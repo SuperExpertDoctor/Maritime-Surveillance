@@ -19,6 +19,7 @@ class Ship:
         self._zigzag_phase: float = random.uniform(0, 2 * math.pi)
         self._base_heading: float = random.uniform(0, 2 * math.pi)
         self.group_id: str | None = None
+        self.trail: list[tuple[int, int]] = []  # 轨迹记录
 
     @property
     def detected(self) -> bool:
@@ -58,3 +59,7 @@ class Ship:
             self._base_heading = random.uniform(0, 2 * math.pi)
 
         self.position = GridCoord(int(new_col), int(new_row))
+        # 记录轨迹（最多保留最近 120 个点，约 2 小时）
+        self.trail.append((self.position.col, self.position.row))
+        if len(self.trail) > 120:
+            self.trail.pop(0)

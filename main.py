@@ -11,6 +11,10 @@ from wm.base_station import BaseStation
 from wm.sim_clock import SimClock
 from schedule.datatypes import GridCoord, BBox
 import random
+import threading
+import asyncio
+import uvicorn
+from vis.backend.server import create_app, broadcast_frame_sync
 
 
 def _generate_sweep_waypoints(bbox: BBox) -> list[GridCoord]:
@@ -83,6 +87,18 @@ def main(config_path: str = "configs"):
 
     # --- 初始化 Task Allocator ---
     allocator = TaskAllocator(config)
+
+    # --- 初始化可视化 FastAPI 服务 ---
+    app = create_app(config, allocator.sm)
+    loop = asyncio.new_event_loop()
+
+    def _run_server():
+        asyncio.set_event_loop(loop)
+        uvicorn.run(app, host="0.0.0.0", port=8765, log_level="warning")
+
+    server_thread = threading.Thread(target=_run_server, daemon=True)
+    server_thread.start()
+    print("可视化服务已启动: http://localhost:8765")
 
     # --- 初始化目标船舶 ---
     random.seed(42)
@@ -215,6 +231,13 @@ def main(config_path: str = "configs"):
         # 5.5. 将调度层分配同步到物理实体
         _sync_uav_assignments(uavs, allocator)
 
+        # 5.6. 广播可视化帧
+        app.state.ships = ships
+        app.state.uav_entities = uavs
+        app.state.current_cycle = allocator.sm.cycle
+        app.state.total_steps = int(max_time_min)
+        broadcast_frame_sync(app, loop)
+
         # 6. 整点进度打印
         if int(t) % 60 == 0:
             info_mat = allocator.sm.get_info_matrix()
@@ -224,7 +247,16 @@ def main(config_path: str = "configs"):
             print(f"[t={t:.0f}min] 覆盖率 {coverage:.1f}% | "
                   f"跟踪 {tracking} 群 | 空闲 UAV {free_uavs}")
 
+    # 仿真结束时广播最后一帧
+    app.state.ships = ships
+    app.state.uav_entities = uavs
+    app.state.current_cycle = allocator.sm.cycle
+    app.state.total_steps = int(max_time_min)
+    broadcast_frame_sync(app, loop)
+
     print("仿真结束。")
+    print(f"JSONL 日志已保存到: {app.state.frame_logger.path}")
+    print("可视化服务将在 30 秒后关闭，或按 Ctrl+C 退出")
 
 
 if __name__ == "__main__":
