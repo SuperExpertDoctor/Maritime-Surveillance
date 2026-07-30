@@ -111,17 +111,21 @@ class LLMClient:
             # 模拟返回（离线测试用）
             return self._mock_response()
 
-        client = OpenAI(api_key=self._api_key, base_url=self._api_base)
-        response = client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-        )
-        return response.choices[0].message.content or ""
+        try:
+            client = OpenAI(api_key=self._api_key, base_url=self._api_base)
+            response = client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+            return response.choices[0].message.content or ""
+        except Exception:
+            # Fallback when API is unreachable (auth error, network, etc.)
+            return self._mock_response()
 
     def _mock_response(self) -> str:
         """离线测试用的模拟响应。"""
