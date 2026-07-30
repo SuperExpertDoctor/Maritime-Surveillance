@@ -11,6 +11,7 @@ import os
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 from src.vis.backend.frame_builder import build_frame
@@ -32,6 +33,12 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
       - app.state._live_clients  活跃 WebSocket 连接集合
     """
     app = FastAPI(title="UAV Surveillance Visualizer")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_methods=["GET"],
+        allow_headers=["*"],
+    )
 
     app.state.state_manager = state_manager
     app.state.config = config
@@ -41,6 +48,7 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
     app.state.llm_cycle = None
     app.state.ships = None        # wm 船舶实体列表
     app.state.uav_entities = None  # wm UAV 实体列表
+    app.state.obstacles = None
     app.state._live_clients = set()
 
     @app.websocket("/ws/live")
@@ -48,6 +56,9 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
         await ws.accept()
         app.state._live_clients.add(ws)
         try:
+            # A newly connected dashboard must not wait for the next simulation
+            # step, especially when a completed run is being held for review.
+            await ws.send_json(_build_frame_inner(app))
             while True:
                 # 保持连接，由仿真主循环通过 broadcast_frame() 推送
                 # 客户端可发送心跳，服务端回复 pong
@@ -111,6 +122,7 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
                 "count_max": cfg.uav.count_max,
                 "cruise_speed_kmh": cfg.uav.cruise_speed_kmh,
                 "endurance_h": cfg.uav.endurance_h,
+                "sortie_endurance_h": cfg.uav.sortie_endurance_h,
                 "refuel_time_min": cfg.uav.refuel_time_min,
             },
             "ship": {
@@ -140,6 +152,7 @@ def _build_frame_inner(app: FastAPI) -> dict:
         llm_cycle=app.state.llm_cycle,
         ships=getattr(app.state, "ships", None),
         uav_entities=getattr(app.state, "uav_entities", None),
+        obstacles=getattr(app.state, "obstacles", None),
     )
 
 
@@ -170,4 +183,5 @@ def broadcast_frame_sync(app: FastAPI, loop: asyncio.AbstractEventLoop) -> None:
     调度到 uvicorn 事件循环上执行。
     """
     if loop.is_running():
-        asyncio.run_coroutine_threadsafe(broadcast_frame(app), loop)
+        return asyncio.run_coroutine_threadsafe(broadcast_frame(app), loop)
+    return None

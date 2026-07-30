@@ -1,4 +1,6 @@
 ﻿import pytest
+import numpy as np
+
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import GridCoord, BBox, UAVState, Region
 from src.schedule.state_manager import StateManager
@@ -56,3 +58,21 @@ def test_get_available_uavs(sm):
     sm.update_uav_status("UAV-2", "transit", GridCoord(10, 10), assigned_region_id="S2")
     available = sm.get_available_uavs()
     assert len(available) == sm.config.uav.count_max - 2
+
+
+def test_coverage_excludes_obstacles_and_boundary(sm):
+    cols, rows = sm.config.grid.resolution
+    obstacle_mask = np.zeros((cols, rows), dtype=bool)
+    obstacle_mask[8, 8] = True
+    sm.set_environment_obstacles([], obstacle_mask)
+    sm.scan_cell(GridCoord(7, 7), 10.0)
+    sm.scan_cell(GridCoord(8, 8), 10.0)
+    sm.scan_cell(GridCoord(0, 0), 10.0)
+
+    stats = sm.get_coverage_stats()
+
+    assert stats["searchable_cells"] == (cols - 2) * (rows - 2) - 1
+    assert stats["scanned_searchable_cells"] == 1
+    assert stats["coverage_pct"] == pytest.approx(
+        100 / stats["searchable_cells"]
+    )

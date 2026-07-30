@@ -19,7 +19,7 @@ class TaskAllocator:
         self.ivt = InfoValueTable(self.sm)
         self.extractor = CandidateExtractor()
         self.llm_client = LLMClient(config)
-        self.reviewer = LLMReviewer(config)
+        self.reviewer = LLMReviewer(config, self.llm_client)
         self.trigger_manager = TriggerManager(self.sm)
 
     def step(self, current_time: float) -> dict:
@@ -50,25 +50,16 @@ class TaskAllocator:
     # ------------------------------------------------------------------
 
     def _handle_light_trigger(self, current_time: float, decision) -> dict:
-        """Lightweight trigger: direct Hungarian pairing of idle UAVs
-        with unassigned candidate regions."""
+        """Pair idle UAVs only with regions already approved by the LLM."""
         idle_uavs = self.sm.get_available_uavs()
         if not idle_uavs:
             return {"trigger_type": "light", "action": "no_idle_uavs"}
 
-        # Extract candidate regions and assign temporary IDs
-        candidate_result = self.extractor.extract(self.sm)
-        candidates_with_id = []
-        for i, c in enumerate(candidate_result.candidate_regions):
-            enriched = dict(c)
-            enriched["id"] = f"C{i + 1}"
-            candidates_with_id.append(enriched)
-
-        # Filter out candidates whose bbox already matches an existing
-        # search region
-        existing_bboxes = {r.bbox for r in self.sm.get_search_regions()}
-        unassigned = [c for c in candidates_with_id
-                      if c["bbox"] not in existing_bboxes]
+        unassigned = [
+            {"id": region.id, "bbox": region.bbox}
+            for region in self.sm.get_active_search_regions()
+            if region.assigned_uav_id is None
+        ]
 
         if not unassigned:
             return {"trigger_type": "light",
@@ -81,16 +72,17 @@ class TaskAllocator:
         )
 
         # Update UAV statuses with assignments
-        candidate_by_id = {c["id"]: c for c in candidates_with_id}
         for uav_id, region_id in pairs:
-            candidate = candidate_by_id.get(region_id)
-            if candidate:
-                uav = self.sm.get_uav(uav_id)
-                if uav:
-                    self.sm.update_uav_status(
-                        uav_id, "transit", uav.position,
-                        assigned_region_id=region_id,
-                    )
+            uav = self.sm.get_uav(uav_id)
+            if uav:
+                self.sm.update_uav_status(
+                    uav_id, "transit", uav.position,
+                    assigned_region_id=region_id,
+                )
+            for region in self.sm.get_search_regions():
+                if region.id == region_id:
+                    region.assigned_uav_id = uav_id
+                    break
 
         self.trigger_manager.mark_triggered("light", current_time)
         return {
@@ -104,7 +96,7 @@ class TaskAllocator:
     # ------------------------------------------------------------------
 
     def _handle_heavy_trigger(self, current_time: float, decision) -> dict:
-        """Heavy trigger: full LLM pipeline for global reallocation."""
+        """Heavy trigger: retain executing work and ask the LLM for additions."""
         # Step 1: Update info-value table
         self.ivt.update_all()
 
@@ -113,12 +105,27 @@ class TaskAllocator:
 
         # Step 3-5: LLM decision (with validation retries built in)
         llm_output = self.llm_client.decide(self.sm, self.ivt, candidate_result)
+        interaction = self.llm_client.last_interaction or {}
+        retained_regions = list(self.sm.get_active_search_regions())
+
+        # A failed external decision is fail-closed: the last real, validated
+        # plan keeps executing and no synthetic region is introduced.
+        if not interaction.get("success"):
+            pairs = self._pair_available_regions(retained_regions)
+            return self._finish_heavy_trigger(
+                current_time,
+                retained_regions,
+                pairs,
+                "llm_failed_plan_preserved",
+                llm_output.get("notes", ""),
+                interaction,
+            )
 
         # Step 6: Create Region objects with ID continuity
         new_regions = []
         prev_regions = self.sm.get_previous_search_regions()
         prev_by_id = {r.id: r for r in prev_regions}
-        assigned_ids: set[str] = set()
+        assigned_ids: set[str] = {region.id for region in retained_regions}
 
         for sr in llm_output.get("search_regions", []):
             bbox = BBox(*sr["bbox"])
@@ -136,6 +143,11 @@ class TaskAllocator:
                             matched_id = prev_id
                             break
 
+            if matched_id in assigned_ids:
+                suffix = 1
+                while f"S{suffix}" in assigned_ids:
+                    suffix += 1
+                matched_id = f"S{suffix}"
             assigned_ids.add(matched_id)
 
             region = Region(
@@ -147,50 +159,82 @@ class TaskAllocator:
             )
             new_regions.append(region)
 
-        self.sm.set_search_regions(new_regions)
+        combined_regions = [*retained_regions, *new_regions]
+        self.sm.set_search_regions(combined_regions)
 
         # Update IVT: add rows for new regions, remove stale ones
         for r in new_regions:
             self.ivt.add_row(r.id, r.bbox, "search")
-        new_ids = {r.id for r in new_regions}
+        new_ids = {r.id for r in combined_regions}
         for row in list(self.ivt.get_rows()):
             if row.type == "search" and row.region_id not in new_ids:
                 self.ivt.remove_row(row.region_id)
 
         # Step 7: Hungarian pairing of idle UAVs to unassigned regions
-        idle_uavs = self.sm.get_available_uavs()
-        unassigned = [
-            {"id": r.id, "bbox": r.bbox}
-            for r in new_regions
-            if r.assigned_uav_id is None
-        ]
-        pairs = hungarian_pair(
-            [{"id": u.id, "position": u.position} for u in idle_uavs],
-            unassigned,
+        pairs = self._pair_available_regions(combined_regions)
+        return self._finish_heavy_trigger(
+            current_time,
+            combined_regions,
+            pairs,
+            "llm_reallocation",
+            llm_output.get("notes", ""),
+            interaction,
         )
 
+    def _pair_available_regions(self, regions: list[Region]) -> list[tuple[str, str]]:
+        idle_uavs = self.sm.get_available_uavs()
+        unassigned = [
+            {"id": region.id, "bbox": region.bbox}
+            for region in regions
+            if region.assigned_uav_id is None
+        ]
+        pairs = hungarian_pair(
+            [{"id": uav.id, "position": uav.position} for uav in idle_uavs],
+            unassigned,
+        )
+        by_id = {region.id: region for region in regions}
         for uav_id, region_id in pairs:
             uav = self.sm.get_uav(uav_id)
-            if uav:
-                self.sm.update_uav_status(
-                    uav_id, "transit", uav.position,
-                    assigned_region_id=region_id,
-                )
-            for r in new_regions:
-                if r.id == region_id:
-                    r.assigned_uav_id = uav_id
-                    break
+            if uav is None or region_id not in by_id:
+                continue
+            self.sm.update_uav_status(
+                uav_id,
+                "transit",
+                uav.position,
+                assigned_region_id=region_id,
+            )
+            by_id[region_id].assigned_uav_id = uav_id
+            row = self.ivt.get_row(region_id)
+            if row is not None:
+                row.assigned_uav_id = uav_id
+        return pairs
 
+    def _finish_heavy_trigger(
+        self,
+        current_time: float,
+        regions: list[Region],
+        pairs: list[tuple[str, str]],
+        action: str,
+        notes: str,
+        interaction: dict,
+    ) -> dict:
         self.trigger_manager.mark_triggered("heavy", current_time)
         self.sm.cycle += 1
-
+        self.sm.add_event("llm_decision", {
+            "cycle": self.sm.cycle,
+            "success": bool(interaction.get("success")),
+            "regions": len(regions),
+        })
         return {
             "trigger_type": "heavy",
-            "action": "llm_reallocation",
-            "search_regions": [{"id": r.id, "bbox": list(r.bbox)}
-                               for r in new_regions],
+            "action": action,
+            "search_regions": [
+                {"id": region.id, "bbox": list(region.bbox)}
+                for region in regions
+            ],
             "pairs": pairs,
-            "notes": llm_output.get("notes", ""),
+            "notes": notes,
+            "llm_cycle": interaction,
         }
 
     # ------------------------------------------------------------------

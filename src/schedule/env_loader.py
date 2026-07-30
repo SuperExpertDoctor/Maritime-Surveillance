@@ -26,3 +26,7 @@ class EnvLoader:
                 value = value.strip().strip('"').strip("'")
                 if key and key not in os.environ:
                     os.environ[key] = value
+
+        local_path = f"{dotenv_path}.local"
+        if os.path.isfile(local_path):
+            EnvLoader.load_dotenv(local_path)

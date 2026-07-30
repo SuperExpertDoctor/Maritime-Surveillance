@@ -47,8 +47,9 @@ class TriggerManager:
         # 过滤 5min 内的事件
         recent = [e for e in self._pending_events
                   if current_time - e["time"] <= 5.0]
-        self._pending_events = [e for e in self._pending_events
-                                if current_time - e["time"] > 5.0]
+        # All queued events are either processed now or stale; neither should
+        # be reconsidered on the next simulation step.
+        self._pending_events = []
 
         if not recent:
             return TriggerDecision("none")

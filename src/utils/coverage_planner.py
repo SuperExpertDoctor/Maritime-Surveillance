@@ -34,8 +34,8 @@ class CoveragePlanner:
     """Plan a complete side-looking scan of an axis-aligned rectangle.
 
     Bounding boxes are end-exclusive, matching ``BBox`` throughout the
-    scheduling package.  Scan-line endpoints are extended by ``R_min`` so
-    each U-turn is completed outside the search rectangle.
+    scheduling package.  Scan lines end on the rectangle boundary; the
+    Dubins connector itself then completes each U-turn outside the region.
     """
 
     def __init__(self, sample_step: float = 0.25, near_range: float = 0.25):
@@ -64,12 +64,26 @@ class CoveragePlanner:
 
         orientation = direction or ("horizontal" if width >= height else "vertical")
         swaths = self._build_swaths(box, swath_width, R_min, orientation)
+        if swaths and math.dist(tuple(start_pose[:2]), swaths[0].end) < math.dist(
+            tuple(start_pose[:2]), swaths[0].start
+        ):
+            swaths = [
+                ScanSwath(
+                    swath.end,
+                    swath.start,
+                    "left" if swath.look_direction == "right" else "right",
+                    swath.footprint,
+                    _wrap_heading(swath.heading + math.pi),
+                )
+                for swath in swaths
+            ]
         result = CoveragePath(swaths=swaths)
         current = tuple(map(float, start_pose))
 
         for swath in swaths:
             entry = (swath.start[0], swath.start[1], swath.heading)
             connection = DubinsPath.compute(current, entry, R_min, self.sample_step)
+            connection.waypoints[-1] = entry
             self._append_unique(result.waypoints, connection.waypoints)
             result.total_length += connection.total_length
 
@@ -87,13 +101,14 @@ class CoveragePlanner:
         self, box: BBox, width: float, radius: float, orientation: str
     ) -> list[ScanSwath]:
         swaths: list[ScanSwath] = []
-        margin = max(radius, self.sample_step)
         if orientation == "horizontal":
+            low_endpoint = float(box.col_start)
+            high_endpoint = float(box.col_end)
             count = int(math.ceil((box.row_end - box.row_start) / width))
             for index in range(count):
                 band_start = box.row_start + index * width
                 band_end = min(box.row_end, band_start + width)
-                track = band_start - self.near_range
+                track = max(0.0, band_start - self.near_range)
                 footprint = tuple(
                     GridCoord(c, r)
                     for c in range(box.col_start, box.col_end)
@@ -101,20 +116,22 @@ class CoveragePlanner:
                     if box.row_start <= r < box.row_end
                 )
                 if index % 2 == 0:
-                    start = (box.col_start - margin, track)
-                    end = (box.col_end + margin, track)
+                    start = (low_endpoint, track)
+                    end = (high_endpoint, track)
                     heading, look = 0.0, "right"
                 else:
-                    start = (box.col_end + margin, track)
-                    end = (box.col_start - margin, track)
+                    start = (high_endpoint, track)
+                    end = (low_endpoint, track)
                     heading, look = math.pi, "left"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
         else:
+            low_endpoint = float(box.row_start)
+            high_endpoint = float(box.row_end)
             count = int(math.ceil((box.col_end - box.col_start) / width))
             for index in range(count):
                 band_start = box.col_start + index * width
                 band_end = min(box.col_end, band_start + width)
-                track = band_start - self.near_range
+                track = max(0.0, band_start - self.near_range)
                 footprint = tuple(
                     GridCoord(c, r)
                     for c in range(int(math.floor(band_start)), int(math.ceil(band_end)))
@@ -122,12 +139,12 @@ class CoveragePlanner:
                     if box.col_start <= c < box.col_end
                 )
                 if index % 2 == 0:
-                    start = (track, box.row_start - margin)
-                    end = (track, box.row_end + margin)
+                    start = (track, low_endpoint)
+                    end = (track, high_endpoint)
                     heading, look = math.pi / 2.0, "left"
                 else:
-                    start = (track, box.row_end + margin)
-                    end = (track, box.row_start - margin)
+                    start = (track, high_endpoint)
+                    end = (track, low_endpoint)
                     heading, look = -math.pi / 2.0, "right"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
         return swaths
@@ -146,13 +163,57 @@ class CoveragePlanner:
             for index in range(steps + 1)
         ]
 
+    def sample_scan_line(self, swath: ScanSwath) -> list[Pose]:
+        return self._sample_line(swath.start, swath.end, swath.heading)
+
+    def is_region_feasible(
+        self,
+        bbox: BBox | Sequence[int],
+        swath_width: float,
+        R_min: float,
+        obstacle_mask,
+    ) -> bool:
+        """Check every scan line and inter-line Dubins turn against a mask."""
+        box = bbox if isinstance(bbox, BBox) else BBox(*bbox)
+        width = box.col_end - box.col_start
+        height = box.row_end - box.row_start
+        orientation = "horizontal" if width >= height else "vertical"
+        swaths = self._build_swaths(box, swath_width, R_min, orientation)
+        previous: ScanSwath | None = None
+        for swath in swaths:
+            if not self._poses_are_free(self.sample_scan_line(swath), obstacle_mask):
+                return False
+            if previous is not None:
+                start = (previous.end[0], previous.end[1], previous.heading)
+                goal = (swath.start[0], swath.start[1], swath.heading)
+                turn = DubinsPath.compute(start, goal, R_min, self.sample_step)
+                if not self._poses_are_free(turn.waypoints, obstacle_mask):
+                    return False
+            previous = swath
+        return bool(swaths)
+
+    @staticmethod
+    def _poses_are_free(poses: Sequence[Sequence[float]], obstacle_mask) -> bool:
+        cols, rows = obstacle_mask.shape
+        for pose in poses:
+            col, row = int(math.floor(pose[0])), int(math.floor(pose[1]))
+            if col < 0 or row < 0 or col >= cols or row >= rows:
+                return False
+            if obstacle_mask[col, row]:
+                return False
+        return True
+
     @staticmethod
     def _append_unique(target: list[Pose], source: list[Pose]) -> None:
         for pose in source:
             if target and math.dist(target[-1][:2], pose[:2]) <= 1e-10:
-                target[-1] = pose
+                continue
             else:
                 target.append(pose)
 
 
 __all__ = ["CoveragePlanner", "CoveragePath", "ScanSwath"]
+
+
+def _wrap_heading(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi

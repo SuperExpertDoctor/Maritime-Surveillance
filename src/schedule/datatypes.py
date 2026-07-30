@@ -18,6 +18,7 @@ class Region:
     assigned_uav_id: Optional[str] = None
     completion_pct: float = 0.0
     created_cycle: int = 0
+    target_group_id: Optional[str] = None
 
 
 @dataclass
@@ -29,6 +30,8 @@ class UAVState:
     assigned_region_id: Optional[str] = None
     target_group_id: Optional[str] = None
     time_to_available: float = 0.0  # minutes until refueled/ready
+    heading_deg: float = 0.0
+    sensor_mode: str = "off"
 
 
 @dataclass

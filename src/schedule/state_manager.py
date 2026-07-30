@@ -1,63 +1,74 @@
-﻿import math
+"""Authoritative scheduling state and information-field facade."""
+from __future__ import annotations
+
 from typing import Optional
-from src.schedule.datatypes import UAVState, Region, Marker, BBox, GridCoord
+
+import numpy as np
+
 from src.schedule.config_loader import AppConfig
+from src.schedule.datatypes import BBox, GridCoord, Marker, Region, UAVState
 from src.schedule.info_field import InfoField
 
 
 class StateManager:
     def __init__(self, config: AppConfig):
         self.config = config
-        self.current_time: float = 0.0
-        self.cycle: int = 0
+        self.current_time = 0.0
+        self.cycle = 0
         self.info_field = InfoField(config)
-
-        # UAV 列表
-        self._uavs: list[UAVState] = [
-            UAVState(id=f"UAV-{i+1}", status="idle",
-                     position=GridCoord(config.environment.base_position[0],
-                                        config.environment.base_position[1]))
-            for i in range(config.uav.count_max)
+        self._uavs = [
+            UAVState(
+                id=f"UAV-{index + 1}",
+                status="idle",
+                position=GridCoord(*config.environment.base_position),
+            )
+            for index in range(config.uav.count_max)
         ]
-
-        # 区域
         self._search_regions: list[Region] = []
         self._track_regions: list[Region] = []
         self._previous_search_regions: list[Region] = []
-
-        # 标记点
         self._markers: list[Marker] = []
-        self._marker_counter: int = 0
-
-        # 事件流
+        self._marker_counter = 0
         self._events: list[dict] = []
-
-        # 已发现的目标群
         self._known_target_groups: set[str] = set()
+        self.obstacles: list = []
+        self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
 
     def step(self, current_time: float) -> None:
-        """推进一帧仿真时间，更新所有衰减。"""
         self.current_time = current_time
         self.info_field.update_decay(current_time)
+        values = self.get_value_matrix()
+        for region in self._search_regions:
+            b = region.bbox
+            scan_times = self.info_field.last_scan_time[
+                b.col_start:b.col_end, b.row_start:b.row_end
+            ]
+            region.completion_pct = float(np.isfinite(scan_times).mean() * 100) if scan_times.size else 0.0
+            region.avg_info = self.get_avg_info_in_bbox(b)
+            patch = values[b.col_start:b.col_end, b.row_start:b.row_end]
+            region.info_value = float(patch.mean()) if patch.size else 0.0
 
-    # --- UAV 管理 ---
+    # UAV management -------------------------------------------------
     def get_all_uavs(self) -> list[UAVState]:
         return self._uavs
 
     def get_uav(self, uav_id: str) -> Optional[UAVState]:
-        for u in self._uavs:
-            if u.id == uav_id:
-                return u
-        return None
+        return next((uav for uav in self._uavs if uav.id == uav_id), None)
 
     def get_available_uavs(self) -> list[UAVState]:
-        """状态为 idle 且 position 为基地的 UAV。"""
-        return [u for u in self._uavs if u.status == "idle"]
+        return [uav for uav in self._uavs if uav.status == "idle"]
 
-    def update_uav_status(self, uav_id: str, status: str, position: GridCoord,
-                          assigned_region_id: Optional[str] = None,
-                          fuel_remaining_pct: Optional[float] = None,
-                          target_group_id: Optional[str] = None) -> None:
+    def update_uav_status(
+        self,
+        uav_id: str,
+        status: str,
+        position: GridCoord,
+        assigned_region_id: Optional[str] = None,
+        fuel_remaining_pct: Optional[float] = None,
+        target_group_id: Optional[str] = None,
+        heading_deg: Optional[float] = None,
+        sensor_mode: Optional[str] = None,
+    ) -> None:
         uav = self.get_uav(uav_id)
         if uav is None:
             return
@@ -69,8 +80,23 @@ class StateManager:
             uav.fuel_remaining_pct = fuel_remaining_pct
         if target_group_id is not None:
             uav.target_group_id = target_group_id
+        if heading_deg is not None:
+            uav.heading_deg = heading_deg
+        if sensor_mode is not None:
+            uav.sensor_mode = sensor_mode
 
-    # --- 区域管理 ---
+    def clear_uav_assignment(self, uav_id: str) -> None:
+        uav = self.get_uav(uav_id)
+        if uav:
+            uav.assigned_region_id = None
+            uav.target_group_id = None
+
+    # Environment ----------------------------------------------------
+    def set_environment_obstacles(self, obstacles: list, mask) -> None:
+        self.obstacles = list(obstacles)
+        self.obstacle_mask = np.asarray(mask, dtype=bool)
+
+    # Region management ----------------------------------------------
     def set_search_regions(self, regions: list[Region]) -> None:
         self._previous_search_regions = list(self._search_regions)
         self._search_regions = regions
@@ -79,7 +105,7 @@ class StateManager:
         return self._search_regions
 
     def get_active_search_regions(self) -> list[Region]:
-        return [r for r in self._search_regions if r.status == "active"]
+        return [region for region in self._search_regions if region.status == "active"]
 
     def get_previous_search_regions(self) -> list[Region]:
         return self._previous_search_regions
@@ -87,70 +113,82 @@ class StateManager:
     def get_track_regions(self) -> list[Region]:
         return self._track_regions
 
-    def create_track_region(self, target_group_id: str, center: GridCoord) -> Region:
-        """以目标位置为中心，创建 4×4 跟踪区。"""
-        c, r = center
-        half = 2
-        bbox = BBox(
-            max(0, c - half), max(0, r - half),
-            min(self.config.grid.resolution[1], c + half),
-            min(self.config.grid.resolution[0], r + half)
+    def get_track_region_for_group(self, target_group_id: str) -> Optional[Region]:
+        return next(
+            (region for region in self._track_regions if region.target_group_id == target_group_id),
+            None,
         )
+
+    def is_target_group_known(self, target_group_id: str) -> bool:
+        return target_group_id in self._known_target_groups
+
+    def create_track_region(self, target_group_id: str, center: GridCoord) -> Region:
+        existing = self.get_track_region_for_group(target_group_id)
+        if existing is not None:
+            return existing
+        col, row = center
+        half = 2
         region = Region(
-            id=f"T{len(self._track_regions)+1}",
-            bbox=bbox, type="track", priority="high",
-            created_cycle=self.cycle
+            id=f"T{len(self._track_regions) + 1}",
+            bbox=BBox(
+                max(0, col - half),
+                max(0, row - half),
+                min(self.config.grid.resolution[1], col + half),
+                min(self.config.grid.resolution[0], row + half),
+            ),
+            type="track",
+            priority="high",
+            created_cycle=self.cycle,
+            target_group_id=target_group_id,
         )
         self._track_regions.append(region)
         self._known_target_groups.add(target_group_id)
         return region
 
     def update_track_region_center(self, region_id: str, new_center: GridCoord) -> None:
-        """跟随目标移动更新跟踪区位置。"""
-        for r in self._track_regions:
-            if r.id == region_id:
-                c, r_c = new_center
-                half = 2
-                r.bbox = BBox(
-                    max(0, c - half), max(0, r_c - half),
-                    min(self.config.grid.resolution[1], c + half),
-                    min(self.config.grid.resolution[0], r_c + half)
-                )
-                return
+        for region in self._track_regions:
+            if region.id != region_id:
+                continue
+            col, row = new_center
+            region.bbox = BBox(
+                max(0, col - 2),
+                max(0, row - 2),
+                min(self.config.grid.resolution[1], col + 2),
+                min(self.config.grid.resolution[0], row + 2),
+            )
+            return
 
     def release_track_region(self, region_id: str, source_uav_id: str = "") -> None:
-        """释放跟踪区并创建标记点。"""
-        for r in self._track_regions:
-            if r.id == region_id:
-                center_col = (r.bbox.col_start + r.bbox.col_end) // 2
-                center_row = (r.bbox.row_start + r.bbox.row_end) // 2
-                self._marker_counter += 1
-                marker = Marker(
-                    id=f"MK{self._marker_counter}",
-                    position=GridCoord(center_col, center_row),
-                    created_time=self.current_time,
-                    source_uav_id=source_uav_id,
-                )
-                self._markers.append(marker)
-                self.info_field.add_marker(marker.position, self.current_time, marker.id)
-                self._track_regions.remove(r)
-                return
+        for region in list(self._track_regions):
+            if region.id != region_id:
+                continue
+            center = GridCoord(
+                (region.bbox.col_start + region.bbox.col_end) // 2,
+                (region.bbox.row_start + region.bbox.row_end) // 2,
+            )
+            self._marker_counter += 1
+            marker = Marker(
+                id=f"MK{self._marker_counter}",
+                position=center,
+                created_time=self.current_time,
+                source_uav_id=source_uav_id,
+            )
+            self._markers.append(marker)
+            self.info_field.add_marker(marker.position, self.current_time, marker.id)
+            self._track_regions.remove(region)
+            return
 
     def get_active_markers(self) -> list[Marker]:
         return self._markers
 
-    # --- 事件管理 ---
+    # Events ---------------------------------------------------------
     def add_event(self, event_type: str, data: dict) -> None:
-        self._events.append({
-            "type": event_type,
-            "time": self.current_time,
-            "data": data,
-        })
+        self._events.append({"type": event_type, "time": self.current_time, "data": data})
 
     def get_recent_events(self, since_time: float) -> list[dict]:
-        return [e for e in self._events if e["time"] >= since_time]
+        return [event for event in self._events if event["time"] >= since_time]
 
-    # --- 信息场接口代理 ---
+    # Information field facade -------------------------------------
     def scan_bbox(self, bbox: BBox, current_time: float, is_track: bool = False) -> None:
         self.info_field.scan_bbox(bbox, current_time, is_track)
 
@@ -163,8 +201,38 @@ class StateManager:
     def get_value_matrix(self):
         return self.info_field.get_value_matrix(self.current_time)
 
+    def get_searchable_mask(self) -> np.ndarray:
+        """Return cells that can be searched under the operational rules."""
+        searchable = ~np.asarray(self.obstacle_mask, dtype=bool).copy()
+        if searchable.size:
+            searchable[0, :] = False
+            searchable[-1, :] = False
+            searchable[:, 0] = False
+            searchable[:, -1] = False
+        return searchable
+
+    def get_coverage_stats(self) -> dict[str, float | int]:
+        """Measure unique coverage over searchable sea cells only."""
+        searchable = self.get_searchable_mask()
+        scanned = np.isfinite(self.info_field.last_scan_time) & searchable
+        searchable_cells = int(searchable.sum())
+        scanned_cells = int(scanned.sum())
+        coverage_pct = (
+            scanned_cells / searchable_cells * 100.0
+            if searchable_cells
+            else 0.0
+        )
+        return {
+            "scanned_searchable_cells": scanned_cells,
+            "searchable_cells": searchable_cells,
+            "coverage_pct": coverage_pct,
+        }
+
     def get_avg_info_in_bbox(self, bbox: BBox) -> float:
         return self.info_field.get_avg_info_in_bbox(bbox)
 
     def get_avg_value_in_bbox(self, bbox: BBox) -> float:
         return self.info_field.get_avg_value_in_bbox(bbox, self.current_time)
+
+
+__all__ = ["StateManager"]

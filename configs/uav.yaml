@@ -1,4 +1,6 @@
 count_max: 10
 cruise_speed_kmh: 160
 endurance_h: 30
+# Operational sortie cap; physical platform endurance remains 30 h.
+sortie_endurance_h: 8.0
 refuel_time_min: 12

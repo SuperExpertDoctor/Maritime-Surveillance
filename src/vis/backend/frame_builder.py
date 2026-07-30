@@ -6,7 +6,8 @@ from src.schedule.config_loader import AppConfig
 def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 total_steps: int = 480, llm_cycle: dict | None = None,
                 ships: list | None = None,
-                uav_entities: list | None = None) -> dict:
+                uav_entities: list | None = None,
+                obstacles: list | None = None) -> dict:
     """从 StateManager 当前状态构建一帧完整 JSON。
 
     Args:
@@ -23,17 +24,39 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     """
     # UAV 列表
     uavs = []
+    entities = {entity.id: entity for entity in (uav_entities or [])}
     for u in state.get_all_uavs():
-        max_range = config.uav.cruise_speed_kmh * config.uav.endurance_h
+        entity = entities.get(u.id)
+        endurance_h = entity.endurance_h if entity is not None else config.uav.endurance_h
+        max_range = config.uav.cruise_speed_kmh * endurance_h
+        position = (
+            list(entity.float_position) if entity is not None
+            else [u.position.col, u.position.row]
+        )
+        eo_fov = None
+        if entity is not None and entity.eo_fov is not None:
+            eo_fov = {
+                "origin": list(entity.eo_fov.origin),
+                "target": list(entity.eo_fov.target),
+                "polygon": [list(point) for point in entity.eo_fov.polygon],
+                "max_range": entity.eo_fov.max_range,
+            }
         uavs.append({
             "id": u.id,
             "status": u.status,
-            "position": [u.position.col, u.position.row],
-            "heading_deg": 0,   # wm 未实现，暂用默认值
+            "position": position,
+            "heading_deg": entity.heading_deg if entity is not None else u.heading_deg,
             "remaining_range_km": round(u.fuel_remaining_pct * max_range),
+            "fuel_remaining_pct": u.fuel_remaining_pct,
             "assigned_region_id": u.assigned_region_id,
             "target_group_id": u.target_group_id,
             "time_to_available_min": u.time_to_available,
+            "sensor_mode": entity.sensor_mode if entity is not None else u.sensor_mode,
+            "planned_path": [list(pose) for pose in entity.planned_path[-500:]] if entity else [],
+            "trail": [list(point) for point in entity.trail[-120:]] if entity else [],
+            "sar_look_direction": entity.sar_look_direction if entity else None,
+            "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],
+            "eo_fov": eo_fov,
         })
 
     # 搜索区域
@@ -82,6 +105,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     # 信息矩阵（直接传 numpy 数组的 list 形式）
     info_mat = state.get_info_matrix()
     value_mat = state.get_value_matrix()
+    coverage = state.get_coverage_stats()
 
     # 船舶列表（从 wm 实体构建）
     ship_list = []
@@ -89,13 +113,30 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         for s in ships:
             ship_list.append({
                 "id": s.id,
-                "position": [s.position.col, s.position.row],
+                "position": list(getattr(s, "float_position", (s.position.col, s.position.row))),
                 "group_id": s.group_id or "?",
                 "is_detected": s.detected,
                 "trail": list(s.trail[-60:]),  # 最近 60 个轨迹点
             })
 
     step = int(state.current_time)
+
+    obstacle_list = []
+    for obstacle in obstacles or []:
+        if hasattr(obstacle, "radius"):
+            obstacle_list.append({
+                "id": obstacle.id,
+                "type": "thunderstorm",
+                "center": list(obstacle.center),
+                "radius": obstacle.radius,
+                "move_vector": list(obstacle.move_vector),
+            })
+        else:
+            obstacle_list.append({
+                "id": obstacle.id,
+                "type": "island",
+                "vertices": [list(point) for point in obstacle.vertices],
+            })
 
     frame = {
         "frame_id": step,
@@ -106,6 +147,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "mode": "live",
         "info_matrix": info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat,
         "value_matrix": value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat,
+        **coverage,
         "uavs": uavs,
         "search_regions": search_regions,
         "track_regions": track_regions,
@@ -114,6 +156,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "events": recent_events,
         "llm_cycle": llm_cycle,
         "base_position": list(config.environment.base_position),
+        "obstacles": obstacle_list,
     }
     return frame
 

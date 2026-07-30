@@ -1,65 +1,47 @@
-﻿import json
+"""Real LongCat decision and reviewer client with validation retries."""
+from __future__ import annotations
+
+import json
 import logging
 import os
 import re
 
 import yaml
 
-from src.schedule.config_loader import AppConfig
-from src.schedule.state_manager import StateManager
-from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateResult
-from src.schedule.prompt_builder import PromptBuilder
+from src.schedule.config_loader import AppConfig
+from src.schedule.env_loader import EnvLoader
+from src.schedule.info_value_table import InfoValueTable
 from src.schedule.output_validator import validate
+from src.schedule.prompt_builder import PromptBuilder
+from src.schedule.state_manager import StateManager
+
 
 logger = logging.getLogger(__name__)
+
+
+class LLMConfigurationError(RuntimeError):
+    """The required real LongCat provider is not ready."""
 
 
 class LLMClient:
     def __init__(self, config: AppConfig, llm_params_path: str = "configs/llm_params.yaml"):
         self.config = config
         self.prompt_builder = PromptBuilder()
-        self._reviewer_memory: str = ""
+        self._reviewer_memory = ""
+        self.last_interaction: dict | None = None
+        self.last_reviewer_interaction: dict | None = None
+        EnvLoader.load_dotenv()
 
-        # --- Load llm_params.yaml ---
-        with open(llm_params_path, "r", encoding="utf-8") as f:
-            params = yaml.safe_load(f)
+        with open(llm_params_path, "r", encoding="utf-8") as stream:
+            params = yaml.safe_load(stream)
+        self._providers = {provider["name"]: provider for provider in params.get("providers", [])}
+        self._models = {model["id"]: model for model in params.get("models", [])}
+        self._bindings = params.get("bindings", {})
+        self._cycles = params.get("cycles", {})
+        self._validate_required_bindings()
 
-        # Index providers and models by name/id
-        self._providers: dict[str, dict] = {
-            p["name"]: p for p in params.get("providers", [])
-        }
-        self._models: dict[str, dict] = {
-            m["id"]: m for m in params.get("models", [])
-        }
-        self._bindings: dict[str, dict] = params.get("bindings", {})
-        self._cycles: dict = params.get("cycles", {})
-
-        # --- Resolve the decision_maker binding ---
-        self._resolve_binding("decision_maker")
-
-    def _resolve_binding(self, role: str) -> None:
-        """Resolve a binding name to concrete model + provider + API key."""
-        binding = self._bindings.get(role, {})
-        model_id = binding.get("model", "deepseek-v4-pro")
-
-        # Look up model definition
-        model_info = self._models.get(model_id, {})
-        provider_name = model_info.get("provider", "deepseek")
-
-        # Look up provider definition
-        provider_info = self._providers.get(provider_name, {})
-
-        # Store resolved values
-        self._model = model_id
-        self._temperature = binding.get("temperature", 0.3)
-        self._max_tokens = binding.get("max_tokens", 4096)
-        self._api_base = provider_info.get("api_base", "")
-        api_key_env = provider_info.get("api_key_env", "DEEPSEEK_API_KEY")
-        self._api_key = os.environ.get(api_key_env, "")
-
-    def resolve_binding(self, role: str) -> dict:
-        """Public resolver: return a dict of model, api_base, api_key, etc. for a role."""
+    def _binding(self, role: str) -> dict:
         binding = self._bindings.get(role, {})
         model_id = binding.get("model", "")
         model_info = self._models.get(model_id, {})
@@ -69,90 +51,192 @@ class LLMClient:
         return {
             "role": role,
             "model": model_id,
+            "provider": provider_name,
             "temperature": binding.get("temperature", 0.3),
             "max_tokens": binding.get("max_tokens", 4096),
+            "thinking": binding.get("thinking"),
             "api_base": provider_info.get("api_base", ""),
+            "api_key_env": api_key_env,
             "api_key": os.environ.get(api_key_env, ""),
+            "supports_json_mode": bool(
+                provider_info.get("supports_json_mode", False)
+            ),
         }
+
+    def _validate_required_bindings(self) -> None:
+        for role in ("decision_maker", "reviewer"):
+            binding = self._binding(role)
+            if binding["provider"] != "longcat":
+                raise LLMConfigurationError(f"{role} must use the LongCat provider")
+            if binding["model"] != "LongCat-2.0":
+                raise LLMConfigurationError(f"{role} must use LongCat-2.0")
+            if not binding["api_base"]:
+                raise LLMConfigurationError(f"{role} has no API base URL")
+
+    def resolve_binding(self, role: str) -> dict:
+        return self._binding(role)
+
+    def assert_ready(self) -> None:
+        """Fail early instead of silently replacing an unavailable model."""
+        for role in ("decision_maker", "reviewer"):
+            binding = self._binding(role)
+            if not binding["api_key"]:
+                raise LLMConfigurationError(
+                    f"{binding['api_key_env']} is required for the {role} binding"
+                )
 
     def set_reviewer_memory(self, memory: str) -> None:
         self._reviewer_memory = memory
 
-    def decide(self, sm: StateManager, ivt: InfoValueTable,
-               candidate_result: CandidateResult) -> dict:
-        """调用 LLM 决策管线，返回解析后的 JSON dict。"""
+    def decide(
+        self,
+        sm: StateManager,
+        ivt: InfoValueTable,
+        candidate_result: CandidateResult,
+    ) -> dict:
         system_prompt, user_prompt = self.prompt_builder.build(
             sm, ivt, candidate_result, self._reviewer_memory
         )
+        interaction = {
+            "role": "decision_maker",
+            "model": self._binding("decision_maker")["model"],
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "attempts": [],
+            "response": "",
+            "validation": {"is_valid": False, "errors": []},
+            "success": False,
+        }
 
         for attempt in range(self.config.llm.max_retries + 1):
-            raw = self._call_api(system_prompt, user_prompt)
-            parsed = self._parse_json(raw)
-
-            if parsed is None:
-                user_prompt += f"\n\n[上轮输出不是有效JSON，请严格按照JSON格式输出]\n原始输出: {raw[:200]}"
+            try:
+                raw = self._call_api(
+                    system_prompt,
+                    user_prompt,
+                    role="decision_maker",
+                    json_mode=True,
+                )
+            except Exception as exc:
+                logger.error("LongCat decision call failed on attempt %s: %s", attempt + 1, exc)
+                interaction["attempts"].append({
+                    "attempt": attempt + 1,
+                    "response": "",
+                    "errors": [str(exc)],
+                })
+                if getattr(exc, "status_code", None) in {400, 401, 402, 403}:
+                    break
                 continue
 
-            # 校验
-            result = validate(parsed, self.config, sm.get_track_regions(),
-                            sm.get_previous_search_regions())
+            parsed = self._parse_json(raw)
+            if parsed is None:
+                errors = ["response is not valid JSON"]
+                interaction["attempts"].append({
+                    "attempt": attempt + 1,
+                    "response": raw,
+                    "errors": errors,
+                })
+                user_prompt += (
+                    "\n\n[上轮输出不是有效JSON，请严格按照JSON格式输出]"
+                    f"\n原始输出: {raw[:200]}"
+                )
+                continue
+
+            reserved_regions = sm.get_active_search_regions()
+            result = validate(
+                parsed,
+                self.config,
+                [*sm.get_track_regions(), *reserved_regions],
+                sm.get_previous_search_regions(),
+                sm.obstacle_mask,
+                allow_empty=not candidate_result.candidate_regions,
+            )
+            errors = list(result.errors)
+            interaction["attempts"].append({
+                "attempt": attempt + 1,
+                "response": raw,
+                "errors": errors,
+            })
             if result.is_valid:
+                interaction["response"] = raw
+                interaction["validation"] = {"is_valid": True, "errors": []}
+                interaction["success"] = True
+                self.last_interaction = interaction
                 return parsed
 
-            # 回注错误
-            error_msg = "\n".join(result.errors)
-            user_prompt += f"\n\n[上轮输出校验失败，请修正以下错误]\n{error_msg}"
+            user_prompt += "\n\n[上轮输出校验失败，请修正以下错误]\n" + "\n".join(errors)
 
-        # 兜底：返回空方案
+        errors = interaction["attempts"][-1]["errors"] if interaction["attempts"] else ["no API attempt"]
+        interaction["validation"] = {"is_valid": False, "errors": errors}
+        self.last_interaction = interaction
+        # Explicit fail-closed output; it never claims to be a model response.
         return {"search_regions": [], "notes": "LLM failed after max retries"}
 
-    def _call_api(self, system_prompt: str, user_prompt: str) -> str:
-        """OpenAI-compatible API 调用。"""
-        try:
-            from openai import OpenAI
-        except ImportError:
-            # 模拟返回（离线测试用）
-            return self._mock_response()
+    def review(self, system_prompt: str, user_prompt: str) -> str:
+        raw = self._call_api(system_prompt, user_prompt, role="reviewer", json_mode=False).strip()
+        memory = raw[:200]
+        self.last_reviewer_interaction = {
+            "role": "reviewer",
+            "model": self._binding("reviewer")["model"],
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "response": raw,
+            "success": bool(memory),
+        }
+        return memory
 
-        try:
-            client = OpenAI(api_key=self._api_key, base_url=self._api_base)
-            response = client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
+    def _call_api(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        role: str = "decision_maker",
+        json_mode: bool = True,
+    ) -> str:
+        """Call LongCat through its OpenAI-compatible ChatCompletions API."""
+        from openai import OpenAI
+
+        binding = self._binding(role)
+        if not binding["api_key"]:
+            raise LLMConfigurationError(
+                f"{binding['api_key_env']} is required; no synthetic response is permitted"
             )
-            return response.choices[0].message.content or ""
-        except Exception as exc:
-            logger.warning("LLM API call failed (falling back to mock): %s", exc)
-            return self._mock_response()
-
-    def _mock_response(self) -> str:
-        """离线测试用的模拟响应。"""
-        return json.dumps({
-            "search_regions": [
-                {"id": "S1", "bbox": [0, 0, 5, 6], "priority": "high", "reason": "mock"},
-                {"id": "S2", "bbox": [10, 10, 15, 14], "priority": "medium", "reason": "mock"},
+        client = OpenAI(
+            api_key=binding["api_key"],
+            base_url=binding["api_base"],
+            timeout=120.0,
+            max_retries=0,
+        )
+        kwargs = {
+            "model": binding["model"],
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            "notes": "mock response"
-        })
+            "temperature": binding["temperature"],
+            "max_tokens": binding["max_tokens"],
+        }
+        if json_mode and binding["supports_json_mode"]:
+            kwargs["response_format"] = {"type": "json_object"}
+        if binding["thinking"] in {"enabled", "disabled"}:
+            kwargs["extra_body"] = {
+                "thinking": {"type": binding["thinking"]}
+            }
+        response = client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
 
-    def _parse_json(self, raw: str) -> dict | None:
-        """从 LLM 响应中提取 JSON。"""
+    @staticmethod
+    def _parse_json(raw: str) -> dict | None:
         raw = raw.strip()
-        # 尝试直接解析
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
             pass
-        # 尝试从 ```json ``` 块中提取
-        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw)
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
         if match:
             try:
                 return json.loads(match.group(1))
             except json.JSONDecodeError:
                 pass
         return None
+
+
+__all__ = ["LLMClient", "LLMConfigurationError"]

@@ -129,11 +129,35 @@ class ObstacleAvoider:
         return path
 
     def is_path_safe(self, waypoints: Sequence[Sequence[float]], obstacle_mask: np.ndarray) -> bool:
-        return bool(waypoints) and all(not self._blocked(pose, obstacle_mask) for pose in waypoints)
+        if not waypoints:
+            return False
+        return all(
+            not self._blocked(point, obstacle_mask)
+            for point in self._sample_segments(waypoints)
+        )
 
     @staticmethod
     def path_conflicts(waypoints: Sequence[Sequence[float]], obstacle_mask: np.ndarray) -> bool:
-        return any(ObstacleAvoider._blocked(pose, obstacle_mask) for pose in waypoints)
+        return any(
+            ObstacleAvoider._blocked(point, obstacle_mask)
+            for point in ObstacleAvoider._sample_segments(waypoints)
+        )
+
+    @staticmethod
+    def _sample_segments(
+        waypoints: Sequence[Sequence[float]],
+        spacing: float = 0.2,
+    ):
+        yield waypoints[0]
+        for start, end in zip(waypoints, waypoints[1:]):
+            length = math.dist(start[:2], end[:2])
+            steps = max(1, int(math.ceil(length / spacing)))
+            for index in range(1, steps + 1):
+                ratio = index / steps
+                yield (
+                    start[0] + (end[0] - start[0]) * ratio,
+                    start[1] + (end[1] - start[1]) * ratio,
+                )
 
     @staticmethod
     def _blocked(point: Sequence[float], mask: np.ndarray) -> bool:

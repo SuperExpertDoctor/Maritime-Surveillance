@@ -4,6 +4,7 @@ from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
 from src.schedule.datatypes import GridCoord, BBox
 from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
+from src.env.obstacle import default_obstacles, obstacle_grid_mask
 
 
 @pytest.fixture
@@ -42,6 +43,20 @@ def test_track_regions_are_excluded(sm):
             assert not _bboxes_overlap(bbox, track.bbox)
 
 
+def test_active_search_regions_are_excluded(sm):
+    from src.schedule.datatypes import Region
+
+    active = Region(id="S-active", bbox=BBox(8, 8, 16, 14), type="search")
+    sm.set_search_regions([active])
+
+    result = CandidateExtractor().extract(sm)
+
+    assert all(
+        not _bboxes_overlap(candidate["bbox"], active.bbox)
+        for candidate in result.candidate_regions
+    )
+
+
 def test_candidate_bbox_within_size_range(sm):
     """候选区域面积应在合理范围内。"""
     extractor = CandidateExtractor()
@@ -51,7 +66,18 @@ def test_candidate_bbox_within_size_range(sm):
         h = cand["bbox"].row_end - cand["bbox"].row_start
         area = w * h
         assert area >= sm.config.grid.search_min_cells, f"Area {area} too small"
-        assert area <= sm.config.grid.search_max_cells * 2, "Area unexpectedly large"
+        assert area <= sm.config.grid.search_max_cells, "Area unexpectedly large"
+
+
+def test_candidates_leave_room_for_radius_one_boundary_turns(sm):
+    result = CandidateExtractor().extract(sm)
+    cols, rows = sm.config.grid.resolution
+    for candidate in result.candidate_regions:
+        bbox = candidate["bbox"]
+        assert bbox.col_start >= 1
+        assert bbox.row_start >= 1
+        assert bbox.col_end <= cols - 1
+        assert bbox.row_end <= rows - 1
 
 
 # --- Bug 1 regression: candidate count cap ---
@@ -63,6 +89,34 @@ def test_candidate_count_does_not_exceed_limit(sm):
     # 15 idle UAVs -> K = min(15*2, 10) = 10
     assert len(result.candidate_regions) <= 10, (
         f"Got {len(result.candidate_regions)} candidates, expected <= 10"
+    )
+
+
+def test_candidates_are_mutually_disjoint(sm):
+    result = CandidateExtractor().extract(sm)
+    for index, candidate in enumerate(result.candidate_regions):
+        for other in result.candidate_regions[index + 1:]:
+            assert not _bboxes_overlap(candidate["bbox"], other["bbox"])
+
+
+def test_irregular_obstacle_pocket_remains_schedulable(sm):
+    obstacles = default_obstacles(seed=42)
+    sm.set_environment_obstacles(
+        obstacles,
+        obstacle_grid_mask(obstacles, sm.config.grid.resolution),
+    )
+    sm.info_field.last_scan_time[1:17, 1:29] = 0.0
+
+    result = CandidateExtractor().extract(sm)
+
+    assert result.candidate_regions
+    assert any(candidate["bbox"].col_start >= 15 for candidate in result.candidate_regions)
+    assert all(
+        np.isneginf(sm.info_field.last_scan_time[
+            candidate["bbox"].col_start:candidate["bbox"].col_end,
+            candidate["bbox"].row_start:candidate["bbox"].row_end,
+        ]).any()
+        for candidate in result.candidate_regions
     )
 
 

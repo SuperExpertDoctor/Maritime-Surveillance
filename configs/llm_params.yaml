@@ -2,36 +2,28 @@
 # API keys are stored in configs/.env (git-ignored)
 
 providers:
-  - name: deepseek
-    api_base: https://api.deepseek.com/v1
-    api_key_env: DEEPSEEK_API_KEY
-  - name: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
+  - name: longcat
+    api_base: https://api.longcat.chat/openai/v1
+    api_key_env: LONGCAT_API_KEY
+    supports_json_mode: false
 
 models:
-  - id: deepseek-v4-pro
-    name: DeepSeek Pro
-    provider: deepseek
-    max_tokens: 65536
-  - id: deepseek-v4
-    name: DeepSeek V4
-    provider: deepseek
-    max_tokens: 16384
-  - id: gpt-4o
-    name: GPT-4o
-    provider: openai
-    max_tokens: 128000
+  - id: LongCat-2.0
+    name: LongCat 2.0
+    provider: longcat
+    max_tokens: 131072
 
 bindings:
   decision_maker:
-    model: deepseek-v4-pro
-    temperature: 0.3
-    max_tokens: 4096
-  reviewer:
-    model: deepseek-v4-pro
+    model: LongCat-2.0
     temperature: 0.3
     max_tokens: 2048
+    thinking: disabled
+  reviewer:
+    model: LongCat-2.0
+    temperature: 0.3
+    max_tokens: 512
+    thinking: disabled
 
 cycles:
   heavy_cycle_min: 30

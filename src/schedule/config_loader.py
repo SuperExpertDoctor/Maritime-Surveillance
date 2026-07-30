@@ -43,6 +43,7 @@ class UAVConfig:
     cruise_speed_kmh: float
     endurance_h: float
     refuel_time_min: float
+    sortie_endurance_h: float = 1.8
 
 
 @dataclass

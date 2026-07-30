@@ -6,6 +6,7 @@ import numpy as np
 
 from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.state_manager import StateManager
+from src.utils.coverage_planner import CoveragePlanner
 
 
 @dataclass
@@ -15,16 +16,39 @@ class CandidateResult:
 
 
 class CandidateExtractor:
+    def __init__(self):
+        self.coverage_planner = CoveragePlanner(sample_step=0.25)
+
     def extract(self, sm: StateManager) -> CandidateResult:
         gc = sm.config.grid
         cols, rows = gc.resolution
         V = sm.get_value_matrix()
         I = sm.get_info_matrix()
+        seen = np.isfinite(sm.info_field.last_scan_time)
+        searchable = sm.get_searchable_mask()
+        searchable_cells = int(searchable.sum())
+        unique_coverage = (
+            int((seen & searchable).sum()) / searchable_cells
+            if searchable_cells
+            else 0.0
+        )
+        exploration_mode = unique_coverage < 0.80
 
         # Step 1: track-region occupancy mask
         occupied = np.zeros((cols, rows), dtype=bool)
+        occupied |= getattr(sm, "obstacle_mask", occupied)
+        # A one-cell flight margin lets a radius-1 Dubins U-turn bulge
+        # outside every candidate rectangle without leaving the map.
+        occupied[0, :] = True
+        occupied[cols - 1, :] = True
+        occupied[:, 0] = True
+        occupied[:, rows - 1] = True
         for tr in sm.get_track_regions():
             b = tr.bbox
+            occupied[b.col_start:b.col_end, b.row_start:b.row_end] = True
+        active_search = sm.get_active_search_regions()
+        for region in sm.get_search_regions():
+            b = region.bbox
             occupied[b.col_start:b.col_end, b.row_start:b.row_end] = True
 
         # Step 2: high-value cell clustering (connected components)
@@ -36,9 +60,12 @@ class CandidateExtractor:
         clusters.sort(key=lambda c: c["total_value"], reverse=True)
 
         # Step 4: Top-K selection (on clusters, not final candidates)
-        available = len(sm.get_available_uavs())
+        pending_regions = sum(
+            region.assigned_uav_id is None for region in active_search
+        )
+        available = max(0, len(sm.get_available_uavs()) - pending_regions)
         K = min(available * 2, 10)
-        clusters = clusters[:K]
+        clusters = clusters[:max(K * 4, K)]
 
         # Step 5: rectangle fitting and track-region overlap filtering
         track_bboxes = [tr.bbox for tr in sm.get_track_regions()]
@@ -55,16 +82,88 @@ class CandidateExtractor:
                 # Bug 2 fix: recompute total_value / avg_info from the
                 # sub-candidate's own bbox, not the whole cluster.
                 bbox = fitted["bbox"]
+                if not gc.search_min_cells <= fitted["cell_count"] <= gc.search_max_cells:
+                    continue
+                if np.any(occupied[
+                    bbox.col_start:bbox.col_end,
+                    bbox.row_start:bbox.row_end,
+                ]):
+                    continue
+                swath_width = (
+                    sm.config.sensor.sar.swath_km
+                    / sm.config.grid.cell_size_km
+                )
+                if not self.coverage_planner.is_region_feasible(
+                    bbox,
+                    swath_width,
+                    1.0,
+                    sm.obstacle_mask,
+                ):
+                    continue
                 patch_V = V[bbox.col_start:bbox.col_end,
                             bbox.row_start:bbox.row_end]
                 patch_I = I[bbox.col_start:bbox.col_end,
                             bbox.row_start:bbox.row_end]
                 fitted["total_value"] = float(np.sum(patch_V))
                 fitted["avg_info"] = float(np.mean(patch_I))
+                fitted["unseen_count"] = int((~seen[
+                    bbox.col_start:bbox.col_end,
+                    bbox.row_start:bbox.row_end,
+                ]).sum())
+                if (
+                    exploration_mode
+                    and fitted["unseen_count"] / fitted["cell_count"] < 0.25
+                ):
+                    continue
                 candidates.append(fitted)
 
-        # Bug 1 fix: cap final candidates at K (subdivision may inflate count)
-        candidates = candidates[:K]
+        # Connected-component bounding boxes lose navigable pockets when a
+        # concave sea component wraps around an obstacle. Enumerate compact,
+        # fully feasible windows so those pockets remain schedulable.
+        candidates.extend(self._fit_feasible_windows(
+            sm,
+            occupied,
+            V,
+            I,
+            seen,
+            K,
+            exploration_mode,
+        ))
+
+        # Cap final candidates at K and keep them mutually disjoint so a model
+        # can safely copy the supplied candidate list as its additions.
+        base_col, base_row = sm.config.environment.base_position
+        def candidate_key(item):
+            bbox = item["bbox"]
+            area = (bbox.col_end - bbox.col_start) * (bbox.row_end - bbox.row_start)
+            unseen_count = item.get("unseen_count", 0)
+            unseen_density = unseen_count / max(area, 1)
+            distance = math.dist(
+                ((bbox.col_start + bbox.col_end) / 2,
+                 (bbox.row_start + bbox.row_end) / 2),
+                (base_col, base_row),
+            )
+            if exploration_mode:
+                return (-unseen_density, -unseen_count, abs(area - 24),
+                        -item["total_value"], distance)
+            return (-item["total_value"], distance)
+
+        candidates.sort(key=candidate_key)
+        selected = []
+        seen_bboxes = set()
+        for candidate in candidates:
+            bbox = candidate["bbox"]
+            bbox_key = tuple(bbox)
+            if bbox_key in seen_bboxes:
+                continue
+            seen_bboxes.add(bbox_key)
+            if any(self._bboxes_overlap(bbox, item["bbox"]) for item in selected):
+                continue
+            candidate.pop("unseen_count", None)
+            selected.append(candidate)
+            if len(selected) >= K:
+                break
+        candidates = selected
 
         # Step 6: fragment detection
         fragments = self._detect_fragments(sm, occupied, gc)
@@ -73,6 +172,77 @@ class CandidateExtractor:
             candidate_regions=candidates,
             fragment_alerts=fragments,
         )
+
+    def _fit_feasible_windows(
+        self,
+        sm: StateManager,
+        occupied: np.ndarray,
+        values: np.ndarray,
+        info: np.ndarray,
+        seen: np.ndarray,
+        limit: int,
+        exploration_mode: bool,
+    ) -> list[dict]:
+        """Find spatially diverse feasible windows inside irregular free sea."""
+        if limit <= 0:
+            return []
+        gc = sm.config.grid
+        cols, rows = gc.resolution
+        base_col, base_row = sm.config.environment.base_position
+        raw = []
+        for width in range(1, gc.search_max_cells + 1):
+            for height in range(1, gc.search_max_cells + 1):
+                area = width * height
+                if not gc.search_min_cells <= area <= gc.search_max_cells:
+                    continue
+                if max(width, height) / min(width, height) > gc.aspect_ratio_max:
+                    continue
+                for c0 in range(1, cols - width):
+                    for r0 in range(1, rows - height):
+                        c1, r1 = c0 + width, r0 + height
+                        if occupied[c0:c1, r0:r1].any():
+                            continue
+                        unseen_count = int((~seen[c0:c1, r0:r1]).sum())
+                        if exploration_mode and unseen_count / area < 0.25:
+                            continue
+                        bbox = BBox(c0, r0, c1, r1)
+                        raw.append({
+                            "bbox": bbox,
+                            "cell_count": area,
+                            "unseen_count": unseen_count,
+                            "total_value": float(values[c0:c1, r0:r1].sum()),
+                            "avg_info": float(info[c0:c1, r0:r1].mean()),
+                            "distance": math.dist(
+                                ((c0 + c1) / 2, (r0 + r1) / 2),
+                                (base_col, base_row),
+                            ),
+                        })
+
+        raw.sort(key=lambda item: (
+            -(item["unseen_count"] / item["cell_count"]),
+            -item["unseen_count"],
+            abs(item["cell_count"] - 24),
+            -item["total_value"],
+            item["distance"],
+        ))
+        swath_width = sm.config.sensor.sar.swath_km / gc.cell_size_km
+        selected = []
+        for item in raw:
+            bbox = item["bbox"]
+            if any(self._bboxes_overlap(bbox, other["bbox"]) for other in selected):
+                continue
+            if not self.coverage_planner.is_region_feasible(
+                bbox,
+                swath_width,
+                1.0,
+                sm.obstacle_mask,
+            ):
+                continue
+            item.pop("distance")
+            selected.append(item)
+            if len(selected) >= max(limit * 4, 20):
+                break
+        return selected
 
     # ------------------------------------------------------------------
     # Connected-component analysis
@@ -196,15 +366,13 @@ class CandidateExtractor:
 
             # --- size-based subdivision (push pieces back to stack) ---
             if area > gc.search_max_cells:
-                n = max(1, round(math.sqrt(area / gc.search_max_cells)))
-                piece_w = (c1 - c0) / n
-                piece_h = (r1 - r0) / n
-                for i in range(n):
-                    for j in range(n):
-                        sub_c0 = int(c0 + i * piece_w)
-                        sub_c1 = int(c0 + (i + 1) * piece_w)
-                        sub_r0 = int(r0 + j * piece_h)
-                        sub_r1 = int(r0 + (j + 1) * piece_h)
+                n_cols, n_rows = self._partition_counts(w, h, gc)
+                col_edges = [c0 + round(i * w / n_cols) for i in range(n_cols + 1)]
+                row_edges = [r0 + round(i * h / n_rows) for i in range(n_rows + 1)]
+                for i in range(n_cols):
+                    for j in range(n_rows):
+                        sub_c0, sub_c1 = col_edges[i], col_edges[i + 1]
+                        sub_r0, sub_r1 = row_edges[j], row_edges[j + 1]
                         if sub_c1 > sub_c0 and sub_r1 > sub_r0:
                             stack.append((sub_c0, sub_r0, sub_c1, sub_r1))
                 continue
@@ -218,6 +386,39 @@ class CandidateExtractor:
             )
 
         return results
+
+    @staticmethod
+    def _partition_counts(width: int, height: int, gc) -> tuple[int, int]:
+        """Choose the densest grid whose every tile satisfies region limits."""
+        choices: list[tuple[float, int, int, int]] = []
+        for n_cols in range(1, width + 1):
+            widths = (width // n_cols, math.ceil(width / n_cols))
+            if widths[0] <= 0:
+                continue
+            for n_rows in range(1, height + 1):
+                heights = (height // n_rows, math.ceil(height / n_rows))
+                if heights[0] <= 0:
+                    continue
+                shapes = [(w, h) for w in widths for h in heights]
+                if any(
+                    w * h < gc.search_min_cells
+                    or w * h > gc.search_max_cells
+                    or max(w, h) / min(w, h) > gc.aspect_ratio_max
+                    for w, h in shapes
+                ):
+                    continue
+                mean_area = width * height / (n_cols * n_rows)
+                # Around 24 cells typically yields a 4-cell short side.  With
+                # a two-cell SAR swath that needs two scan lines instead of
+                # the three required by the former ~36-cell square target,
+                # improving coverage throughput while remaining in the
+                # configured 20-40 cell envelope.
+                choices.append((-abs(mean_area - 24.0), n_cols * n_rows, n_cols, n_rows))
+        if not choices:
+            n = max(1, math.ceil(math.sqrt(width * height / gc.search_max_cells)))
+            return n, n
+        _, _, n_cols, n_rows = max(choices)
+        return n_cols, n_rows
 
     # ------------------------------------------------------------------
     # Fragment detection

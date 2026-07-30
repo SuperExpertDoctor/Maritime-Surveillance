@@ -1,0 +1,544 @@
+"""Headless simulation engine shared by the CLI, tests, and web service."""
+from __future__ import annotations
+
+import math
+import random
+from collections import defaultdict
+
+import numpy as np
+
+from src.env.base_station import BaseStation
+from src.env.obstacle import default_obstacles, obstacle_grid_mask
+from src.env.sar_sensor import SARSensor
+from src.env.ship import Ship
+from src.env.sim_clock import SimClock
+from src.env.uav_entity import UAVEntity
+from src.schedule.config_loader import AppConfig
+from src.schedule.datatypes import GridCoord
+from src.schedule.task_allocator import TaskAllocator
+from src.utils.coverage_planner import CoveragePlanner
+from src.utils.obstacle_avoider import ObstacleAvoider
+from src.utils.phase_coordinator import PhaseCoordinator
+
+
+class SimulationEngine:
+    def __init__(self, config: AppConfig, seed: int = 42):
+        self.config = config
+        self.seed = seed
+        self.rng = random.Random(seed)
+        random.seed(seed)
+        self.clock = SimClock()
+        self.base = BaseStation(GridCoord(*config.environment.base_position), config.uav.refuel_time_min)
+        self.allocator = TaskAllocator(config)
+        self.allocator.llm_client.assert_ready()
+        self.coverage_planner = CoveragePlanner(sample_step=0.2)
+        self.obstacle_avoider = ObstacleAvoider(max_iterations=1000, seed=seed)
+        self.phase_coordinator = PhaseCoordinator()
+        self.obstacles = default_obstacles(seed)
+        self.obstacle_mask = obstacle_grid_mask(self.obstacles, config.grid.resolution)
+        self.allocator.sm.set_environment_obstacles(self.obstacles, self.obstacle_mask)
+
+        self.uavs = [
+            UAVEntity(
+                f"UAV-{index + 1}",
+                self.base.position,
+                config.uav.sortie_endurance_h,
+                config.uav.cruise_speed_kmh,
+                cell_size_km=config.grid.cell_size_km,
+                R_min=1.0,
+            )
+            for index in range(config.uav.count_max)
+        ]
+        for uav in self.uavs:
+            uav.sar_sensor = SARSensor(
+                swath_width_cells=config.sensor.sar.swath_km / config.grid.cell_size_km,
+                detection_probability=config.sensor.sar.detection_probability,
+                grid_shape=config.grid.resolution,
+            )
+            uav.eo_sensor.max_range_cells = (
+                config.sensor.eoir.detection_range_km / config.grid.cell_size_km
+            )
+        self.ships = self._create_ships()
+        self.heavy_triggers = 0
+        self.light_triggers = 0
+        self.llm_successes = 0
+        self.region_signatures: list[tuple] = []
+        self.track_creations = 0
+        self.status_history: dict[str, list[str]] = defaultdict(lambda: ["idle"])
+        self.lifecycle_cycles: dict[str, int] = {
+            uav.id: 0 for uav in self.uavs
+        }
+        self._sortie_searched: dict[str, bool] = {
+            uav.id: False for uav in self.uavs
+        }
+        self.last_result: dict = {"trigger_type": "none", "action": None}
+
+    def _create_ships(self) -> list[Ship]:
+        cfg = self.config.ship
+        count = self.rng.randint(cfg.count_min, cfg.count_min + 5)
+        group_count = min(3, cfg.max_groups, count)
+        safe_centers = [(8.0, 8.0), (8.0, 20.0), (15.0, 14.0)]
+        ships: list[Ship] = []
+        for index in range(count):
+            group = index % group_count
+            # The acceptance scenario keeps every group in reachable free
+            # water; detected groups still move with the ship zigzag model.
+            center = safe_centers[group]
+            position = GridCoord(
+                int(max(2, min(27, center[0] + self.rng.randint(-1, 1)))),
+                int(max(2, min(27, center[1] + self.rng.randint(-1, 1)))),
+            )
+            ship = Ship(
+                f"Ship-{group + 1}-{index // group_count + 1}",
+                position,
+                cfg.speed_kn,
+                cfg.zigzag_amplitude_km,
+                cfg.zigzag_period_min,
+                self.config.grid.cell_size_km,
+            )
+            ship.group_id = f"G{group + 1}"
+            ships.append(ship)
+        return ships
+
+    def step(self) -> dict:
+        t = self.clock.tick()
+        sm = self.allocator.sm
+        sm.current_time = t
+
+        self._update_obstacles()
+        for ship in self.ships:
+            ship.step(self.clock.dt_min)
+
+        tracking_speeds = self._tracking_speed_commands()
+        for uav in self.uavs:
+            target = self._group_center(uav.target_group_id) if uav.target_group_id else None
+            fuel_low = uav.step(
+                self.clock.dt_min,
+                target,
+                tracking_speed_cells_min=tracking_speeds.get(uav.id),
+            )
+            if uav.status == "searching":
+                self._sortie_searched[uav.id] = True
+            if fuel_low or self._needs_reserve_return(uav):
+                self._begin_return(uav, t)
+
+        self._update_sensors_and_detections(t)
+        self._process_search_completions(t)
+        self._process_refuelling(t)
+        self._sync_state_from_entities()
+
+        result = self.allocator.step(t)
+        self.last_result = result
+        if result["trigger_type"] == "heavy":
+            self.heavy_triggers += 1
+            interaction = result.get("llm_cycle") or {}
+            self.llm_successes += int(bool(interaction.get("success")))
+            signature = tuple(
+                (region["id"], tuple(region["bbox"]))
+                for region in result.get("search_regions", [])
+            )
+            if signature and (not self.region_signatures or signature != self.region_signatures[-1]):
+                self.region_signatures.append(signature)
+        elif result["trigger_type"] == "light":
+            self.light_triggers += 1
+        self._sync_assignments()
+        self._record_statuses()
+        return result
+
+    def run(self, steps: int = 480, on_step=None) -> dict:
+        for _ in range(steps):
+            result = self.step()
+            if on_step is not None:
+                on_step(self, result)
+        return self.summary()
+
+    def summary(self) -> dict:
+        coverage = self.allocator.sm.get_coverage_stats()
+        return {
+            "steps": int(self.clock.time),
+            **coverage,
+            "heavy_triggers": self.heavy_triggers,
+            "light_triggers": self.light_triggers,
+            "llm_success_rate": (
+                self.llm_successes / self.heavy_triggers if self.heavy_triggers else 0.0
+            ),
+            "detected_ships": sum(ship.detected for ship in self.ships),
+            "ship_count": len(self.ships),
+            "region_changes": len(self.region_signatures),
+            "track_creations": self.track_creations,
+            "markers": len(self.allocator.sm.get_active_markers()),
+            "lifecycle_cycles": dict(self.lifecycle_cycles),
+            "min_lifecycle_cycles": min(self.lifecycle_cycles.values(), default=0),
+            "status_history": dict(self.status_history),
+        }
+
+    def _update_obstacles(self) -> None:
+        previous_mask = self.obstacle_mask
+        active = []
+        for obstacle in self.obstacles:
+            if hasattr(obstacle, "step"):
+                if obstacle.step(self.clock.dt_min, self.config.grid.resolution):
+                    active.append(obstacle)
+            else:
+                active.append(obstacle)
+        self.obstacles = active
+        self.obstacle_mask = obstacle_grid_mask(active, self.config.grid.resolution)
+        self.allocator.sm.set_environment_obstacles(active, self.obstacle_mask)
+        if not np.array_equal(previous_mask, self.obstacle_mask):
+            self._replan_conflicting_routes()
+
+    def _replan_conflicting_routes(self) -> None:
+        sm = self.allocator.sm
+        regions = {region.id: region for region in sm.get_active_search_regions()}
+        for uav in self.uavs:
+            if uav.status in ("idle", "refueling", "tracking"):
+                continue
+            if not self.obstacle_avoider.path_conflicts(
+                uav.remaining_path,
+                self.obstacle_mask,
+            ):
+                continue
+
+            if uav.status == "returning":
+                self._set_return_route(uav, sm.current_time)
+            elif uav.mission_kind in ("search",):
+                state = sm.get_uav(uav.id)
+                region = regions.get(state.assigned_region_id if state else None)
+                if region is None:
+                    self._begin_return(uav, sm.current_time)
+                    continue
+                try:
+                    self._assign_search_route(uav, region)
+                except (RuntimeError, ValueError) as exc:
+                    region.status = "stale"
+                    region.assigned_uav_id = None
+                    sm.clear_uav_assignment(uav.id)
+                    sm.add_event("route_plan_failed", {
+                        "uav_id": uav.id,
+                        "region_id": region.id,
+                        "error": str(exc),
+                    })
+                    self._begin_return(uav, sm.current_time)
+                    continue
+            elif uav.mission_kind == "track_entry" and uav.target_group_id:
+                center = self._group_center(uav.target_group_id)
+                if center is None:
+                    self._begin_return(uav, sm.current_time)
+                    continue
+                uav.start_tracking(uav.target_group_id, center)
+            else:
+                continue
+            sm.add_event("route_replanned", {
+                "uav_id": uav.id,
+                "reason": "dynamic_obstacle",
+            })
+
+    def _update_sensors_and_detections(self, current_time: float) -> None:
+        sm = self.allocator.sm
+        for uav in self.uavs:
+            if uav.status == "searching":
+                footprint = uav.sar_sensor.compute_swath_footprint(
+                    uav.float_position,
+                    uav.heading_rad,
+                    uav.sar_look_direction,
+                    along_track_cells=5.0,
+                )
+                uav.sar_footprint = footprint
+                for cell in footprint:
+                    sm.scan_cell(cell, current_time, is_track=False)
+                footprint_set = set(footprint)
+                for ship in self.ships:
+                    if ship.detected or ship.position not in footprint_set:
+                        continue
+                    if self.rng.random() <= uav.sar_sensor.detection_probability:
+                        self._handle_detection(uav, ship, current_time)
+            elif uav.status == "tracking" and uav.target_group_id:
+                center = self._group_center(uav.target_group_id)
+                if center is not None:
+                    sm.scan_cell(GridCoord(int(round(center[0])), int(round(center[1]))), current_time, True)
+            else:
+                uav.sar_footprint = []
+                if uav.status != "tracking":
+                    uav.eo_fov = None
+
+    def _handle_detection(self, uav: UAVEntity, ship: Ship, current_time: float) -> None:
+        sm = self.allocator.sm
+        for member in self.ships:
+            if member.group_id != ship.group_id or member.detected:
+                continue
+            member.mark_detected()
+            sm.add_event("ship_detected", {
+                "ship_id": member.id,
+                "group_id": member.group_id,
+                "uav_id": uav.id,
+                "position": member.position,
+            })
+        existing = sm.get_track_region_for_group(ship.group_id)
+        if existing is not None:
+            return
+
+        for region in sm.get_search_regions():
+            if region.assigned_uav_id == uav.id:
+                region.assigned_uav_id = None
+        track = sm.create_track_region(ship.group_id, ship.position)
+        track.assigned_uav_id = uav.id
+        self.track_creations += 1
+        uav.start_tracking(ship.group_id, ship.float_position)
+        sm.update_uav_status(
+            uav.id,
+            "transit",
+            uav.position,
+            assigned_region_id=track.id,
+            target_group_id=ship.group_id,
+            fuel_remaining_pct=uav.fuel_remaining_pct,
+        )
+        self.allocator.trigger_manager.notify_event(
+            "target_found",
+            time=current_time,
+            uav_id=uav.id,
+            group_id=ship.group_id,
+            position={"col": ship.position.col, "row": ship.position.row},
+        )
+        sm.add_event("target_found", {
+            "uav_id": uav.id,
+            "group_id": ship.group_id,
+            "position": ship.position,
+        })
+
+    def _begin_return(self, uav: UAVEntity, current_time: float) -> None:
+        sm = self.allocator.sm
+        if uav.target_group_id:
+            track = sm.get_track_region_for_group(uav.target_group_id)
+            if track is not None and track.assigned_uav_id == uav.id:
+                sm.release_track_region(track.id, uav.id)
+                self.allocator.trigger_manager.notify_event(
+                    "target_lost", time=current_time, uav_id=uav.id,
+                    group_id=uav.target_group_id,
+                )
+                sm.add_event("target_lost", {
+                    "uav_id": uav.id,
+                    "group_id": uav.target_group_id,
+                })
+        for region in sm.get_search_regions():
+            if region.assigned_uav_id == uav.id:
+                region.assigned_uav_id = None
+
+        self._set_return_route(uav, current_time)
+        sm.clear_uav_assignment(uav.id)
+        sm.update_uav_status(uav.id, "returning", uav.position, fuel_remaining_pct=uav.fuel_remaining_pct)
+        self.allocator.trigger_manager.notify_event(
+            "uav_returned", time=current_time, uav_id=uav.id,
+        )
+        sm.add_event("uav_returned", {"uav_id": uav.id})
+
+    def _set_return_route(self, uav: UAVEntity, current_time: float) -> None:
+        goal = (float(self.base.position.col), float(self.base.position.row), -math.pi / 2)
+        local_mask = self.obstacle_mask.copy()
+        col, row = uav.position
+        local_mask[max(0, col - 1):col + 2, max(0, row - 1):row + 2] = False
+        try:
+            path = self.obstacle_avoider.plan_path(uav.pose, goal, local_mask, uav.R_min)
+        except RuntimeError:
+            # A second deterministic RRT* seed explores a different tree; it
+            # remains the same algorithm and never substitutes a straight path.
+            retry = ObstacleAvoider(max_iterations=1800, seed=self.seed + int(current_time) + len(uav.id))
+            path = retry.plan_path(uav.pose, goal, local_mask, uav.R_min)
+        uav.plan_return(path)
+
+    def _process_search_completions(self, current_time: float) -> None:
+        sm = self.allocator.sm
+        for uav in self.uavs:
+            if not uav.search_complete_pending:
+                continue
+            region_id = sm.get_uav(uav.id).assigned_region_id if sm.get_uav(uav.id) else None
+            for region in sm.get_search_regions():
+                if region.id == region_id:
+                    region.status = "completed"
+                    region.completion_pct = 100.0
+                    region.assigned_uav_id = None
+            self.allocator.trigger_manager.notify_event(
+                "search_complete", time=current_time, uav_id=uav.id, region_id=region_id,
+            )
+            sm.add_event("search_complete", {"uav_id": uav.id, "region_id": region_id})
+            uav.search_complete_pending = False
+            uav.completed_searches_since_refuel += 1
+            sm.clear_uav_assignment(uav.id)
+            if (
+                uav.completed_searches_since_refuel >= 2
+                or self._needs_reserve_return(uav, include_idle=True)
+            ):
+                self._begin_return(uav, current_time)
+
+    def _needs_reserve_return(self, uav: UAVEntity, include_idle: bool = False) -> bool:
+        if uav.status in ("returning", "refueling"):
+            return False
+        if uav.status == "idle" and not include_idle:
+            return False
+        max_range_cells = (
+            uav.cruise_speed_kmh * uav.endurance_h / uav.cell_size_km
+        )
+        remaining_cells = uav.fuel_remaining_pct * max_range_cells
+        direct_home = math.dist(uav.float_position, (self.base.position.col, self.base.position.row))
+        reserve_cells = direct_home * 1.25 + 3.0
+        return remaining_cells <= reserve_cells
+
+    def _process_refuelling(self, current_time: float) -> None:
+        for uav in self.uavs:
+            if uav.status == "refueling" and not self.base.is_refueling(uav.id):
+                self.base.land_uav(uav.id)
+        for uav_id in self.base.step(self.clock.dt_min):
+            uav = next(item for item in self.uavs if item.id == uav_id)
+            uav.position = self.base.position
+            uav.refuel()
+            if self._sortie_searched[uav.id]:
+                self.lifecycle_cycles[uav.id] += 1
+            self._sortie_searched[uav.id] = False
+            self.allocator.sm.clear_uav_assignment(uav.id)
+            self.allocator.trigger_manager.notify_event(
+                "uav_refueled", time=current_time, uav_id=uav.id,
+            )
+            self.allocator.sm.add_event("uav_refueled", {"uav_id": uav.id})
+
+    def _sync_state_from_entities(self) -> None:
+        sm = self.allocator.sm
+        for entity in self.uavs:
+            state = sm.get_uav(entity.id)
+            sm.update_uav_status(
+                entity.id,
+                entity.status,
+                entity.position,
+                assigned_region_id=state.assigned_region_id if state else None,
+                fuel_remaining_pct=entity.fuel_remaining_pct,
+                target_group_id=entity.target_group_id,
+                heading_deg=entity.heading_deg,
+                sensor_mode=entity.sensor_mode,
+            )
+        for track in sm.get_track_regions():
+            center = self._group_center(track.target_group_id)
+            if center:
+                sm.update_track_region_center(
+                    track.id, GridCoord(int(round(center[0])), int(round(center[1])))
+                )
+
+    def _sync_assignments(self) -> None:
+        sm = self.allocator.sm
+        region_by_id = {region.id: region for region in sm.get_search_regions()}
+        entity_by_id = {uav.id: uav for uav in self.uavs}
+        for state in sm.get_all_uavs():
+            entity = entity_by_id[state.id]
+            if state.status != "transit" or not state.assigned_region_id or entity.status != "idle":
+                continue
+            region = region_by_id.get(state.assigned_region_id)
+            if region is None:
+                continue
+            try:
+                self._assign_search_route(entity, region)
+            except (RuntimeError, ValueError) as exc:
+                region.status = "stale"
+                region.assigned_uav_id = None
+                sm.clear_uav_assignment(entity.id)
+                entity.status = "idle"
+                sm.add_event("route_plan_failed", {
+                    "uav_id": entity.id,
+                    "region_id": region.id,
+                    "error": str(exc),
+                })
+
+    def _assign_search_route(self, uav: UAVEntity, region) -> None:
+        swath_width = self.config.sensor.sar.swath_km / self.config.grid.cell_size_km
+        coverage = self.coverage_planner.plan(
+            region.bbox, uav.pose, swath_width, uav.R_min
+        )
+        scan_times = self.allocator.sm.info_field.last_scan_time
+        swaths = [
+            swath
+            for swath in coverage.swaths
+            if any(
+                not math.isfinite(scan_times[cell.col, cell.row])
+                for cell in swath.footprint
+            )
+        ]
+        if not swaths:
+            region.status = "completed"
+            region.completion_pct = 100.0
+            region.assigned_uav_id = None
+            self.allocator.sm.clear_uav_assignment(uav.id)
+            uav.status = "idle"
+            return
+        full_path = [uav.pose]
+        scan_ranges = []
+        transit_end_index = 0
+        for index, swath in enumerate(swaths):
+            entry = (swath.start[0], swath.start[1], swath.heading)
+            connector = self.obstacle_avoider.plan_path(
+                full_path[-1], entry, self.obstacle_mask, uav.R_min
+            )
+            full_path.extend(connector[1:])
+            if index == 0:
+                transit_end_index = len(full_path) - 1
+            line = self.coverage_planner.sample_scan_line(swath)
+            if not self.obstacle_avoider.is_path_safe(line, self.obstacle_mask):
+                raise RuntimeError("SAR scan line intersects a no-fly obstacle")
+            scan_start = len(full_path) - 1
+            full_path.extend(line[1:])
+            scan_ranges.append((scan_start, len(full_path) - 1, swath.look_direction))
+        uav.assign_mission(
+            region.bbox,
+            full_path,
+            transit_end_index=transit_end_index,
+            scan_ranges=scan_ranges,
+        )
+
+    def _group_center(self, group_id: str | None):
+        members = [ship for ship in self.ships if ship.group_id == group_id]
+        if not members:
+            return None
+        return (
+            sum(ship.float_position[0] for ship in members) / len(members),
+            sum(ship.float_position[1] for ship in members) / len(members),
+        )
+
+    def _tracking_speed_commands(self) -> dict[str, float]:
+        """Apply cooperative phase spacing to UAVs sharing an orbit."""
+        commands: dict[str, float] = {}
+        groups = {
+            uav.target_group_id
+            for uav in self.uavs
+            if uav.status == "tracking" and uav.target_group_id
+        }
+        nominal = (
+            self.config.uav.cruise_speed_kmh
+            / self.config.grid.cell_size_km
+            / 60.0
+        )
+        for group_id in groups:
+            members = [
+                uav for uav in self.uavs
+                if uav.status == "tracking" and uav.target_group_id == group_id
+            ]
+            if len(members) < 2:
+                continue
+            center = self._group_center(group_id)
+            if center is None:
+                continue
+            phase_errors = self.phase_coordinator.compute_phase_offsets(
+                [{"position": uav.float_position} for uav in members],
+                center,
+            )
+            speeds = self.phase_coordinator.adjust_airspeeds(
+                phase_errors,
+                nominal,
+            )
+            commands.update(
+                (uav.id, speed) for uav, speed in zip(members, speeds)
+            )
+        return commands
+
+    def _record_statuses(self) -> None:
+        for uav in self.uavs:
+            history = self.status_history[uav.id]
+            if history[-1] != uav.status:
+                history.append(uav.status)
+
+
+__all__ = ["SimulationEngine"]

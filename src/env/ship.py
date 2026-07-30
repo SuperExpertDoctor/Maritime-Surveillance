@@ -1,25 +1,45 @@
-﻿"""目标船舶实体：宙斯盾驱逐舰级别，支持 zigzag 逃逸。"""
+"""Continuous target-ship model with bounded sinusoidal zigzag escape."""
+from __future__ import annotations
+
 import math
 import random
+
 from src.schedule.datatypes import GridCoord
 
 
 class Ship:
-    def __init__(self, ship_id: str, initial_position: GridCoord,
-                 speed_kn: float, zigzag_amplitude_km: float,
-                 zigzag_period_min: float, cell_size_km: float = 10.0):
+    def __init__(
+        self,
+        ship_id: str,
+        initial_position: GridCoord,
+        speed_kn: float,
+        zigzag_amplitude_km: float,
+        zigzag_period_min: float,
+        cell_size_km: float = 10.0,
+    ):
         self.id = ship_id
-        self.position = initial_position
-        self.speed_kn = speed_kn  # 节
-        self.speed_km_per_min = speed_kn * 1.852 / 60.0  # km/min
-        self.zigzag_amplitude_km = zigzag_amplitude_km
+        self._col, self._row = float(initial_position.col), float(initial_position.row)
+        self.speed_kn = speed_kn
+        self.speed_cells_per_min = speed_kn * 1.852 / 60.0 / cell_size_km
+        self.zigzag_amplitude_cells = zigzag_amplitude_km / cell_size_km
         self.zigzag_period_min = zigzag_period_min
-        self.cell_size_km = cell_size_km
-        self._detected: bool = False
-        self._zigzag_phase: float = random.uniform(0, 2 * math.pi)
-        self._base_heading: float = random.uniform(0, 2 * math.pi)
+        self._detected = False
+        self._phase = random.uniform(0, 2 * math.pi)
+        self._base_heading = random.uniform(0, 2 * math.pi)
         self.group_id: str | None = None
-        self.trail: list[tuple[int, int]] = []  # 轨迹记录
+        self.trail: list[tuple[float, float]] = []
+
+    @property
+    def position(self) -> GridCoord:
+        return GridCoord(int(round(self._col)), int(round(self._row)))
+
+    @position.setter
+    def position(self, value: GridCoord) -> None:
+        self._col, self._row = float(value.col), float(value.row)
+
+    @property
+    def float_position(self) -> tuple[float, float]:
+        return self._col, self._row
 
     @property
     def detected(self) -> bool:
@@ -29,37 +49,32 @@ class Ship:
         self._detected = True
 
     def step(self, dt_min: float) -> None:
-        """推进 dt 分钟。"""
-        if not self._detected:
-            # 未被发现前可能漂移
+        if not self._detected or dt_min <= 0:
             return
+        angular_rate = 2.0 * math.pi / max(self.zigzag_period_min, 1e-6)
+        # Convert the sinusoidal cross-track derivative into a heading offset.
+        lateral_velocity = self.zigzag_amplitude_cells * angular_rate * math.cos(self._phase)
+        heading_offset = math.atan2(lateral_velocity, max(self.speed_cells_per_min, 1e-6))
+        heading = self._base_heading + heading_offset
+        self._col += self.speed_cells_per_min * math.cos(heading) * dt_min
+        self._row += self.speed_cells_per_min * math.sin(heading) * dt_min
+        self._phase = (self._phase + angular_rate * dt_min) % (2 * math.pi)
 
-        # Zigzag 逃逸
-        t = self._zigzag_phase
+        bounced = False
+        if self._col < 0 or self._col > 29:
+            self._base_heading = math.pi - self._base_heading
+            bounced = True
+        if self._row < 0 or self._row > 29:
+            self._base_heading = -self._base_heading
+            bounced = True
+        self._col = max(0.0, min(29.0, self._col))
+        self._row = max(0.0, min(29.0, self._row))
+        if bounced:
+            self._phase = (self._phase + math.pi / 3.0) % (2 * math.pi)
 
-        # 横向偏移（zigzag）-- 使用当前相位，再推进相位
-        lateral_offset = self.zigzag_amplitude_km * math.sin(self._zigzag_phase)
-        self._zigzag_phase += dt_min / self.zigzag_period_min * 2 * math.pi
-
-        # 沿基本方向前进
-        forward_dist = self.speed_km_per_min * dt_min
-        dx_km = forward_dist * math.cos(self._base_heading) - lateral_offset * math.sin(self._base_heading)
-        dy_km = forward_dist * math.sin(self._base_heading) + lateral_offset * math.cos(self._base_heading)
-
-        # 更新位置
-        new_col = self.position.col + dx_km / self.cell_size_km
-        new_row = self.position.row + dy_km / self.cell_size_km
-
-        # clamp 到 [0, 29] 网格范围
-        new_col = max(0, min(29, new_col))
-        new_row = max(0, min(29, new_row))
-
-        # 如果碰到边界，改变方向
-        if new_col <= 0 or new_col >= 29 or new_row <= 0 or new_row >= 29:
-            self._base_heading = random.uniform(0, 2 * math.pi)
-
-        self.position = GridCoord(int(new_col), int(new_row))
-        # 记录轨迹（最多保留最近 120 个点，约 2 小时）
-        self.trail.append((self.position.col, self.position.row))
+        self.trail.append(self.float_position)
         if len(self.trail) > 120:
             self.trail.pop(0)
+
+
+__all__ = ["Ship"]

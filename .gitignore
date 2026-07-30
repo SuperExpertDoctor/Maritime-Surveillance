@@ -2,6 +2,12 @@ __pycache__/
 *.pyc
 .superpowers/
 .env
+.env.*
 .agents
 .pytest_cache/
 .tests
+outputs/
+node_modules/
+src/vis/frontend/dist/
+src/vis/frontend/test-results/
+src/vis/frontend/playwright-report/

@@ -1,6 +1,10 @@
 ﻿from dataclasses import dataclass, field
 from src.schedule.datatypes import BBox, Region
 from src.schedule.config_loader import AppConfig
+from src.utils.coverage_planner import CoveragePlanner
+
+
+_coverage_planner = CoveragePlanner(sample_step=0.25)
 
 
 @dataclass
@@ -11,13 +15,17 @@ class ValidationResult:
 
 def validate(llm_output: dict, config: AppConfig,
              track_regions: list[Region],
-             prev_search_regions: list[Region]) -> ValidationResult:
+             prev_search_regions: list[Region],
+             obstacle_mask=None,
+             allow_empty: bool = False) -> ValidationResult:
     """校验 LLM 输出的搜索区域划分方案。"""
     errors = []
     gc = config.grid
 
     regions_data = llm_output.get("search_regions", [])
     if not regions_data:
+        if allow_empty:
+            return ValidationResult(is_valid=True, errors=[])
         errors.append("search_regions is empty")
         return ValidationResult(is_valid=False, errors=errors)
 
@@ -52,6 +60,22 @@ def validate(llm_output: dict, config: AppConfig,
             errors.append(f"Region {i} aspect={aspect:.2f}: exceeds max {gc.aspect_ratio_max}")
 
         bboxes.append((i, b))
+        if obstacle_mask is not None and obstacle_mask[
+            c0:c1,
+            r0:r1,
+        ].any():
+            errors.append(f"Region {i} overlaps a no-fly obstacle")
+        elif obstacle_mask is not None:
+            swath_width = config.sensor.sar.swath_km / config.grid.cell_size_km
+            if not _coverage_planner.is_region_feasible(
+                b,
+                swath_width,
+                1.0,
+                obstacle_mask,
+            ):
+                errors.append(
+                    f"Region {i} has no collision-free SAR scan pattern"
+                )
 
     # 4. 不重叠（搜索区之间）
     for i in range(len(bboxes)):
@@ -72,14 +96,9 @@ def validate(llm_output: dict, config: AppConfig,
     if total_regions > 10:
         errors.append(f"Total regions {total_regions} exceeds UAV max 10")
 
-    # 7. 稳定性约束 (可选，非致命)
-    for ri, r_bbox in bboxes:
-        for prev in prev_search_regions:
-            if prev.id == regions_data[ri].get("id"):
-                iou = _compute_iou(r_bbox, prev.bbox)
-                if iou < gc.stability_iou_threshold:
-                    errors.append(f"Region {ri} IoU={iou:.2f} below stability threshold {gc.stability_iou_threshold}")
-                break
+    # Display IDs in heavy-model output describe additions, not mutations of
+    # previous regions. TaskAllocator normalizes continuity by geometric IoU
+    # after validation, so reusing an old display ID is not a validation error.
 
     return ValidationResult(is_valid=len(errors) == 0, errors=errors)
 

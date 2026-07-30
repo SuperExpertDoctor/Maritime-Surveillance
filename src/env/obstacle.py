@@ -140,10 +140,10 @@ def obstacle_grid_mask(
 def default_obstacles(seed: int = 42) -> list[Thunderstorm | Island]:
     """Deterministic environment used by the eight-hour demonstration."""
     return [
-        Thunderstorm((8.0, 11.0), 2.3, (0.008, 0.004), -1, "storm-1"),
-        Thunderstorm((22.0, 9.0), 2.0, (-0.005, 0.006), -1, "storm-2"),
-        Island.random_polygon((15.0, 16.0), 1.7, 7, seed=seed, island_id="island-1"),
-        Island.random_polygon((25.0, 22.0), 1.25, 6, seed=seed + 1, island_id="island-2"),
+        Thunderstorm((22.0, 7.0), 2.2, (0.006, 0.004), -1, "storm-1"),
+        Thunderstorm((24.0, 15.0), 1.8, (-0.004, 0.005), -1, "storm-2"),
+        Island.random_polygon((19.0, 23.0), 1.4, 7, seed=seed, island_id="island-1"),
+        Island.random_polygon((27.0, 25.0), 1.0, 6, seed=seed + 1, island_id="island-2"),
     ]
 
 

@@ -1,8 +1,8 @@
 # === SAR 合成孔径雷达 ===
 sar:
-  swath_km: 15                # 条带宽度 (strip mode)
+  swath_km: 20                # 条带宽度 (2 grid cells, strip mode)
   detection_range_km: 80      # 最大探测距离
-  detection_probability: 0.85 # 单次扫描检测概率 Pd
+  detection_probability: 0.90 # 单次扫描检测概率 Pd
   false_alarm_rate: 0.01      # 虚警率
   resolution_m: 3             # 分辨率 (strip mode)
   mode: "strip"               # strip | spotlight | scan
