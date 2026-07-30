@@ -11,6 +11,7 @@ class Region:
     id: str
     bbox: BBox
     type: str  # "search" | "track"
+    status: str = "active"  # "active" | "completed" | "stale"
     priority: str = "medium"  # "high" | "medium" | "low"
     info_value: float = 0.0
     avg_info: float = 0.0
