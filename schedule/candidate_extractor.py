@@ -35,7 +35,7 @@ class CandidateExtractor:
         # Step 3: sort by total value descending
         clusters.sort(key=lambda c: c["total_value"], reverse=True)
 
-        # Step 4: Top-K selection
+        # Step 4: Top-K selection (on clusters, not final candidates)
         available = len(sm.get_available_uavs())
         K = min(available * 2, 10)
         K = max(K, 5)
@@ -53,9 +53,19 @@ class CandidateExtractor:
                     for tb in track_bboxes
                 ):
                     continue
-                fitted["total_value"] = cluster["total_value"]
-                fitted["avg_info"] = cluster["avg_info"]
+                # Bug 2 fix: recompute total_value / avg_info from the
+                # sub-candidate's own bbox, not the whole cluster.
+                bbox = fitted["bbox"]
+                patch_V = V[bbox.col_start:bbox.col_end,
+                            bbox.row_start:bbox.row_end]
+                patch_I = I[bbox.col_start:bbox.col_end,
+                            bbox.row_start:bbox.row_end]
+                fitted["total_value"] = float(np.sum(patch_V))
+                fitted["avg_info"] = float(np.mean(patch_I))
                 candidates.append(fitted)
+
+        # Bug 1 fix: cap final candidates at K (subdivision may inflate count)
+        candidates = candidates[:K]
 
         # Step 6: fragment detection
         fragments = self._detect_fragments(sm, occupied, gc)
@@ -139,12 +149,9 @@ class CandidateExtractor:
     ) -> list[dict]:
         """Fit bounding rectangle(s) to a cluster of cells.
 
-        Handles three cases:
-        1. Tiny area  -- expand the bbox.
-        2. High aspect ratio -- split along the longer axis.
-        3. Over-sized bbox -- subdivide into a regular grid.
-
-        Returns a list of candidate dicts, each with ``bbox`` and ``cell_count``.
+        Uses an iterative stack so that every sub-piece is checked
+        against all three constraints (tiny-area expansion, aspect-ratio
+        split, size-based subdivision) -- fixing Issue 3 (non-recursive).
         """
         if not cells:
             return []
@@ -154,76 +161,64 @@ class CandidateExtractor:
         c_min, c_max = min(cs), max(cs) + 1
         r_min, r_max = min(rs), max(rs) + 1
 
-        w, h = c_max - c_min, r_max - r_min
-        area = w * h
-
-        # --- tiny-area expansion ---
-        if area < gc.fragment_threshold_cells:
-            expand = 2
-            c_min = max(0, c_min - expand)
-            r_min = max(0, r_min - expand)
-            c_max = min(cols, c_max + expand)
-            r_max = min(rows, r_max + expand)
-            w, h = c_max - c_min, r_max - r_min
-
-        # --- aspect-ratio split ---
-        aspect = max(w, h) / max(min(w, h), 1)
-        if aspect > gc.aspect_ratio_max:
-            if w > h:
-                mid = (c_min + c_max) // 2
-                return [
-                    {
-                        "bbox": BBox(c_min, r_min, mid, r_max),
-                        "cell_count": (mid - c_min) * (r_max - r_min),
-                    },
-                    {
-                        "bbox": BBox(mid, r_min, c_max, r_max),
-                        "cell_count": (c_max - mid) * (r_max - r_min),
-                    },
-                ]
-            else:
-                mid = (r_min + r_max) // 2
-                return [
-                    {
-                        "bbox": BBox(c_min, r_min, c_max, mid),
-                        "cell_count": (c_max - c_min) * (mid - r_min),
-                    },
-                    {
-                        "bbox": BBox(c_min, mid, c_max, r_max),
-                        "cell_count": (c_max - c_min) * (r_max - mid),
-                    },
-                ]
-
-        # --- size-based subdivision ---
-        area = (c_max - c_min) * (r_max - r_min)
-        if area > gc.search_max_cells:
-            n = max(1, round(math.sqrt(area / gc.search_max_cells)))
-            piece_w = (c_max - c_min) / n
-            piece_h = (r_max - r_min) / n
-            results = []
-            for i in range(n):
-                for j in range(n):
-                    sub_c0 = int(c_min + i * piece_w)
-                    sub_c1 = int(c_min + (i + 1) * piece_w)
-                    sub_r0 = int(r_min + j * piece_h)
-                    sub_r1 = int(r_min + (j + 1) * piece_h)
-                    if sub_c1 > sub_c0 and sub_r1 > sub_r0:
-                        results.append(
-                            {
-                                "bbox": BBox(sub_c0, sub_r0, sub_c1, sub_r1),
-                                "cell_count": (sub_c1 - sub_c0)
-                                * (sub_r1 - sub_r0),
-                            }
-                        )
-            return results
-
-        # --- normal case: single bbox ---
-        return [
-            {
-                "bbox": BBox(c_min, r_min, c_max, r_max),
-                "cell_count": area,
-            }
+        # Stack of (c0, r0, c1, r1) bbox tuples to process
+        stack: list[tuple[int, int, int, int]] = [
+            (c_min, r_min, c_max, r_max)
         ]
+        results: list[dict] = []
+
+        while stack:
+            c0, r0, c1, r1 = stack.pop()
+            w, h = c1 - c0, r1 - r0
+            area = w * h
+
+            # --- tiny-area expansion ---
+            if area < gc.fragment_threshold_cells:
+                expand = 2
+                c0 = max(0, c0 - expand)
+                r0 = max(0, r0 - expand)
+                c1 = min(cols, c1 + expand)
+                r1 = min(rows, r1 + expand)
+                w, h = c1 - c0, r1 - r0
+                area = w * h
+
+            # --- aspect-ratio split (push halves back to stack) ---
+            aspect = max(w, h) / max(min(w, h), 1)
+            if aspect > gc.aspect_ratio_max:
+                if w > h:
+                    mid = (c0 + c1) // 2
+                    stack.append((c0, r0, mid, r1))
+                    stack.append((mid, r0, c1, r1))
+                else:
+                    mid = (r0 + r1) // 2
+                    stack.append((c0, r0, c1, mid))
+                    stack.append((c0, mid, c1, r1))
+                continue
+
+            # --- size-based subdivision (push pieces back to stack) ---
+            if area > gc.search_max_cells:
+                n = max(1, round(math.sqrt(area / gc.search_max_cells)))
+                piece_w = (c1 - c0) / n
+                piece_h = (r1 - r0) / n
+                for i in range(n):
+                    for j in range(n):
+                        sub_c0 = int(c0 + i * piece_w)
+                        sub_c1 = int(c0 + (i + 1) * piece_w)
+                        sub_r0 = int(r0 + j * piece_h)
+                        sub_r1 = int(r0 + (j + 1) * piece_h)
+                        if sub_c1 > sub_c0 and sub_r1 > sub_r0:
+                            stack.append((sub_c0, sub_r0, sub_c1, sub_r1))
+                continue
+
+            # --- base case: acceptable bbox ---
+            results.append(
+                {
+                    "bbox": BBox(c0, r0, c1, r1),
+                    "cell_count": area,
+                }
+            )
+
+        return results
 
     # ------------------------------------------------------------------
     # Fragment detection
@@ -233,7 +228,11 @@ class CandidateExtractor:
         self, sm: StateManager, occupied: np.ndarray, gc
     ) -> list[dict]:
         """Detect fragments left after track regions carve into previous
-        search regions."""
+        search regions.
+
+        ``occupied`` is used as a safety filter: any fragment whose bbox
+        overlaps a currently-occupied cell is skipped (Bug 4 fix).
+        """
         fragments = []
         prev_regions = sm.get_previous_search_regions()
         track_regions = sm.get_track_regions()
@@ -246,15 +245,28 @@ class CandidateExtractor:
                         area = (rem_bbox.col_end - rem_bbox.col_start) * (
                             rem_bbox.row_end - rem_bbox.row_start
                         )
-                        if area < gc.fragment_threshold_cells:
-                            fragments.append(
-                                {
-                                    "bbox": rem_bbox,
-                                    "area": area,
-                                    "reason": f"区域{prev.id}被{track.id}挖除后产生{area}格碎片",
-                                    "parent_region_id": prev.id,
-                                }
-                            )
+                        if area >= gc.fragment_threshold_cells:
+                            continue
+                        # Safety: skip if any cell in the fragment is
+                        # currently occupied (Bug 4 fix).
+                        if np.any(
+                            occupied[
+                                rem_bbox.col_start:rem_bbox.col_end,
+                                rem_bbox.row_start:rem_bbox.row_end,
+                            ]
+                        ):
+                            continue
+                        fragments.append(
+                            {
+                                "bbox": rem_bbox,
+                                "area": area,
+                                "reason": (
+                                    f"区域{prev.id}被{track.id}"
+                                    f"挖除后产生{area}格碎片"
+                                ),
+                                "parent_region_id": prev.id,
+                            }
+                        )
 
         return fragments
 
