@@ -1,92 +1,95 @@
-import { useRef, useState, useEffect, useCallback } from "react";
-import { renderFrame } from "../renderer/layers";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { RadioTower } from "lucide-react";
+
 import { computeLayout, pixelToCoord } from "../renderer/geometry";
+import { renderFrame } from "../renderer/layers";
 
 export default function CanvasMap({
   frame,
   selectedUavId,
   onSelectUav,
   showGrid = false,
-  mode = "live",
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const layoutRef = useRef({ cellSize: 20, offsetX: 0, offsetY: 0 });
   const hoverRef = useRef(null);
   const [hovered, setHovered] = useState(false);
-  const frameCountRef = useRef(0);
-  const rafRef = useRef(null);
+  const [sizeVersion, setSizeVersion] = useState(0);
 
-  // 响应式尺寸
   const updateSize = useCallback(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
-    const w = container.clientWidth;
-    const h = container.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    layoutRef.current = computeLayout(w, h);
+
+    const width = Math.max(1, container.clientWidth);
+    const height = Math.max(1, container.clientHeight);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    canvas.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+    layoutRef.current = computeLayout(width, height);
+    setSizeVersion((version) => version + 1);
   }, []);
 
-  // ResizeObserver
   useEffect(() => {
     updateSize();
-    const obs = new ResizeObserver(updateSize);
-    if (containerRef.current) obs.observe(containerRef.current);
-    return () => obs.disconnect();
+    const observer = new ResizeObserver(updateSize);
+    if (containerRef.current) observer.observe(containerRef.current);
+    return () => observer.disconnect();
   }, [updateSize]);
 
-  // 主渲染循环
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
+    if (!canvas) return undefined;
+    const context = canvas.getContext("2d");
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let animationFrame = null;
+    let phase = 0;
 
     const render = () => {
       const { cellSize, offsetX, offsetY } = layoutRef.current;
-      ctx.save();
-      renderFrame(ctx, frame, {
+      context.save();
+      renderFrame(context, frame, {
         cellSize,
         offsetX,
         offsetY,
         showGrid,
         hoverInfo: hoverRef.current,
         selectedUavId,
-        frameCount: frameCountRef.current,
+        frameCount: phase,
       });
-      ctx.restore();
-      frameCountRef.current++;
-      rafRef.current = requestAnimationFrame(render);
+      context.restore();
+      phase += 1;
+      if (!reducedMotion) animationFrame = window.requestAnimationFrame(render);
     };
 
-    rafRef.current = requestAnimationFrame(render);
+    render();
     return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, showGrid, selectedUavId]);
+  }, [frame, selectedUavId, showGrid, sizeVersion]);
 
-  // 鼠标 hover → cell tooltip
-  const handleMouseMove = useCallback((e) => {
+  const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;
     if (!canvas || !frame) return;
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
     const { cellSize, offsetX, offsetY } = layoutRef.current;
-    const coord = pixelToCoord(mx, my, cellSize, offsetX, offsetY);
+    const coord = pixelToCoord(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      cellSize,
+      offsetX,
+      offsetY,
+    );
+
     if (coord && frame.info_matrix && frame.value_matrix) {
-      const I = (frame.info_matrix[coord.col] || [])[coord.row] || 0;
-      const V = (frame.value_matrix[coord.col] || [])[coord.row] || 0;
-      let cat = "black";
-      if (I >= 0.7) cat = "white";
-      else if (I >= 0.2) cat = "gray";
-      hoverRef.current = { col: coord.col, row: coord.row, I, V, category: cat };
+      const info = Number(frame.info_matrix?.[coord.col]?.[coord.row] || 0);
+      const value = Number(frame.value_matrix?.[coord.col]?.[coord.row] || 0);
+      const category = info >= 0.7 ? "white" : info >= 0.2 ? "gray" : "black";
+      hoverRef.current = { col: coord.col, row: coord.row, I: info, V: value, category };
       setHovered(true);
     } else {
       hoverRef.current = null;
@@ -94,36 +97,48 @@ export default function CanvasMap({
     }
   }, [frame]);
 
-  // 点击 UAV 选中
-  const handleClick = useCallback((e) => {
-    if (!frame || !frame.uavs) return;
+  const handleMouseLeave = useCallback(() => {
+    hoverRef.current = null;
+    setHovered(false);
+  }, []);
+
+  const handleClick = useCallback((event) => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !frame?.uavs) return;
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
     const { cellSize, offsetX, offsetY } = layoutRef.current;
 
-    for (const u of frame.uavs) {
-      const [col, row] = u.position;
-      const cx = offsetX + col * cellSize + cellSize / 2;
-      const cy = offsetY + row * cellSize + cellSize / 2;
-      const dist = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
-      if (dist < cellSize * 0.5) {
-        onSelectUav?.(u.id === selectedUavId ? null : u.id);
+    for (const uav of frame.uavs) {
+      const [col, row] = uav.position;
+      const centerX = offsetX + (col + 0.5) * cellSize;
+      const centerY = offsetY + (row + 0.5) * cellSize;
+      if (Math.hypot(mouseX - centerX, mouseY - centerY) < Math.max(9, cellSize * 0.55)) {
+        onSelectUav?.(uav.id === selectedUavId ? null : uav.id);
         return;
       }
     }
-  }, [frame, selectedUavId, onSelectUav]);
+  }, [frame, onSelectUav, selectedUavId]);
 
   return (
     <div className="canvas-area" ref={containerRef}>
       <canvas
         ref={canvasRef}
         onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
         onClick={handleClick}
         style={{ cursor: hovered ? "crosshair" : "default" }}
+        aria-label="Operational map"
       />
+      {!frame && (
+        <div className="map-empty" role="status">
+          <RadioTower size={22} />
+          <strong>WAITING FOR MISSION DATA</strong>
+          <span>Live telemetry or replay frames will appear here.</span>
+        </div>
+      )}
+      <div className="map-scale" aria-hidden="true"><i />20 KM</div>
     </div>
   );
 }

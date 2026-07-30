@@ -1,76 +1,43 @@
-const SPEEDS = [0.5, 1, 2, 4, 8];
+import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+
+const SPEEDS = [0.5, 1, 2, 5, 10];
+const EVENT_COLORS = {
+  target_found: "var(--danger)",
+  llm_decision: "var(--violet)",
+  uav_returned: "var(--warning)",
+};
 
 export default function PlaybackBar({
-  visible,
-  isPlaying,
-  onPlayPause,
-  frameIndex,
-  totalFrames,
-  onSeek,
-  playSpeed,
-  onSpeedChange,
-  frame,
+  visible, isPlaying, onPlayPause, frameIndex, totalFrames, onSeek,
+  playSpeed, onSpeedChange, frame, markers = [],
 }) {
   if (!visible) return null;
-
-  const simTime = frame?.timestamp || "--:--:--";
+  const disabled = totalFrames === 0;
 
   return (
-    <div className="playback-bar">
-      {/* 播放/暂停 */}
-      <button className="pb-btn" onClick={onPlayPause} title="空格键播放/暂停">
-        {isPlaying ? "⏸" : "▶"}
+    <section className="playback-bar" aria-label="回放控制">
+      <button className="transport-btn primary" onClick={onPlayPause} disabled={disabled} title={isPlaying ? "暂停" : "播放"} aria-label={isPlaying ? "暂停" : "播放"}>
+        {isPlaying ? <Pause size={17} /> : <Play size={17} />}
       </button>
-
-      {/* 上一帧 */}
-      <button
-        className="pb-btn"
-        onClick={() => onSeek(Math.max(0, frameIndex - 1))}
-        disabled={totalFrames === 0}
-        title="← 上一帧"
-      >
-        ⏮
+      <button className="transport-btn" onClick={() => onSeek(frameIndex - 1)} disabled={disabled || frameIndex === 0} title="上一帧" aria-label="上一帧">
+        <SkipBack size={16} />
       </button>
-
-      {/* 下一帧 */}
-      <button
-        className="pb-btn"
-        onClick={() => onSeek(Math.min(totalFrames - 1, frameIndex + 1))}
-        disabled={totalFrames === 0}
-        title="→ 下一帧"
-      >
-        ⏭
+      <button className="transport-btn" onClick={() => onSeek(frameIndex + 1)} disabled={disabled || frameIndex >= totalFrames - 1} title="下一帧" aria-label="下一帧">
+        <SkipForward size={16} />
       </button>
-
-      {/* 时间线滑块 */}
-      <input
-        type="range"
-        className="pb-slider"
-        min={0}
-        max={Math.max(0, totalFrames - 1)}
-        value={frameIndex}
-        onChange={(e) => onSeek(Number(e.target.value))}
-        disabled={totalFrames === 0}
-      />
-
-      {/* 帧计数 */}
-      <span className="pb-frame-count">
-        {frameIndex + 1} / {totalFrames || 0}
-      </span>
-
-      {/* 仿真时间 */}
-      <span className="pb-sim-time">{simTime}</span>
-
-      {/* 速度选择 */}
-      <select
-        className="pb-speed"
-        value={playSpeed}
-        onChange={(e) => onSpeedChange(Number(e.target.value))}
-      >
-        {SPEEDS.map((s) => (
-          <option key={s} value={s}>{s}x</option>
-        ))}
+      <div className="timeline-control">
+        <div className="event-marks" aria-hidden="true">
+          {markers.map((marker, index) => (
+            <i key={`${marker.frameIndex}-${marker.type}-${index}`} style={{ left: `${totalFrames > 1 ? marker.frameIndex / (totalFrames - 1) * 100 : 0}%`, background: EVENT_COLORS[marker.type] }} />
+          ))}
+        </div>
+        <input type="range" min="0" max={Math.max(0, totalFrames - 1)} value={frameIndex} onChange={(event) => onSeek(event.target.value)} disabled={disabled} aria-label="回放时间轴" />
+      </div>
+      <span className="playback-readout">帧 {disabled ? 0 : frameIndex + 1} / {totalFrames}</span>
+      <span className="playback-readout time">{frame?.timestamp || "--:--:--"}</span>
+      <select className="speed-select" value={playSpeed} onChange={(event) => onSpeedChange(Number(event.target.value))} aria-label="回放速度">
+        {SPEEDS.map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
       </select>
-    </div>
+    </section>
   );
 }

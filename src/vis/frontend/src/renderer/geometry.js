@@ -7,7 +7,7 @@
  */
 
 export function computeLayout(canvasW, canvasH) {
-  const cellSize = Math.floor(Math.min(canvasW, canvasH) / 32);
+  const cellSize = Math.max(1, Math.floor(Math.min(canvasW, canvasH) / 32));
   const offsetX = (canvasW - 30 * cellSize) / 2;
   const offsetY = (canvasH - 30 * cellSize) / 2;
   return { cellSize, offsetX, offsetY };
