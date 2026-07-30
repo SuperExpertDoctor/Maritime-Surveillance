@@ -55,14 +55,9 @@ class ShipConfig:
 
 @dataclass
 class LLMConfig:
-    model: str
-    api_base: str
-    api_key_env: str
     heavy_cycle_min: float
     reviewer_cycle_min: float
     max_retries: int
-    temperature: float
-    max_tokens: int
 
 
 @dataclass
