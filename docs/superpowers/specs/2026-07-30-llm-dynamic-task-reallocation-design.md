@@ -32,29 +32,47 @@ v3/
 │   ├── grid.yaml           # 网格分辨率、衰减参数、态势阈值
 │   ├── uav.yaml            # UAV 机动属性（参考彩虹固定翼）
 │   ├── ship.yaml           # 舰船机动属性（参考宙斯盾驱逐舰）+ zigzag 参数
+│   ├── sensor.yaml         # 传感器参数（SAR、EO/IR、Radar/ESM）
 │   └── llm.yaml            # LLM 周期、模型、重试次数
 │
-├── schedule/                # 核心调度
-│   ├── info_field.py       # 信息场：30×30 cell 级信息素 + 衰减 + 价值计算
-│   ├── info_value_table.py # 信息价值表：区域级聚合，LLM 输入数据源
-│   ├── candidate_extractor.py  # 关键区域提取：连通域聚类 + 排序 + 碎片检测
-│   ├── llm_client.py       # LLM 调用封装 (Decision Maker)
-│   ├── llm_reviewer.py     # 后台 Reviewer：长期记忆凝练 (15min 周期)
-│   ├── prompt_builder.py   # Prompt 组装（System + User 模板）
-│   ├── output_validator.py # LLM 输出校验（矩形合法性、面积、重叠、稳定性）
-│   ├── hungarian.py        # Hungarian 算法：UAV↔区域最小距离配对
-│   ├── task_allocator.py   # 任务分配引擎：触发器 + 轻/重量决策流程编排
-│   ├── trigger_manager.py  # 触发管理器：事件监听 + 合批 + 优先级仲裁
-│   └── state_manager.py    # 全局状态管理（UAV 状态机、区域状态、标记点）
-│
-├── utils/                   # 启发式规则
-│   ├── waypoint.py         # 航路点计算（当前位置→目标区域）
-│   ├── sensor_control.py   # 传感器朝向控制
-│   ├── scan_pattern.py     # 覆盖扫描模式（弓形/U形扫描）
-│   ├── track_orbit.py     # 目标跟踪盘旋
-│   └── return_path.py     # 返航路径规划
-│
-└── wm/                      # 仿真环境（目标船舶、UAV 实体、基地、时钟）
+├── src/
+│   ├── sensor/              # 传感器建模
+│   │   ├── heading.py      # 传感器朝向控制
+│   │   ├── models.py       # SAR / EO/IR / Radar/ESM 传感器模型
+│   │   └── __init__.py
+│   │
+│   ├── control/             # 固定翼控制算法
+│   │   ├── waypoint.py     # 航路点计算（当前位置→目标区域）
+│   │   ├── scan_pattern.py # 覆盖扫描模式（弓形扫描）
+│   │   ├── track_orbit.py  # 目标跟踪盘旋
+│   │   ├── return_path.py  # 返航路径规划
+│   │   └── __init__.py
+│   │
+│   ├── schedule/            # 核心调度
+│   │   ├── info_field.py       # 信息场：30×30 cell 级信息素 + 衰减 + 价值计算
+│   │   ├── info_value_table.py # 信息价值表：区域级聚合，LLM 输入数据源
+│   │   ├── candidate_extractor.py  # 关键区域提取：连通域聚类 + 排序 + 碎片检测
+│   │   ├── llm_client.py       # LLM 调用封装 (Decision Maker)
+│   │   ├── llm_reviewer.py     # 后台 Reviewer：长期记忆凝练 (15min 周期)
+│   │   ├── prompt_builder.py   # Prompt 组装（System + User 模板）
+│   │   ├── output_validator.py # LLM 输出校验（矩形合法性、面积、重叠、稳定性）
+│   │   ├── hungarian.py        # Hungarian 算法：UAV↔区域最小距离配对
+│   │   ├── task_allocator.py   # 任务分配引擎：触发器 + 轻/重量决策流程编排
+│   │   ├── trigger_manager.py  # 触发管理器：事件监听 + 合批 + 优先级仲裁
+│   │   └── state_manager.py    # 全局状态管理（UAV 状态机、区域状态、标记点）
+│   │
+│   ├── env/                  # 仿真环境
+│   │   ├── ship.py          # 舰船实体（zigzag 规避）
+│   │   ├── uav_entity.py    # UAV 实体（位置/油量/航路点）
+│   │   ├── base_station.py  # 基地（加油管理）
+│   │   └── sim_clock.py     # 仿真时钟
+│   │
+│   ├── utils/               # 通用辅助
+│   │   └── __init__.py      # 通用辅助函数
+│   │
+│   └── vis/                 # 可视化
+│       ├── backend/         # FastAPI + WebSocket 服务
+│       └── frontend/        # React Canvas 前端
 ```
 
 ---
@@ -402,10 +420,19 @@ UAV 油尽:
 ### uav.yaml
 - `count_max`: 10
 - `cruise_speed_kmh`: 160
-- `sar_swath_km`: 15
 - `endurance_h`: 30
 - `refuel_time_min`: 12
-- `search_efficiency`: 0.75
+
+### sensor.yaml
+- `sar.swath_km`: 15
+- `sar.detection_range_km`: 80
+- `sar.detection_probability`: 0.85
+- `eoir.fov_deg`: 30
+- `eoir.detection_range_km`: 25
+- `eoir.detection_probability`: 0.70
+- `radar.detection_range_km`: 100
+- `radar.detection_probability`: 0.90
+- `general.search_efficiency`: 0.75
 
 ### ship.yaml
 - `count_min`: 5

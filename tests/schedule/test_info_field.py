@@ -1,9 +1,9 @@
-import pytest
+﻿import pytest
 import numpy as np
 import math
-from schedule.config_loader import ConfigLoader
-from schedule.datatypes import GridCoord, BBox
-from schedule.info_field import InfoField
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.datatypes import GridCoord, BBox
+from src.schedule.info_field import InfoField
 
 
 @pytest.fixture

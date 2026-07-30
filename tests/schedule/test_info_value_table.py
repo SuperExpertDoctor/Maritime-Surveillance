@@ -1,8 +1,8 @@
-import pytest
-from schedule.config_loader import ConfigLoader
-from schedule.state_manager import StateManager
-from schedule.datatypes import BBox, GridCoord
-from schedule.info_value_table import InfoValueTable
+﻿import pytest
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.state_manager import StateManager
+from src.schedule.datatypes import BBox, GridCoord
+from src.schedule.info_value_table import InfoValueTable
 
 
 @pytest.fixture

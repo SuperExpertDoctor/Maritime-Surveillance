@@ -1,7 +1,7 @@
-import pytest
-from schedule.config_loader import ConfigLoader
-from schedule.task_allocator import TaskAllocator
-from schedule.datatypes import BBox, GridCoord
+﻿import pytest
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.task_allocator import TaskAllocator
+from src.schedule.datatypes import BBox, GridCoord
 
 
 @pytest.fixture

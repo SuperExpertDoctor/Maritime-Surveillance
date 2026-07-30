@@ -1,7 +1,7 @@
-import pytest
-from schedule.config_loader import ConfigLoader
-from schedule.datatypes import BBox, Region
-from schedule.output_validator import validate, ValidationResult
+﻿import pytest
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.datatypes import BBox, Region
+from src.schedule.output_validator import validate, ValidationResult
 
 
 @pytest.fixture

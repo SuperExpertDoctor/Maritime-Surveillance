@@ -1,0 +1,6 @@
+count_min: 5
+max_groups: 3
+speed_kn: 18
+zigzag_amplitude_km: 5
+zigzag_period_min: 10
+zigzag_phase_random: true

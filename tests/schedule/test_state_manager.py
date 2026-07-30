@@ -1,7 +1,7 @@
-import pytest
-from schedule.config_loader import ConfigLoader
-from schedule.datatypes import GridCoord, BBox, UAVState, Region
-from schedule.state_manager import StateManager
+﻿import pytest
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.datatypes import GridCoord, BBox, UAVState, Region
+from src.schedule.state_manager import StateManager
 
 
 @pytest.fixture

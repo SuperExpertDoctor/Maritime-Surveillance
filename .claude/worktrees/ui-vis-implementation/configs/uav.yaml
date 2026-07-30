@@ -1,0 +1,6 @@
+count_max: 10
+cruise_speed_kmh: 160
+sar_swath_km: 15
+endurance_h: 30
+refuel_time_min: 12
+search_efficiency: 0.75

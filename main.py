@@ -3,18 +3,20 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from schedule.config_loader import ConfigLoader
-from schedule.task_allocator import TaskAllocator
-from wm.ship import Ship
-from wm.uav_entity import UAVEntity
-from wm.base_station import BaseStation
-from wm.sim_clock import SimClock
-from schedule.datatypes import GridCoord, BBox
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.env_loader import EnvLoader
+from src.schedule.task_allocator import TaskAllocator
+from src.env.ship import Ship
+from src.env.uav_entity import UAVEntity
+from src.env.base_station import BaseStation
+from src.env.sim_clock import SimClock
+from src.schedule.datatypes import GridCoord, BBox
+from src.sensor import SensorSuite
 import random
 import threading
 import asyncio
 import uvicorn
-from vis.backend.server import create_app, broadcast_frame_sync
+from src.vis.backend.server import create_app, broadcast_frame_sync
 
 
 def _generate_sweep_waypoints(bbox: BBox) -> list[GridCoord]:
@@ -66,6 +68,9 @@ def _sync_uav_assignments(uavs: list[UAVEntity], allocator) -> None:
 
 
 def main(config_path: str = "configs"):
+    # --- 加载环境变量（API Keys 等） ---
+    EnvLoader.load_dotenv()
+
     config = ConfigLoader.load(config_path)
 
     # --- 初始化仿真时钟 ---
@@ -87,6 +92,9 @@ def main(config_path: str = "configs"):
 
     # --- 初始化 Task Allocator ---
     allocator = TaskAllocator(config)
+
+    # --- 初始化传感器套件 ---
+    sensor_suite = SensorSuite.from_config(config.sensor)
 
     # --- 初始化可视化 FastAPI 服务 ---
     app = create_app(config, allocator.sm)
@@ -170,24 +178,26 @@ def main(config_path: str = "configs"):
                 allocator.sm.add_event("uav_returned", {"uav_id": uav.id})
                 allocator.sm.update_uav_status(uav.id, "returning", uav.position)
 
-            # 目标检测：同 cell 则视为发现
+            # 目标检测：基于传感器模型的距离+概率判定
             if uav.status in ("searching", "tracking"):
-                for ship in ships:
-                    if not ship.detected and uav.position == ship.position:
-                        ship.mark_detected()
-                        allocator.trigger_manager.notify_event(
-                            "target_found", time=t,
-                            group_id=ship.group_id,
-                            position={"col": ship.position.col,
-                                      "row": ship.position.row},
-                        )
-                        allocator.sm.add_event("target_found", {
-                            "ship_id": ship.id,
-                            "group_id": ship.group_id,
-                            "position": ship.position,
-                        })
-                        print(f"[t={t:.0f}min] {uav.id} 发现 {ship.id} "
-                              f"在 {ship.position}")
+                detections = sensor_suite.detect(
+                    uav.position, ships, config.grid.cell_size_km,
+                )
+                for ship in detections:
+                    ship.mark_detected()
+                    allocator.trigger_manager.notify_event(
+                        "target_found", time=t,
+                        group_id=ship.group_id,
+                        position={"col": ship.position.col,
+                                  "row": ship.position.row},
+                    )
+                    allocator.sm.add_event("target_found", {
+                        "ship_id": ship.id,
+                        "group_id": ship.group_id,
+                        "position": ship.position,
+                    })
+                    print(f"[t={t:.0f}min] {uav.id} 发现 {ship.id} "
+                          f"在 {ship.position}")
 
         # 3. 扫描信息场更新
         for uav in uavs:

@@ -1,0 +1,28 @@
+# === SAR 合成孔径雷达 ===
+sar:
+  swath_km: 15                # 条带宽度 (strip mode)
+  detection_range_km: 80      # 最大探测距离
+  detection_probability: 0.85 # 单次扫描检测概率 Pd
+  false_alarm_rate: 0.01      # 虚警率
+  resolution_m: 3             # 分辨率 (strip mode)
+  mode: "strip"               # strip | spotlight | scan
+
+# === EO/IR 光电/红外 ===
+eoir:
+  fov_deg: 30                 # 视场角
+  detection_range_km: 25      # 最大探测距离 (受气象影响)
+  detection_probability: 0.70 # 单次检测概率
+  false_alarm_rate: 0.02      # 虚警率
+  resolution_m: 0.5           # 分辨率
+
+# === Radar/ESM 雷帧 ===
+radar:
+  detection_range_km: 100     # 最大探测距离
+  azimuth_coverage_deg: 360   # 方位覆盖
+  detection_probability: 0.90 # 单次检测概率
+  false_alarm_rate: 0.005     # 虚警率
+  update_rate_hz: 1.0         # 更新频率
+
+# === 通用传感器参数 ===
+general:
+  search_efficiency: 0.75     # 搜索效率因子 (含转弯损耗)

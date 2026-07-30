@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.superpowers/
+.env
+.agents
+.pytest_cache/
+.tests

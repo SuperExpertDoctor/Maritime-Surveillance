@@ -2486,7 +2486,7 @@ def sensor_heading_for_track(uav_position: GridCoord,
 
 - [ ] **Step 2: 验证导入**
 
-Run: `python -c "from utils.waypoint import navigate_to_region; from utils.scan_pattern import generate_scan_waypoints; from utils.track_orbit import generate_orbit_waypoints; print('All utils imported OK')"`
+Run: `python -c "from src.control.waypoint import navigate_to_region; from src.control.scan_pattern import generate_scan_waypoints; from src.control.track_orbit import generate_orbit_waypoints; print('All control imports OK')"`
 Expected: `All utils imported OK`
 
 - [ ] **Step 3: Commit**

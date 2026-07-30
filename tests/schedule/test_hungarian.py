@@ -1,6 +1,6 @@
-import pytest
-from schedule.datatypes import GridCoord, BBox
-from schedule.hungarian import hungarian_pair
+﻿import pytest
+from src.schedule.datatypes import GridCoord, BBox
+from src.schedule.hungarian import hungarian_pair
 
 
 def test_hungarian_basic():

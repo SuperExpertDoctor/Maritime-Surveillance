@@ -1,7 +1,7 @@
-import pytest
-from schedule.config_loader import ConfigLoader
-from schedule.state_manager import StateManager
-from schedule.trigger_manager import TriggerManager, TriggerDecision
+﻿import pytest
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.state_manager import StateManager
+from src.schedule.trigger_manager import TriggerManager, TriggerDecision
 
 
 @pytest.fixture

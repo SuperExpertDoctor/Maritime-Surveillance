@@ -1,9 +1,9 @@
-import pytest
+﻿import pytest
 import numpy as np
-from schedule.config_loader import ConfigLoader
-from schedule.state_manager import StateManager
-from schedule.datatypes import GridCoord, BBox
-from schedule.candidate_extractor import CandidateExtractor, CandidateResult
+from src.schedule.config_loader import ConfigLoader
+from src.schedule.state_manager import StateManager
+from src.schedule.datatypes import GridCoord, BBox
+from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
 
 
 @pytest.fixture
@@ -99,7 +99,7 @@ def test_fragment_detection_on_overlap(sm):
     (12) become fragment alerts.
     """
     sm.create_track_region("G1", GridCoord(15, 15))
-    from schedule.datatypes import Region
+    from src.schedule.datatypes import Region
 
     prev_region = Region(
         id="S1",

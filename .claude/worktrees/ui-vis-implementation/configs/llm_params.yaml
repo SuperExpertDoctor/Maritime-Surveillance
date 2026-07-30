@@ -1,0 +1,39 @@
+# LLM Provider, Model, and Binding Configuration
+# API keys are stored in configs/.env (git-ignored)
+
+providers:
+  - name: deepseek
+    api_base: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+  - name: openai
+    api_base: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+
+models:
+  - id: deepseek-v4-pro
+    name: DeepSeek Pro
+    provider: deepseek
+    max_tokens: 65536
+  - id: deepseek-v4
+    name: DeepSeek V4
+    provider: deepseek
+    max_tokens: 16384
+  - id: gpt-4o
+    name: GPT-4o
+    provider: openai
+    max_tokens: 128000
+
+bindings:
+  decision_maker:
+    model: deepseek-v4-pro
+    temperature: 0.3
+    max_tokens: 4096
+  reviewer:
+    model: deepseek-v4-pro
+    temperature: 0.3
+    max_tokens: 2048
+
+cycles:
+  heavy_cycle_min: 30
+  reviewer_cycle_min: 15
+  max_retries: 2
