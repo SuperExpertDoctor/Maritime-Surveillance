@@ -35,10 +35,10 @@ class Ship:
 
         # Zigzag 逃逸
         t = self._zigzag_phase
-        self._zigzag_phase += dt_min / self.zigzag_period_min * 2 * math.pi
 
-        # 横向偏移（zigzag）
+        # 横向偏移（zigzag）-- 使用当前相位，再推进相位
         lateral_offset = self.zigzag_amplitude_km * math.sin(self._zigzag_phase)
+        self._zigzag_phase += dt_min / self.zigzag_period_min * 2 * math.pi
 
         # 沿基本方向前进
         forward_dist = self.speed_km_per_min * dt_min

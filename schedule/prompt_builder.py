@@ -34,7 +34,7 @@ class PromptBuilder:
             b = cand["bbox"]
             area = (b.col_end - b.col_start) * (b.row_end - b.row_start)
             info = cand.get("avg_info", 0.0)
-            situation = "黑" if info < 0.2 else ("灰" if info < 0.7 else "白")
+            situation = "黑" if info < 0.2 else ("灰" if info <= 0.7 else "白")
             parts.append(
                 f"{i+1}. bbox({b.col_start},{b.row_start},{b.col_end},{b.row_end}) "
                 f"面积{area}格 平均信息{info:.2f}({situation}) "

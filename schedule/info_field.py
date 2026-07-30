@@ -85,10 +85,9 @@ class InfoField:
         return S
 
     def _timeliness_field(self, current_time: float) -> np.ndarray:
-        """A(c,r): 标记点时效性。"""
+        """A(c,r): 标记点时效性。A(c,r) = exp(-t_marker / time_constant)."""
         gc = self.config.grid
         A = np.zeros((self.cols, self.rows), dtype=np.float64)
-        lam = math.log(2) / gc.marker_decay_half_life_min
         for marker in self._markers:
             age = current_time - marker["created_time"]
             if age < 0:
@@ -98,7 +97,7 @@ class InfoField:
                 for r in range(self.rows):
                     dist = math.sqrt((c - mc) ** 2 + (r - mr) ** 2)
                     gauss = math.exp(-0.5 * (dist / gc.marker_sigma_cells) ** 2)
-                    A[c, r] = max(A[c, r], gauss * math.exp(-lam * age))
+                    A[c, r] = max(A[c, r], gauss * math.exp(-age / gc.marker_decay_half_life_min))
         return A
 
     def get_value_matrix(self, current_time: float) -> np.ndarray:
@@ -128,7 +127,7 @@ class InfoField:
         gc = self.config.grid
         if info > gc.white_threshold:
             return "white"
-        elif info >= gc.gray_threshold:
+        elif info > gc.gray_threshold:
             return "gray"
         else:
             return "black"

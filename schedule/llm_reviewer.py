@@ -3,6 +3,16 @@ from schedule.state_manager import StateManager
 
 
 class LLMReviewer:
+    """Long-term memory condensation for the decision-maker agent.
+
+    Current implementation uses a statistical summary of recent events
+    (target found/lost, UAV returns, coverage percentage) rather than
+    LLM-based condensation.  This keeps the reviewer lightweight and
+    deterministic.
+
+    TODO: Integrate LLMClient for true LLM-based memory condensation.
+    """
+
     def __init__(self, config: AppConfig):
         self.config = config
         self._last_review_time: float = -float("inf")

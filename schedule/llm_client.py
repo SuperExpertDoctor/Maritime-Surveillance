@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 
@@ -10,6 +11,8 @@ from schedule.info_value_table import InfoValueTable
 from schedule.candidate_extractor import CandidateResult
 from schedule.prompt_builder import PromptBuilder
 from schedule.output_validator import validate
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -123,8 +126,8 @@ class LLMClient:
                 max_tokens=self._max_tokens,
             )
             return response.choices[0].message.content or ""
-        except Exception:
-            # Fallback when API is unreachable (auth error, network, etc.)
+        except Exception as exc:
+            logger.warning("LLM API call failed (falling back to mock): %s", exc)
             return self._mock_response()
 
     def _mock_response(self) -> str:

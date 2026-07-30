@@ -38,7 +38,6 @@ class CandidateExtractor:
         # Step 4: Top-K selection (on clusters, not final candidates)
         available = len(sm.get_available_uavs())
         K = min(available * 2, 10)
-        K = max(K, 5)
         clusters = clusters[:K]
 
         # Step 5: rectangle fitting and track-region overlap filtering

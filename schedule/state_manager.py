@@ -134,14 +134,7 @@ class StateManager:
                 self._markers.append(marker)
                 self.info_field.add_marker(marker.position, self.current_time, marker.id)
                 self._track_regions.remove(r)
-                # 原跟踪区 cell 信息价值提升
-                self._set_region_value_boost(r.bbox)
                 return
-
-    def _set_region_value_boost(self, bbox: BBox) -> None:
-        """提升 bbox 内 cell 的信息价值（通过标记点已有机制）。"""
-        # 标记点已通过 add_marker 提升了周边价值，此处无需额外操作
-        pass
 
     def get_active_markers(self) -> list[Marker]:
         return self._markers
