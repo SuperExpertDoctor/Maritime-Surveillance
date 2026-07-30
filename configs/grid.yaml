@@ -12,6 +12,8 @@ marker_max_age_min: 60
 marker_decay_half_life_min: 45
 candidate_value_threshold: 0.3
 fragment_threshold_cells: 12
+track_min_cells: 6
+track_max_cells: 16
 search_min_cells: 20
 search_max_cells: 40
 aspect_ratio_max: 2.0
