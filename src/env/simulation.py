@@ -8,6 +8,7 @@ from collections import defaultdict
 import numpy as np
 
 from src.env.base_station import BaseStation
+from src.env.ais_signal import generate_ais_signal
 from src.env.obstacle import Island, Thunderstorm, default_obstacles, obstacle_grid_mask
 from src.env.sar_sensor import SARSensor
 from src.env.ship import Ship, ShipType
@@ -17,6 +18,7 @@ from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import GridCoord
 from src.schedule.task_allocator import TaskAllocator
 from src.utils.coverage_planner import CoveragePlanner
+from src.utils.ais_discriminator import AISDiscriminator
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
 
@@ -88,6 +90,10 @@ class SimulationEngine:
                 config.sensor.eoir.detection_range_km / config.grid.cell_size_km
             )
         self.ships = self._create_ships()
+        self._refresh_ais_signals(0.0)
+        self.ais_discriminator = AISDiscriminator(
+            config.ship.ais_discrepancy_threshold_cells
+        )
         self.heavy_triggers = 0
         self.light_triggers = 0
         self.llm_successes = 0
@@ -102,6 +108,10 @@ class SimulationEngine:
         }
         self._search_started_at: dict[str, float] = {}
         self._tracking_started_at: dict[str, float] = {}
+        self._ais_tracking_started_at: dict[str, float] = {}
+        self._ais_measurements: dict[str, list[tuple[float, float]]] = {}
+        self.ais_discriminations = 0
+        self.civilian_releases = 0
         self._lifecycle_mode = False
         self._lifecycle_completed = False
         self._return_base_by_uav: dict[str, BaseStation] = {}
@@ -149,7 +159,7 @@ class SimulationEngine:
                     int(round(center[1] + offset[1])),
                 )
                 speed = cfg.carrier_speed_kn if ship_type is ShipType.AIRCRAFT_CARRIER else cfg.destroyer_speed_kn
-                ships.append(Ship(
+                ship = Ship(
                     f"Ship-{group + 1}-{member + 1}",
                     position,
                     speed,
@@ -161,7 +171,13 @@ class SimulationEngine:
                     base_heading=heading,
                     formation_offset=offset,
                     actual_military=military,
-                ))
+                )
+                ship.ais_mode = (
+                    "civilian"
+                    if not military
+                    else ("silent" if (group + member) % 2 == 0 else "deceptive")
+                )
+                ships.append(ship)
                 ship_index += 1
         return ships
 
@@ -226,6 +242,7 @@ class SimulationEngine:
 
         self._update_obstacles()
         self._update_ships(t)
+        self._refresh_ais_signals(t)
 
         tracking_speeds = self._tracking_speed_commands()
         for uav in self.uavs:
@@ -308,6 +325,10 @@ class SimulationEngine:
             "ship_count": len(self.ships),
             "region_changes": len(self.region_signatures),
             "track_creations": self.track_creations,
+            "ais_discriminations": self.ais_discriminations,
+            "civilian_releases": self.civilian_releases,
+            "departed_ship_count": self.departed_ship_count,
+            "base_refuel_counts": {base.id: base.refuel_count for base in self.bases},
             "markers": len(self.allocator.sm.get_active_markers()),
             "lifecycle_cycles": dict(self.lifecycle_cycles),
             "min_lifecycle_cycles": min(self.lifecycle_cycles.values(), default=0),
@@ -361,18 +382,18 @@ class SimulationEngine:
             self.departed_ship_count += len(members)
             self._release_departed_group(group_id, current_time)
 
+    def _refresh_ais_signals(self, current_time: float) -> None:
+        """Publish physical AIS broadcasts at the configured minute cadence."""
+        interval = self.config.ship.ais_update_interval_min
+        if current_time - getattr(self, "_last_ais_update", float("-inf")) < interval:
+            return
+        for ship in self.ships:
+            if not ship.departed:
+                ship.set_ais_signal(generate_ais_signal(ship, current_time))
+        self._last_ais_update = current_time
+
     def _release_departed_group(self, group_id: str, current_time: float) -> None:
-        sm = self.allocator.sm
-        for uav in self.uavs:
-            if uav.target_group_id == group_id:
-                self._begin_return(uav, current_time, release_marker=False)
-        track = sm.get_track_region_for_group(group_id)
-        if track is not None:
-            sm.release_track_region(track.id, create_marker=False)
-        self.allocator.trigger_manager.notify_event(
-            "target_departed", time=current_time, group_id=group_id,
-        )
-        sm.add_event("target_departed", {"group_id": group_id})
+        self._release_target_group(group_id, current_time, "target_departed")
 
     def _replan_conflicting_routes(self) -> None:
         sm = self.allocator.sm
@@ -443,10 +464,116 @@ class SimulationEngine:
                 center = self._group_center(uav.target_group_id)
                 if center is not None:
                     sm.scan_cell(GridCoord(int(round(center[0])), int(round(center[1]))), current_time, True)
+                    self._process_ais_tracking(uav, center, current_time)
             else:
                 uav.sar_footprint = []
                 if uav.status != "tracking":
                     uav.eo_fov = None
+
+    def _process_ais_tracking(
+        self,
+        uav: UAVEntity,
+        target_position: tuple[float, float],
+        current_time: float,
+    ) -> None:
+        """Accumulate EO fixes, then perform delayed AIS discrimination."""
+        group_id = uav.target_group_id
+        if group_id is None:
+            return
+        members = [
+            ship for ship in self.ships
+            if ship.group_id == group_id and not ship.departed
+        ]
+        if not members or all(ship.discrimination is not None for ship in members):
+            return
+        storms = [item for item in self.obstacles if isinstance(item, Thunderstorm)]
+        measurement = uav.measure_target(target_position, storms)
+        if measurement is None:
+            return
+        estimate = self.ais_discriminator.estimate_target_position(uav.pose, measurement)
+        samples = self._ais_measurements.setdefault(uav.id, [])
+        samples.append(estimate)
+        if len(samples) > 12:
+            del samples[:-12]
+        started = self._ais_tracking_started_at.setdefault(uav.id, current_time)
+        if current_time - started < self.config.ship.ais_discrimination_delay_min:
+            return
+        estimate_median = tuple(float(np.median([point[index] for point in samples])) for index in (0, 1))
+        result = self.ais_discriminator.discriminate(
+            members[0].ais_signal,
+            estimate_median,
+        )
+        result_data = result.to_dict()
+        for member in members:
+            member.is_military = result.is_military
+            member.discrimination = result_data
+        self.ais_discriminations += 1
+        self.allocator.sm.add_event("ais_discriminated", {
+            "group_id": group_id,
+            "uav_id": uav.id,
+            **result_data,
+        })
+        if result.is_military:
+            self.allocator.trigger_manager.notify_event(
+                "target_military", time=current_time, uav_id=uav.id, group_id=group_id,
+            )
+            return
+        self.civilian_releases += 1
+        self._release_target_group(group_id, current_time, "civilian_released")
+
+    def _release_target_group(
+        self,
+        group_id: str,
+        current_time: float,
+        event_type: str,
+    ) -> None:
+        """Release a civilian or departed target without creating a loss marker."""
+        sm = self.allocator.sm
+        for member in self.ships:
+            if member.group_id == group_id:
+                member.set_tracked(False)
+        track = sm.get_track_region_for_group(group_id)
+        if track is not None:
+            sm.release_track_region(track.id, create_marker=False)
+        for uav in self.uavs:
+            if uav.target_group_id != group_id:
+                continue
+            self._tracking_started_at.pop(uav.id, None)
+            self._ais_tracking_started_at.pop(uav.id, None)
+            self._ais_measurements.pop(uav.id, None)
+            uav.cancel_tracking()
+            sm.clear_uav_assignment(uav.id)
+            if not self._resume_search(uav):
+                sm.update_uav_status(
+                    uav.id, "idle", uav.position,
+                    fuel_remaining_pct=uav.fuel_remaining_pct,
+                )
+        self.allocator.trigger_manager.notify_event(
+            event_type, time=current_time, group_id=group_id,
+        )
+        sm.add_event(event_type, {"group_id": group_id})
+
+    def _resume_search(self, uav: UAVEntity) -> bool:
+        """Immediately assign an unclaimed active search region when present."""
+        sm = self.allocator.sm
+        for region in sm.get_active_search_regions():
+            if region.assigned_uav_id is not None:
+                continue
+            region.assigned_uav_id = uav.id
+            try:
+                self._assign_search_route(uav, region)
+            except (RuntimeError, ValueError):
+                region.assigned_uav_id = None
+                continue
+            sm.update_uav_status(
+                uav.id,
+                uav.status,
+                uav.position,
+                assigned_region_id=region.id,
+                fuel_remaining_pct=uav.fuel_remaining_pct,
+            )
+            return True
+        return False
 
     def _handle_detection(self, uav: UAVEntity, ship: Ship, current_time: float) -> None:
         sm = self.allocator.sm
@@ -506,6 +633,8 @@ class SimulationEngine:
         sm = self.allocator.sm
         self._search_started_at.pop(uav.id, None)
         self._tracking_started_at.pop(uav.id, None)
+        self._ais_tracking_started_at.pop(uav.id, None)
+        self._ais_measurements.pop(uav.id, None)
         if uav.target_group_id:
             track = sm.get_track_region_for_group(uav.target_group_id)
             if track is not None and track.assigned_uav_id == uav.id:

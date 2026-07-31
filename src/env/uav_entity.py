@@ -8,6 +8,7 @@ from src.env.dubins import Pose
 from src.env.eo_sensor import EOSensor, FOVCone
 from src.env.sar_sensor import SARSensor
 from src.schedule.datatypes import BBox, GridCoord
+from src.utils.ais_discriminator import EOMeasurement
 from src.utils.track_orbit import LGVFTracker
 
 
@@ -125,6 +126,40 @@ class UAVEntity:
         self._transit_end_index = len(self.waypoints) - 1
         self.status = "transit"
         self.sensor_mode = "off"
+
+    def cancel_tracking(self) -> None:
+        """Release a classified civilian/departed target for search reuse."""
+        self.target_group_id = None
+        self.assigned_region = None
+        self._mission_kind = ""
+        self.waypoints = []
+        self.planned_path = []
+        self._wp_index = 0
+        self.status = "idle"
+        self.sensor_mode = "off"
+        self.eo_fov = None
+
+    def measure_target(
+        self,
+        target_position: Sequence[float],
+        storms=(),
+    ) -> EOMeasurement | None:
+        """Return the EO bearing/range observation, or None when obscured."""
+        if not self.eo_sensor.is_target_visible(self.float_position, target_position):
+            return None
+        if any(
+            storm.contains(self.float_position) or storm.contains(target_position)
+            for storm in storms
+        ):
+            return None
+        bearing = math.atan2(
+            float(target_position[1]) - self._row,
+            float(target_position[0]) - self._col,
+        )
+        return EOMeasurement(
+            relative_bearing_rad=_wrap_pi(bearing - self.heading_rad),
+            distance_cells=math.dist(self.float_position, target_position[:2]),
+        )
 
     def plan_return(self, waypoints: Sequence[Sequence[float]]) -> None:
         self._mission_kind = "return"
