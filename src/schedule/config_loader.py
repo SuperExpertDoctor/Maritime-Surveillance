@@ -11,6 +11,7 @@ from src.sensor.models import (
 class EnvironmentConfig:
     sea_area_km: tuple
     base_position: tuple
+    support_base_positions: tuple = ()
 
 
 @dataclass
@@ -44,6 +45,11 @@ class UAVConfig:
     endurance_h: float
     refuel_time_min: float
     sortie_endurance_h: float = 1.8
+    lifecycle_rotation_start_min: float = 120.0
+    lifecycle_coverage_threshold_pct: float = 50.0
+    lifecycle_search_dwell_min: float = 5.0
+    lifecycle_candidate_max_distance_cells: float = 12.0
+    lifecycle_required_cycles: int = 3
 
 
 @dataclass
@@ -89,6 +95,10 @@ class ConfigLoader:
         env_data = _read("environment.yaml")
         env_data["sea_area_km"] = tuple(env_data["sea_area_km"])
         env_data["base_position"] = tuple(env_data["base_position"])
+        env_data["support_base_positions"] = tuple(
+            tuple(position)
+            for position in env_data.get("support_base_positions", [])
+        )
 
         grid_data = _read("grid.yaml")
         grid_data["resolution"] = tuple(grid_data["resolution"])

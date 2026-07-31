@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-const REPLAY_FILE = "simulation_20260731_061343.jsonl";
+const REPLAY_FILE = "simulation_20260801_002817.jsonl";
 const VIEWPORTS = [
   { name: "desktop-1440", width: 1440, height: 900 },
   { name: "desktop-1280", width: 1280, height: 720 },

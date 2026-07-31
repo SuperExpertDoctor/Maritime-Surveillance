@@ -54,7 +54,12 @@ class TriggerManager:
         if not recent:
             return TriggerDecision("none")
 
-        heavy_types = {"uav_returned", "target_found", "target_lost"}
+        heavy_types = {
+            "uav_returned",
+            "target_found",
+            "target_lost",
+            "lifecycle_completed",
+        }
         light_types = {"search_complete", "uav_refueled"}
 
         heavy_count = sum(1 for e in recent if e["type"] in heavy_types)

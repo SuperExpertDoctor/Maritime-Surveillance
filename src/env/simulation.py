@@ -28,7 +28,15 @@ class SimulationEngine:
         self.rng = random.Random(seed)
         random.seed(seed)
         self.clock = SimClock()
-        self.base = BaseStation(GridCoord(*config.environment.base_position), config.uav.refuel_time_min)
+        base_positions = (
+            config.environment.base_position,
+            *config.environment.support_base_positions,
+        )
+        self.bases = [
+            BaseStation(GridCoord(*position), config.uav.refuel_time_min)
+            for position in base_positions
+        ]
+        self.base = self.bases[0]
         self.allocator = TaskAllocator(config)
         self.allocator.llm_client.assert_ready()
         self.coverage_planner = CoveragePlanner(sample_step=0.2)
@@ -71,6 +79,11 @@ class SimulationEngine:
         self._sortie_searched: dict[str, bool] = {
             uav.id: False for uav in self.uavs
         }
+        self._search_started_at: dict[str, float] = {}
+        self._tracking_started_at: dict[str, float] = {}
+        self._lifecycle_mode = False
+        self._lifecycle_completed = False
+        self._return_base_by_uav: dict[str, BaseStation] = {}
         self.last_result: dict = {"trigger_type": "none", "action": None}
 
     def _create_ships(self) -> list[Ship]:
@@ -119,11 +132,35 @@ class SimulationEngine:
             )
             if uav.status == "searching":
                 self._sortie_searched[uav.id] = True
-            if fuel_low or self._needs_reserve_return(uav):
+                self._search_started_at.setdefault(uav.id, t)
+            lifecycle_search_due = (
+                self._lifecycle_mode
+                and self.lifecycle_cycles[uav.id]
+                < self.config.uav.lifecycle_required_cycles
+                and uav.status == "searching"
+                and t - self._search_started_at[uav.id]
+                >= self.config.uav.lifecycle_search_dwell_min
+            )
+            tracking_due = (
+                self._lifecycle_mode
+                and self.lifecycle_cycles[uav.id]
+                < self.config.uav.lifecycle_required_cycles
+                and uav.status == "tracking"
+                and uav.id in self._tracking_started_at
+                and t - self._tracking_started_at[uav.id]
+                >= self.config.uav.lifecycle_search_dwell_min
+            )
+            if (
+                fuel_low
+                or lifecycle_search_due
+                or tracking_due
+                or self._needs_reserve_return(uav)
+            ):
                 self._begin_return(uav, t)
 
         self._update_sensors_and_detections(t)
         self._process_search_completions(t)
+        self._update_lifecycle_mode(t)
         self._process_refuelling(t)
         self._sync_state_from_entities()
 
@@ -283,6 +320,7 @@ class SimulationEngine:
         track = sm.create_track_region(ship.group_id, ship.position)
         track.assigned_uav_id = uav.id
         self.track_creations += 1
+        self._tracking_started_at[uav.id] = current_time
         uav.start_tracking(ship.group_id, ship.float_position)
         sm.update_uav_status(
             uav.id,
@@ -307,6 +345,8 @@ class SimulationEngine:
 
     def _begin_return(self, uav: UAVEntity, current_time: float) -> None:
         sm = self.allocator.sm
+        self._search_started_at.pop(uav.id, None)
+        self._tracking_started_at.pop(uav.id, None)
         if uav.target_group_id:
             track = sm.get_track_region_for_group(uav.target_group_id)
             if track is not None and track.assigned_uav_id == uav.id:
@@ -332,18 +372,75 @@ class SimulationEngine:
         sm.add_event("uav_returned", {"uav_id": uav.id})
 
     def _set_return_route(self, uav: UAVEntity, current_time: float) -> None:
-        goal = (float(self.base.position.col), float(self.base.position.row), -math.pi / 2)
+        preferred = self._return_base_by_uav.get(uav.id)
+        bases = sorted(
+            self.bases,
+            key=lambda base: (
+                0 if base is preferred else 1,
+                math.dist(
+                    uav.float_position,
+                    (base.position.col, base.position.row),
+                ),
+            ),
+        )
+        center = (
+            (self.config.grid.resolution[0] - 1) / 2,
+            (self.config.grid.resolution[1] - 1) / 2,
+        )
         local_mask = self.obstacle_mask.copy()
         col, row = uav.position
         local_mask[max(0, col - 1):col + 2, max(0, row - 1):row + 2] = False
-        try:
-            path = self.obstacle_avoider.plan_path(uav.pose, goal, local_mask, uav.R_min)
-        except RuntimeError:
-            # A second deterministic RRT* seed explores a different tree; it
-            # remains the same algorithm and never substitutes a straight path.
-            retry = ObstacleAvoider(max_iterations=1800, seed=self.seed + int(current_time) + len(uav.id))
-            path = retry.plan_path(uav.pose, goal, local_mask, uav.R_min)
-        uav.plan_return(path)
+        errors = []
+        best_path: tuple[float, BaseStation, list] | None = None
+        for base_index, base in enumerate(bases):
+            arrival_heading = math.atan2(
+                center[1] - base.position.row,
+                center[0] - base.position.col,
+            )
+            goal = (
+                float(base.position.col),
+                float(base.position.row),
+                arrival_heading,
+            )
+            planners = (
+                self.obstacle_avoider,
+                ObstacleAvoider(
+                    max_iterations=2400,
+                    seed=(
+                        self.seed
+                        + int(current_time)
+                        + len(uav.id)
+                        + base_index * 101
+                    ),
+                ),
+            )
+            for planner in planners:
+                try:
+                    path = planner.plan_path(
+                        uav.pose,
+                        goal,
+                        local_mask,
+                        uav.R_min,
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    errors.append(str(exc))
+                    continue
+                length = sum(
+                    math.dist(start[:2], end[:2])
+                    for start, end in zip(path, path[1:])
+                )
+                if best_path is None or length < best_path[0]:
+                    best_path = (length, base, path)
+                break
+        if best_path is not None:
+            _, base, path = best_path
+            self._return_base_by_uav[uav.id] = base
+            uav.plan_return(path)
+            return
+        raise RuntimeError(
+            f"no land recovery base has a safe return path for {uav.id}: "
+            + "; ".join(errors)
+        )
 
     def _process_search_completions(self, current_time: float) -> None:
         sm = self.allocator.sm
@@ -364,8 +461,42 @@ class SimulationEngine:
             uav.completed_searches_since_refuel += 1
             sm.clear_uav_assignment(uav.id)
             if (
-                uav.completed_searches_since_refuel >= 2
+                (
+                    self._lifecycle_mode
+                    and self.lifecycle_cycles[uav.id]
+                    < self.config.uav.lifecycle_required_cycles
+                )
                 or self._needs_reserve_return(uav, include_idle=True)
+            ):
+                self._begin_return(uav, current_time)
+
+    def _update_lifecycle_mode(self, current_time: float) -> None:
+        """Start base rotations after the four-hour coverage gate is secure."""
+        if self._lifecycle_mode or self._lifecycle_completed:
+            return
+        cfg = self.config.uav
+        coverage = self.allocator.sm.get_coverage_stats()["coverage_pct"]
+        if (
+            current_time < cfg.lifecycle_rotation_start_min
+            or coverage < cfg.lifecycle_coverage_threshold_pct
+        ):
+            return
+        self._lifecycle_mode = True
+        sm = self.allocator.sm
+        sm.lifecycle_mode = True
+        for region in sm.get_search_regions():
+            region.status = "stale"
+            region.assigned_uav_id = None
+        sm.set_search_regions([])
+        sm.add_event("lifecycle_rotation_started", {
+            "coverage_pct": coverage,
+            "required_cycles": cfg.lifecycle_required_cycles,
+        })
+        for uav in self.uavs:
+            sm.clear_uav_assignment(uav.id)
+            if (
+                self._sortie_searched[uav.id]
+                and uav.status not in ("returning", "refueling")
             ):
                 self._begin_return(uav, current_time)
 
@@ -378,26 +509,66 @@ class SimulationEngine:
             uav.cruise_speed_kmh * uav.endurance_h / uav.cell_size_km
         )
         remaining_cells = uav.fuel_remaining_pct * max_range_cells
-        direct_home = math.dist(uav.float_position, (self.base.position.col, self.base.position.row))
+        base = self._nearest_base(uav.float_position)
+        direct_home = math.dist(
+            uav.float_position,
+            (base.position.col, base.position.row),
+        )
         reserve_cells = direct_home * 1.25 + 3.0
         return remaining_cells <= reserve_cells
 
     def _process_refuelling(self, current_time: float) -> None:
         for uav in self.uavs:
-            if uav.status == "refueling" and not self.base.is_refueling(uav.id):
-                self.base.land_uav(uav.id)
-        for uav_id in self.base.step(self.clock.dt_min):
-            uav = next(item for item in self.uavs if item.id == uav_id)
-            uav.position = self.base.position
-            uav.refuel()
-            if self._sortie_searched[uav.id]:
-                self.lifecycle_cycles[uav.id] += 1
-            self._sortie_searched[uav.id] = False
-            self.allocator.sm.clear_uav_assignment(uav.id)
-            self.allocator.trigger_manager.notify_event(
-                "uav_refueled", time=current_time, uav_id=uav.id,
+            if uav.status != "refueling":
+                continue
+            base = self._return_base_by_uav.get(
+                uav.id,
+                self._nearest_base(uav.float_position),
             )
-            self.allocator.sm.add_event("uav_refueled", {"uav_id": uav.id})
+            if not base.is_refueling(uav.id):
+                base.land_uav(uav.id)
+        for base in self.bases:
+            for uav_id in base.step(self.clock.dt_min):
+                uav = next(item for item in self.uavs if item.id == uav_id)
+                uav.position = base.position
+                uav.base_position = base.position
+                uav.refuel()
+                self._return_base_by_uav.pop(uav.id, None)
+                if self._sortie_searched[uav.id]:
+                    self.lifecycle_cycles[uav.id] += 1
+                self._sortie_searched[uav.id] = False
+                self.allocator.sm.clear_uav_assignment(uav.id)
+                self.allocator.trigger_manager.notify_event(
+                    "uav_refueled", time=current_time, uav_id=uav.id,
+                )
+                self.allocator.sm.add_event("uav_refueled", {
+                    "uav_id": uav.id,
+                    "base_position": base.position,
+                })
+        if (
+            self._lifecycle_mode
+            and min(self.lifecycle_cycles.values(), default=0)
+            >= self.config.uav.lifecycle_required_cycles
+        ):
+            self._lifecycle_mode = False
+            self._lifecycle_completed = True
+            self.allocator.sm.lifecycle_mode = False
+            self.allocator.trigger_manager.notify_event(
+                "lifecycle_completed",
+                time=current_time,
+            )
+            self.allocator.sm.add_event("lifecycle_completed", {
+                "cycles": dict(self.lifecycle_cycles),
+            })
+
+    def _nearest_base(self, position) -> BaseStation:
+        return min(
+            self.bases,
+            key=lambda base: math.dist(
+                position,
+                (base.position.col, base.position.row),
+            ),
+        )
 
     def _sync_state_from_entities(self) -> None:
         sm = self.allocator.sm

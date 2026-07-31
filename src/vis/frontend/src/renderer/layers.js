@@ -178,11 +178,15 @@ export function drawShips(ctx, ships, cellSize, ox, oy) {
   }
 }
 
-export function drawUavs(ctx, uavs, basePosition, cellSize, ox, oy, selectedId) {
-  if (basePosition) {
-    const base = gridCenter(basePosition[0], basePosition[1], cellSize, ox, oy);
+export function drawUavs(ctx, uavs, basePosition, supportBases, cellSize, ox, oy, selectedId) {
+  const bases = [
+    ...(basePosition ? [{ position: basePosition, label: "B" }] : []),
+    ...((supportBases || []).map((position) => ({ position, label: "F" }))),
+  ];
+  for (const { position, label } of bases) {
+    const base = gridCenter(position[0], position[1], cellSize, ox, oy);
     ctx.strokeStyle = "#CBD5E1"; ctx.lineWidth = 1.3; ctx.strokeRect(base.x - 7, base.y - 7, 14, 14);
-    ctx.font = `700 10px ${FONT}`; ctx.fillStyle = "#CBD5E1"; ctx.fillText("B", base.x - 3, base.y + 4);
+    ctx.font = `700 10px ${FONT}`; ctx.fillStyle = "#CBD5E1"; ctx.fillText(label, base.x - 3, base.y + 4);
   }
   for (const uav of uavs || []) {
     const center = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
@@ -224,7 +228,7 @@ export function renderFrame(ctx, frame, options = {}) {
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
     drawShips(ctx, frame.ships, cellSize, offsetX, offsetY);
-    drawUavs(ctx, frame.uavs, frame.base_position, cellSize, offsetX, offsetY, selectedUavId);
+    drawUavs(ctx, frame.uavs, frame.base_position, frame.support_base_positions, cellSize, offsetX, offsetY, selectedUavId);
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);
 }

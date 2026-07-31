@@ -60,7 +60,14 @@ def test_dynamic_obstacle_replans_remaining_return_route():
     engine._replan_conflicting_routes()
 
     assert engine.obstacle_avoider.is_path_safe(uav.remaining_path, mask)
-    assert math.dist(uav.remaining_path[-1][:2], tuple(base)) < 1e-6
+    land_bases = (
+        engine.config.environment.base_position,
+        *engine.config.environment.support_base_positions,
+    )
+    assert any(
+        math.dist(uav.remaining_path[-1][:2], tuple(land_base)) < 1e-6
+        for land_base in land_bases
+    )
     events = engine.allocator.sm.get_recent_events(0)
     assert any(event["type"] == "route_replanned" for event in events)
 
@@ -98,3 +105,89 @@ def test_simulation_applies_phase_speed_control_to_shared_trackers():
 
     assert set(commands) == {first.id, second.id}
     assert commands[second.id] > commands[first.id]
+
+
+def test_completed_search_starts_a_real_return_during_lifecycle_rotation():
+    engine = SimulationEngine(ConfigLoader.load())
+    engine._lifecycle_mode = True
+    engine.allocator.sm.lifecycle_mode = True
+    uav = engine.uavs[0]
+    state = engine.allocator.sm.get_uav(uav.id)
+    region = Region(
+        id="S-cycle",
+        bbox=BBox(13, 24, 17, 29),
+        type="search",
+        assigned_uav_id=uav.id,
+    )
+    engine.allocator.sm.set_search_regions([region])
+    state.assigned_region_id = region.id
+    uav.search_complete_pending = True
+    uav.status = "idle"
+
+    engine._process_search_completions(10.0)
+
+    assert uav.status == "returning"
+    assert uav.mission_kind == "return"
+
+
+def test_tracking_dwell_starts_return_without_waiting_for_low_fuel():
+    engine = SimulationEngine(ConfigLoader.load())
+    engine._lifecycle_mode = True
+    engine.allocator.sm.lifecycle_mode = True
+    uav = engine.uavs[0]
+    uav.status = "tracking"
+    uav.target_group_id = "G1"
+    engine._sortie_searched[uav.id] = True
+    engine._tracking_started_at[uav.id] = -engine.config.uav.lifecycle_search_dwell_min
+
+    engine.step()
+
+    assert uav.status == "returning"
+    assert uav.id not in engine._tracking_started_at
+
+
+def test_lifecycle_rotation_waits_for_time_and_coverage_gate():
+    engine = SimulationEngine(ConfigLoader.load())
+    cfg = engine.config.uav
+    engine.clock.time = cfg.lifecycle_rotation_start_min - 1
+    engine._update_lifecycle_mode(engine.clock.time)
+    assert not engine._lifecycle_mode
+
+    searchable = engine.allocator.sm.get_searchable_mask()
+    cells = list(zip(*searchable.nonzero()))
+    required = math.ceil(
+        len(cells) * cfg.lifecycle_coverage_threshold_pct / 100
+    )
+    for col, row in cells[:required]:
+        engine.allocator.sm.scan_cell(GridCoord(col, row), engine.clock.time)
+
+    engine.clock.time = cfg.lifecycle_rotation_start_min
+    engine._update_lifecycle_mode(engine.clock.time)
+
+    assert engine._lifecycle_mode
+    assert engine.allocator.sm.lifecycle_mode
+
+
+def test_completed_lifecycle_does_not_restart_from_coverage_gate():
+    engine = SimulationEngine(ConfigLoader.load())
+    cfg = engine.config.uav
+    engine._lifecycle_completed = True
+    engine.clock.time = cfg.lifecycle_rotation_start_min
+    searchable = engine.allocator.sm.get_searchable_mask()
+    for col, row in zip(*searchable.nonzero()):
+        engine.allocator.sm.scan_cell(GridCoord(col, row), engine.clock.time)
+
+    engine._update_lifecycle_mode(engine.clock.time)
+
+    assert not engine._lifecycle_mode
+
+
+def test_return_route_uses_nearest_land_recovery_base():
+    engine = SimulationEngine(ConfigLoader.load())
+    uav = engine.uavs[0]
+    uav.position = GridCoord(2, 15)
+
+    engine._set_return_route(uav, 10.0)
+
+    expected = GridCoord(2, 15)
+    assert math.dist(uav.remaining_path[-1][:2], tuple(expected)) < 1e-6

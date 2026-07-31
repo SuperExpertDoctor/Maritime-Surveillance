@@ -1,2 +1,16 @@
 sea_area_km: [300, 300]
 base_position: [15, 28]
+# Coastal forward arming and refueling points. All positions are designated
+# land cells; the primary command base remains (15, 28).
+support_base_positions:
+  - [2, 7]
+  - [2, 15]
+  - [2, 23]
+  - [7, 2]
+  - [15, 2]
+  - [23, 2]
+  - [27, 7]
+  - [27, 15]
+  - [27, 23]
+  - [7, 27]
+  - [23, 27]

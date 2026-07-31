@@ -15,6 +15,7 @@ class StateManager:
         self.config = config
         self.current_time = 0.0
         self.cycle = 0
+        self.lifecycle_mode = False
         self.info_field = InfoField(config)
         self._uavs = [
             UAVState(
@@ -209,6 +210,11 @@ class StateManager:
             searchable[-1, :] = False
             searchable[:, 0] = False
             searchable[:, -1] = False
+            for col, row in (
+                self.config.environment.base_position,
+                *self.config.environment.support_base_positions,
+            ):
+                searchable[col, row] = False
         return searchable
 
     def get_coverage_stats(self) -> dict[str, float | int]:

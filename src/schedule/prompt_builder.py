@@ -102,7 +102,13 @@ class PromptBuilder:
         in_use = [u for u in all_uavs if u.status != "idle"]
         retained = sm.get_active_search_regions()
         pending = sum(region.assigned_uav_id is None for region in retained)
-        new_capacity = max(0, len(available) - pending)
+        if sm.lifecycle_mode:
+            new_capacity = max(
+                0,
+                10 - len(sm.get_track_regions()) - len(retained),
+            )
+        else:
+            new_capacity = max(0, len(available) - pending)
         parts.append(
             f"现役搜索区将原样保留{len(retained)}个，其中待续派{pending}个；"
             f"本轮只输出新增区域，新增上限{new_capacity}个。"

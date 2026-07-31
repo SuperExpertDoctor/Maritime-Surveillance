@@ -103,6 +103,10 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
             "environment": {
                 "sea_area_km": list(cfg.environment.sea_area_km),
                 "base_position": list(cfg.environment.base_position),
+                "support_base_positions": [
+                    list(position)
+                    for position in cfg.environment.support_base_positions
+                ],
             },
             "grid": {
                 "resolution": list(cfg.grid.resolution),
@@ -123,6 +127,11 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
                 "cruise_speed_kmh": cfg.uav.cruise_speed_kmh,
                 "endurance_h": cfg.uav.endurance_h,
                 "sortie_endurance_h": cfg.uav.sortie_endurance_h,
+                "lifecycle_rotation_start_min": cfg.uav.lifecycle_rotation_start_min,
+                "lifecycle_coverage_threshold_pct": cfg.uav.lifecycle_coverage_threshold_pct,
+                "lifecycle_search_dwell_min": cfg.uav.lifecycle_search_dwell_min,
+                "lifecycle_candidate_max_distance_cells": cfg.uav.lifecycle_candidate_max_distance_cells,
+                "lifecycle_required_cycles": cfg.uav.lifecycle_required_cycles,
                 "refuel_time_min": cfg.uav.refuel_time_min,
             },
             "ship": {

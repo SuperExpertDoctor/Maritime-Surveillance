@@ -156,6 +156,10 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "events": recent_events,
         "llm_cycle": llm_cycle,
         "base_position": list(config.environment.base_position),
+        "support_base_positions": [
+            list(position)
+            for position in config.environment.support_base_positions
+        ],
         "obstacles": obstacle_list,
     }
     return frame

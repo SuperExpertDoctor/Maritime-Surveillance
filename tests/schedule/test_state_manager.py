@@ -71,7 +71,13 @@ def test_coverage_excludes_obstacles_and_boundary(sm):
 
     stats = sm.get_coverage_stats()
 
-    assert stats["searchable_cells"] == (cols - 2) * (rows - 2) - 1
+    land_bases = {
+        sm.config.environment.base_position,
+        *sm.config.environment.support_base_positions,
+    }
+    assert stats["searchable_cells"] == (
+        (cols - 2) * (rows - 2) - 1 - len(land_bases)
+    )
     assert stats["scanned_searchable_cells"] == 1
     assert stats["coverage_pct"] == pytest.approx(
         100 / stats["searchable_cells"]

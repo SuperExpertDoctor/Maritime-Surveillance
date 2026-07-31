@@ -52,7 +52,7 @@ npm audit --audit-level=high
 
 Browser acceptance expects the backend on `8765`, Vite on `5173`, and the
 480-frame replay named in `tests/acceptance.spec.js`. See
-`docs/VALIDATION.md` for the latest recorded run and remaining target gaps.
+`docs/VALIDATION.md` for the latest recorded acceptance run.
 
 ## Main Modules
 

@@ -37,6 +37,11 @@ class CandidateExtractor:
         # Step 1: track-region occupancy mask
         occupied = np.zeros((cols, rows), dtype=bool)
         occupied |= getattr(sm, "obstacle_mask", occupied)
+        for col, row in (
+            sm.config.environment.base_position,
+            *sm.config.environment.support_base_positions,
+        ):
+            occupied[col, row] = True
         # A one-cell flight margin lets a radius-1 Dubins U-turn bulge
         # outside every candidate rectangle without leaving the map.
         occupied[0, :] = True
@@ -64,7 +69,11 @@ class CandidateExtractor:
             region.assigned_uav_id is None for region in active_search
         )
         available = max(0, len(sm.get_available_uavs()) - pending_regions)
-        K = min(available * 2, 10)
+        # During the lifecycle rotation all UAVs may be returning at once.
+        # Keep legal, LLM-approved recovery sorties ready before they land so
+        # refueled airframes can launch immediately instead of waiting for
+        # the next 30-minute planning window.
+        K = 10 if sm.lifecycle_mode else min(available * 2, 10)
         clusters = clusters[:max(K * 4, K)]
 
         # Step 5: rectangle fitting and track-region overlap filtering
@@ -132,27 +141,48 @@ class CandidateExtractor:
 
         # Cap final candidates at K and keep them mutually disjoint so a model
         # can safely copy the supplied candidate list as its additions.
-        base_col, base_row = sm.config.environment.base_position
+        base_positions = (sm.config.environment.base_position,)
+        if sm.lifecycle_mode:
+            base_positions += sm.config.environment.support_base_positions
         def candidate_key(item):
             bbox = item["bbox"]
             area = (bbox.col_end - bbox.col_start) * (bbox.row_end - bbox.row_start)
             unseen_count = item.get("unseen_count", 0)
             unseen_density = unseen_count / max(area, 1)
-            distance = math.dist(
-                ((bbox.col_start + bbox.col_end) / 2,
-                 (bbox.row_start + bbox.row_end) / 2),
-                (base_col, base_row),
+            center = (
+                (bbox.col_start + bbox.col_end) / 2,
+                (bbox.row_start + bbox.row_end) / 2,
             )
+            distance = min(
+                math.dist(center, base_position)
+                for base_position in base_positions
+            )
+            if sm.lifecycle_mode:
+                return (-unseen_density, distance,
+                        abs(area - gc.search_min_cells),
+                        -unseen_count, -item["total_value"])
             if exploration_mode:
                 return (-unseen_density, -unseen_count, abs(area - 24),
                         -item["total_value"], distance)
             return (-item["total_value"], distance)
 
         candidates.sort(key=candidate_key)
+        if sm.lifecycle_mode:
+            candidates = self._order_lifecycle_candidates(candidates, sm, base_positions)
         selected = []
         seen_bboxes = set()
         for candidate in candidates:
             bbox = candidate["bbox"]
+            if sm.lifecycle_mode:
+                center = (
+                    (bbox.col_start + bbox.col_end) / 2,
+                    (bbox.row_start + bbox.row_end) / 2,
+                )
+                if min(
+                    math.dist(center, base_position)
+                    for base_position in base_positions
+                ) > sm.config.uav.lifecycle_candidate_max_distance_cells:
+                    continue
             bbox_key = tuple(bbox)
             if bbox_key in seen_bboxes:
                 continue
@@ -173,6 +203,71 @@ class CandidateExtractor:
             fragment_alerts=fragments,
         )
 
+    def _order_lifecycle_candidates(
+        self,
+        candidates: list[dict],
+        sm: StateManager,
+        base_positions: tuple,
+    ) -> list[dict]:
+        """Put one short, non-overlapping sortie near each UAV first.
+
+        LongCat still chooses only from the candidate list.  This merely
+        avoids offering a left-coast airframe a right-coast recovery sortie
+        when a legal local rectangle is available.
+        """
+        max_distance = sm.config.uav.lifecycle_candidate_max_distance_cells
+        positions = [
+            (uav.position.col, uav.position.row)
+            for uav in sm.get_all_uavs()
+        ]
+        ordered: list[dict] = []
+        used_bboxes: set[tuple] = set()
+
+        def center(item: dict) -> tuple[float, float]:
+            bbox = item["bbox"]
+            return (
+                (bbox.col_start + bbox.col_end) / 2,
+                (bbox.row_start + bbox.row_end) / 2,
+            )
+
+        def nearby_base(item: dict) -> bool:
+            point = center(item)
+            return min(math.dist(point, base) for base in base_positions) <= max_distance
+
+        for position in positions:
+            options = []
+            for item in candidates:
+                bbox = item["bbox"]
+                bbox_key = tuple(bbox)
+                if bbox_key in used_bboxes or not nearby_base(item):
+                    continue
+                if any(self._bboxes_overlap(bbox, picked["bbox"]) for picked in ordered):
+                    continue
+                distance = math.dist(center(item), position)
+                if distance > max_distance:
+                    continue
+                density = item.get("unseen_count", 0) / max(item["cell_count"], 1)
+                options.append((
+                    -density,
+                    distance,
+                    abs(item["cell_count"] - sm.config.grid.search_min_cells),
+                    -item.get("unseen_count", 0),
+                    -item["total_value"],
+                    item,
+                ))
+            if not options:
+                continue
+            _, _, _, _, _, chosen = min(options, key=lambda item: item[:-1])
+            ordered.append(chosen)
+            used_bboxes.add(tuple(chosen["bbox"]))
+
+        # Preserve the general lifecycle priority for any unused capacity.
+        ordered_keys = {tuple(item["bbox"]) for item in ordered}
+        return [
+            *ordered,
+            *(item for item in candidates if tuple(item["bbox"]) not in ordered_keys),
+        ]
+
     def _fit_feasible_windows(
         self,
         sm: StateManager,
@@ -188,7 +283,9 @@ class CandidateExtractor:
             return []
         gc = sm.config.grid
         cols, rows = gc.resolution
-        base_col, base_row = sm.config.environment.base_position
+        base_positions = (sm.config.environment.base_position,)
+        if sm.lifecycle_mode:
+            base_positions += sm.config.environment.support_base_positions
         raw = []
         for width in range(1, gc.search_max_cells + 1):
             for height in range(1, gc.search_max_cells + 1):
@@ -212,23 +309,42 @@ class CandidateExtractor:
                             "unseen_count": unseen_count,
                             "total_value": float(values[c0:c1, r0:r1].sum()),
                             "avg_info": float(info[c0:c1, r0:r1].mean()),
-                            "distance": math.dist(
-                                ((c0 + c1) / 2, (r0 + r1) / 2),
-                                (base_col, base_row),
+                            "distance": min(
+                                math.dist(
+                                    ((c0 + c1) / 2, (r0 + r1) / 2),
+                                    base_position,
+                                )
+                                for base_position in base_positions
                             ),
                         })
 
-        raw.sort(key=lambda item: (
-            -(item["unseen_count"] / item["cell_count"]),
-            -item["unseen_count"],
-            abs(item["cell_count"] - 24),
-            -item["total_value"],
-            item["distance"],
-        ))
+        if sm.lifecycle_mode:
+            raw.sort(key=lambda item: (
+                -(item["unseen_count"] / item["cell_count"]),
+                item["distance"],
+                abs(item["cell_count"] - gc.search_min_cells),
+                -item["unseen_count"],
+                -item["total_value"],
+            ))
+            raw = self._order_lifecycle_candidates(raw, sm, base_positions)
+        else:
+            raw.sort(key=lambda item: (
+                -(item["unseen_count"] / item["cell_count"]),
+                -item["unseen_count"],
+                abs(item["cell_count"] - 24),
+                -item["total_value"],
+                item["distance"],
+            ))
         swath_width = sm.config.sensor.sar.swath_km / gc.cell_size_km
         selected = []
         for item in raw:
             bbox = item["bbox"]
+            if (
+                sm.lifecycle_mode
+                and item["distance"]
+                > sm.config.uav.lifecycle_candidate_max_distance_cells
+            ):
+                continue
             if any(self._bboxes_overlap(bbox, other["bbox"]) for other in selected):
                 continue
             if not self.coverage_planner.is_region_feasible(
@@ -408,11 +524,9 @@ class CandidateExtractor:
                 ):
                     continue
                 mean_area = width * height / (n_cols * n_rows)
-                # Around 24 cells typically yields a 4-cell short side.  With
-                # a two-cell SAR swath that needs two scan lines instead of
-                # the three required by the former ~36-cell square target,
-                # improving coverage throughput while remaining in the
-                # configured 20-40 cell envelope.
+                # Around 24 cells typically needs two scan lines with the
+                # configured two-cell SAR swath, preserving the validated
+                # coverage throughput of the normal exploration phase.
                 choices.append((-abs(mean_area - 24.0), n_cols * n_rows, n_cols, n_rows))
         if not choices:
             n = max(1, math.ceil(math.sqrt(width * height / gc.search_max_cells)))

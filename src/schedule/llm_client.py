@@ -142,13 +142,23 @@ class LLMClient:
                 continue
 
             reserved_regions = sm.get_active_search_regions()
+            remaining_slots = max(
+                0,
+                10 - len(sm.get_track_regions()) - len(reserved_regions),
+            )
             result = validate(
                 parsed,
                 self.config,
                 [*sm.get_track_regions(), *reserved_regions],
                 sm.get_previous_search_regions(),
                 sm.obstacle_mask,
-                allow_empty=not candidate_result.candidate_regions,
+                # An empty plan is a valid model decision when retained work
+                # already consumes every search/track slot. Retrying it only
+                # creates artificial failures and cannot add legal regions.
+                allow_empty=(
+                    not candidate_result.candidate_regions
+                    or remaining_slots == 0
+                ),
             )
             errors = list(result.errors)
             interaction["attempts"].append({

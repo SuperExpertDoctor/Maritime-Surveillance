@@ -69,6 +69,15 @@ def test_candidate_bbox_within_size_range(sm):
         assert area <= sm.config.grid.search_max_cells, "Area unexpectedly large"
 
 
+def test_initial_candidates_preserve_validated_normal_sortie_size(sm):
+    result = CandidateExtractor().extract(sm)
+    assert result.candidate_regions
+    assert all(
+        candidate["cell_count"] == sm.config.grid.search_max_cells
+        for candidate in result.candidate_regions
+    )
+
+
 def test_candidates_leave_room_for_radius_one_boundary_turns(sm):
     result = CandidateExtractor().extract(sm)
     cols, rows = sm.config.grid.resolution
@@ -90,6 +99,16 @@ def test_candidate_count_does_not_exceed_limit(sm):
     assert len(result.candidate_regions) <= 10, (
         f"Got {len(result.candidate_regions)} candidates, expected <= 10"
     )
+
+
+def test_lifecycle_rotation_preplans_candidates_before_any_uav_refuels(sm):
+    sm.lifecycle_mode = True
+    for uav in sm.get_all_uavs():
+        uav.status = "returning"
+
+    result = CandidateExtractor().extract(sm)
+
+    assert len(result.candidate_regions) == 10
 
 
 def test_candidates_are_mutually_disjoint(sm):
