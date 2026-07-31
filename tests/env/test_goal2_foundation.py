@@ -76,3 +76,16 @@ def test_carrier_formation_always_has_two_destroyer_escorts():
         ]
         assert len(escorts) >= 2
         assert all(ship.base_heading == carrier.base_heading for ship in escorts)
+
+
+def test_dissipated_storm_is_replaced_at_configured_density():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    storm = next(item for item in engine.obstacles if hasattr(item, "intensity"))
+    storm.lifetime = 0.5
+    initial_id = storm.id
+
+    engine._update_obstacles()
+
+    storms = [item for item in engine.obstacles if hasattr(item, "intensity")]
+    assert len(storms) == engine._storm_target_count
+    assert initial_id not in {item.id for item in storms}

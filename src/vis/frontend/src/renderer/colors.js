@@ -9,6 +9,7 @@ export const UAV_STATUS_COLORS = {
   tracking: "#FB7185",
   returning: "#F59E0B",
   refueling: "#38BDF8",
+  holding: "#EAB308",
   idle: "#94A3B8",
   transit: "#60A5FA",
 };

@@ -79,6 +79,11 @@ def test_engine_waits_for_delay_then_releases_civilian_tracking():
 
     assert engine.allocator.sm.get_track_region_for_group(group_id) is None
     assert all(ship.is_military is False for ship in engine.ships)
+    assert all(
+        ship.estimated_position is not None
+        for ship in engine.ships
+        if ship.group_id == group_id
+    )
     assert engine.civilian_releases == 1
     assert not engine.allocator.sm.get_active_markers()
 

@@ -60,3 +60,25 @@ then resumes the assigned SAR sortie.
 No mock response, rule-generated region, artificial state transition, or
 offshore base was used. A capacity-full empty plan is treated as a valid model
 decision, so the client does not misclassify it as an LLM failure.
+
+## GOAL2 Acceptance
+
+Artifact: `outputs/simulation_20260801_052022.jsonl`
+
+The full 480-step run used the real configured `LongCat-2.0` API and completed
+without a simulation, routing, or frame-serialization failure.
+
+| Metric | Result | Target | Status |
+|---|---:|---:|---|
+| Frames | 480 (8 hours) | 480 | Pass |
+| Land bases | 3 | 1-3 coastal bases | Pass |
+| Base refuels | Base-1: 8, Base-2: 10, Base-3: 8 | max difference <=30% | Pass (20%) |
+| Active thunderstorms at end | 3 | configured density retained | Pass |
+| AIS classifications | 3 ships, all with EO estimates | position-based result | Pass |
+| Python regression | 149 tests | all pass | Pass |
+| Browser acceptance | live/replay, 4 viewports | no runtime errors or overflow | Pass |
+
+The GOAL2 regression suite additionally covers capacity-induced holding,
+randomized coastal base placement, carrier escorts, civilian release without a
+marker, target departure, square-storm avoidance, storm replacement, and the
+20-plus-20 position-based AIS discrimination batch.

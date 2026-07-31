@@ -122,6 +122,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "ship_type": getattr(getattr(s, "ship_type", None), "value", "destroyer"),
                 "is_military": getattr(s, "is_military", None),
                 "departed": bool(getattr(s, "departed", False)),
+                "estimated_position": (
+                    list(s.estimated_position)
+                    if getattr(s, "estimated_position", None) is not None
+                    else None
+                ),
                 "ais": (
                     getattr(s, "ais_signal", None).to_dict()
                     if getattr(s, "ais_signal", None) is not None

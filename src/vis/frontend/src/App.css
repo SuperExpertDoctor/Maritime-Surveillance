@@ -775,6 +775,15 @@ button {
   background: var(--panel-hover);
 }
 
+.ais-table tr.ais-military td:last-child {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.ais-table tr.ais-civilian td:last-child {
+  color: var(--text-soft);
+}
+
 .mono,
 .region-table td:nth-child(n + 5) {
   font-family: Consolas, monospace;

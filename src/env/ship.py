@@ -44,6 +44,7 @@ class Ship:
         self.is_military: bool | None = None
         self.ais_signal = None
         self.discrimination = None
+        self.estimated_position: tuple[float, float] | None = None
         self.departed = False
         self._detected = False
         self._being_tracked = False

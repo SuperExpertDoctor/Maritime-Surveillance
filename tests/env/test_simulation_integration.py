@@ -189,3 +189,32 @@ def test_return_route_uses_nearest_land_recovery_base():
     engine._set_return_route(uav, 10.0)
 
     assert math.dist(uav.remaining_path[-1][:2], tuple(expected)) < 1e-6
+
+
+def test_return_route_balances_completed_refuels_before_distance():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    uav = engine.uavs[0]
+    busiest = engine.bases[0]
+    for base in engine.bases:
+        base.refuel_count = 0
+    busiest.refuel_count = 5
+    uav.position = busiest.position
+    uav.heading_rad = engine._inward_heading(busiest.position)
+
+    engine._set_return_route(uav, 10.0)
+
+    assert engine._return_base_by_uav[uav.id] is not busiest
+
+
+def test_return_route_balances_already_scheduled_recoveries():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    uav = engine.uavs[0]
+    busiest = engine.bases[0]
+    uav.position = busiest.position
+    uav.heading_rad = engine._inward_heading(busiest.position)
+    for assigned in engine.uavs[1:4]:
+        engine._return_base_by_uav[assigned.id] = busiest
+
+    engine._set_return_route(uav, 10.0)
+
+    assert engine._return_base_by_uav[uav.id] is not busiest

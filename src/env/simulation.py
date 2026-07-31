@@ -47,18 +47,23 @@ class SimulationEngine:
         self.coverage_planner = CoveragePlanner(sample_step=0.2)
         self.obstacle_avoider = ObstacleAvoider(max_iterations=1000, seed=seed)
         self.phase_coordinator = PhaseCoordinator()
+        island_count = self.rng.randint(
+            config.environment.island_count_min,
+            config.environment.island_count_max,
+        )
+        self._storm_target_count = self.rng.randint(
+            config.environment.thunderstorm_count_min,
+            config.environment.thunderstorm_count_max,
+        )
         self.obstacles = default_obstacles(
             seed,
             base_positions=base_positions,
-            island_count=self.rng.randint(
-                config.environment.island_count_min,
-                config.environment.island_count_max,
-            ),
-            thunderstorm_count=self.rng.randint(
-                config.environment.thunderstorm_count_min,
-                config.environment.thunderstorm_count_max,
-            ),
+            island_count=island_count,
+            thunderstorm_count=self._storm_target_count,
             resolution=config.grid.resolution,
+        )
+        self._next_storm_id = 1 + sum(
+            isinstance(obstacle, Thunderstorm) for obstacle in self.obstacles
         )
         self.obstacle_mask = obstacle_grid_mask(
             self.obstacles,
@@ -346,12 +351,23 @@ class SimulationEngine:
     def _update_obstacles(self) -> None:
         previous_mask = self.obstacle_mask
         active = []
+        dissipated_storms = []
         for obstacle in self.obstacles:
             if hasattr(obstacle, "step"):
                 if obstacle.step(self.clock.dt_min, self.config.grid.resolution):
                     active.append(obstacle)
+                elif isinstance(obstacle, Thunderstorm):
+                    dissipated_storms.append(obstacle)
             else:
                 active.append(obstacle)
+        for storm in dissipated_storms:
+            self.allocator.sm.add_event("storm_dissipated", {"storm_id": storm.id})
+        while sum(isinstance(obstacle, Thunderstorm) for obstacle in active) < self._storm_target_count:
+            replacement = self._spawn_thunderstorm(active)
+            if replacement is None:
+                break
+            active.append(replacement)
+            self.allocator.sm.add_event("storm_spawned", {"storm_id": replacement.id})
         self.obstacles = active
         self.obstacle_mask = obstacle_grid_mask(
             active,
@@ -361,6 +377,37 @@ class SimulationEngine:
         self.allocator.sm.set_environment_obstacles(active, self.obstacle_mask)
         if not np.array_equal(previous_mask, self.obstacle_mask):
             self._replan_conflicting_routes()
+
+    def _spawn_thunderstorm(self, obstacles) -> Thunderstorm | None:
+        """Restore the configured moving-storm density after dissipation."""
+        cols, rows = self.config.grid.resolution
+        for _ in range(200):
+            size = self.rng.randint(1, 4)
+            half_extent = size / 2.0
+            center = (
+                self.rng.uniform(half_extent + 1.0, cols - half_extent - 1.0),
+                self.rng.uniform(half_extent + 1.0, rows - half_extent - 1.0),
+            )
+            candidate = Thunderstorm(
+                center=center,
+                size=size,
+                move_vector=(self.rng.uniform(-0.05, 0.05), self.rng.uniform(-0.05, 0.05)),
+                lifetime=self.rng.choice((-1.0, self.rng.uniform(90.0, 240.0))),
+                intensity=self.rng.uniform(0.3, 1.0),
+                id=f"storm-{self._next_storm_id}",
+            )
+            if any(candidate.contains(base.position, safety_margin=1.0) for base in self.bases):
+                continue
+            if any(
+                isinstance(other, Thunderstorm)
+                and math.dist(candidate.center, other.center)
+                < candidate.half_extent + other.half_extent + 1.0
+                for other in obstacles
+            ):
+                continue
+            self._next_storm_id += 1
+            return candidate
+        return None
 
     def _update_ships(self, current_time: float) -> None:
         islands = [item for item in self.obstacles if isinstance(item, Island)]
@@ -572,6 +619,7 @@ class SimulationEngine:
         for member in members:
             member.is_military = result.is_military
             member.discrimination = result_data
+            member.estimated_position = estimate_median
         self.ais_discriminations += 1
         self.allocator.sm.add_event("ais_discriminated", {
             "group_id": group_id,
@@ -728,12 +776,15 @@ class SimulationEngine:
         sm.add_event("uav_returned", {"uav_id": uav.id})
 
     def _set_return_route(self, uav: UAVEntity, current_time: float) -> None:
-        preferred = self._return_base_by_uav.get(uav.id)
         accepting = [base for base in self.bases if base.can_accept()]
         bases = sorted(
             accepting or self.bases,
             key=lambda base: (
-                0 if base is preferred else 1,
+                # Keep recovery work balanced across the independently
+                # capacity-limited coastal bases.  Equal-work bases still
+                # use geometric distance as their final route tiebreaker.
+                self._recovery_load(base),
+                base.occupancy,
                 math.dist(
                     uav.float_position,
                     (base.position.col, base.position.row),
@@ -748,7 +799,7 @@ class SimulationEngine:
         col, row = uav.position
         local_mask[max(0, col - 1):col + 2, max(0, row - 1):row + 2] = False
         errors = []
-        best_path: tuple[float, BaseStation, list] | None = None
+        best_path: tuple[int, int, float, BaseStation, list] | None = None
         for base_index, base in enumerate(bases):
             arrival_heading = math.atan2(
                 base.position.row - center[1],
@@ -792,11 +843,12 @@ class SimulationEngine:
                 if length >= uav.fuel_remaining_pct * max_range_cells * 0.98:
                     errors.append(f"{base.id}: insufficient fuel for {length:.2f} cells")
                     break
-                if best_path is None or length < best_path[0]:
-                    best_path = (length, base, path)
+                candidate_key = (self._recovery_load(base), base.occupancy, length)
+                if best_path is None or candidate_key < best_path[:3]:
+                    best_path = (*candidate_key, base, path)
                 break
         if best_path is not None:
-            _, base, path = best_path
+            _, _, _, base, path = best_path
             self._return_base_by_uav[uav.id] = base
             uav.plan_return(path)
             return
@@ -804,6 +856,13 @@ class SimulationEngine:
             f"no land recovery base has a safe return path for {uav.id}: "
             + "; ".join(errors)
         )
+
+    def _recovery_load(self, base: BaseStation) -> int:
+        """Completed and already-reserved recovery work for one base."""
+        scheduled = sum(
+            assigned is base for assigned in self._return_base_by_uav.values()
+        )
+        return base.refuel_count + scheduled
 
     def _process_search_completions(self, current_time: float) -> None:
         sm = self.allocator.sm

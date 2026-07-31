@@ -151,8 +151,9 @@ class Thunderstorm:
         self.center = (x, y)
         self.move_vector = (vx, vy)
         if self.lifetime > 0:
-            self.lifetime -= dt_min
-        return self.lifetime < 0 or self.lifetime > 0
+            self.lifetime = max(0.0, self.lifetime - dt_min)
+            return self.lifetime > 0
+        return True
 
 
 def obstacle_grid_mask(

@@ -46,3 +46,10 @@ def test_thunderstorm_moves_and_bounces_inside_map():
     storm.step(1, bounds=(20, 20))
     assert storm.center[0] <= 19
     assert storm.move_vector[0] < 0
+
+
+def test_expired_thunderstorm_reports_dissipation():
+    storm = Thunderstorm((8, 8), size=1, lifetime=0.5)
+
+    assert not storm.step(1.0, bounds=(20, 20))
+    assert storm.lifetime == 0.0

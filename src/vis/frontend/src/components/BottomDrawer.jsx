@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, Bot, Clipboard, GripHorizontal, Map, SlidersHorizontal, X } from "lucide-react";
+import { Activity, Bot, Clipboard, GripHorizontal, Map, Satellite, SlidersHorizontal, X } from "lucide-react";
 
 const TABS = [
   { label: "时间线", icon: Activity },
   { label: "区域", icon: Map },
   { label: "模型日志", icon: Bot },
   { label: "参数", icon: SlidersHorizontal },
+  { label: "AIS", icon: Satellite },
 ];
 const EVENT_NAMES = {
   target_found: "发现目标",
@@ -27,7 +28,7 @@ export default function BottomDrawer({ frame, events = [], llmCycle, visible, on
   const drag = useRef(null);
 
   useEffect(() => {
-    if (activeTab !== 3 || config || configError) return;
+  if (activeTab !== 4 || config || configError) return;
     fetch("/api/config")
       .then((response) => {
         if (!response.ok) throw new Error();
@@ -67,7 +68,8 @@ export default function BottomDrawer({ frame, events = [], llmCycle, visible, on
         {activeTab === 0 && <TimelineTab events={events} />}
         {activeTab === 1 && <RegionTab frame={frame} />}
         {activeTab === 2 && <LLMTab llm={llmCycle} />}
-        {activeTab === 3 && <ParamsTab config={config} error={configError} />}
+        {activeTab === 3 && <AisTab frame={frame} />}
+        {activeTab === 4 && <ParamsTab config={config} error={configError} />}
       </div>
     </section>
   );
@@ -132,6 +134,37 @@ function LLMTab({ llm }) {
       ))}</div>
     </div>
   );
+}
+
+function AisTab({ frame }) {
+  const rows = (frame?.ships || []).filter((ship) => ship.ais || ship.discrimination || ship.is_detected);
+  if (!rows.length) return <EmptyState text="No tracked AIS reports" />;
+  return (
+    <div className="table-wrap">
+      <table className="region-table ais-table">
+        <thead><tr><th>Target</th><th>MMSI</th><th>AIS position</th><th>EO estimate</th><th>Error</th><th>Result</th></tr></thead>
+        <tbody>{rows.map((ship) => {
+          const discrepancy = ship.discrimination?.discrepancy_cells;
+          const military = ship.discrimination?.is_military === true || ship.is_military === true;
+          const civilian = ship.discrimination?.is_military === false || ship.is_military === false;
+          return (
+            <tr className={military ? "ais-military" : civilian ? "ais-civilian" : ""} key={ship.id}>
+              <td><b>{ship.id}</b></td>
+              <td>{ship.ais?.mmsi || "SILENT"}</td>
+              <td className="mono">{formatPosition(ship.ais?.reported_position)}</td>
+              <td className="mono">{formatPosition(ship.estimated_position)}</td>
+              <td>{Number.isFinite(discrepancy) ? discrepancy.toFixed(2) : "-"}</td>
+              <td>{military ? "MILITARY" : civilian ? "CIVILIAN" : "PENDING"}</td>
+            </tr>
+          );
+        })}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function formatPosition(position) {
+  return Array.isArray(position) ? position.map((value) => Number(value).toFixed(1)).join(", ") : "-";
 }
 
 function ParamsTab({ config, error }) {
