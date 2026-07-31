@@ -27,6 +27,8 @@ class LGVFTracker:
         target_position: Sequence[float],
         R_d: float,
         v_nominal: float,
+        storm_zones=(),
+        storm_safety_margin: float = 1.0,
     ) -> tuple[float, float]:
         """Return bounded heading-rate and airspeed commands.
 
@@ -44,6 +46,31 @@ class LGVFTracker:
         # the downward-y visualiser frame this produces a clockwise orbit.
         vx = -self.convergence_gain * error * x_rel - 2.0 * R_d * radius * y_rel
         vy = -self.convergence_gain * error * y_rel + 2.0 * R_d * radius * x_rel
+        # Blend the nominal LGVF vector with a repulsive field for nearby
+        # square storms.  This preserves the fixed-wing rate bound below;
+        # level-2 detours are handled by StormAvoider with explicit Dubins
+        # paths when a repulsive heading alone cannot maintain clearance.
+        for zone in storm_zones:
+            if hasattr(zone, "center"):
+                center = zone.center
+                half_extent = float(getattr(zone, "half_extent", getattr(zone, "size", 1) / 2.0))
+            else:
+                center, size = zone
+                half_extent = float(size) / 2.0
+            away_x = float(uav_pose[0]) - float(center[0])
+            away_y = float(uav_pose[1]) - float(center[1])
+            center_distance = max(math.hypot(away_x, away_y), 1e-9)
+            clearance = max(0.0, center_distance - half_extent)
+            influence = R_d + max(0.0, storm_safety_margin) + self.R_min
+            if clearance >= influence:
+                continue
+            weight = min(0.98, max(0.0, (influence - clearance) / max(influence, 1e-9)))
+            if clearance <= storm_safety_margin + 0.5:
+                weight = 0.98
+            repulse_x = away_x / center_distance * max(math.hypot(vx, vy), v_nominal)
+            repulse_y = away_y / center_distance * max(math.hypot(vx, vy), v_nominal)
+            vx = (1.0 - weight) * vx + weight * repulse_x
+            vy = (1.0 - weight) * vy + weight * repulse_y
         desired_heading = math.atan2(vy, vx)
         heading_error = _wrap_pi(desired_heading - float(uav_pose[2]))
         raw_rate = self.heading_gain * heading_error

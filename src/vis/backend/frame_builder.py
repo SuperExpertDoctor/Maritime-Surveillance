@@ -58,6 +58,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "sar_look_direction": entity.sar_look_direction if entity else None,
             "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],
             "eo_fov": eo_fov,
+            "avoidance_level": entity.avoidance_level if entity else 0,
+            "avoidance_path": [list(pose) for pose in entity.avoidance_path] if entity else [],
         })
 
     # 搜索区域

@@ -89,6 +89,7 @@ class SimulationEngine:
             uav.eo_sensor.max_range_cells = (
                 config.sensor.eoir.detection_range_km / config.grid.cell_size_km
             )
+            uav.storm_avoider.eo_detection_range_cells = uav.eo_sensor.max_range_cells
         self.ships = self._create_ships()
         self._refresh_ais_signals(0.0)
         self.ais_discriminator = AISDiscriminator(
@@ -112,6 +113,9 @@ class SimulationEngine:
         self._ais_measurements: dict[str, list[tuple[float, float]]] = {}
         self.ais_discriminations = 0
         self.civilian_releases = 0
+        self.storm_avoidance_events = 0
+        self._storm_levels: dict[str, int] = {}
+        self._storm_level3_started_at: dict[str, float] = {}
         self._lifecycle_mode = False
         self._lifecycle_completed = False
         self._return_base_by_uav: dict[str, BaseStation] = {}
@@ -245,13 +249,16 @@ class SimulationEngine:
         self._refresh_ais_signals(t)
 
         tracking_speeds = self._tracking_speed_commands()
+        storms = [item for item in self.obstacles if isinstance(item, Thunderstorm)]
         for uav in self.uavs:
             target = self._group_center(uav.target_group_id) if uav.target_group_id else None
             fuel_low = uav.step(
                 self.clock.dt_min,
                 target,
                 tracking_speed_cells_min=tracking_speeds.get(uav.id),
+                storm_zones=storms,
             )
+            self._record_storm_avoidance(uav, t)
             if uav.status == "searching":
                 self._sortie_searched[uav.id] = True
                 self._search_started_at.setdefault(uav.id, t)
@@ -327,6 +334,7 @@ class SimulationEngine:
             "track_creations": self.track_creations,
             "ais_discriminations": self.ais_discriminations,
             "civilian_releases": self.civilian_releases,
+            "storm_avoidance_events": self.storm_avoidance_events,
             "departed_ship_count": self.departed_ship_count,
             "base_refuel_counts": {base.id: base.refuel_count for base in self.bases},
             "markers": len(self.allocator.sm.get_active_markers()),
@@ -440,6 +448,63 @@ class SimulationEngine:
                 "uav_id": uav.id,
                 "reason": "dynamic_obstacle",
             })
+
+    def _record_storm_avoidance(self, uav: UAVEntity, current_time: float) -> None:
+        if uav.status != "tracking":
+            self._storm_levels.pop(uav.id, None)
+            self._storm_level3_started_at.pop(uav.id, None)
+            return
+        level = int(uav.avoidance_level)
+        previous = self._storm_levels.get(uav.id, 0)
+        if level != previous:
+            if level:
+                self.storm_avoidance_events += 1
+                self.allocator.sm.add_event("storm_avoidance", {
+                    "uav_id": uav.id,
+                    "level": level,
+                })
+            elif previous:
+                self.allocator.sm.add_event("storm_avoidance_cleared", {
+                    "uav_id": uav.id,
+                })
+            self._storm_levels[uav.id] = level
+        if level == 3:
+            started = self._storm_level3_started_at.setdefault(uav.id, current_time)
+            if current_time - started >= 3.0:
+                self._lose_target_to_storm(uav, current_time)
+        else:
+            self._storm_level3_started_at.pop(uav.id, None)
+
+    def _lose_target_to_storm(self, uav: UAVEntity, current_time: float) -> None:
+        """Escalate a persistent level-3 cloud cover to a real track loss."""
+        group_id = uav.target_group_id
+        if not group_id:
+            return
+        sm = self.allocator.sm
+        track = sm.get_track_region_for_group(group_id)
+        if track is not None:
+            sm.release_track_region(track.id, uav.id, create_marker=True)
+        for member in self.ships:
+            if member.group_id == group_id:
+                member.set_tracked(False)
+        for tracker in self.uavs:
+            if tracker.target_group_id != group_id:
+                continue
+            tracker.cancel_tracking()
+            sm.clear_uav_assignment(tracker.id)
+            sm.update_uav_status(
+                tracker.id, "idle", tracker.position,
+                fuel_remaining_pct=tracker.fuel_remaining_pct,
+            )
+            self._storm_levels.pop(tracker.id, None)
+            self._storm_level3_started_at.pop(tracker.id, None)
+        self.allocator.trigger_manager.notify_event(
+            "target_lost", time=current_time, uav_id=uav.id, group_id=group_id,
+        )
+        sm.add_event("target_lost_storm", {
+            "uav_id": uav.id,
+            "group_id": group_id,
+        })
 
     def _update_sensors_and_detections(self, current_time: float) -> None:
         sm = self.allocator.sm
