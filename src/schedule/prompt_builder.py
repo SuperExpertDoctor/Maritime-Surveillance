@@ -84,10 +84,10 @@ class PromptBuilder:
         if obstacles:
             parts.append("\n【禁飞障碍物】(搜索区不得覆盖，航路必须绕行)")
             for obstacle in obstacles:
-                if hasattr(obstacle, "radius"):
+                if hasattr(obstacle, "intensity"):
                     parts.append(
                         f"- 雷云 {obstacle.id}: center=({obstacle.center[0]:.1f},"
-                        f"{obstacle.center[1]:.1f}) radius={obstacle.radius:.1f}"
+                        f"{obstacle.center[1]:.1f}) square_size={obstacle.size}"
                     )
                 else:
                     points = ",".join(

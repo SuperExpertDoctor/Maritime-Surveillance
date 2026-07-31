@@ -53,6 +53,7 @@ class UAVEntity:
         self.completed_searches_since_refuel = 0
         self._mission_kind = ""
         self._fuel_low_reported = False
+        self._holding_center: tuple[float, float] | None = None
         self._fuel_consumption_rate = 1.0 / (endurance_h * 60.0)
         self.lgvf = LGVFTracker(R_min=R_min)
         self.sar_sensor = SARSensor()
@@ -133,6 +134,19 @@ class UAVEntity:
         self.sensor_mode = "off"
         self.sar_footprint = []
         self.eo_fov = None
+        self._holding_center = None
+
+    def start_holding(self, base_position: GridCoord | Sequence[float]) -> None:
+        """Orbit a full recovery base until a refuelling slot opens."""
+        self._holding_center = (float(base_position[0]), float(base_position[1]))
+        self._mission_kind = "holding"
+        self.waypoints = []
+        self.planned_path = []
+        self._wp_index = 0
+        self.status = "holding"
+        self.sensor_mode = "off"
+        self.sar_footprint = []
+        self.eo_fov = None
 
     def _set_route(self, waypoints: Sequence[Sequence[float] | GridCoord]) -> None:
         route: list[Pose] = []
@@ -169,6 +183,8 @@ class UAVEntity:
 
         if self.status == "tracking" and target_position is not None:
             self._step_tracking(dt_min, target_position, tracking_speed_cells_min)
+        elif self.status == "holding" and self._holding_center is not None:
+            self._step_holding(dt_min)
         else:
             self._follow_route(dt_min)
 
@@ -258,6 +274,18 @@ class UAVEntity:
             self.float_position, self.heading_rad, target_position
         )
 
+    def _step_holding(self, dt_min: float) -> None:
+        speed = self.cruise_speed_kmh / self.cell_size_km / 60.0
+        rate, _ = self.lgvf.compute_guidance(
+            self.pose, self._holding_center, 1.2, speed
+        )
+        mid = self.heading_rad + rate * dt_min / 2.0
+        self._col += speed * math.cos(mid) * dt_min
+        self._row += speed * math.sin(mid) * dt_min
+        self.heading_rad = _wrap_pi(self.heading_rad + rate * dt_min)
+        self._col = max(0.0, min(29.0, self._col))
+        self._row = max(0.0, min(29.0, self._row))
+
     def refuel(self) -> None:
         self.fuel_remaining_pct = 1.0
         self.status = "idle"
@@ -268,6 +296,7 @@ class UAVEntity:
         self.assigned_region = None
         self.waypoints = []
         self.planned_path = []
+        self._holding_center = None
 
 
 __all__ = ["UAVEntity"]

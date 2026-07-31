@@ -37,10 +37,7 @@ class CandidateExtractor:
         # Step 1: track-region occupancy mask
         occupied = np.zeros((cols, rows), dtype=bool)
         occupied |= getattr(sm, "obstacle_mask", occupied)
-        for col, row in (
-            sm.config.environment.base_position,
-            *sm.config.environment.support_base_positions,
-        ):
+        for col, row in sm.get_base_positions():
             occupied[col, row] = True
         # A one-cell flight margin lets a radius-1 Dubins U-turn bulge
         # outside every candidate rectangle without leaving the map.
@@ -141,9 +138,7 @@ class CandidateExtractor:
 
         # Cap final candidates at K and keep them mutually disjoint so a model
         # can safely copy the supplied candidate list as its additions.
-        base_positions = (sm.config.environment.base_position,)
-        if sm.lifecycle_mode:
-            base_positions += sm.config.environment.support_base_positions
+        base_positions = sm.get_base_positions()
         def candidate_key(item):
             bbox = item["bbox"]
             area = (bbox.col_end - bbox.col_start) * (bbox.row_end - bbox.row_start)
@@ -283,9 +278,7 @@ class CandidateExtractor:
             return []
         gc = sm.config.grid
         cols, rows = gc.resolution
-        base_positions = (sm.config.environment.base_position,)
-        if sm.lifecycle_mode:
-            base_positions += sm.config.environment.support_base_positions
+        base_positions = sm.get_base_positions()
         raw = []
         for width in range(1, gc.search_max_cells + 1):
             for height in range(1, gc.search_max_cells + 1):

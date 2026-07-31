@@ -8,9 +8,9 @@ from collections import defaultdict
 import numpy as np
 
 from src.env.base_station import BaseStation
-from src.env.obstacle import default_obstacles, obstacle_grid_mask
+from src.env.obstacle import Island, Thunderstorm, default_obstacles, obstacle_grid_mask
 from src.env.sar_sensor import SARSensor
-from src.env.ship import Ship
+from src.env.ship import Ship, ShipType
 from src.env.sim_clock import SimClock
 from src.env.uav_entity import UAVEntity
 from src.schedule.config_loader import AppConfig
@@ -28,28 +28,47 @@ class SimulationEngine:
         self.rng = random.Random(seed)
         random.seed(seed)
         self.clock = SimClock()
-        base_positions = (
-            config.environment.base_position,
-            *config.environment.support_base_positions,
-        )
+        base_positions = self._generate_base_positions()
         self.bases = [
-            BaseStation(GridCoord(*position), config.uav.refuel_time_min)
-            for position in base_positions
+            BaseStation(
+                GridCoord(*position),
+                config.uav.refuel_time_min,
+                capacity=config.environment.base_capacity,
+                base_id=f"Base-{index + 1}",
+            )
+            for index, position in enumerate(base_positions)
         ]
         self.base = self.bases[0]
         self.allocator = TaskAllocator(config)
         self.allocator.llm_client.assert_ready()
+        self.allocator.sm.set_base_positions(base_positions)
         self.coverage_planner = CoveragePlanner(sample_step=0.2)
         self.obstacle_avoider = ObstacleAvoider(max_iterations=1000, seed=seed)
         self.phase_coordinator = PhaseCoordinator()
-        self.obstacles = default_obstacles(seed)
-        self.obstacle_mask = obstacle_grid_mask(self.obstacles, config.grid.resolution)
+        self.obstacles = default_obstacles(
+            seed,
+            base_positions=base_positions,
+            island_count=self.rng.randint(
+                config.environment.island_count_min,
+                config.environment.island_count_max,
+            ),
+            thunderstorm_count=self.rng.randint(
+                config.environment.thunderstorm_count_min,
+                config.environment.thunderstorm_count_max,
+            ),
+            resolution=config.grid.resolution,
+        )
+        self.obstacle_mask = obstacle_grid_mask(
+            self.obstacles,
+            config.grid.resolution,
+            config.environment.storm_safety_margin_cells,
+        )
         self.allocator.sm.set_environment_obstacles(self.obstacles, self.obstacle_mask)
 
         self.uavs = [
             UAVEntity(
                 f"UAV-{index + 1}",
-                self.base.position,
+                self.bases[index % len(self.bases)].position,
                 config.uav.sortie_endurance_h,
                 config.uav.cruise_speed_kmh,
                 cell_size_km=config.grid.cell_size_km,
@@ -57,6 +76,8 @@ class SimulationEngine:
             )
             for index in range(config.uav.count_max)
         ]
+        for index, uav in enumerate(self.uavs):
+            uav.heading_rad = self._inward_heading(self.bases[index % len(self.bases)].position)
         for uav in self.uavs:
             uav.sar_sensor = SARSensor(
                 swath_width_cells=config.sensor.sar.swath_km / config.grid.cell_size_km,
@@ -84,34 +105,119 @@ class SimulationEngine:
         self._lifecycle_mode = False
         self._lifecycle_completed = False
         self._return_base_by_uav: dict[str, BaseStation] = {}
+        self._holding_base_by_uav: dict[str, BaseStation] = {}
+        self.departed_ship_count = 0
+        self._departed_groups: set[str] = set()
         self.last_result: dict = {"trigger_type": "none", "action": None}
 
     def _create_ships(self) -> list[Ship]:
         cfg = self.config.ship
-        count = self.rng.randint(cfg.count_min, cfg.count_min + 5)
-        group_count = min(3, cfg.max_groups, count)
-        safe_centers = [(8.0, 8.0), (8.0, 20.0), (15.0, 14.0)]
+        count = self.rng.randint(cfg.target_min, cfg.target_max)
+        group_limit = min(cfg.group_max, cfg.max_groups, max(1, count - 1))
+        group_count = self.rng.randint(1, group_limit)
+        group_sizes = [1] * group_count
+        # A fleet has at least one actual formation rather than only singleton
+        # targets.  Any surplus is spread across groups deterministically.
+        group_sizes[0] += 1
+        for index in range(count - sum(group_sizes)):
+            group_sizes[index % group_count] += 1
+        carrier_group = 0 if cfg.carrier_max > 0 and count >= 3 else None
+        if carrier_group is not None and group_sizes[carrier_group] < 3:
+            for donor in range(1, len(group_sizes)):
+                if group_sizes[donor] > 1:
+                    group_sizes[donor] -= 1
+                    group_sizes[carrier_group] += 1
+                    break
+            if group_sizes[carrier_group] < 3:
+                carrier_group = None
         ships: list[Ship] = []
-        for index in range(count):
-            group = index % group_count
-            # The acceptance scenario keeps every group in reachable free
-            # water; detected groups still move with the ship zigzag model.
-            center = safe_centers[group]
-            position = GridCoord(
-                int(max(2, min(27, center[0] + self.rng.randint(-1, 1)))),
-                int(max(2, min(27, center[1] + self.rng.randint(-1, 1)))),
-            )
-            ship = Ship(
-                f"Ship-{group + 1}-{index // group_count + 1}",
-                position,
-                cfg.speed_kn,
-                cfg.zigzag_amplitude_km,
-                cfg.zigzag_period_min,
-                self.config.grid.cell_size_km,
-            )
-            ship.group_id = f"G{group + 1}"
-            ships.append(ship)
+        islands = [item for item in self.obstacles if isinstance(item, Island)]
+        ship_index = 0
+        for group, size in enumerate(group_sizes):
+            center = self._random_ship_group_center(islands)
+            heading = self.rng.uniform(0, 2 * math.pi)
+            military = group == carrier_group or self.rng.choice((True, False))
+            for member in range(size):
+                ship_type = (
+                    ShipType.AIRCRAFT_CARRIER
+                    if group == carrier_group and member == 0
+                    else ShipType.DESTROYER
+                )
+                offset = self._formation_offset(member, size)
+                position = GridCoord(
+                    int(round(center[0] + offset[0])),
+                    int(round(center[1] + offset[1])),
+                )
+                speed = cfg.carrier_speed_kn if ship_type is ShipType.AIRCRAFT_CARRIER else cfg.destroyer_speed_kn
+                ships.append(Ship(
+                    f"Ship-{group + 1}-{member + 1}",
+                    position,
+                    speed,
+                    cfg.zigzag_amplitude_km,
+                    cfg.zigzag_period_min,
+                    self.config.grid.cell_size_km,
+                    ship_type=ship_type,
+                    group_id=f"G{group + 1}",
+                    base_heading=heading,
+                    formation_offset=offset,
+                    actual_military=military,
+                ))
+                ship_index += 1
         return ships
+
+    def _generate_base_positions(self) -> tuple[tuple[int, int], ...]:
+        cfg = self.config.environment
+        cols, rows = self.config.grid.resolution
+        if not 1 <= cfg.base_count <= 3:
+            raise ValueError("base_count must be between 1 and 3")
+        margin = max(0, int(cfg.base_land_margin))
+        candidates = [
+            (col, row)
+            for col in range(cols)
+            for row in range(rows)
+            if col <= margin or col >= cols - 1 - margin or row <= margin or row >= rows - 1 - margin
+        ]
+        self.rng.shuffle(candidates)
+        selected: list[tuple[int, int]] = []
+        for candidate in candidates:
+            if all(math.dist(candidate, existing) >= cfg.base_min_distance_cells for existing in selected):
+                selected.append(candidate)
+                if len(selected) == cfg.base_count:
+                    return tuple(selected)
+        raise RuntimeError("unable to place the requested separated coastal bases")
+
+    def _random_ship_group_center(self, islands: list[Island]) -> tuple[float, float]:
+        for _ in range(200):
+            center = (self.rng.uniform(4.0, 25.0), self.rng.uniform(4.0, 25.0))
+            if all(not island.contains(center) and island.distance_to_boundary(center) >= 2.0 for island in islands):
+                return center
+        return 15.0, 15.0
+
+    @staticmethod
+    def _formation_offset(member: int, size: int) -> tuple[float, float]:
+        if size == 1:
+            return 0.0, 0.0
+        phase = 2.0 * math.pi * member / size
+        return 1.25 * math.cos(phase), 1.25 * math.sin(phase)
+
+    def _inward_heading(self, position: GridCoord) -> float:
+        margin = self.config.environment.base_land_margin
+        cols, rows = self.config.grid.resolution
+        if position.row <= margin:
+            return math.pi / 2.0
+        if position.row >= rows - 1 - margin:
+            return -math.pi / 2.0
+        if position.col <= margin:
+            return 0.0
+        if position.col >= cols - 1 - margin:
+            return math.pi
+        return -math.pi / 2.0
+
+    def reset(self, seed: int | None = None) -> "SimulationEngine":
+        """Create a fresh randomized GOAL2 environment in this engine."""
+        next_seed = self.seed + 1 if seed is None else int(seed)
+        self.__init__(self.config, next_seed)
+        return self
 
     def step(self) -> dict:
         t = self.clock.tick()
@@ -119,8 +225,7 @@ class SimulationEngine:
         sm.current_time = t
 
         self._update_obstacles()
-        for ship in self.ships:
-            ship.step(self.clock.dt_min)
+        self._update_ships(t)
 
         tracking_speeds = self._tracking_speed_commands()
         for uav in self.uavs:
@@ -219,16 +324,61 @@ class SimulationEngine:
             else:
                 active.append(obstacle)
         self.obstacles = active
-        self.obstacle_mask = obstacle_grid_mask(active, self.config.grid.resolution)
+        self.obstacle_mask = obstacle_grid_mask(
+            active,
+            self.config.grid.resolution,
+            self.config.environment.storm_safety_margin_cells,
+        )
         self.allocator.sm.set_environment_obstacles(active, self.obstacle_mask)
         if not np.array_equal(previous_mask, self.obstacle_mask):
             self._replan_conflicting_routes()
+
+    def _update_ships(self, current_time: float) -> None:
+        islands = [item for item in self.obstacles if isinstance(item, Island)]
+        groups: dict[str, list[Ship]] = defaultdict(list)
+        for ship in self.ships:
+            if ship.group_id and not ship.departed:
+                groups[ship.group_id].append(ship)
+        for members in groups.values():
+            # Carrier groups travel at the carrier's safe formation speed; the
+            # members still retain their own declared ship-type performance.
+            formation_speed = min(member.speed_cells_per_min for member in members)
+            for ship in members:
+                original = ship.speed_cells_per_min
+                ship.speed_cells_per_min = formation_speed
+                ship.step(self.clock.dt_min, islands)
+                ship.speed_cells_per_min = original
+        departed_groups = {
+            ship.group_id for ship in self.ships
+            if ship.group_id and ship.departed
+        }
+        for group_id in departed_groups - self._departed_groups:
+            self._departed_groups.add(group_id)
+            members = [ship for ship in self.ships if ship.group_id == group_id]
+            for ship in members:
+                ship.departed = True
+                ship.set_tracked(False)
+            self.departed_ship_count += len(members)
+            self._release_departed_group(group_id, current_time)
+
+    def _release_departed_group(self, group_id: str, current_time: float) -> None:
+        sm = self.allocator.sm
+        for uav in self.uavs:
+            if uav.target_group_id == group_id:
+                self._begin_return(uav, current_time, release_marker=False)
+        track = sm.get_track_region_for_group(group_id)
+        if track is not None:
+            sm.release_track_region(track.id, create_marker=False)
+        self.allocator.trigger_manager.notify_event(
+            "target_departed", time=current_time, group_id=group_id,
+        )
+        sm.add_event("target_departed", {"group_id": group_id})
 
     def _replan_conflicting_routes(self) -> None:
         sm = self.allocator.sm
         regions = {region.id: region for region in sm.get_active_search_regions()}
         for uav in self.uavs:
-            if uav.status in ("idle", "refueling", "tracking"):
+            if uav.status in ("idle", "refueling", "holding", "tracking"):
                 continue
             if not self.obstacle_avoider.path_conflicts(
                 uav.remaining_path,
@@ -322,6 +472,9 @@ class SimulationEngine:
         self.track_creations += 1
         self._tracking_started_at[uav.id] = current_time
         uav.start_tracking(ship.group_id, ship.float_position)
+        for member in self.ships:
+            if member.group_id == ship.group_id:
+                member.set_tracked(True)
         sm.update_uav_status(
             uav.id,
             "transit",
@@ -343,14 +496,20 @@ class SimulationEngine:
             "position": ship.position,
         })
 
-    def _begin_return(self, uav: UAVEntity, current_time: float) -> None:
+    def _begin_return(
+        self,
+        uav: UAVEntity,
+        current_time: float,
+        *,
+        release_marker: bool = True,
+    ) -> None:
         sm = self.allocator.sm
         self._search_started_at.pop(uav.id, None)
         self._tracking_started_at.pop(uav.id, None)
         if uav.target_group_id:
             track = sm.get_track_region_for_group(uav.target_group_id)
             if track is not None and track.assigned_uav_id == uav.id:
-                sm.release_track_region(track.id, uav.id)
+                sm.release_track_region(track.id, uav.id, create_marker=release_marker)
                 self.allocator.trigger_manager.notify_event(
                     "target_lost", time=current_time, uav_id=uav.id,
                     group_id=uav.target_group_id,
@@ -359,6 +518,9 @@ class SimulationEngine:
                     "uav_id": uav.id,
                     "group_id": uav.target_group_id,
                 })
+            for member in self.ships:
+                if member.group_id == uav.target_group_id:
+                    member.set_tracked(False)
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
                 region.assigned_uav_id = None
@@ -373,8 +535,9 @@ class SimulationEngine:
 
     def _set_return_route(self, uav: UAVEntity, current_time: float) -> None:
         preferred = self._return_base_by_uav.get(uav.id)
+        accepting = [base for base in self.bases if base.can_accept()]
         bases = sorted(
-            self.bases,
+            accepting or self.bases,
             key=lambda base: (
                 0 if base is preferred else 1,
                 math.dist(
@@ -394,8 +557,8 @@ class SimulationEngine:
         best_path: tuple[float, BaseStation, list] | None = None
         for base_index, base in enumerate(bases):
             arrival_heading = math.atan2(
-                center[1] - base.position.row,
-                center[0] - base.position.col,
+                base.position.row - center[1],
+                base.position.col - center[0],
             )
             goal = (
                 float(base.position.col),
@@ -429,6 +592,12 @@ class SimulationEngine:
                     math.dist(start[:2], end[:2])
                     for start, end in zip(path, path[1:])
                 )
+                max_range_cells = (
+                    uav.cruise_speed_kmh * uav.endurance_h / uav.cell_size_km
+                )
+                if length >= uav.fuel_remaining_pct * max_range_cells * 0.98:
+                    errors.append(f"{base.id}: insufficient fuel for {length:.2f} cells")
+                    break
                 if best_path is None or length < best_path[0]:
                     best_path = (length, base, path)
                 break
@@ -501,7 +670,7 @@ class SimulationEngine:
                 self._begin_return(uav, current_time)
 
     def _needs_reserve_return(self, uav: UAVEntity, include_idle: bool = False) -> bool:
-        if uav.status in ("returning", "refueling"):
+        if uav.status in ("returning", "refueling", "holding"):
             return False
         if uav.status == "idle" and not include_idle:
             return False
@@ -525,8 +694,15 @@ class SimulationEngine:
                 uav.id,
                 self._nearest_base(uav.float_position),
             )
-            if not base.is_refueling(uav.id):
-                base.land_uav(uav.id)
+            if not base.is_refueling(uav.id) and not base.land_uav(uav.id):
+                self._holding_base_by_uav[uav.id] = base
+                uav.start_holding(base.position)
+                self.allocator.sm.add_event("base_capacity_full", {
+                    "uav_id": uav.id,
+                    "base_id": base.id,
+                    "occupancy": base.occupancy,
+                    "capacity": base.capacity,
+                })
         for base in self.bases:
             for uav_id in base.step(self.clock.dt_min):
                 uav = next(item for item in self.uavs if item.id == uav_id)
@@ -543,7 +719,24 @@ class SimulationEngine:
                 )
                 self.allocator.sm.add_event("uav_refueled", {
                     "uav_id": uav.id,
+                    "base_id": base.id,
                     "base_position": base.position,
+                })
+        for uav in self.uavs:
+            if uav.status != "holding":
+                continue
+            base = self._holding_base_by_uav.get(uav.id, self._nearest_base(uav.float_position))
+            if not base.can_accept():
+                continue
+            if base.land_uav(uav.id):
+                uav.position = base.position
+                uav.status = "refueling"
+                uav.sensor_mode = "off"
+                self._return_base_by_uav[uav.id] = base
+                self._holding_base_by_uav.pop(uav.id, None)
+                self.allocator.sm.add_event("holding_released", {
+                    "uav_id": uav.id,
+                    "base_id": base.id,
                 })
         if (
             self._lifecycle_mode
@@ -661,7 +854,10 @@ class SimulationEngine:
         )
 
     def _group_center(self, group_id: str | None):
-        members = [ship for ship in self.ships if ship.group_id == group_id]
+        members = [
+            ship for ship in self.ships
+            if ship.group_id == group_id and not ship.departed
+        ]
         if not members:
             return None
         return (

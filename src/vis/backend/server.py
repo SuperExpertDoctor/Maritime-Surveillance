@@ -49,6 +49,7 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
     app.state.ships = None        # wm 船舶实体列表
     app.state.uav_entities = None  # wm UAV 实体列表
     app.state.obstacles = None
+    app.state.bases = None
     app.state._live_clients = set()
 
     @app.websocket("/ws/live")
@@ -103,10 +104,10 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
             "environment": {
                 "sea_area_km": list(cfg.environment.sea_area_km),
                 "base_position": list(cfg.environment.base_position),
-                "support_base_positions": [
-                    list(position)
-                    for position in cfg.environment.support_base_positions
-                ],
+                "base_count": cfg.environment.base_count,
+                "base_capacity": cfg.environment.base_capacity,
+                "base_min_distance_cells": cfg.environment.base_min_distance_cells,
+                "base_land_margin": cfg.environment.base_land_margin,
             },
             "grid": {
                 "resolution": list(cfg.grid.resolution),
@@ -162,6 +163,7 @@ def _build_frame_inner(app: FastAPI) -> dict:
         ships=getattr(app.state, "ships", None),
         uav_entities=getattr(app.state, "uav_entities", None),
         obstacles=getattr(app.state, "obstacles", None),
+        bases=getattr(app.state, "bases", None),
     )
 
 

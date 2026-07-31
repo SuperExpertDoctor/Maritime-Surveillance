@@ -34,6 +34,7 @@ class StateManager:
         self._known_target_groups: set[str] = set()
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
+        self._base_positions: tuple[tuple[int, int], ...] = (config.environment.base_position,)
 
     def step(self, current_time: float) -> None:
         self.current_time = current_time
@@ -97,6 +98,19 @@ class StateManager:
         self.obstacles = list(obstacles)
         self.obstacle_mask = np.asarray(mask, dtype=bool)
 
+    def set_base_positions(self, positions) -> None:
+        """Publish reset-specific land bases to scheduling and coverage code."""
+        normalized = tuple((int(position[0]), int(position[1])) for position in positions)
+        if not normalized:
+            raise ValueError("at least one base position is required")
+        self._base_positions = normalized
+        for uav in self._uavs:
+            if uav.status == "idle":
+                uav.position = GridCoord(*normalized[0])
+
+    def get_base_positions(self) -> tuple[tuple[int, int], ...]:
+        return self._base_positions
+
     # Region management ----------------------------------------------
     def set_search_regions(self, regions: list[Region]) -> None:
         self._previous_search_regions = list(self._search_regions)
@@ -159,7 +173,13 @@ class StateManager:
             )
             return
 
-    def release_track_region(self, region_id: str, source_uav_id: str = "") -> None:
+    def release_track_region(
+        self,
+        region_id: str,
+        source_uav_id: str = "",
+        *,
+        create_marker: bool = True,
+    ) -> None:
         for region in list(self._track_regions):
             if region.id != region_id:
                 continue
@@ -167,15 +187,16 @@ class StateManager:
                 (region.bbox.col_start + region.bbox.col_end) // 2,
                 (region.bbox.row_start + region.bbox.row_end) // 2,
             )
-            self._marker_counter += 1
-            marker = Marker(
-                id=f"MK{self._marker_counter}",
-                position=center,
-                created_time=self.current_time,
-                source_uav_id=source_uav_id,
-            )
-            self._markers.append(marker)
-            self.info_field.add_marker(marker.position, self.current_time, marker.id)
+            if create_marker:
+                self._marker_counter += 1
+                marker = Marker(
+                    id=f"MK{self._marker_counter}",
+                    position=center,
+                    created_time=self.current_time,
+                    source_uav_id=source_uav_id,
+                )
+                self._markers.append(marker)
+                self.info_field.add_marker(marker.position, self.current_time, marker.id)
             self._track_regions.remove(region)
             return
 
@@ -210,10 +231,7 @@ class StateManager:
             searchable[-1, :] = False
             searchable[:, 0] = False
             searchable[:, -1] = False
-            for col, row in (
-                self.config.environment.base_position,
-                *self.config.environment.support_base_positions,
-            ):
+            for col, row in self._base_positions:
                 searchable[col, row] = False
         return searchable
 

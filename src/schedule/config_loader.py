@@ -11,7 +11,15 @@ from src.sensor.models import (
 class EnvironmentConfig:
     sea_area_km: tuple
     base_position: tuple
-    support_base_positions: tuple = ()
+    base_count: int = 1
+    base_capacity: int = 3
+    base_min_distance_cells: float = 5.0
+    base_land_margin: int = 1
+    island_count_min: int = 2
+    island_count_max: int = 6
+    thunderstorm_count_min: int = 3
+    thunderstorm_count_max: int = 8
+    storm_safety_margin_cells: float = 1.0
 
 
 @dataclass
@@ -60,6 +68,15 @@ class ShipConfig:
     zigzag_amplitude_km: float
     zigzag_period_min: float
     zigzag_phase_random: bool
+    target_min: int = 3
+    target_max: int = 5
+    group_max: int = 3
+    carrier_max: int = 1
+    carrier_speed_kn: float = 14.0
+    destroyer_speed_kn: float = 20.0
+    ais_discrepancy_threshold_cells: float = 2.0
+    ais_update_interval_min: float = 1.0
+    ais_discrimination_delay_min: float = 2.0
 
 
 @dataclass
@@ -95,11 +112,6 @@ class ConfigLoader:
         env_data = _read("environment.yaml")
         env_data["sea_area_km"] = tuple(env_data["sea_area_km"])
         env_data["base_position"] = tuple(env_data["base_position"])
-        env_data["support_base_positions"] = tuple(
-            tuple(position)
-            for position in env_data.get("support_base_positions", [])
-        )
-
         grid_data = _read("grid.yaml")
         grid_data["resolution"] = tuple(grid_data["resolution"])
 

@@ -52,7 +52,7 @@ def test_dynamic_obstacle_replans_remaining_return_route():
     mask = np.zeros(engine.config.grid.resolution, dtype=bool)
     midpoint = (
         int(math.floor((2 + base.col) / 2)),
-        int(math.floor((28 + base.row) / 2)),
+        int(math.floor((28 + base.row) / 2)) - 1,
     )
     mask[midpoint] = True
     engine.obstacle_mask = mask
@@ -60,10 +60,7 @@ def test_dynamic_obstacle_replans_remaining_return_route():
     engine._replan_conflicting_routes()
 
     assert engine.obstacle_avoider.is_path_safe(uav.remaining_path, mask)
-    land_bases = (
-        engine.config.environment.base_position,
-        *engine.config.environment.support_base_positions,
-    )
+    land_bases = engine.allocator.sm.get_base_positions()
     assert any(
         math.dist(uav.remaining_path[-1][:2], tuple(land_base)) < 1e-6
         for land_base in land_bases
@@ -185,9 +182,10 @@ def test_completed_lifecycle_does_not_restart_from_coverage_gate():
 def test_return_route_uses_nearest_land_recovery_base():
     engine = SimulationEngine(ConfigLoader.load())
     uav = engine.uavs[0]
-    uav.position = GridCoord(2, 15)
+    expected = engine.bases[-1].position
+    uav.position = expected
+    uav.heading_rad = engine._inward_heading(expected)
 
     engine._set_return_route(uav, 10.0)
 
-    expected = GridCoord(2, 15)
     assert math.dist(uav.remaining_path[-1][:2], tuple(expected)) < 1e-6

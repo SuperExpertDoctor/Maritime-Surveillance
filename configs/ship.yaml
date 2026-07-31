@@ -1,6 +1,16 @@
-count_min: 5
+count_min: 3
 max_groups: 3
 speed_kn: 18
 zigzag_amplitude_km: 5
 zigzag_period_min: 10
 zigzag_phase_random: true
+# GOAL2 target fleet and AIS discrimination settings.
+target_min: 3
+target_max: 5
+group_max: 3
+carrier_max: 1
+carrier_speed_kn: 14
+destroyer_speed_kn: 20
+ais_discrepancy_threshold_cells: 2.0
+ais_update_interval_min: 1.0
+ais_discrimination_delay_min: 2.0

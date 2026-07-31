@@ -68,6 +68,7 @@ def main(
             app.state.ships = current_engine.ships
             app.state.uav_entities = current_engine.uavs
             app.state.obstacles = current_engine.obstacles
+            app.state.bases = current_engine.bases
             app.state.current_cycle = sm.cycle
             app.state.total_steps = steps
             app.state.llm_cycle = llm_cycle
@@ -84,6 +85,7 @@ def main(
                 ships=current_engine.ships,
                 uav_entities=current_engine.uavs,
                 obstacles=current_engine.obstacles,
+                bases=current_engine.bases,
             )
             logger.write(frame)
 

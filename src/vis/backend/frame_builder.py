@@ -7,7 +7,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 total_steps: int = 480, llm_cycle: dict | None = None,
                 ships: list | None = None,
                 uav_entities: list | None = None,
-                obstacles: list | None = None) -> dict:
+                obstacles: list | None = None,
+                bases: list | None = None) -> dict:
     """从 StateManager 当前状态构建一帧完整 JSON。
 
     Args:
@@ -116,6 +117,15 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "position": list(getattr(s, "float_position", (s.position.col, s.position.row))),
                 "group_id": s.group_id or "?",
                 "is_detected": s.detected,
+                "ship_type": getattr(getattr(s, "ship_type", None), "value", "destroyer"),
+                "is_military": getattr(s, "is_military", None),
+                "departed": bool(getattr(s, "departed", False)),
+                "ais": (
+                    getattr(s, "ais_signal", None).to_dict()
+                    if getattr(s, "ais_signal", None) is not None
+                    else None
+                ),
+                "discrimination": getattr(s, "discrimination", None),
                 "trail": list(s.trail[-60:]),  # 最近 60 个轨迹点
             })
 
@@ -123,20 +133,42 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
 
     obstacle_list = []
     for obstacle in obstacles or []:
-        if hasattr(obstacle, "radius"):
+        if hasattr(obstacle, "intensity"):
             obstacle_list.append({
                 "id": obstacle.id,
                 "type": "thunderstorm",
                 "center": list(obstacle.center),
-                "radius": obstacle.radius,
+                "size": obstacle.size,
                 "move_vector": list(obstacle.move_vector),
+                "intensity": obstacle.intensity,
+                "lifetime": obstacle.lifetime,
             })
         else:
             obstacle_list.append({
                 "id": obstacle.id,
                 "type": "island",
                 "vertices": [list(point) for point in obstacle.vertices],
+                "label": obstacle.label,
             })
+
+    base_list = []
+    for index, base in enumerate(bases or []):
+        base_list.append({
+            "id": base.id,
+            "number": index + 1,
+            "position": [base.position.col, base.position.row],
+            "occupancy": base.occupancy,
+            "capacity": base.capacity,
+            "busy": base.is_busy,
+            "refueling_uav_ids": list(base.hangar),
+        })
+    if not base_list:
+        base_list = [{
+            "id": "Base-1", "number": 1,
+            "position": list(config.environment.base_position),
+            "occupancy": 0, "capacity": config.environment.base_capacity,
+            "busy": False, "refueling_uav_ids": [],
+        }]
 
     frame = {
         "frame_id": step,
@@ -155,11 +187,10 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "ships": ship_list,
         "events": recent_events,
         "llm_cycle": llm_cycle,
-        "base_position": list(config.environment.base_position),
-        "support_base_positions": [
-            list(position)
-            for position in config.environment.support_base_positions
-        ],
+        # Retain V1 fields while appending the richer GOAL2 base model.
+        "base_position": base_list[0]["position"],
+        "support_base_positions": [base["position"] for base in base_list[1:]],
+        "bases": base_list,
         "obstacles": obstacle_list,
     }
     return frame

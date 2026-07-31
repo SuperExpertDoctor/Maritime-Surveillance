@@ -22,9 +22,9 @@ def test_no_obstacle_returns_direct_shortest_dubins_path():
 
 
 def test_rrt_star_dubins_keeps_storm_clearance():
-    storm = Thunderstorm((8, 5), radius=1)
+    storm = Thunderstorm((8, 5), size=2)
     mask = obstacle_grid_mask([storm], resolution=(20, 12))
     planner = ObstacleAvoider(max_iterations=1200, seed=2)
     path = planner.plan_path((1, 5, 0), (16, 5, 0), mask, 1)
     assert planner.is_path_safe(path, mask)
-    assert min(math.dist(pose[:2], storm.center) for pose in path) >= storm.radius + 2
+    assert all(not storm.contains(pose[:2], safety_margin=1.0) for pose in path)

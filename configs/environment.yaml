@@ -1,16 +1,15 @@
 sea_area_km: [300, 300]
+# Retained as the V1-compatible default and initial StateManager position.
+# GOAL2 bases are generated from the coastal pool on each engine reset.
 base_position: [15, 28]
-# Coastal forward arming and refueling points. All positions are designated
-# land cells; the primary command base remains (15, 28).
-support_base_positions:
-  - [2, 7]
-  - [2, 15]
-  - [2, 23]
-  - [7, 2]
-  - [15, 2]
-  - [23, 2]
-  - [27, 7]
-  - [27, 15]
-  - [27, 23]
-  - [7, 27]
-  - [23, 27]
+# GOAL2: one to three land/coastal bases, sampled afresh on each reset.
+base_count: 3
+base_capacity: 3
+base_min_distance_cells: 5
+base_land_margin: 1
+# 10 km grid cells: islands are 10--30 km and thunderstorms 10--40 km.
+island_count_min: 2
+island_count_max: 6
+thunderstorm_count_min: 3
+thunderstorm_count_max: 5
+storm_safety_margin_cells: 1.0

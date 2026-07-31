@@ -1,7 +1,7 @@
-"""Dynamic thunderstorms, static islands, and occupancy rasterisation."""
+"""GOAL2 square island and thunderstorm environment models."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
 import random
 from typing import Iterable, Sequence
@@ -13,138 +13,222 @@ Point = tuple[float, float]
 
 
 @dataclass
-class Thunderstorm:
+class Island:
+    """Static square island, expressed in 10 km grid cells."""
+
     center: Point
-    radius: float
-    move_vector: Point = (0.0, 0.0)
-    lifetime: float = -1.0
-    id: str = "storm"
+    size: int
+    id: str = "island-1"
+    label: str | None = None
 
     def __post_init__(self) -> None:
         self.center = (float(self.center[0]), float(self.center[1]))
-        if self.radius <= 0:
-            raise ValueError("storm radius must be positive")
+        self.size = int(self.size)
+        if not 1 <= self.size <= 3:
+            raise ValueError("island size must be between 1 and 3 cells")
+        if self.label is None:
+            suffix = self.id.rsplit("-", 1)[-1]
+            self.label = f"岛屿-{suffix}"
+
+    @property
+    def half_extent(self) -> float:
+        return self.size / 2.0
+
+    @property
+    def vertices(self) -> list[Point]:
+        x, y = self.center
+        h = self.half_extent
+        return [(x - h, y - h), (x + h, y - h), (x + h, y + h), (x - h, y + h)]
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        x, y = self.center
+        h = self.half_extent
+        return x - h, y - h, x + h, y + h
+
+    def contains(self, point: Sequence[float]) -> bool:
+        min_x, min_y, max_x, max_y = self.bounds
+        x, y = float(point[0]), float(point[1])
+        return min_x <= x <= max_x and min_y <= y <= max_y
+
+    def distance_to_boundary(self, point: Sequence[float]) -> float:
+        x, y = float(point[0]), float(point[1])
+        min_x, min_y, max_x, max_y = self.bounds
+        if self.contains((x, y)):
+            return 0.0
+        dx = max(min_x - x, 0.0, x - max_x)
+        dy = max(min_y - y, 0.0, y - max_y)
+        return math.hypot(dx, dy)
+
+    def intersects_segment(self, start: Sequence[float], end: Sequence[float]) -> bool:
+        """Exact line-segment vs axis-aligned-square collision check."""
+        x0, y0 = float(start[0]), float(start[1])
+        x1, y1 = float(end[0]), float(end[1])
+        min_x, min_y, max_x, max_y = self.bounds
+        dx, dy = x1 - x0, y1 - y0
+        t0, t1 = 0.0, 1.0
+        for p, q in (
+            (-dx, x0 - min_x), (dx, max_x - x0),
+            (-dy, y0 - min_y), (dy, max_y - y0),
+        ):
+            if abs(p) <= 1e-12:
+                if q < 0:
+                    return False
+                continue
+            ratio = q / p
+            if p < 0:
+                if ratio > t1:
+                    return False
+                t0 = max(t0, ratio)
+            else:
+                if ratio < t0:
+                    return False
+                t1 = min(t1, ratio)
+        return True
+
+
+@dataclass
+class Thunderstorm:
+    """Moving square thunderstorm.  Its center supports sub-cell movement."""
+
+    center: Point
+    size: int
+    move_vector: Point = (0.0, 0.0)
+    lifetime: float = -1.0
+    intensity: float = 0.5
+    id: str = "storm-1"
+
+    def __post_init__(self) -> None:
+        self.center = (float(self.center[0]), float(self.center[1]))
+        self.size = int(self.size)
+        self.move_vector = (float(self.move_vector[0]), float(self.move_vector[1]))
+        self.intensity = float(self.intensity)
+        if not 1 <= self.size <= 4:
+            raise ValueError("thunderstorm size must be between 1 and 4 cells")
+        if not 0.0 <= self.intensity <= 1.0:
+            raise ValueError("thunderstorm intensity must be between zero and one")
+
+    @property
+    def half_extent(self) -> float:
+        return self.size / 2.0
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        x, y = self.center
+        h = self.half_extent
+        return x - h, y - h, x + h, y + h
+
+    @property
+    def vertices(self) -> list[Point]:
+        min_x, min_y, max_x, max_y = self.bounds
+        return [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
+
+    def contains(self, point: Sequence[float], safety_margin: float = 0.0) -> bool:
+        x, y = float(point[0]), float(point[1])
+        h = self.half_extent + max(0.0, safety_margin)
+        return abs(x - self.center[0]) <= h and abs(y - self.center[1]) <= h
+
+    def distance_to_boundary(self, point: Sequence[float]) -> float:
+        x, y = float(point[0]), float(point[1])
+        dx = max(abs(x - self.center[0]) - self.half_extent, 0.0)
+        dy = max(abs(y - self.center[1]) - self.half_extent, 0.0)
+        return math.hypot(dx, dy)
 
     def step(self, dt_min: float, bounds: tuple[int, int] = (30, 30)) -> bool:
-        """Move the storm and return whether it remains active."""
+        """Advance, reflect at map boundaries, and report whether still live."""
         if dt_min < 0:
             raise ValueError("dt_min cannot be negative")
         x = self.center[0] + self.move_vector[0] * dt_min
         y = self.center[1] + self.move_vector[1] * dt_min
         vx, vy = self.move_vector
-        if x - self.radius < 0 or x + self.radius > bounds[0]:
+        h = self.half_extent
+        if x - h < 0.0 or x + h > bounds[0]:
             vx = -vx
-            x = min(max(x, self.radius), bounds[0] - self.radius)
-        if y - self.radius < 0 or y + self.radius > bounds[1]:
+            x = min(max(x, h), bounds[0] - h)
+        if y - h < 0.0 or y + h > bounds[1]:
             vy = -vy
-            y = min(max(y, self.radius), bounds[1] - self.radius)
+            y = min(max(y, h), bounds[1] - h)
         self.center = (x, y)
         self.move_vector = (vx, vy)
-        if self.lifetime >= 0:
+        if self.lifetime > 0:
             self.lifetime -= dt_min
         return self.lifetime < 0 or self.lifetime > 0
-
-    def contains(self, point: Sequence[float], safety_margin: float = 0.0) -> bool:
-        return math.dist(self.center, (float(point[0]), float(point[1]))) <= self.radius + safety_margin
-
-
-@dataclass
-class Island:
-    vertices: list[Point]
-    id: str = "island"
-
-    def __post_init__(self) -> None:
-        self.vertices = [(float(x), float(y)) for x, y in self.vertices]
-        if len(self.vertices) < 3:
-            raise ValueError("an island needs at least three vertices")
-
-    @classmethod
-    def random_polygon(
-        cls,
-        center: Point,
-        base_radius: float,
-        vertex_count: int = 7,
-        irregularity: float = 0.3,
-        seed: int | None = None,
-        island_id: str = "island",
-    ) -> "Island":
-        rng = random.Random(seed)
-        vertices = []
-        for index in range(max(5, min(10, vertex_count))):
-            angle = 2.0 * math.pi * index / vertex_count + rng.uniform(-0.12, 0.12)
-            radius = base_radius * (1.0 + rng.uniform(-irregularity, irregularity))
-            vertices.append((
-                min(29.0, max(0.0, center[0] + radius * math.cos(angle))),
-                min(29.0, max(0.0, center[1] + radius * math.sin(angle))),
-            ))
-        return cls(vertices, island_id)
-
-    def contains(self, point: Sequence[float]) -> bool:
-        x, y = float(point[0]), float(point[1])
-        inside = False
-        j = len(self.vertices) - 1
-        for i, (xi, yi) in enumerate(self.vertices):
-            xj, yj = self.vertices[j]
-            if (yi > y) != (yj > y):
-                crossing_x = (xj - xi) * (y - yi) / (yj - yi) + xi
-                if x < crossing_x:
-                    inside = not inside
-            j = i
-        return inside
-
-    def distance_to_boundary(self, point: Sequence[float]) -> float:
-        px, py = float(point[0]), float(point[1])
-        best = float("inf")
-        for index, start in enumerate(self.vertices):
-            end = self.vertices[(index + 1) % len(self.vertices)]
-            best = min(best, _point_segment_distance((px, py), start, end))
-        return best
-
-
-def _point_segment_distance(point: Point, start: Point, end: Point) -> float:
-    vx, vy = end[0] - start[0], end[1] - start[1]
-    length2 = vx * vx + vy * vy
-    if length2 <= 1e-12:
-        return math.dist(point, start)
-    t = max(0.0, min(1.0, ((point[0] - start[0]) * vx + (point[1] - start[1]) * vy) / length2))
-    projection = (start[0] + t * vx, start[1] + t * vy)
-    return math.dist(point, projection)
 
 
 def obstacle_grid_mask(
     obstacles: Iterable[Thunderstorm | Island],
     resolution: tuple[int, int] = (30, 30),
-    storm_safety_margin: float = 2.0,
-    island_safety_margin: float = 1.0,
+    storm_safety_margin: float = 1.0,
+    include_islands: bool = False,
 ) -> np.ndarray:
-    """Rasterise obstacles into the repository's ``mask[col, row]`` form."""
+    """Rasterise no-fly hazards; islands stay flyable for fixed-wing UAVs."""
     cols, rows = resolution
     mask = np.zeros((cols, rows), dtype=bool)
-    obstacle_list = list(obstacles)
-    for col in range(cols):
-        for row in range(rows):
-            center = (col + 0.5, row + 0.5)
-            for obstacle in obstacle_list:
+    for obstacle in obstacles:
+        if isinstance(obstacle, Island) and not include_islands:
+            continue
+        for col in range(cols):
+            for row in range(rows):
                 if isinstance(obstacle, Thunderstorm):
-                    # Half-cell padding makes continuous points in an allowed
-                    # cell respect the requested radius+margin clearance.
-                    blocked = obstacle.contains(center, storm_safety_margin + math.sqrt(0.5))
+                    blocked = obstacle.contains((col + 0.5, row + 0.5), storm_safety_margin)
                 else:
-                    blocked = obstacle.contains(center) or obstacle.distance_to_boundary(center) <= island_safety_margin + math.sqrt(0.5)
+                    blocked = obstacle.contains((col + 0.5, row + 0.5))
                 if blocked:
                     mask[col, row] = True
-                    break
     return mask
 
 
-def default_obstacles(seed: int = 42) -> list[Thunderstorm | Island]:
-    """Deterministic environment used by the eight-hour demonstration."""
-    return [
-        Thunderstorm((22.0, 7.0), 2.2, (0.006, 0.004), -1, "storm-1"),
-        Thunderstorm((24.0, 15.0), 1.8, (-0.004, 0.005), -1, "storm-2"),
-        Island.random_polygon((19.0, 23.0), 1.4, 7, seed=seed, island_id="island-1"),
-        Island.random_polygon((27.0, 25.0), 1.0, 6, seed=seed + 1, island_id="island-2"),
-    ]
+def default_obstacles(
+    seed: int = 42,
+    *,
+    base_positions: Iterable[Sequence[float]] = (),
+    island_count: int | None = None,
+    thunderstorm_count: int | None = None,
+    resolution: tuple[int, int] = (30, 30),
+) -> list[Thunderstorm | Island]:
+    """Generate a deterministic GOAL2 sea state for one environment reset."""
+    rng = random.Random(seed)
+    cols, rows = resolution
+    bases = [tuple(map(float, position[:2])) for position in base_positions]
+    islands: list[Island] = []
+    requested_islands = island_count if island_count is not None else rng.randint(2, 6)
+    for index in range(requested_islands):
+        for _ in range(300):
+            size = rng.randint(1, 3)
+            h = size / 2.0
+            center = (rng.uniform(2.0 + h, cols - 2.0 - h), rng.uniform(2.0 + h, rows - 2.0 - h))
+            candidate = Island(center, size, f"island-{index + 1}")
+            if any(candidate.contains(base) for base in bases):
+                continue
+            if any(candidate.distance_to_boundary(other.center) < 1.0 + other.half_extent for other in islands):
+                continue
+            islands.append(candidate)
+            break
+    storms: list[Thunderstorm] = []
+    requested_storms = thunderstorm_count if thunderstorm_count is not None else rng.randint(3, 8)
+    for index in range(requested_storms):
+        for _ in range(200):
+            size = rng.randint(1, 4)
+            h = size / 2.0
+            # Keep the one-cell airborne safety margin clear of the coastal
+            # launch/recovery strip, including every generated base.
+            center = (
+                rng.uniform(h + 1.0, cols - h - 1.0),
+                rng.uniform(h + 1.0, rows - h - 1.0),
+            )
+            candidate = Thunderstorm(center, size)
+            if any(candidate.contains(base, safety_margin=1.0) for base in bases):
+                continue
+            storms.append(Thunderstorm(
+                center,
+                size,
+                (rng.uniform(-0.05, 0.05), rng.uniform(-0.05, 0.05)),
+                rng.choice([-1.0, rng.uniform(90.0, 240.0)]),
+                rng.uniform(0.3, 1.0),
+                f"storm-{index + 1}",
+            ))
+            break
+    return [*storms, *islands]
 
 
 __all__ = ["Thunderstorm", "Island", "obstacle_grid_mask", "default_obstacles"]

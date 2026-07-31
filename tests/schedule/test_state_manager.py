@@ -71,10 +71,7 @@ def test_coverage_excludes_obstacles_and_boundary(sm):
 
     stats = sm.get_coverage_stats()
 
-    land_bases = {
-        sm.config.environment.base_position,
-        *sm.config.environment.support_base_positions,
-    }
+    land_bases = set(sm.get_base_positions())
     assert stats["searchable_cells"] == (
         (cols - 2) * (rows - 2) - 1 - len(land_bases)
     )

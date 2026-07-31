@@ -29,18 +29,20 @@ def test_eo_fov_points_at_target_and_honours_range():
     assert not sensor.is_target_visible((2, 2), (10, 10))
 
 
-def test_obstacle_mask_includes_required_safety_margins():
-    storm = Thunderstorm((8, 8), radius=2)
-    island = Island([(14, 3), (17, 3), (17, 6), (14, 6)])
+def test_square_obstacles_keep_islands_flyable_and_storms_no_fly():
+    storm = Thunderstorm((8, 8), size=2, intensity=0.8)
+    island = Island((15.5, 4.5), size=3)
     mask = obstacle_grid_mask([storm, island], resolution=(20, 20))
     assert mask[8, 8]
-    assert mask[11, 8]  # storm radius + edge safety
-    assert mask[15, 4]
+    assert mask[9, 8]  # one-cell square safety margin
+    assert not mask[15, 4]  # Island is SAR-flyable for UAVs.
+    assert len(island.vertices) == 4
+    assert island.contains((15.5, 4.5))
     assert not mask[0, 0]
 
 
 def test_thunderstorm_moves_and_bounces_inside_map():
-    storm = Thunderstorm((18, 10), radius=1, move_vector=(2, 0))
+    storm = Thunderstorm((18, 10), size=2, move_vector=(2, 0))
     storm.step(1, bounds=(20, 20))
     assert storm.center[0] <= 19
     assert storm.move_vector[0] < 0
