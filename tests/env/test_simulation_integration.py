@@ -366,6 +366,23 @@ def test_fixed_range_consumption_uses_actual_route_distance():
     )
 
 
+def test_search_sortie_rotation_uses_accumulated_sar_minutes_only():
+    engine = SimulationEngine(ConfigLoader.load())
+    uav = engine.uavs[0]
+    budget = engine.config.uav.sortie_search_budget_min
+
+    uav.status = "searching"
+    engine._sortie_searched[uav.id] = True
+    engine._sortie_search_minutes[uav.id] = budget - 1
+    assert not engine._needs_sortie_rotation_return(uav)
+
+    engine._sortie_search_minutes[uav.id] = budget
+    assert engine._needs_sortie_rotation_return(uav)
+
+    uav.status = "tracking"
+    assert not engine._needs_sortie_rotation_return(uav)
+
+
 def test_post_coverage_search_assignment_keeps_stale_revisit_swaths():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     candidate = engine.allocator.extractor.extract(
