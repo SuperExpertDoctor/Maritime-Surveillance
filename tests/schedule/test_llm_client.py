@@ -56,3 +56,29 @@ def test_probe_uses_a_short_bounded_longcat_request(monkeypatch):
         "max_tokens": 8,
         "timeout_seconds": 7.5,
     }
+
+
+def test_decision_retries_when_parallel_allocation_is_incomplete(monkeypatch):
+    config = ConfigLoader.load()
+    state = StateManager(config)
+    client = LLMClient(config)
+    candidates = CandidateResult(candidate_regions=[
+        {"bbox": BBox(8, 8, 12, 13), "cell_count": 20, "avg_info": 0.0, "total_value": 20.0},
+        {"bbox": BBox(14, 8, 18, 13), "cell_count": 20, "avg_info": 0.0, "total_value": 20.0},
+    ])
+    responses = iter([
+        '{"search_regions": [{"id": "S1", "bbox": [8, 8, 12, 13]}]}',
+        '{"search_regions": [{"id": "S1", "bbox": [8, 8, 12, 13]}, {"id": "S2", "bbox": [14, 8, 18, 13]}]}',
+    ])
+    monkeypatch.setattr(client, "_call_api", lambda *args, **kwargs: next(responses))
+
+    result = client.decide(
+        state,
+        InfoValueTable(state),
+        candidates,
+        required_search_regions=2,
+    )
+
+    assert len(result["search_regions"]) == 2
+    assert client.last_interaction["success"]
+    assert len(client.last_interaction["attempts"]) == 2

@@ -75,8 +75,18 @@ class TaskAllocator:
         ]
 
         if not unassigned:
-            return {"trigger_type": "light",
-                    "action": "no_unassigned_regions"}
+            candidates = self.extractor.extract(self.sm)
+            if candidates.candidate_regions:
+                # Leaving refuelled/completed airframes idle until the next
+                # periodic window wastes the bounded information lifetime.
+                # Escalate only when new legal work exists; the real LongCat
+                # decision remains the authority for the new partition.
+                return self._handle_heavy_trigger(
+                    current_time,
+                    decision,
+                    candidate_result=candidates,
+                )
+            return {"trigger_type": "light", "action": "no_eligible_regions"}
 
         # Hungarian pairing
         pairs = hungarian_pair(
@@ -108,19 +118,50 @@ class TaskAllocator:
     # Heavy trigger: full LLM pipeline
     # ------------------------------------------------------------------
 
-    def _handle_heavy_trigger(self, current_time: float, decision) -> dict:
+    def _handle_heavy_trigger(
+        self,
+        current_time: float,
+        decision,
+        candidate_result: CandidateResult | None = None,
+    ) -> dict:
         """Heavy trigger: retain executing work and ask the LLM for additions."""
         self.retire_search_track_conflicts()
         # Step 1: Update info-value table
         self.ivt.update_all()
 
         # Step 2: Extract candidate regions
-        candidate_result = self.extractor.extract(self.sm)
+        candidate_result = candidate_result or self.extractor.extract(self.sm)
+
+        retained_regions = list(self.sm.get_active_search_regions())
+        pending_regions = sum(
+            region.assigned_uav_id is None for region in retained_regions
+        )
+        remaining_slots = max(
+            0,
+            self.config.uav.count_max
+            - len(self.sm.get_track_regions())
+            - len(retained_regions),
+        )
+        if self.sm.lifecycle_mode:
+            required_search_regions = min(
+                remaining_slots,
+                len(candidate_result.candidate_regions),
+            )
+        else:
+            required_search_regions = min(
+                max(0, len(self.sm.get_available_uavs()) - pending_regions),
+                remaining_slots,
+                len(candidate_result.candidate_regions),
+            )
 
         # Step 3-5: LLM decision (with validation retries built in)
-        llm_output = self.llm_client.decide(self.sm, self.ivt, candidate_result)
+        llm_output = self.llm_client.decide(
+            self.sm,
+            self.ivt,
+            candidate_result,
+            required_search_regions=required_search_regions,
+        )
         interaction = self.llm_client.last_interaction or {}
-        retained_regions = list(self.sm.get_active_search_regions())
 
         # A failed external decision is fail-closed: the last real, validated
         # plan keeps executing and no synthetic region is introduced.

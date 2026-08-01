@@ -49,7 +49,17 @@ class UAVEntity:
         self._transit_end_index = 0
         self._scan_ranges: list[tuple[int, int, str]] = []
         self.sar_look_direction = "right"
-        self.sar_along_track_cells = 5.0
+        # A stripmap image is formed by coherently integrating successive
+        # side-looking pulses along a stable track.  The instantaneous
+        # footprint is intentionally short; the visible aperture history is
+        # retained separately for the renderer and diagnostics.
+        self.sar_along_track_cells = 0.8
+        self.sar_aperture_length_cells = 5.0
+        self.sar_heading_tolerance_rad = math.radians(2.0)
+        self.sar_imaging = False
+        self.sar_scan_heading_rad: float | None = None
+        self.sar_heading_error_deg = 0.0
+        self.sar_aperture_track: list[tuple[float, float]] = []
         self.sar_footprint: list[GridCoord] = []
         self.eo_fov: FOVCone | None = None
         self.search_complete_pending = False
@@ -122,6 +132,7 @@ class UAVEntity:
         self._scan_ranges = list(scan_ranges or [])
         self.status = "transit"
         self.sensor_mode = "off"
+        self._clear_sar_acquisition()
         self.search_complete_pending = False
 
     def start_tracking(self, target_group_id: str, target_position: Sequence[float], R_d: float = 1.8) -> None:
@@ -132,6 +143,7 @@ class UAVEntity:
         self._transit_end_index = len(self.waypoints) - 1
         self.status = "transit"
         self.sensor_mode = "off"
+        self._clear_sar_acquisition()
 
     def cancel_tracking(self) -> None:
         """Release a classified civilian/departed target for search reuse."""
@@ -143,6 +155,7 @@ class UAVEntity:
         self._wp_index = 0
         self.status = "idle"
         self.sensor_mode = "off"
+        self._clear_sar_acquisition()
         self.eo_fov = None
         self.avoidance_level = 0
         self.avoidance_path = []
@@ -177,6 +190,7 @@ class UAVEntity:
         self.status = "returning"
         self.sensor_mode = "off"
         self.sar_footprint = []
+        self._clear_sar_acquisition()
         self.eo_fov = None
         self._holding_center = None
         self.avoidance_level = 0
@@ -193,6 +207,7 @@ class UAVEntity:
         self.status = "holding"
         self.sensor_mode = "off"
         self.sar_footprint = []
+        self._clear_sar_acquisition()
         self.eo_fov = None
 
     def _set_route(self, waypoints: Sequence[Sequence[float] | GridCoord]) -> None:
@@ -289,20 +304,75 @@ class UAVEntity:
             self.sensor_mode = "off"
             self.search_complete_pending = True
             self.sar_footprint = []
+            self._clear_sar_acquisition()
 
     def _update_scan_direction(self) -> None:
         if self._mission_kind != "search" or self._wp_index >= len(self.waypoints):
+            self._clear_sar_acquisition()
             return
         route_index = max(0, self._wp_index - 1)
         for start, end, look in self._scan_ranges:
             if start <= route_index <= end:
                 self.sar_look_direction = look
-                self.status = "searching"
-                self.sensor_mode = "sar"
+                # The scan ranges are produced from the planner's straight
+                # legs.  Do not start collecting at either connector point:
+                # first establish the commanded heading, then accumulate a
+                # coherent synthetic aperture while it remains stable.
+                heading_index = min(max(start + 1, route_index), end)
+                desired_heading = self.waypoints[heading_index][2]
+                heading_error = abs(_wrap_pi(self.heading_rad - desired_heading))
+                self.sar_scan_heading_rad = desired_heading
+                self.sar_heading_error_deg = math.degrees(heading_error)
+                stable_leg = start < route_index < end
+                self.sar_imaging = (
+                    stable_leg
+                    and heading_error <= self.sar_heading_tolerance_rad
+                    and self.avoidance_level == 0
+                )
+                if self.sar_imaging:
+                    self.status = "searching"
+                    self.sensor_mode = "sar"
+                    self._append_sar_aperture_position()
+                else:
+                    self.status = "transit"
+                    self.sensor_mode = "off"
+                    self.sar_footprint = []
+                    self.sar_aperture_track = []
                 return
         self.status = "transit"
         self.sensor_mode = "off"
         self.sar_footprint = []
+        self._clear_sar_acquisition()
+
+    def _append_sar_aperture_position(self) -> None:
+        """Keep only the recent, straight-line synthetic aperture path."""
+        position = self.float_position
+        if not self.sar_aperture_track:
+            self.sar_aperture_track.append(position)
+            return
+        if math.dist(position, self.sar_aperture_track[-1]) <= 1e-6:
+            return
+        self.sar_aperture_track.append(position)
+        while (
+            len(self.sar_aperture_track) > 1
+            and self._aperture_length() > self.sar_aperture_length_cells
+        ):
+            self.sar_aperture_track.pop(0)
+
+    def _aperture_length(self) -> float:
+        return sum(
+            math.dist(start, end)
+            for start, end in zip(
+                self.sar_aperture_track,
+                self.sar_aperture_track[1:],
+            )
+        )
+
+    def _clear_sar_acquisition(self) -> None:
+        self.sar_imaging = False
+        self.sar_scan_heading_rad = None
+        self.sar_heading_error_deg = 0.0
+        self.sar_aperture_track = []
 
     def _step_tracking(
         self,
@@ -444,6 +514,7 @@ class UAVEntity:
         self.fuel_remaining_pct = 1.0
         self.status = "idle"
         self.sensor_mode = "off"
+        self._clear_sar_acquisition()
         self._fuel_low_reported = False
         self.completed_searches_since_refuel = 0
         self.target_group_id = None

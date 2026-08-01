@@ -18,9 +18,11 @@ class ValidationResult:
 def validate(llm_output: dict, config: AppConfig,
              track_regions: list[Region],
              prev_search_regions: list[Region],
-             obstacle_mask=None,
-             base_positions=None,
-             allow_empty: bool = False) -> ValidationResult:
+              obstacle_mask=None,
+              base_positions=None,
+              allow_empty: bool = False,
+              allowed_search_bboxes=None,
+              required_search_regions: int = 0) -> ValidationResult:
     """校验 LLM 输出的搜索区域划分方案。"""
     errors = []
     gc = config.grid
@@ -31,6 +33,17 @@ def validate(llm_output: dict, config: AppConfig,
             return ValidationResult(is_valid=True, errors=[])
         errors.append("search_regions is empty")
         return ValidationResult(is_valid=False, errors=errors)
+
+    if required_search_regions and len(regions_data) != required_search_regions:
+        errors.append(
+            "search_regions count="
+            f"{len(regions_data)}: must equal the required parallel allocation "
+            f"count {required_search_regions}"
+        )
+
+    allowed_bbox_keys = {
+        tuple(bbox) for bbox in (allowed_search_bboxes or [])
+    }
 
     bboxes = []
     for i, r in enumerate(regions_data):
@@ -48,6 +61,10 @@ def validate(llm_output: dict, config: AppConfig,
             continue
 
         b = BBox(c0, r0, c1, r1)
+        if allowed_search_bboxes is not None and tuple(b) not in allowed_bbox_keys:
+            errors.append(
+                f"Region {i} bbox {bbox}: is not one of the observed candidate regions"
+            )
         w, h = c1 - c0, r1 - r0
         area = w * h
 

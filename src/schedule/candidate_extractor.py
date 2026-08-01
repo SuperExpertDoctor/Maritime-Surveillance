@@ -50,7 +50,10 @@ class CandidateExtractor:
             b = tr.bbox
             occupied[b.col_start:b.col_end, b.row_start:b.row_end] = True
         active_search = sm.get_active_search_regions()
-        for region in sm.get_search_regions():
+        # Completed regions remain visible in history but are no longer an
+        # active airspace reservation.  Once their information decays, they
+        # must be eligible for a fresh SAR revisit.
+        for region in active_search:
             b = region.bbox
             occupied[b.col_start:b.col_end, b.row_start:b.row_end] = True
 

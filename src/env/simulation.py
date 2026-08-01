@@ -621,7 +621,7 @@ class SimulationEngine:
     def _update_sensors_and_detections(self, current_time: float) -> None:
         sm = self.allocator.sm
         for uav in self.uavs:
-            if uav.status == "searching":
+            if uav.status == "searching" and uav.sar_imaging:
                 footprint = uav.sar_sensor.compute_swath_footprint(
                     uav.float_position,
                     uav.heading_rad,
@@ -637,6 +637,11 @@ class SimulationEngine:
                         continue
                     if self.rng.random() <= uav.sar_sensor.detection_probability:
                         self._handle_detection(uav, ship, current_time)
+            elif uav.status == "searching":
+                # A search route may be in its entry/exit settling segment.
+                # It moves normally, but invalid SAR samples never improve
+                # the information field or produce a target detection.
+                uav.sar_footprint = []
             elif uav.status == "tracking" and uav.target_group_id:
                 center = self._group_center(uav.target_group_id)
                 if center is not None:

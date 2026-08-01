@@ -34,7 +34,7 @@ def test_step_heavy_trigger_at_cycle(allocator):
     assert "search_regions" in result
 
 
-def test_uav_search_complete_light_trigger(allocator):
+def test_uav_search_complete_triggers_reallocation_when_work_exists(allocator, monkeypatch):
     allocator.sm.current_time = 10.0
     base = allocator.sm.config.environment.base_position
     allocator.sm.create_track_region("G1", GridCoord(*base))
@@ -42,8 +42,19 @@ def test_uav_search_complete_light_trigger(allocator):
         BBox(10, 20, 16, 26), "search", "UAV-1")
     allocator.trigger_manager.notify_event(
         "search_complete", time=10.0, uav_id="UAV-1", region_id="S1")
+    def decide(state, table, candidates, required_search_regions=0):
+        allocator.llm_client.last_interaction = {"success": True}
+        return {
+            "search_regions": [
+                {"id": f"S{index + 1}", "bbox": list(candidate["bbox"])}
+                for index, candidate in enumerate(candidates.candidate_regions[:required_search_regions])
+            ],
+            "notes": "coverage refresh",
+        }
+
+    monkeypatch.setattr(allocator.llm_client, "decide", decide)
     result = allocator.step(10.0)
-    assert result["trigger_type"] in ("light", "none")
+    assert result["trigger_type"] == "heavy"
 
 
 def test_light_trigger_never_reassigns_search_region_overlapping_track(allocator):
@@ -71,3 +82,52 @@ def test_light_trigger_never_reassigns_search_region_overlapping_track(allocator
     assert [region.id for region in allocator.sm.get_search_regions()] == ["S-safe"]
     assert all(region_id != "S-conflict" for _, region_id in result["pairs"])
     assert allocator.ivt.get_row("S-conflict") is None
+
+
+def test_heavy_allocation_requires_parallel_regions_for_idle_uavs(allocator, monkeypatch):
+    initial_available = len(allocator.sm.get_available_uavs())
+    captured = {}
+
+    def decide(state, table, candidates, required_search_regions=0):
+        captured["required"] = required_search_regions
+        selected = candidates.candidate_regions[:required_search_regions]
+        allocator.llm_client.last_interaction = {"success": True}
+        return {
+            "search_regions": [
+                {"id": f"S{index + 1}", "bbox": list(item["bbox"])}
+                for index, item in enumerate(selected)
+            ],
+            "notes": "parallel coverage",
+        }
+
+    monkeypatch.setattr(allocator.llm_client, "decide", decide)
+    result = allocator._handle_heavy_trigger(30.0, object())
+
+    assert captured["required"] == min(initial_available, len(result["search_regions"]))
+    assert captured["required"] > 0
+    assert len(result["pairs"]) == captured["required"]
+    assert len({region_id for _, region_id in result["pairs"]}) == captured["required"]
+
+
+def test_light_completion_escalates_when_new_coverage_work_is_available(allocator, monkeypatch):
+    calls = []
+
+    def decide(state, table, candidates, required_search_regions=0):
+        calls.append(required_search_regions)
+        allocator.llm_client.last_interaction = {"success": True}
+        return {
+            "search_regions": [
+                {"id": "S-new", "bbox": list(candidates.candidate_regions[0]["bbox"])}
+            ] if required_search_regions else [],
+            "notes": "replace completed search",
+        }
+
+    monkeypatch.setattr(allocator.llm_client, "decide", decide)
+    allocator.trigger_manager.notify_event(
+        "search_complete", time=10.0, uav_id="UAV-1", region_id="S-old",
+    )
+
+    result = allocator.step(10.0)
+
+    assert result["trigger_type"] == "heavy"
+    assert calls and calls[0] > 0

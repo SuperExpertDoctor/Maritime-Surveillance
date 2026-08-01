@@ -60,10 +60,13 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "max_range": entity.eo_fov.max_range,
             }
         sar_beam = None
-        if entity is not None and entity.sensor_mode == "sar":
+        # Preserve replay compatibility for historical frames that only
+        # supplied sensor_mode.  Live entities expose sar_imaging and only
+        # set sensor_mode to SAR during a stable stripmap acquisition.
+        if entity is not None and (entity.sar_imaging or entity.sensor_mode == "sar"):
             beam = entity.sar_sensor.compute_swath_beam(
                 entity.float_position,
-                entity.heading_rad,
+                entity.sar_scan_heading_rad or entity.heading_rad,
                 entity.sar_look_direction,
                 along_track_cells=entity.sar_along_track_cells,
             )
@@ -94,6 +97,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "sar_look_direction": entity.sar_look_direction if entity else None,
             "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],
             "sar_beam": sar_beam,
+            "sar_imaging": entity.sar_imaging if entity else False,
+            "sar_heading_error_deg": entity.sar_heading_error_deg if entity else None,
+            "sar_aperture_track": [
+                list(position) for position in entity.sar_aperture_track
+            ] if entity else [],
             "eo_fov": eo_fov,
             "avoidance_level": entity.avoidance_level if entity else 0,
             "avoidance_path": [list(pose) for pose in entity.avoidance_path] if entity else [],

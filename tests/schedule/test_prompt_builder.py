@@ -53,3 +53,22 @@ def test_prompt_uses_only_recorded_target_observations_for_handoff_context():
     assert "最后观测=(20,16)" in user_prompt
     assert "未观测船舶不可推断" in user_prompt
     assert "接力目标=G-contact" in user_prompt
+
+
+def test_prompt_requires_parallel_task_count_when_idle_uavs_need_work():
+    state = StateManager(ConfigLoader.load())
+    candidates = CandidateResult(candidate_regions=[{
+        "bbox": BBox(8, 8, 12, 13),
+        "cell_count": 20,
+        "avg_info": 0.0,
+        "total_value": 20.0,
+    }])
+
+    _, user_prompt = PromptBuilder().build(
+        state,
+        InfoValueTable(state),
+        candidates,
+        required_search_regions=1,
+    )
+
+    assert "恰好选择 1 个互不重叠的新区域" in user_prompt

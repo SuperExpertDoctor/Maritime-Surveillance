@@ -108,9 +108,14 @@ class LLMClient:
         sm: StateManager,
         ivt: InfoValueTable,
         candidate_result: CandidateResult,
+        required_search_regions: int = 0,
     ) -> dict:
         system_prompt, user_prompt = self.prompt_builder.build(
-            sm, ivt, candidate_result, self._reviewer_memory
+            sm,
+            ivt,
+            candidate_result,
+            self._reviewer_memory,
+            required_search_regions,
         )
         interaction = {
             "role": "decision_maker",
@@ -174,6 +179,15 @@ class LLMClient:
                 allow_empty=(
                     not candidate_result.candidate_regions
                     or remaining_slots == 0
+                ),
+                allowed_search_bboxes=[
+                    candidate["bbox"]
+                    for candidate in candidate_result.candidate_regions
+                ],
+                required_search_regions=min(
+                    max(0, int(required_search_regions)),
+                    remaining_slots,
+                    len(candidate_result.candidate_regions),
                 ),
             )
             errors = list(result.errors)

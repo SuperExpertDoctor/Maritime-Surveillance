@@ -15,13 +15,17 @@ class PromptBuilder:
 
     def build(self, sm: StateManager, ivt: InfoValueTable,
               candidate_result: CandidateResult,
-              reviewer_memory: str = "") -> tuple[str, str]:
+              reviewer_memory: str = "",
+              required_search_regions: int = 0) -> tuple[str, str]:
         """返回 (system_prompt, user_prompt)"""
-        user = self._build_user_prompt(sm, ivt, candidate_result, reviewer_memory)
+        user = self._build_user_prompt(
+            sm, ivt, candidate_result, reviewer_memory, required_search_regions,
+        )
         return self.system_prompt, user
 
     def _build_user_prompt(self, sm: StateManager, ivt: InfoValueTable,
-                           candidate_result: CandidateResult, reviewer_memory: str) -> str:
+                           candidate_result: CandidateResult, reviewer_memory: str,
+                           required_search_regions: int) -> str:
         parts = []
 
         # 长期记忆
@@ -132,6 +136,17 @@ class PromptBuilder:
             parts.append(f"  {u.id}: {u.status}, 油量{u.fuel_remaining_pct:.0%}, "
                         f"区域={u.assigned_region_id or 'none'}")
         parts.append(f"本周期新增区域容量: {new_capacity}个")
+        required = min(
+            max(0, int(required_search_regions)),
+            new_capacity,
+            len(candidate_result.candidate_regions),
+        )
+        if required:
+            parts.append(
+                f"【硬约束】当前有待分配的可用侦察资源；必须从候选列表中"
+                f"恰好选择 {required} 个互不重叠的新区域，使每架可用 UAV "
+                "都有并行搜索任务。"
+            )
 
         parts.append("\n请输出本周期任务区域划分方案。")
         return "\n".join(parts)

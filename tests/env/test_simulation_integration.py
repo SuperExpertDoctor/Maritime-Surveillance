@@ -32,7 +32,8 @@ def test_sar_is_off_during_dubins_turns():
     assert uav.status == "transit"
     assert uav.sensor_mode == "off"
 
-    uav._wp_index = scan_ranges[1][0] + 1
+    uav._wp_index = scan_ranges[1][0] + 2
+    uav.heading_rad = uav.waypoints[scan_ranges[1][0] + 2][2]
     uav._update_scan_direction()
     assert uav.status == "searching"
     assert uav.sensor_mode == "sar"
@@ -110,10 +111,44 @@ def test_search_stays_off_until_uav_reaches_region_boundary():
     uav._wp_index = uav._transit_end_index
     uav._update_scan_direction()
     assert uav.sensor_mode == "off"
-    uav._wp_index = uav._transit_end_index + 1
+    uav._wp_index = uav._transit_end_index + 2
+    uav.heading_rad = uav.waypoints[uav._transit_end_index + 2][2]
     uav._update_scan_direction()
     assert uav.status == "searching"
     assert uav.sensor_mode == "sar"
+
+
+def test_sar_requires_stable_straight_heading_before_writing_information():
+    engine = SimulationEngine(ConfigLoader.load(), seed=31)
+    uav = engine.uavs[0]
+    bbox = BBox(10, 8, 16, 14)
+    coverage = CoveragePlanner(sample_step=0.2).plan(bbox, uav.pose, 2, 1)
+    scan_ranges = [
+        (start, end, swath.look_direction)
+        for (start, end), swath in zip(coverage.scan_ranges, coverage.swaths)
+    ]
+    uav.assign_mission(
+        bbox,
+        coverage.waypoints,
+        transit_end_index=coverage.scan_ranges[0][0],
+        scan_ranges=scan_ranges,
+    )
+    start, end, _ = scan_ranges[0]
+    uav._wp_index = start + 2
+    uav._col, uav._row = uav.waypoints[start + 1][:2]
+    uav.heading_rad = uav.waypoints[start + 2][2] + math.radians(9)
+    uav._update_scan_direction()
+
+    assert not uav.sar_imaging
+    assert uav.sensor_mode == "off"
+    engine._update_sensors_and_detections(engine.clock.time)
+    assert not np.isfinite(engine.allocator.sm.info_field.last_scan_time).any()
+
+    uav.heading_rad = uav.waypoints[start + 2][2]
+    uav._update_scan_direction()
+    assert uav.sar_imaging
+    engine._update_sensors_and_detections(engine.clock.time)
+    assert np.isfinite(engine.allocator.sm.info_field.last_scan_time).any()
 
 
 def test_simulation_applies_phase_speed_control_to_shared_trackers():

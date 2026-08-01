@@ -4,10 +4,12 @@ endurance_h: 30
 # Operational sortie cap; physical platform endurance remains 30 h.
 sortie_endurance_h: 8.0
 refuel_time_min: 3
-# Preserve the coverage baseline, then use the nearest land recovery point
-# for short, real SAR sorties until every airframe completes three cycles.
+# Keep the main force on the offshore coverage mission until the whole
+# searchable sea has received a pass.  A partial-coverage handoff pulls
+# aircraft back to the coast while aging black-situation pockets remain.
+# Recovery still uses the real land bases on a true fuel/reserve trigger.
 lifecycle_rotation_start_min: 120
-lifecycle_coverage_threshold_pct: 50
+lifecycle_coverage_threshold_pct: 100
 lifecycle_search_dwell_min: 5
 lifecycle_candidate_max_distance_cells: 12
 lifecycle_required_cycles: 3

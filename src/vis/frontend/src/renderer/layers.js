@@ -387,43 +387,95 @@ function sensorPhase(id) {
   return [...String(id || "UAV")].reduce((sum, char) => sum + char.charCodeAt(0), 0) * 0.17;
 }
 
-function lerpPoint(start, end, progress) {
-  return {
-    x: start.x + (end.x - start.x) * progress,
-    y: start.y + (end.y - start.y) * progress,
-  };
-}
-
 function drawSarBeam(ctx, uav, cellSize, ox, oy, phase) {
   const beam = uav.sar_beam?.polygon?.length === 4 ? uav.sar_beam : fallbackSarBeam(uav);
   if (!beam?.polygon) return;
   const points = beam.polygon.map(([col, row]) => gridCenter(col, row, cellSize, ox, oy));
+  const apertureTrack = (uav.sar_aperture_track || [])
+    .filter((point) => Array.isArray(point) && point.length >= 2)
+    .map(([col, row]) => ({ col: Number(col), row: Number(row) }));
   ctx.save();
   ctx.beginPath();
   ctx.rect(ox, oy, 30 * cellSize, 30 * cellSize);
   ctx.clip();
+
+  // The long, offset polygon is the coherent strip accumulated from a
+  // stable straight flight segment.  It disappears at a connector/turn,
+  // rather than pretending that a turning aircraft produces a SAR image.
+  if (apertureTrack.length >= 2) {
+    const start = apertureTrack[0];
+    const end = apertureTrack[apertureTrack.length - 1];
+    const heading = Number(beam.heading) || 0;
+    const sideSign = beam.look_direction === "left" ? -1 : 1;
+    const side = {
+      x: -Math.sin(heading) * sideSign,
+      y: Math.cos(heading) * sideSign,
+    };
+    const near = Number(beam.near_range || 0.25);
+    const far = Number(beam.far_range || 2.25);
+    const stripPoint = (point, range) => gridCenter(
+      point.col + side.x * range,
+      point.row + side.y * range,
+      cellSize,
+      ox,
+      oy,
+    );
+    const strip = [
+      stripPoint(start, near),
+      stripPoint(end, near),
+      stripPoint(end, far),
+      stripPoint(start, far),
+    ];
+    ctx.beginPath();
+    strip.forEach((point, index) => {
+      if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = "rgba(8, 145, 178, .10)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(14, 116, 144, .54)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.beginPath();
+    apertureTrack.forEach((point, index) => {
+      const pixel = gridCenter(point.col, point.row, cellSize, ox, oy);
+      if (index === 0) ctx.moveTo(pixel.x, pixel.y); else ctx.lineTo(pixel.x, pixel.y);
+    });
+    ctx.strokeStyle = "rgba(8, 145, 178, .96)";
+    ctx.lineWidth = Math.max(1.5, cellSize * 0.10);
+    ctx.setLineDash([]);
+    ctx.stroke();
+
+    const pulse = 0.12 + 0.76 * (0.5 + 0.5 * Math.sin(phase * 0.055 + sensorPhase(uav.id)));
+    const pulseIndex = Math.min(
+      apertureTrack.length - 1,
+      Math.max(0, Math.round((apertureTrack.length - 1) * pulse)),
+    );
+    const pulsePoint = apertureTrack[pulseIndex];
+    const pulseNear = stripPoint(pulsePoint, near);
+    const pulseFar = stripPoint(pulsePoint, far);
+    ctx.beginPath();
+    ctx.moveTo(pulseNear.x, pulseNear.y);
+    ctx.lineTo(pulseFar.x, pulseFar.y);
+    ctx.strokeStyle = "rgba(165, 243, 252, .96)";
+    ctx.lineWidth = Math.max(1, cellSize * 0.075);
+    ctx.stroke();
+  }
+
+  // This short quadrilateral is the instantaneous side-looking pulse.
   ctx.beginPath();
   points.forEach((point, index) => {
     if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
   });
   ctx.closePath();
-  ctx.fillStyle = "rgba(8, 145, 178, .13)";
-  ctx.strokeStyle = "rgba(14, 116, 144, .86)";
+  ctx.fillStyle = "rgba(8, 145, 178, .18)";
+  ctx.strokeStyle = "rgba(14, 116, 144, .92)";
   ctx.lineWidth = 1.25;
   ctx.fill();
   ctx.stroke();
 
-  ctx.strokeStyle = "rgba(103, 232, 249, .92)";
-  ctx.lineWidth = Math.max(1, cellSize * 0.07);
-  const sweep = 0.5 + 0.5 * Math.sin(phase * 0.055 + sensorPhase(uav.id));
-  const sweepStart = lerpPoint(points[0], points[3], sweep);
-  const sweepEnd = lerpPoint(points[1], points[2], sweep);
-  ctx.beginPath();
-  ctx.moveTo(sweepStart.x, sweepStart.y);
-  ctx.lineTo(sweepEnd.x, sweepEnd.y);
-  ctx.stroke();
-
-  ctx.strokeStyle = "rgba(14, 116, 144, .52)";
+  ctx.strokeStyle = "rgba(14, 116, 144, .6)";
   ctx.setLineDash([Math.max(2, cellSize * 0.14), Math.max(2, cellSize * 0.12)]);
   ctx.beginPath();
   ctx.moveTo(points[0].x, points[0].y);
@@ -478,7 +530,7 @@ function drawEoBeam(ctx, uav, cellSize, ox, oy, phase) {
 
 export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy, phase = 0) {
   for (const uav of uavs || []) {
-    if (uav.sensor_mode === "sar") {
+    if (uav.sar_imaging || uav.sensor_mode === "sar") {
       drawSarBeam(ctx, uav, cellSize, ox, oy, phase);
       ctx.fillStyle = "rgba(6, 182, 212, .16)";
       for (const [col, row] of uav.sar_footprint || []) {
@@ -818,7 +870,7 @@ export function drawTransparencyLegend(ctx, bounds) {
   const swatches = [
     { color: "#D97706", label: "TASK CELLS" },
     { color: "#0F766E", label: "FRESH SAR" },
-    { color: "#0891B2", label: "SAR BEAM", shape: "strip" },
+    { color: "#0891B2", label: "SAR APERTURE / SWATH", shape: "strip" },
     { color: "#D97706", label: "EO / IR FOV", shape: "cone" },
     { color: "#DC2626", label: "NO-FLY STORM" },
     { color: "#0E7490", label: "SHIP RADAR" },
