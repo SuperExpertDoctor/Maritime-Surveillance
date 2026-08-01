@@ -47,6 +47,32 @@ def test_silent_ais_is_military():
     assert result.reason == "AIS silent"
 
 
+@pytest.mark.parametrize("index", range(20))
+def test_formation_discriminator_uses_centroid_for_civilian_members(index):
+    discriminator = AISDiscriminator(2.0)
+    center = (10.0 + index * 0.03, 12.0 - index * 0.02)
+    signals = [
+        AISSignal("111111111", (center[0] - 1.0, center[1]), 16, 0, "A", "Cargo", 1.0),
+        AISSignal("222222222", (center[0] + 1.0, center[1]), 16, 0, "B", "Cargo", 1.0),
+    ]
+
+    result = discriminator.discriminate_formation(signals, center)
+
+    assert not result.is_military
+
+
+@pytest.mark.parametrize("index", range(20))
+def test_formation_discriminator_treats_silent_member_as_military(index):
+    discriminator = AISDiscriminator(2.0)
+    center = (10.0 + index * 0.03, 12.0 - index * 0.02)
+    signal = AISSignal("333333333", (center[0] + 3.0, center[1]), 20, 0, "Unknown", "Cargo", 1.0)
+
+    result = discriminator.discriminate_formation([signal, None], center)
+
+    assert result.is_military
+    assert result.reason == "AIS formation member silent"
+
+
 def test_engine_waits_for_delay_then_releases_civilian_tracking():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
     group_id = engine.ships[0].group_id

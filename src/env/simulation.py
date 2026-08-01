@@ -748,8 +748,8 @@ class SimulationEngine:
         if current_time - started < self.config.ship.ais_discrimination_delay_min:
             return
         estimate_median = tuple(float(np.median([point[index] for point in samples])) for index in (0, 1))
-        result = self.ais_discriminator.discriminate(
-            members[0].ais_signal,
+        result = self.ais_discriminator.discriminate_formation(
+            [member.ais_signal for member in members],
             estimate_median,
         )
         result_data = result.to_dict()

@@ -68,5 +68,38 @@ class AISDiscriminator:
         confidence = max(0.7, 1.0 - discrepancy / max(self.discrepancy_threshold_cells * 2.0, 1e-9))
         return DiscriminateResult(False, confidence, "AIS position consistent", discrepancy)
 
+    def discriminate_formation(
+        self,
+        ais_signals: Sequence[AISSignal | None],
+        estimated_center: Sequence[float],
+    ) -> DiscriminateResult:
+        """Classify a tracked formation against its EO-derived center.
+
+        SAR/EO tracking follows a formation center rather than a particular
+        hull.  Comparing that center with one member's AIS position folds the
+        physical formation offset into the discrepancy and can mask a
+        deceptive broadcast.  A silent member is conclusive evidence; for
+        broadcasting formations, compare the AIS centroid with the EO center.
+        """
+        signals = list(ais_signals)
+        if not signals or any(signal is None for signal in signals):
+            return DiscriminateResult(True, 1.0, "AIS formation member silent", None)
+        centroid = (
+            sum(signal.reported_position[0] for signal in signals) / len(signals),
+            sum(signal.reported_position[1] for signal in signals) / len(signals),
+        )
+        return self.discriminate(
+            AISSignal(
+                mmsi="formation-centroid",
+                reported_position=centroid,
+                reported_speed_kn=0.0,
+                reported_heading_deg=0.0,
+                ship_name="formation-centroid",
+                ship_type="formation",
+                timestamp=max(signal.timestamp for signal in signals),
+            ),
+            estimated_center,
+        )
+
 
 __all__ = ["AISDiscriminator", "DiscriminateResult", "EOMeasurement"]
