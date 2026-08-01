@@ -7,6 +7,7 @@ from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.datatypes import Region
 from src.utils.coverage_planner import CoveragePlanner
+from src.utils.obstacle_avoider import ObstacleAvoider
 
 
 def test_sar_is_off_during_dubins_turns():
@@ -286,6 +287,29 @@ def test_return_route_skips_base_with_full_reserved_maintenance_capacity():
     engine._set_return_route(uav, 10.0)
 
     assert engine._return_base_by_uav[uav.id] is not busiest
+
+
+def test_return_route_uses_high_budget_fallback_after_transient_rrt_failures(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    uav = engine.uavs[0]
+    uav.position = GridCoord(8, 11)
+    uav.heading_rad = 0.0
+    calls = 0
+
+    def retry_then_succeed(self, start, goal, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("transient RRT* miss")
+        return [start, goal]
+
+    monkeypatch.setattr(ObstacleAvoider, "plan_path", retry_then_succeed)
+
+    engine._set_return_route(uav, 10.0)
+
+    assert calls >= 3
+    assert uav.status == "returning"
+    assert engine._return_base_by_uav[uav.id] in engine.bases
 
 
 def test_reserve_return_uses_95_percent_of_remaining_fixed_range():

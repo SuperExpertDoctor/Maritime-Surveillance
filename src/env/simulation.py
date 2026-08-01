@@ -1011,6 +1011,20 @@ class SimulationEngine:
                         + base_index * 101
                     ),
                 ),
+                # Moving storm footprints can invalidate a previously safe
+                # return corridor between two frames.  Keep a deterministic
+                # high-budget fallback before declaring the coastal recovery
+                # route impossible; the map is small, while terminating the
+                # full eight-hour run on a transient RRT* miss is not safe.
+                ObstacleAvoider(
+                    max_iterations=8000,
+                    seed=(
+                        self.seed
+                        + int(current_time) * 17
+                        + len(uav.id) * 31
+                        + base_index * 1009
+                    ),
+                ),
             )
             for planner in planners:
                 try:
