@@ -3,10 +3,6 @@ cruise_speed_kmh: 160
 endurance_h: 30
 # Operational sortie cap; physical platform endurance remains 30 h.
 sortie_endurance_h: 8.0
-# Rotate a search airframe after a useful, measurable SAR dwell.  This is
-# deliberately above the 25-minute acceptance floor and below the physical
-# range limit so every airframe can complete repeated recovery cycles.
-sortie_search_budget_min: 45
 refuel_time_min: 3
 # Keep the main force on the offshore coverage mission until the whole
 # searchable sea has received a pass.  A partial-coverage handoff pulls

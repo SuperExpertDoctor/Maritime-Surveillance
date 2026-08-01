@@ -145,9 +145,6 @@ class SimulationEngine:
         self._sortie_searched: dict[str, bool] = {
             uav.id: False for uav in self.uavs
         }
-        self._sortie_search_minutes: dict[str, float] = {
-            uav.id: 0.0 for uav in self.uavs
-        }
         self._search_started_at: dict[str, float] = {}
         self._tracking_started_at: dict[str, float] = {}
         self._ais_tracking_started_at: dict[str, float] = {}
@@ -341,7 +338,6 @@ class SimulationEngine:
                 )
             if uav.status == "searching":
                 self._sortie_searched[uav.id] = True
-                self._sortie_search_minutes[uav.id] += self.clock.dt_min
                 self._search_started_at.setdefault(uav.id, t)
             lifecycle_search_due = (
                 self._lifecycle_mode
@@ -367,7 +363,6 @@ class SimulationEngine:
                         ("fuel_low", fuel_low),
                         ("lifecycle_search", lifecycle_search_due),
                         ("lifecycle_tracking", tracking_due),
-                        ("sortie_search_budget", self._needs_sortie_rotation_return(uav)),
                         ("range_reserve", self._needs_reserve_return(uav)),
                     )
                     if triggered
@@ -1266,16 +1261,6 @@ class SimulationEngine:
             or navigable_home > usable_remaining_range
         )
 
-    def _needs_sortie_rotation_return(self, uav: UAVEntity) -> bool:
-        """Return after a useful SAR sortie without shortening the range rule."""
-        if uav.status not in ("searching", "transit"):
-            return False
-        return (
-            self._sortie_searched[uav.id]
-            and self._sortie_search_minutes[uav.id]
-            >= self.config.uav.sortie_search_budget_min
-        )
-
     def _process_refuelling(self, current_time: float) -> None:
         for uav in self.uavs:
             if uav.status != "refueling":
@@ -1309,7 +1294,6 @@ class SimulationEngine:
                 if self._sortie_searched[uav.id]:
                     self.lifecycle_cycles[uav.id] += 1
                 self._sortie_searched[uav.id] = False
-                self._sortie_search_minutes[uav.id] = 0.0
                 self.allocator.sm.clear_uav_assignment(uav.id)
                 self.allocator.trigger_manager.notify_event(
                     "uav_refueled", time=current_time, uav_id=uav.id,

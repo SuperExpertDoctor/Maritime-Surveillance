@@ -56,7 +56,6 @@ class UAVConfig:
     endurance_h: float
     refuel_time_min: float
     sortie_endurance_h: float = 1.8
-    sortie_search_budget_min: float = 45.0
     lifecycle_rotation_start_min: float = 120.0
     lifecycle_coverage_threshold_pct: float = 50.0
     lifecycle_search_dwell_min: float = 5.0
