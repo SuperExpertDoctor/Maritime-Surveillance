@@ -1,7 +1,7 @@
 ﻿import pytest
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.task_allocator import TaskAllocator
-from src.schedule.datatypes import BBox, GridCoord
+from src.schedule.datatypes import BBox, GridCoord, Region
 
 
 @pytest.fixture
@@ -44,3 +44,30 @@ def test_uav_search_complete_light_trigger(allocator):
         "search_complete", time=10.0, uav_id="UAV-1", region_id="S1")
     result = allocator.step(10.0)
     assert result["trigger_type"] in ("light", "none")
+
+
+def test_light_trigger_never_reassigns_search_region_overlapping_track(allocator):
+    conflict = Region(
+        id="S-conflict",
+        bbox=BBox(12, 12, 17, 17),
+        type="search",
+    )
+    safe = Region(
+        id="S-safe",
+        bbox=BBox(20, 20, 25, 25),
+        type="search",
+    )
+    allocator.sm.set_search_regions([conflict, safe])
+    allocator.ivt.add_row(conflict.id, conflict.bbox, "search")
+    allocator.ivt.add_row(safe.id, safe.bbox, "search")
+    allocator.sm.create_track_region("G1", GridCoord(14, 14))
+    allocator.trigger_manager.notify_event(
+        "search_complete", time=10.0, uav_id="UAV-1", region_id="S-old",
+    )
+
+    result = allocator.step(10.0)
+
+    assert result["action"] == "hungarian_pairing"
+    assert [region.id for region in allocator.sm.get_search_regions()] == ["S-safe"]
+    assert all(region_id != "S-conflict" for _, region_id in result["pairs"])
+    assert allocator.ivt.get_row("S-conflict") is None

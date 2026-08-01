@@ -22,6 +22,18 @@ class TaskAllocator:
         self.reviewer = LLMReviewer(config, self.llm_client)
         self.trigger_manager = TriggerManager(self.sm)
 
+    def retire_search_track_conflicts(
+        self,
+    ) -> list[tuple[Region, str | None]]:
+        retired = self.sm.retire_search_regions_overlapping_tracks()
+        for region, assigned_uav_id in retired:
+            self.ivt.remove_row(region.id)
+            self.sm.add_event("search_region_retired_for_tracking", {
+                "region_id": region.id,
+                "assigned_uav_id": assigned_uav_id,
+            })
+        return retired
+
     def step(self, current_time: float) -> dict:
         """Advance one frame and return a summary of actions taken."""
         self.sm.step(current_time)
@@ -51,6 +63,7 @@ class TaskAllocator:
 
     def _handle_light_trigger(self, current_time: float, decision) -> dict:
         """Pair idle UAVs only with regions already approved by the LLM."""
+        self.retire_search_track_conflicts()
         idle_uavs = self.sm.get_available_uavs()
         if not idle_uavs:
             return {"trigger_type": "light", "action": "no_idle_uavs"}
@@ -97,6 +110,7 @@ class TaskAllocator:
 
     def _handle_heavy_trigger(self, current_time: float, decision) -> dict:
         """Heavy trigger: retain executing work and ask the LLM for additions."""
+        self.retire_search_track_conflicts()
         # Step 1: Update info-value table
         self.ivt.update_all()
 

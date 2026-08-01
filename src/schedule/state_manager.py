@@ -137,6 +137,53 @@ class StateManager:
     def get_track_regions(self) -> list[Region]:
         return self._track_regions
 
+    def retire_search_regions_overlapping_tracks(
+        self,
+    ) -> list[tuple[Region, Optional[str]]]:
+        """Remove search work that no longer has exclusive airspace."""
+        if not self._track_regions or not self._search_regions:
+            return []
+
+        retired: list[tuple[Region, Optional[str]]] = []
+        retained: list[Region] = []
+        for region in self._search_regions:
+            overlaps_track = any(
+                self._bboxes_overlap(region.bbox, track.bbox)
+                for track in self._track_regions
+            )
+            if not overlaps_track:
+                retained.append(region)
+                continue
+
+            assigned_uav_id = region.assigned_uav_id
+            retired.append((region, assigned_uav_id))
+            region.status = "stale"
+            region.assigned_uav_id = None
+            if assigned_uav_id:
+                uav = self.get_uav(assigned_uav_id)
+                if uav and uav.assigned_region_id == region.id:
+                    uav.assigned_region_id = None
+
+        if not retired:
+            return []
+
+        previous_by_id = {
+            region.id: region for region in self._previous_search_regions
+        }
+        previous_by_id.update({region.id: region for region, _ in retired})
+        self._previous_search_regions = list(previous_by_id.values())
+        self._search_regions = retained
+        return retired
+
+    @staticmethod
+    def _bboxes_overlap(a: BBox, b: BBox) -> bool:
+        return not (
+            a.col_end <= b.col_start
+            or b.col_end <= a.col_start
+            or a.row_end <= b.row_start
+            or b.row_end <= a.row_start
+        )
+
     def get_track_region_for_group(self, target_group_id: str) -> Optional[Region]:
         return next(
             (region for region in self._track_regions if region.target_group_id == target_group_id),

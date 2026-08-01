@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test";
 
-const REPLAY_FILE = "simulation_20260801_002817.jsonl";
 const VIEWPORTS = [
   { name: "desktop-1440", width: 1440, height: 900 },
   { name: "desktop-1280", width: 1280, height: 720 },
@@ -89,8 +88,12 @@ test("live and replay dashboard acceptance", async ({ page }) => {
 
   await page.locator(".mode-switch button").nth(1).click();
   const fileSelect = page.locator(".file-select");
-  await expect(fileSelect.locator(`option[value="${REPLAY_FILE}"]`)).toHaveCount(1);
-  await fileSelect.selectOption(REPLAY_FILE);
+  await expect.poll(async () => fileSelect.locator("option").count()).toBeGreaterThan(0);
+  const replayFile = await fileSelect.locator("option").evaluateAll((options) => (
+    options.map((option) => option.value).find(Boolean) || ""
+  ));
+  expect(replayFile).toMatch(/^simulation_.*\.jsonl$/);
+  await fileSelect.selectOption(replayFile);
   await expect(page.locator(".playback-readout").first()).toContainText("480");
 
   const readout = page.locator(".playback-readout").first();

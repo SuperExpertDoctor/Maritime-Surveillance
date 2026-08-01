@@ -150,6 +150,81 @@ def test_unobserved_ships_are_not_exported_to_the_visualization_or_llm_state():
     assert report.position == contact.position
 
 
+def test_target_detection_retires_overlapping_search_and_redirects_uav(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    contact = engine.ships[0]
+    observer, searcher = engine.uavs[:2]
+    col, row = contact.position
+    conflict = Region(
+        id="S-conflict",
+        bbox=BBox(
+            max(0, col - 2),
+            max(0, row - 2),
+            min(30, col + 3),
+            min(30, row + 3),
+        ),
+        type="search",
+        assigned_uav_id=searcher.id,
+    )
+    engine.allocator.sm.set_search_regions([conflict])
+    searcher.status = "searching"
+    engine.allocator.sm.update_uav_status(
+        searcher.id,
+        "searching",
+        searcher.position,
+        assigned_region_id=conflict.id,
+    )
+    redirected = []
+    monkeypatch.setattr(engine, "_resume_search", lambda entity: False)
+    monkeypatch.setattr(
+        engine,
+        "_begin_return",
+        lambda entity, current_time: redirected.append((entity.id, current_time)),
+    )
+
+    engine._handle_detection(observer, contact, 1.0)
+
+    track = engine.allocator.sm.get_track_region_for_group(contact.group_id)
+    assert track is not None
+    assert engine.allocator.sm.get_search_regions() == []
+    assert engine.allocator.sm.get_uav(searcher.id).assigned_region_id is None
+    assert redirected == [(searcher.id, 1.0)]
+
+
+def test_moving_track_region_retires_newly_overlapping_search(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    searcher = engine.uavs[1]
+    conflict = Region(
+        id="S-moving-conflict",
+        bbox=BBox(12, 12, 17, 17),
+        type="search",
+        assigned_uav_id=searcher.id,
+    )
+    engine.allocator.sm.set_search_regions([conflict])
+    searcher.status = "transit"
+    engine.allocator.sm.update_uav_status(
+        searcher.id,
+        "transit",
+        searcher.position,
+        assigned_region_id=conflict.id,
+    )
+    track = engine.allocator.sm.create_track_region("G-moving", GridCoord(25, 25))
+    track.assigned_uav_id = engine.uavs[0].id
+    engine.allocator.sm.update_track_region_center(track.id, GridCoord(14, 14))
+    redirected = []
+    monkeypatch.setattr(engine, "_resume_search", lambda entity: False)
+    monkeypatch.setattr(
+        engine,
+        "_begin_return",
+        lambda entity, current_time: redirected.append((entity.id, current_time)),
+    )
+
+    engine._resolve_search_track_conflicts(5.0)
+
+    assert engine.allocator.sm.get_search_regions() == []
+    assert redirected == [(searcher.id, 5.0)]
+
+
 def test_tracker_return_keeps_only_last_observed_contact_for_handoff():
     engine = SimulationEngine(ConfigLoader.load(), seed=41)
     contact = engine.ships[0]

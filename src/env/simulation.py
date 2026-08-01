@@ -780,6 +780,10 @@ class SimulationEngine:
                 region.assigned_uav_id = None
         track = sm.create_track_region(ship.group_id, ship.position)
         track.assigned_uav_id = uav.id
+        self._resolve_search_track_conflicts(
+            current_time,
+            protected_uav_ids={uav.id},
+        )
         self.track_creations += 1
         self._tracking_started_at[uav.id] = current_time
         uav.start_tracking(ship.group_id, ship.float_position)
@@ -806,6 +810,32 @@ class SimulationEngine:
             "group_id": ship.group_id,
             "position": ship.position,
         })
+
+    def _resolve_search_track_conflicts(
+        self,
+        current_time: float,
+        protected_uav_ids: set[str] | None = None,
+    ) -> None:
+        """Retire overlapping searches and redirect their assigned UAVs."""
+        protected = protected_uav_ids or set()
+        retired = self.allocator.retire_search_track_conflicts()
+        if not retired:
+            return
+
+        entities = {entity.id: entity for entity in self.uavs}
+        for _, assigned_uav_id in retired:
+            if not assigned_uav_id:
+                continue
+            self.allocator.sm.clear_uav_assignment(assigned_uav_id)
+            if assigned_uav_id in protected:
+                continue
+            entity = entities.get(assigned_uav_id)
+            if entity is None or entity.status in {
+                "idle", "tracking", "returning", "holding", "refueling",
+            }:
+                continue
+            if not self._resume_search(entity):
+                self._begin_return(entity, current_time)
 
     def _begin_return(
         self,
@@ -1115,6 +1145,7 @@ class SimulationEngine:
                 sm.update_track_region_center(
                     track.id, GridCoord(int(round(center[0])), int(round(center[1])))
                 )
+        self._resolve_search_track_conflicts(sm.current_time)
 
     def _sync_assignments(self) -> None:
         sm = self.allocator.sm
