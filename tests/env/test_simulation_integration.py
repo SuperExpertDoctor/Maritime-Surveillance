@@ -300,14 +300,32 @@ def test_reserve_return_uses_95_percent_of_remaining_fixed_range():
         (base.position.col, base.position.row),
     )
 
-    uav.fuel_remaining_pct = (
-        distance_home / 0.95 + 0.1
-    ) / uav.total_range_cells
+    uav.fuel_remaining_pct = 1.0
     assert not engine._needs_reserve_return(uav)
 
     uav.fuel_remaining_pct = (
         distance_home / 0.95 - 0.1
     ) / uav.total_range_cells
+    assert engine._needs_reserve_return(uav)
+
+
+def test_reserve_return_starts_early_for_fixed_wing_navigation_margin():
+    engine = SimulationEngine(ConfigLoader.load())
+    uav = engine.uavs[0]
+    uav.position = GridCoord(15, 15)
+    uav.status = "searching"
+    base = engine._nearest_available_base(uav.float_position, exclude_uav_id=uav.id)
+    assert base is not None
+    distance_home = math.dist(
+        uav.float_position,
+        (base.position.col, base.position.row),
+    )
+    navigation_distance = distance_home + 2.0 * math.pi * uav.R_min + 4.0
+    uav.fuel_remaining_pct = (
+        navigation_distance / 0.95 - 0.1
+    ) / uav.total_range_cells
+
+    assert distance_home <= uav.remaining_range_cells * 0.95
     assert engine._needs_reserve_return(uav)
 
 
@@ -346,3 +364,49 @@ def test_fixed_range_consumption_uses_actual_route_distance():
         rel_tol=0,
         abs_tol=1e-9,
     )
+
+
+def test_post_coverage_search_assignment_keeps_stale_revisit_swaths():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    candidate = engine.allocator.extractor.extract(
+        engine.allocator.sm
+    ).candidate_regions[0]
+    region = Region(id="S-revisit", bbox=candidate["bbox"], type="search")
+    searchable = engine.allocator.sm.get_searchable_mask()
+    scan_times = engine.allocator.sm.info_field.last_scan_time
+    scan_times[searchable] = 1.0
+    uav = engine.uavs[0]
+
+    engine._assign_search_route(uav, region)
+
+    assert uav.status == "transit"
+    assert uav._scan_ranges
+    assert uav.planned_path
+
+
+def test_post_coverage_completion_restarts_local_revisit_without_idling():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    candidate = engine.allocator.extractor.extract(
+        engine.allocator.sm
+    ).candidate_regions[0]
+    region = Region(
+        id="S-patrol",
+        bbox=candidate["bbox"],
+        type="search",
+        assigned_uav_id=engine.uavs[0].id,
+    )
+    engine.allocator.sm.set_search_regions([region])
+    state = engine.allocator.sm.get_uav(engine.uavs[0].id)
+    state.assigned_region_id = region.id
+    searchable = engine.allocator.sm.get_searchable_mask()
+    engine.allocator.sm.info_field.last_scan_time[searchable] = 1.0
+    uav = engine.uavs[0]
+    uav.status = "idle"
+    uav.search_complete_pending = True
+
+    engine._process_search_completions(10.0)
+
+    assert uav.status == "transit"
+    assert not uav.search_complete_pending
+    assert region.status == "active"
+    assert region.assigned_uav_id == uav.id

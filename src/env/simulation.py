@@ -104,6 +104,18 @@ class SimulationEngine:
         ]
         for index, uav in enumerate(self.uavs):
             uav.heading_rad = self._inward_heading(self.bases[index % len(self.bases)].position)
+            # StateManager drives Hungarian assignment before the first
+            # entity-to-state sync.  Publish each alternating coastal launch
+            # position now so the first plan does not treat the whole fleet
+            # as if it departed from Base-1.
+            self.allocator.sm.update_uav_status(
+                uav.id,
+                "idle",
+                uav.position,
+                fuel_remaining_pct=uav.fuel_remaining_pct,
+                heading_deg=uav.heading_deg,
+                sensor_mode=uav.sensor_mode,
+            )
         for uav in self.uavs:
             uav.sar_sensor = SARSensor(
                 swath_width_cells=config.sensor.sar.swath_km / config.grid.cell_size_km,
@@ -1067,11 +1079,49 @@ class SimulationEngine:
             if not uav.search_complete_pending:
                 continue
             region_id = sm.get_uav(uav.id).assigned_region_id if sm.get_uav(uav.id) else None
+            assigned_region = None
             for region in sm.get_search_regions():
                 if region.id == region_id:
-                    region.status = "completed"
-                    region.completion_pct = 100.0
-                    region.assigned_uav_id = None
+                    assigned_region = region
+                    break
+
+            # A completed first-pass region is a valid persistent patrol cell
+            # once broad coverage exists.  Retain the real LLM-approved
+            # partition and restart SAR locally, avoiding an idle interval and
+            # a fresh cross-map transit solely to revisit stale information.
+            if (
+                assigned_region is not None
+                and self.allocator.sm.get_coverage_stats()["coverage_pct"] >= 80.0
+                and not self._needs_reserve_return(uav, include_idle=True)
+            ):
+                try:
+                    uav.search_complete_pending = False
+                    assigned_region.status = "active"
+                    assigned_region.assigned_uav_id = uav.id
+                    self._assign_search_route(uav, assigned_region)
+                    sm.update_uav_status(
+                        uav.id,
+                        uav.status,
+                        uav.position,
+                        assigned_region_id=assigned_region.id,
+                        fuel_remaining_pct=uav.fuel_remaining_pct,
+                    )
+                    sm.add_event("search_revisit_started", {
+                        "uav_id": uav.id,
+                        "region_id": assigned_region.id,
+                    })
+                    continue
+                except (RuntimeError, ValueError) as exc:
+                    sm.add_event("revisit_route_plan_failed", {
+                        "uav_id": uav.id,
+                        "region_id": assigned_region.id,
+                        "error": str(exc),
+                    })
+
+            if assigned_region is not None:
+                assigned_region.status = "completed"
+                assigned_region.completion_pct = 100.0
+                assigned_region.assigned_uav_id = None
             self.allocator.trigger_manager.notify_event(
                 "search_complete", time=current_time, uav_id=uav.id, region_id=region_id,
             )
@@ -1137,7 +1187,23 @@ class SimulationEngine:
             uav.float_position,
             (base.position.col, base.position.row),
         )
-        return direct_home > uav.remaining_range_cells * 0.95
+        usable_remaining_range = uav.remaining_range_cells * 0.95
+        # The user-facing rule is measured to the closest base by direct
+        # distance.  A fixed-wing aircraft cannot fly that chord instantly:
+        # it needs a curvature-constrained turn-in and may need to clear a
+        # no-fly cell.  Triggering only at the chord threshold can leave too
+        # little fuel for a legal Dubins return route.  This guard may make
+        # the UAV return earlier, never later, than the required 95% rule.
+        # One turn-in is needed to commit to the return course and another
+        # can be required when a moving storm invalidates that course.  The
+        # four-cell clearance covers the configured small storm plus the
+        # obstacle avoider's one-cell safety envelope.
+        turn_and_clearance = 2.0 * math.pi * uav.R_min + 4.0
+        navigable_home = direct_home + turn_and_clearance
+        return (
+            direct_home > usable_remaining_range
+            or navigable_home > usable_remaining_range
+        )
 
     def _process_refuelling(self, current_time: float) -> None:
         for uav in self.uavs:
@@ -1274,14 +1340,24 @@ class SimulationEngine:
             region.bbox, uav.pose, swath_width, uav.R_min
         )
         scan_times = self.allocator.sm.info_field.last_scan_time
-        swaths = [
-            swath
-            for swath in coverage.swaths
-            if any(
-                not math.isfinite(scan_times[cell.col, cell.row])
-                for cell in swath.footprint
-            )
-        ]
+        coverage_pct = self.allocator.sm.get_coverage_stats()["coverage_pct"]
+        if coverage_pct < 80.0:
+            # Before broad area coverage is established, do not spend a scan
+            # leg repeating information that is already available.
+            swaths = [
+                swath
+                for swath in coverage.swaths
+                if any(
+                    not math.isfinite(scan_times[cell.col, cell.row])
+                    for cell in swath.footprint
+                )
+            ]
+        else:
+            # After the first pass, every approved high-value region is a
+            # legitimate revisit task.  Dropping already-seen swaths here
+            # would turn a black/stale cell into an immediate no-op and leave
+            # the fleet idle instead of maintaining information freshness.
+            swaths = coverage.swaths
         if not swaths:
             region.status = "completed"
             region.completion_pct = 100.0

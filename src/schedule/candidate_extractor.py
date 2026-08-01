@@ -154,6 +154,10 @@ class CandidateExtractor:
         # Cap final candidates at K and keep them mutually disjoint so a model
         # can safely copy the supplied candidate list as its additions.
         base_positions = sm.get_base_positions()
+        ready_positions = [
+            (uav.position.col, uav.position.row)
+            for uav in sm.get_available_uavs()
+        ] or list(base_positions)
         def candidate_key(item):
             bbox = item["bbox"]
             area = (bbox.col_end - bbox.col_start) * (bbox.row_end - bbox.row_start)
@@ -164,8 +168,8 @@ class CandidateExtractor:
                 (bbox.row_start + bbox.row_end) / 2,
             )
             distance = min(
-                math.dist(center, base_position)
-                for base_position in base_positions
+                math.dist(center, ready_position)
+                for ready_position in ready_positions
             )
             if item.get("target_group_id"):
                 return (-2, distance, -item["total_value"])
@@ -174,8 +178,12 @@ class CandidateExtractor:
                         abs(area - gc.search_min_cells),
                         -unseen_count, -item["total_value"])
             if exploration_mode:
-                return (-unseen_density, -unseen_count, abs(area - 24),
-                        -item["total_value"], distance)
+                # Initial sea cells are equally unknown.  Prefer legal work
+                # close to a coastal launch point in that tie so the first
+                # sortie spends its limited early window on SAR imaging
+                # rather than a long deadhead transit across the map.
+                return (-unseen_density, -unseen_count, distance,
+                        abs(area - 24), -item["total_value"])
             return (-item["total_value"], distance)
 
         candidates.sort(key=candidate_key)

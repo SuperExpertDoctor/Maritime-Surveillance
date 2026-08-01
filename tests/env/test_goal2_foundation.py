@@ -19,6 +19,14 @@ def test_default_engine_has_two_left_mainland_bases_with_three_refuelling_slots_
     assert math.dist(engine.bases[0].position, engine.bases[1].position) >= config.environment.base_min_distance_cells
 
 
+def test_initial_scheduler_positions_match_alternating_physical_launch_bases():
+    engine = SimulationEngine(ConfigLoader.load(), seed=19)
+
+    assert [state.position for state in engine.allocator.sm.get_all_uavs()] == [
+        uav.position for uav in engine.uavs
+    ]
+
+
 def test_default_open_water_has_at_most_two_islands():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
 
