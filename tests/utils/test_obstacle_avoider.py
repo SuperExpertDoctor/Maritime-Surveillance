@@ -28,3 +28,14 @@ def test_rrt_star_dubins_keeps_storm_clearance():
     path = planner.plan_path((1, 5, 0), (16, 5, 0), mask, 1)
     assert planner.is_path_safe(path, mask)
     assert all(not storm.contains(pose[:2], safety_margin=1.0) for pose in path)
+
+
+def test_deterministic_anchor_fallback_finds_safe_dubins_route():
+    storm = Thunderstorm((8, 5), size=2)
+    mask = obstacle_grid_mask([storm], resolution=(20, 12))
+    planner = ObstacleAvoider(max_iterations=0, seed=2)
+
+    path = planner.plan_path((1, 5, 0), (16, 5, 0), mask, 1)
+
+    assert planner.is_path_safe(path, mask)
+    assert all(not storm.contains(pose[:2], safety_margin=1.0) for pose in path)

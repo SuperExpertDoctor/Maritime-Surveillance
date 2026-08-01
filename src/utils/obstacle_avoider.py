@@ -110,6 +110,9 @@ class ObstacleAvoider:
                         break
 
         if not goal_candidates:
+            fallback = self._plan_via_free_anchor(start, goal, obstacle_mask, R_min)
+            if fallback:
+                return fallback
             raise RuntimeError("RRT* could not find a collision-free Dubins path")
 
         _, node_index, final_edge = min(goal_candidates, key=lambda item: item[0])
@@ -127,6 +130,42 @@ class ObstacleAvoider:
         if not self.is_path_safe(path, obstacle_mask):
             raise RuntimeError("planner generated an unsafe path")
         return path
+
+    def _plan_via_free_anchor(
+        self,
+        start: Pose,
+        goal: Pose,
+        obstacle_mask: np.ndarray,
+        R_min: float,
+    ) -> list[Pose]:
+        """Deterministic two-leg fallback for a transient RRT* miss.
+
+        The environment contains only sparse, small square hazards.  A
+        single free-water anchor is therefore sufficient in the cases where
+        stochastic sampling misses a narrow Dubins corridor.  Enumerating
+        cell centres keeps the fallback reproducible and preserves the same
+        curvature and raster-safety checks as the primary planner.
+        """
+        candidates: list[tuple[float, list[Pose]]] = []
+        cols, rows = obstacle_mask.shape
+        for col in range(1, cols - 1):
+            for row in range(1, rows - 1):
+                anchor_xy = (col + 0.5, row + 0.5)
+                if self._blocked(anchor_xy, obstacle_mask):
+                    continue
+                heading = math.atan2(goal[1] - anchor_xy[1], goal[0] - anchor_xy[0])
+                anchor = (*anchor_xy, heading)
+                first = DubinsPath.compute(start, anchor, R_min, self.sample_step).waypoints
+                if not self.is_path_safe(first, obstacle_mask):
+                    continue
+                second = DubinsPath.compute(anchor, goal, R_min, self.sample_step).waypoints
+                if not self.is_path_safe(second, obstacle_mask):
+                    continue
+                path = [*first, *second[1:]]
+                candidates.append((self._length(path), path))
+        if not candidates:
+            return []
+        return min(candidates, key=lambda item: item[0])[1]
 
     def is_path_safe(self, waypoints: Sequence[Sequence[float]], obstacle_mask: np.ndarray) -> bool:
         if not waypoints:
