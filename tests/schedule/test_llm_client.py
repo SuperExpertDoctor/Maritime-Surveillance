@@ -35,3 +35,24 @@ def test_full_retained_capacity_accepts_empty_real_model_plan(monkeypatch):
     assert result["search_regions"] == []
     assert client.last_interaction["success"]
     assert len(client.last_interaction["attempts"]) == 1
+
+
+def test_probe_uses_a_short_bounded_longcat_request(monkeypatch):
+    client = LLMClient(ConfigLoader.load())
+    captured = {}
+
+    def fake_call(system_prompt, user_prompt, **kwargs):
+        captured.update(kwargs)
+        assert "connectivity probe" in system_prompt
+        assert user_prompt == "Reply with OK."
+        return "OK"
+
+    monkeypatch.setattr(client, "_call_api", fake_call)
+
+    assert client.probe(timeout_seconds=7.5) == "OK"
+    assert captured == {
+        "role": "decision_maker",
+        "json_mode": False,
+        "max_tokens": 8,
+        "timeout_seconds": 7.5,
+    }

@@ -21,4 +21,6 @@ if __name__ == "__main__":
         start_server=not args.no_server,
         step_delay=args.step_delay,
         hold_server=args.hold_server,
+        probe_llm=not args.skip_llm_probe,
+        llm_probe_timeout=args.llm_probe_timeout,
     )

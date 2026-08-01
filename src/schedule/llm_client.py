@@ -85,6 +85,21 @@ class LLMClient:
                     f"{binding['api_key_env']} is required for the {role} binding"
                 )
 
+    def probe(self, timeout_seconds: float = 20.0) -> str:
+        """Verify the configured LongCat route with a bounded live request."""
+        self.assert_ready()
+        response = self._call_api(
+            "You are a connectivity probe. Reply with OK only.",
+            "Reply with OK.",
+            role="decision_maker",
+            json_mode=False,
+            max_tokens=8,
+            timeout_seconds=timeout_seconds,
+        ).strip()
+        if not response:
+            raise LLMConfigurationError("LongCat probe returned an empty response")
+        return response
+
     def set_reviewer_memory(self, memory: str) -> None:
         self._reviewer_memory = memory
 
@@ -201,6 +216,8 @@ class LLMClient:
         user_prompt: str,
         role: str = "decision_maker",
         json_mode: bool = True,
+        max_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         """Call LongCat through its OpenAI-compatible ChatCompletions API."""
         from openai import OpenAI
@@ -213,7 +230,7 @@ class LLMClient:
         client = OpenAI(
             api_key=binding["api_key"],
             base_url=binding["api_base"],
-            timeout=120.0,
+            timeout=timeout_seconds or 120.0,
             max_retries=0,
         )
         kwargs = {
@@ -223,7 +240,7 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": binding["temperature"],
-            "max_tokens": binding["max_tokens"],
+            "max_tokens": max_tokens or binding["max_tokens"],
         }
         if json_mode and binding["supports_json_mode"]:
             kwargs["response_format"] = {"type": "json_object"}

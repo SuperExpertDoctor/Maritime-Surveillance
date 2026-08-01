@@ -17,20 +17,28 @@ Do not commit API keys.
 
 ## Run
 
-```powershell
-python main.py
-```
-
-In a second terminal:
+Start the persistent local console with one command:
 
 ```powershell
-cd src/vis/frontend
-npm install
-npm run dev
+.\scripts\console.ps1 start
 ```
 
-Open `http://localhost:5173`. The backend listens on `8765`. A completed
-simulation writes one JSON object per frame to `outputs/simulation_*.jsonl`.
+The launcher verifies LongCat-2.0 with a short live request before opening the
+backend, keeps the backend alive after the simulation completes, records PID
+files and logs under `.runtime/`, then starts Vite. Open `http://127.0.0.1:5173`.
+
+```powershell
+.\scripts\console.ps1 status
+.\scripts\console.ps1 stop
+```
+
+When the project uses a non-default Python environment, select it explicitly:
+
+```powershell
+.\scripts\console.ps1 start -PythonPath C:\path\to\python.exe
+```
+
+A completed simulation writes one JSON object per frame to `outputs/simulation_*.jsonl`.
 
 Useful CLI options:
 
@@ -38,6 +46,7 @@ Useful CLI options:
 python main.py --steps 480 --step-delay 0.05
 python main.py --steps 35 --no-server --step-delay 0
 python main.py --steps 1 --hold-server --step-delay 0
+python main.py --skip-llm-probe
 ```
 
 ## Verify

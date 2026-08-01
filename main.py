@@ -24,6 +24,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-server", action="store_true")
     parser.add_argument("--hold-server", action="store_true")
     parser.add_argument("--step-delay", type=float, default=0.05)
+    parser.add_argument("--skip-llm-probe", action="store_true")
+    parser.add_argument("--llm-probe-timeout", type=float, default=20.0)
     return parser
 
 
@@ -34,9 +36,14 @@ def main(
     start_server: bool = True,
     step_delay: float = 0.05,
     hold_server: bool = False,
+    probe_llm: bool = True,
+    llm_probe_timeout: float = 20.0,
 ) -> dict:
     config = ConfigLoader.load(config_path)
     engine = SimulationEngine(config)
+    if probe_llm:
+        engine.allocator.llm_client.probe(llm_probe_timeout)
+        print("LongCat-2.0 connectivity probe passed")
     app = None
     loop = None
     logger = None
@@ -129,4 +136,6 @@ if __name__ == "__main__":
         start_server=not args.no_server,
         step_delay=args.step_delay,
         hold_server=args.hold_server,
+        probe_llm=not args.skip_llm_probe,
+        llm_probe_timeout=args.llm_probe_timeout,
     )
