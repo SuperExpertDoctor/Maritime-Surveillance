@@ -674,15 +674,16 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
 }
 
 export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
-  const width = Math.max(194, cellSize * 8.2);
-  const height = 100;
+  const width = Math.max(178, Math.min(184, cellSize * 7.8));
+  const itemHeight = 18;
+  const height = 24 + 8 * itemHeight + 8;
   const canvasWidth = ctx.canvas.clientWidth || ctx.canvas.width;
   const canvasHeight = ctx.canvas.clientHeight || ctx.canvas.height;
   const mapRight = ox + 30 * cellSize;
   const sideSpace = canvasWidth - mapRight;
-  const useSidePanel = sideSpace >= width + 14;
+  const useSidePanel = sideSpace >= width + 14 && canvasHeight >= oy + height + 10;
   const x = useSidePanel ? mapRight + 10 : Math.max(8, canvasWidth - width - 12);
-  const y = useSidePanel ? Math.max(8, oy + 10) : Math.max(8, canvasHeight - height - 38);
+  const y = useSidePanel ? Math.max(8, oy + 10) : Math.max(8, canvasHeight - height - 14);
   ctx.fillStyle = "rgba(255, 255, 255, .94)";
   ctx.strokeStyle = "rgba(71, 85, 105, .72)";
   ctx.lineWidth = 1;
@@ -700,10 +701,8 @@ export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
     { color: "#334155", label: "TASK BORDER" },
   ];
   swatches.forEach((swatch, index) => {
-    const column = index % 2;
-    const row = Math.floor(index / 2);
-    const itemX = x + 7 + column * ((width - 14) / 2);
-    const itemY = y + 22 + row * 17;
+    const itemX = x + 9;
+    const itemY = y + 22 + index * itemHeight;
     ctx.fillStyle = swatch.color;
     ctx.fillRect(itemX, itemY, 10, 10);
     ctx.strokeStyle = "#64748B";
