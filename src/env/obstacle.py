@@ -179,32 +179,15 @@ def obstacle_grid_mask(
     return mask
 
 
-def coastal_land_mask(
-    base_positions: Iterable[Sequence[float]],
+def mainland_land_mask(
     resolution: tuple[int, int] = (30, 30),
-    depth_cells: int = 4,
+    width_cells: int = 5,
 ) -> np.ndarray:
-    """Build continuous mainland bands on the coastline hosting each base."""
+    """Build the unrendered left-side mainland constraint from the chart."""
     cols, rows = resolution
     mask = np.zeros((cols, rows), dtype=bool)
-    depth = max(1, min(int(depth_cells), min(cols, rows) // 2))
-    for position in base_positions:
-        col, row = int(position[0]), int(position[1])
-        edge = min(
-            (row, "top"),
-            (rows - 1 - row, "bottom"),
-            (col, "left"),
-            (cols - 1 - col, "right"),
-            key=lambda item: item[0],
-        )[1]
-        if edge == "top":
-            mask[:, :depth] = True
-        elif edge == "bottom":
-            mask[:, rows - depth:] = True
-        elif edge == "left":
-            mask[:depth, :] = True
-        else:
-            mask[cols - depth:, :] = True
+    width = max(1, min(int(width_cells), cols - 1))
+    mask[:width, :] = True
     return mask
 
 
@@ -309,7 +292,7 @@ def default_obstacles(
 __all__ = [
     "Thunderstorm",
     "Island",
-    "coastal_land_mask",
+    "mainland_land_mask",
     "obstacle_grid_mask",
     "obstacle_intersects_mask",
     "default_obstacles",

@@ -78,6 +78,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "assigned_uav_id": r.assigned_uav_id,
             "completion_pct": r.completion_pct,
             "created_cycle": r.created_cycle,
+            "cells": _task_cells(r),
         })
 
     # 跟踪区域
@@ -119,12 +120,16 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             ship_list.append({
                 "id": s.id,
                 "position": list(getattr(s, "float_position", (s.position.col, s.position.row))),
-                "group_id": s.group_id or "?",
+                "group_id": s.group_id or "G0",
                 "is_detected": s.detected,
                 "ship_type": getattr(getattr(s, "ship_type", None), "value", "destroyer"),
                 "heading_deg": math.degrees(getattr(s, "base_heading", 0.0)) % 360.0,
                 "is_military": getattr(s, "is_military", None),
                 "departed": bool(getattr(s, "departed", False)),
+                "is_evasive": bool(getattr(s, "is_evading", False)),
+                "radar_range_cells": float(
+                    getattr(s, "surface_search_radar_range_cells", 3.0)
+                ),
                 "estimated_position": (
                     list(s.estimated_position)
                     if getattr(s, "estimated_position", None) is not None
@@ -215,3 +220,22 @@ def _format_time(minutes: float) -> str:
     m = (total_seconds % 3600) // 60
     s = total_seconds % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _task_cells(region) -> list[list[int]]:
+    """Expose task areas as explicit, slightly irregular grid-cell sets."""
+    bbox = region.bbox
+    seed = sum(ord(char) for char in region.id)
+    cells = []
+    for col in range(bbox.col_start, bbox.col_end):
+        for row in range(bbox.row_start, bbox.row_end):
+            edge_distance = min(
+                col - bbox.col_start,
+                bbox.col_end - 1 - col,
+                row - bbox.row_start,
+                bbox.row_end - 1 - row,
+            )
+            if edge_distance == 0 and (col * 13 + row * 7 + seed) % 5 == 0:
+                continue
+            cells.append([col, row])
+    return cells

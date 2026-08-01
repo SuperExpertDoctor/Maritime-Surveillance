@@ -48,6 +48,7 @@ class Ship:
         self.departed = False
         self._detected = False
         self._being_tracked = False
+        self._evasive = False
         self._phase = random.uniform(0, 2 * math.pi)
         self._base_heading = random.uniform(0, 2 * math.pi) if base_heading is None else float(base_heading)
         self.trail: list[tuple[float, float]] = []
@@ -75,13 +76,33 @@ class Ship:
     def mark_detected(self) -> None:
         self._detected = True
 
+    @property
+    def is_evading(self) -> bool:
+        return self._evasive
+
+    @property
+    def surface_search_radar_range_cells(self) -> float:
+        """Sea-search radar footprint rendered around the target vessel."""
+        return 4.0 if self.ship_type is ShipType.AIRCRAFT_CARRIER else 3.0
+
     def set_tracked(self, tracked: bool) -> None:
-        self._being_tracked = bool(tracked)
+        tracked = bool(tracked)
+        if tracked and not self._being_tracked:
+            # Detection changes the former straight transit into a visible
+            # evasive zigzag.  The deterministic turn direction keeps replay
+            # runs reproducible without making every vessel evade identically.
+            turn_direction = 1.0 if sum(map(ord, self.id)) % 2 else -1.0
+            self._base_heading = (self._base_heading + turn_direction * math.pi / 5) % (2 * math.pi)
+            self._phase = 0.0
+            self._evasive = True
+        self._being_tracked = tracked
 
     def set_ais_signal(self, signal) -> None:
         self.ais_signal = signal
 
     def _motion_heading(self) -> float:
+        if not self._evasive:
+            return self._base_heading
         angular_rate = 2.0 * math.pi / max(self.zigzag_period_min, 1e-6)
         lateral_velocity = self.zigzag_amplitude_cells * angular_rate * math.cos(self._phase)
         return self._base_heading + math.atan2(lateral_velocity, max(self.speed_cells_per_min, 1e-6))

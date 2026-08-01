@@ -5,7 +5,7 @@ import { computeLayout, pixelToCoord } from "../renderer/geometry";
 import { renderFrame } from "../renderer/layers";
 
 const MAP_ASSET_SOURCES = {
-  background: "/assets/maritime-background.png",
+  background: "/assets/background.png",
   uav: "/assets/rainbow-uav.png",
   carrier: "/assets/carrier.png",
   destroyer: "/assets/destroyer.png",

@@ -1,5 +1,5 @@
 import { coordToPixel } from "./geometry";
-import { markerColor, PRIORITY_COLORS, UAV_STATUS_COLORS } from "./colors";
+import { markerColor, UAV_STATUS_COLORS } from "./colors";
 
 const FONT = '"Fira Code", "Microsoft YaHei", monospace';
 const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
@@ -25,44 +25,24 @@ function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
   ctx.fillText(value, x, y);
 }
 
-function coastlineEdge(position) {
-  const [col, row] = position;
-  return [
-    [row, "top"],
-    [29 - row, "bottom"],
-    [col, "left"],
-    [29 - col, "right"],
-  ].sort((left, right) => left[0] - right[0])[0][1];
-}
-
-function drawMapImage(ctx, image, cellSize, ox, oy, bases) {
+function drawMapImage(ctx, image, cellSize, ox, oy) {
   if (!image?.complete || !image.naturalWidth || !image.naturalHeight) return;
   const size = 30 * cellSize;
-  const crop = Math.min(image.naturalWidth, image.naturalHeight);
-  const edge = bases?.[0]?.position ? coastlineEdge(bases[0].position) : "left";
-  const rotation = { left: 0, top: Math.PI / 2, right: Math.PI, bottom: -Math.PI / 2 }[edge];
   ctx.save();
   ctx.beginPath();
   ctx.rect(ox, oy, size, size);
   ctx.clip();
-  ctx.translate(ox + size / 2, oy + size / 2);
-  ctx.rotate(rotation);
-  // The source chart adds seabed texture, while the semantic sea/land layers
-  // below remain the authoritative geography for the operational view.
-  ctx.globalAlpha = 0.16;
-  ctx.drawImage(image, 0, 0, crop, crop, -size / 2, -size / 2, size, size);
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = "rgba(255, 255, 255, .56)";
-  ctx.fillRect(-size / 2, -size / 2, size, size);
+  ctx.globalAlpha = 0.93;
+  ctx.drawImage(image, 0, 0, image.naturalWidth, image.naturalHeight, ox, oy, size, size);
   ctx.restore();
 }
 
-export function drawBackground(ctx, width, height, cellSize, ox, oy, bases, assets) {
+export function drawBackground(ctx, width, height, cellSize, ox, oy, assets) {
   ctx.fillStyle = "#FFFFFF";
   ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = "#B9E0F2";
+  ctx.fillStyle = "#075AA6";
   ctx.fillRect(ox, oy, 30 * cellSize, 30 * cellSize);
-  drawMapImage(ctx, assets?.background, cellSize, ox, oy, bases);
+  drawMapImage(ctx, assets?.background, cellSize, ox, oy);
   ctx.strokeStyle = "rgba(14, 116, 144, .56)";
   ctx.lineWidth = 1;
   ctx.strokeRect(ox - 0.5, oy - 0.5, 30 * cellSize + 1, 30 * cellSize + 1);
@@ -124,67 +104,6 @@ export function drawOceanTexture(ctx, cellSize, ox, oy) {
       if (col === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
-  }
-  ctx.restore();
-}
-
-export function drawCoastline(ctx, bases, cellSize, ox, oy) {
-  for (const base of bases || []) {
-    drawCoastlineForBase(ctx, base, cellSize, ox, oy);
-  }
-}
-
-function drawCoastlineForBase(ctx, base, cellSize, ox, oy) {
-  if (!base?.position) return;
-  const [col, row] = base.position;
-  const mapSize = 30 * cellSize;
-  const edge = coastlineEdge(base.position);
-  const span = mapSize;
-  const depth = 4 * cellSize;
-  const variation = [0.84, 0.92, 0.81, 0.96, 0.87, 0.94, 0.82, 0.9, 0.85];
-  const horizontalStart = ox;
-  const verticalStart = oy;
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(ox, oy, mapSize, mapSize);
-  ctx.clip();
-  ctx.fillStyle = "#A7CB80";
-  ctx.strokeStyle = "#517444";
-  ctx.lineWidth = 1.8;
-  ctx.beginPath();
-  if (edge === "top" || edge === "bottom") {
-    const outerY = edge === "top" ? oy : oy + mapSize;
-    ctx.moveTo(horizontalStart, outerY);
-    ctx.lineTo(horizontalStart + span, outerY);
-    for (let index = variation.length - 1; index >= 0; index -= 1) {
-      const x = horizontalStart + (index / (variation.length - 1)) * span;
-      const offset = variation[index] * depth;
-      const y = edge === "top" ? oy + offset : oy + mapSize - offset;
-      ctx.lineTo(x, y);
-    }
-  } else {
-    const outerX = edge === "left" ? ox - cellSize : ox + mapSize + cellSize;
-    ctx.moveTo(outerX, verticalStart);
-    ctx.lineTo(outerX, verticalStart + span);
-    for (let index = variation.length - 1; index >= 0; index -= 1) {
-      const y = verticalStart + (index / (variation.length - 1)) * span;
-      const offset = variation[index] * depth;
-      const x = edge === "left" ? ox + offset : ox + mapSize - offset;
-      ctx.lineTo(x, y);
-    }
-  }
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  ctx.globalAlpha = 0.18;
-  ctx.fillStyle = "#EAF5DD";
-  if (edge === "top" || edge === "bottom") {
-    const y = edge === "top" ? oy : oy + mapSize - depth * 0.44;
-    ctx.fillRect(ox, y, mapSize, depth * 0.44);
-  } else {
-    const x = edge === "left" ? ox : ox + mapSize - depth * 0.44;
-    ctx.fillRect(x, oy, depth * 0.44, mapSize);
   }
   ctx.restore();
 }
@@ -291,33 +210,44 @@ function drawMissionEnvelope(ctx, regions, cellSize, ox, oy) {
   text(ctx, label, x + 9, Math.max(oy + fontSize + 1, y - 4), "#075985", fontSize, 700);
 }
 
+function taskCells(region) {
+  if (Array.isArray(region.cells) && region.cells.length) return region.cells;
+  const [c0, r0, c1, r1] = region.bbox;
+  const seed = [...String(region.id || "S")].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  const cells = [];
+  for (let col = c0; col < c1; col += 1) {
+    for (let row = r0; row < r1; row += 1) {
+      const edgeDistance = Math.min(col - c0, c1 - 1 - col, row - r0, r1 - 1 - row);
+      const carveEdge = edgeDistance === 0 && (col * 13 + row * 7 + seed) % 5 === 0;
+      if (!carveEdge) cells.push([col, row]);
+    }
+  }
+  return cells;
+}
+
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
   for (const region of regions || []) {
-    const [c0, r0, c1, r1] = region.bbox;
-    const { x, y } = coordToPixel(c0, r0, cellSize, ox, oy);
-    const width = (c1 - c0) * cellSize;
-    const height = (r1 - r0) * cellSize;
-    const color = PRIORITY_COLORS[region.priority] || PRIORITY_COLORS.medium;
-    ctx.fillStyle = `${color}0D`;
-    ctx.fillRect(x, y, width, height);
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.35;
-    ctx.setLineDash([Math.max(4, cellSize * 0.34), Math.max(3, cellSize * 0.24)]);
-    ctx.strokeRect(x, y, width, height);
-    ctx.restore();
+    const color = "#F59E0B";
+    const cells = taskCells(region);
+    const assigned = Boolean(region.assigned_uav_id);
+    ctx.fillStyle = `${color}${assigned ? "70" : "52"}`;
+    for (const [col, row] of cells) {
+      const point = coordToPixel(col, row, cellSize, ox, oy);
+      ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
+    }
     const uav = (uavs || []).find((item) => item.id === region.assigned_uav_id);
     const arrow = uav?.sar_look_direction === "left" ? "<" : ">";
     const fontSize = Math.max(8, Math.min(10, cellSize * 0.34));
     const fullLabel = `${region.id} ${Math.round(region.completion_pct || 0)}% ${arrow}`;
     ctx.font = `700 ${fontSize}px ${FONT}`;
-    const availableWidth = Math.max(0, width - 8);
-    const label = ctx.measureText(fullLabel).width <= availableWidth ? fullLabel : region.id;
-    const labelWidth = Math.min(availableWidth, ctx.measureText(label).width + 8);
-    if (labelWidth > 0) {
+    const labelCell = cells[0];
+    if (labelCell) {
+      const point = coordToPixel(labelCell[0], labelCell[1], cellSize, ox, oy);
+      const label = cellSize >= 14 ? fullLabel : region.id;
+      const labelWidth = ctx.measureText(label).width + 8;
       ctx.fillStyle = "rgba(255, 255, 255, .9)";
-      ctx.fillRect(x + 3, y + 3, labelWidth, fontSize + 6);
-      text(ctx, label, x + 7, y + fontSize + 5, color, fontSize, 700);
+      ctx.fillRect(point.x + 2, point.y + 2, labelWidth, fontSize + 6);
+      text(ctx, label, point.x + 6, point.y + fontSize + 4, color, fontSize, 700);
     }
   }
 }
@@ -561,6 +491,29 @@ function drawClassificationSymbol(ctx, ship, center, size, military) {
   ctx.restore();
 }
 
+function drawShipRadar(ctx, ship, center, cellSize) {
+  if (ship.departed) return;
+  const radius = Math.max(cellSize * 1.6, Number(ship.radar_range_cells || 3) * cellSize);
+  const heading = (Number(ship.heading_deg) || 0) * Math.PI / 180;
+  ctx.save();
+  ctx.fillStyle = "rgba(6, 182, 212, .035)";
+  ctx.strokeStyle = "rgba(14, 116, 144, .68)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(34, 211, 238, .10)";
+  ctx.beginPath();
+  ctx.moveTo(center.x, center.y);
+  ctx.arc(center.x, center.y, radius, heading - Math.PI / 5, heading + Math.PI / 5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
   drawGroupRings(ctx, ships, cellSize, ox, oy);
   for (const ship of ships || []) {
@@ -585,6 +538,7 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
       x: clamp(rawCenter.x, ox + size + 2, ox + 30 * cellSize - size - 2),
       y: clamp(rawCenter.y, oy + size + 2, oy + 30 * cellSize - size - 2),
     };
+    drawShipRadar(ctx, ship, center, cellSize);
     ctx.save();
     ctx.globalAlpha = ship.departed ? 0.36 : 1;
     drawShipHull(ctx, ship, center, size, color, assets);
@@ -609,8 +563,12 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
       ctx.stroke();
       ctx.restore();
     }
-    const state = ship.departed ? "DEPARTED" : military ? "M" : ship.is_military === false ? "C" : "?";
-    const stateColor = ship.departed ? "#64748B" : military ? "#BE123C" : "#334155";
+    const state = ship.departed
+      ? "DEPARTED"
+      : ship.is_evasive
+        ? "EVADE"
+        : ship.ship_type === "carrier" ? "CV" : "DDG";
+    const stateColor = ship.departed ? "#64748B" : ship.is_evasive ? "#BE123C" : military ? "#BE123C" : "#334155";
     text(ctx, state, center.x + size + 3, center.y + 3, stateColor, Math.max(7, cellSize * 0.26), 700);
   }
 }
@@ -649,9 +607,8 @@ export function drawBases(ctx, bases, cellSize, ox, oy, phase) {
     ctx.stroke();
     ctx.restore();
     const baseLabel = `B${base.number || index + 1}`;
-    const edge = coastlineEdge(base.position);
-    const labelX = edge === "right" ? center.x - outerRadius - 30 : center.x + outerRadius + 4;
-    const labelY = edge === "bottom" ? center.y - 7 : center.y + 2;
+    const labelX = center.x + outerRadius + 4;
+    const labelY = center.y + 2;
     const fontSize = Math.max(7, cellSize * 0.25);
     text(ctx, baseLabel, labelX, labelY, color, fontSize, 700);
     text(ctx, `${base.occupancy || 0}/${base.capacity || 3}`, labelX, labelY + fontSize + 3, "#7F1D1D", Math.max(6, cellSize * 0.21), 600);
@@ -715,8 +672,8 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
 }
 
 export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
-  const width = Math.max(174, cellSize * 7.4);
-  const height = 48;
+  const width = Math.max(194, cellSize * 8.2);
+  const height = 82;
   const canvasWidth = ctx.canvas.clientWidth || ctx.canvas.width;
   const canvasHeight = ctx.canvas.clientHeight || ctx.canvas.height;
   const x = Math.max(8, canvasWidth - width - 12);
@@ -726,19 +683,25 @@ export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
   ctx.lineWidth = 1;
   ctx.fillRect(x, y, width, height);
   ctx.strokeRect(x, y, width, height);
-  text(ctx, "SCAN TRANSPARENCY", x + 7, y + 13, "#334155", 8, 700);
+  text(ctx, "MAP LEGEND", x + 7, y + 13, "#334155", 8, 700);
   const swatches = [
-    { color: "#050505", label: "BLACK 0.0" },
-    { color: "#737373", label: "GRAY 0.5" },
-    { color: "#F8FAFC", label: "WHITE 1.0" },
+    { color: "#D97706", label: "TASK CELLS" },
+    { color: "#0F766E", label: "SAR COVERAGE" },
+    { color: "#DC2626", label: "NO-FLY STORM" },
+    { color: "#0E7490", label: "SHIP RADAR" },
+    { color: "#2563EB", label: "UAV TRANSIT" },
+    { color: "#BE123C", label: "EVASIVE SHIP" },
   ];
   swatches.forEach((swatch, index) => {
-    const itemX = x + 7 + index * ((width - 14) / 3);
+    const column = index % 2;
+    const row = Math.floor(index / 2);
+    const itemX = x + 7 + column * ((width - 14) / 2);
+    const itemY = y + 22 + row * 17;
     ctx.fillStyle = swatch.color;
-    ctx.fillRect(itemX, y + 21, 10, 10);
+    ctx.fillRect(itemX, itemY, 10, 10);
     ctx.strokeStyle = "#64748B";
-    ctx.strokeRect(itemX, y + 21, 10, 10);
-    text(ctx, swatch.label, itemX + 13, y + 30, "#475569", 7, 600);
+    ctx.strokeRect(itemX, itemY, 10, 10);
+    text(ctx, swatch.label, itemX + 13, itemY + 9, "#475569", 7, 600);
   });
 }
 
@@ -778,12 +741,11 @@ export function renderFrame(ctx, frame, options = {}) {
   const width = ctx.canvas.clientWidth || ctx.canvas.width;
   const height = ctx.canvas.clientHeight || ctx.canvas.height;
   const bases = normalizeBases(frame?.bases, frame?.base_position);
-  drawBackground(ctx, width, height, cellSize, offsetX, offsetY, bases, assets);
+  drawBackground(ctx, width, height, cellSize, offsetX, offsetY, assets);
   if (frame) {
     drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY);
     drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
-    drawCoastline(ctx, bases, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
     drawMissionEnvelope(ctx, [...(frame.search_regions || []), ...(frame.track_regions || [])], cellSize, offsetX, offsetY);

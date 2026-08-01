@@ -5,21 +5,17 @@ from src.env.obstacle import Island, Thunderstorm, obstacle_intersects_mask
 from src.env.simulation import SimulationEngine
 from src.env.ship import ShipType
 from src.schedule.config_loader import ConfigLoader
-from src.schedule.datatypes import GridCoord
+from src.schedule.datatypes import BBox, GridCoord, Region
 from src.vis.backend.frame_builder import build_frame
 
 
-def test_default_engine_has_two_coastal_bases_with_three_refuelling_slots_each():
+def test_default_engine_has_two_left_mainland_bases_with_three_refuelling_slots_each():
     config = ConfigLoader.load()
     engine = SimulationEngine(config, seed=19)
 
     assert len(engine.bases) == 2
-    cols, rows = config.grid.resolution
     assert all(base.capacity == 3 for base in engine.bases)
-    assert all(
-        base.position.col in {0, cols - 1} or base.position.row in {0, rows - 1}
-        for base in engine.bases
-    )
+    assert all(engine.land_mask[base.position.col, base.position.row] for base in engine.bases)
     assert math.dist(engine.bases[0].position, engine.bases[1].position) >= config.environment.base_min_distance_cells
 
 
@@ -68,13 +64,7 @@ def test_reset_generates_a_fresh_two_base_coastal_scenario():
     first_positions = tuple(base.position for base in engine.bases)
 
     assert len(first_positions) == 2
-    for position in first_positions:
-        assert (
-            position.col <= config.environment.base_land_margin
-            or position.col >= config.grid.resolution[0] - 1 - config.environment.base_land_margin
-            or position.row <= config.environment.base_land_margin
-            or position.row >= config.grid.resolution[1] - 1 - config.environment.base_land_margin
-        )
+    assert all(engine.land_mask[position.col, position.row] for position in first_positions)
     assert all(
         math.dist(left, right) >= config.environment.base_min_distance_cells
         for index, left in enumerate(first_positions)
@@ -122,6 +112,27 @@ def test_frame_exposes_two_bases_and_reset_scenario_metadata():
     assert frame["reset_generation"] == 1
 
 
+def test_frame_exposes_search_tasks_as_colored_grid_cell_sets():
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    engine.allocator.sm.set_search_regions([
+        Region(id="S-cells", bbox=BBox(8, 8, 13, 13), type="search"),
+    ])
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    cells = frame["search_regions"][0]["cells"]
+    assert cells
+    assert len(cells) < 25
+    assert all(8 <= col < 13 and 8 <= row < 13 for col, row in cells)
+
+
 def test_base_capacity_sends_fourth_arrival_to_holding_then_refuels():
     config = ConfigLoader.load()
     config.environment.base_count = 1
@@ -167,6 +178,19 @@ def test_carrier_formation_always_has_two_destroyer_escorts():
         ]
         assert len(escorts) >= 2
         assert all(ship.base_heading == carrier.base_heading for ship in escorts)
+
+
+def test_target_ship_changes_course_and_starts_zigzagging_when_tracked():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    ship = engine.ships[0]
+    ship._phase = 0.0
+    original_heading = ship.base_heading
+
+    ship.set_tracked(True)
+
+    assert ship.is_evading
+    assert ship.base_heading != original_heading
+    assert ship._motion_heading() != ship.base_heading
 
 
 def test_dissipated_storm_is_replaced_at_configured_density():

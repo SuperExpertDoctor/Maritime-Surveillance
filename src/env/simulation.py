@@ -12,7 +12,7 @@ from src.env.ais_signal import generate_ais_signal
 from src.env.obstacle import (
     Island,
     Thunderstorm,
-    coastal_land_mask,
+    mainland_land_mask,
     default_obstacles,
     obstacle_grid_mask,
     obstacle_intersects_mask,
@@ -52,10 +52,9 @@ class SimulationEngine:
         self.allocator = TaskAllocator(config)
         self.allocator.llm_client.assert_ready()
         self.allocator.sm.set_base_positions(base_positions)
-        self.land_mask = coastal_land_mask(
-            base_positions,
+        self.land_mask = mainland_land_mask(
             config.grid.resolution,
-            config.environment.coastal_land_depth_cells,
+            config.environment.mainland_width_cells,
         )
         self.allocator.sm.set_land_mask(self.land_mask)
         self.allocator.sm.scenario_seed = seed
@@ -214,12 +213,12 @@ class SimulationEngine:
         cols, rows = self.config.grid.resolution
         if not 1 <= cfg.base_count <= 3:
             raise ValueError("base_count must be between 1 and 3")
-        margin = max(0, int(cfg.base_land_margin))
+        mainland_width = max(2, min(int(cfg.mainland_width_cells), cols - 1))
+        inland_column_end = max(2, min(mainland_width - 1, 3))
         candidates = [
             (col, row)
-            for col in range(cols)
-            for row in range(rows)
-            if col <= margin or col >= cols - 1 - margin or row <= margin or row >= rows - 1 - margin
+            for col in range(1, inland_column_end)
+            for row in range(2, rows - 2)
         ]
         self.rng.shuffle(candidates)
         selected: list[tuple[int, int]] = []
@@ -231,8 +230,9 @@ class SimulationEngine:
         raise RuntimeError("unable to place the requested separated coastal bases")
 
     def _random_ship_group_center(self, islands: list[Island]) -> tuple[float, float]:
+        mainland_width = self.config.environment.mainland_width_cells
         for _ in range(200):
-            center = (self.rng.uniform(4.0, 25.0), self.rng.uniform(4.0, 25.0))
+            center = (self.rng.uniform(mainland_width + 2.0, 25.0), self.rng.uniform(4.0, 25.0))
             col, row = int(round(center[0])), int(round(center[1]))
             if (
                 not self.land_mask[col, row]
@@ -249,6 +249,8 @@ class SimulationEngine:
         return 1.25 * math.cos(phase), 1.25 * math.sin(phase)
 
     def _inward_heading(self, position: GridCoord) -> float:
+        if position.col < self.config.environment.mainland_width_cells:
+            return 0.0
         margin = self.config.environment.base_land_margin
         cols, rows = self.config.grid.resolution
         if position.row <= margin:

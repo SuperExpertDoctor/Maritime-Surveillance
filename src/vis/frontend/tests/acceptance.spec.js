@@ -22,7 +22,7 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   const config = await page.evaluate(() => fetch("/api/config").then((response) => response.json()));
   expect(config.environment.base_count).toBe(2);
   expect(config.environment.base_land_margin).toBe(0);
-  expect(config.environment.coastal_land_depth_cells).toBe(4);
+  expect(config.environment.mainland_width_cells).toBe(5);
   expect(config.environment.island_count_min).toBe(0);
   expect(config.environment.island_count_max).toBe(2);
   expect(config.environment.base_task_min_distance_cells).toBe(3);
@@ -30,7 +30,7 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   expect(config.environment.thunderstorm_count_min).toBe(2);
   expect(config.environment.thunderstorm_count_max).toBe(3);
   const assetStatuses = await page.evaluate(() => Promise.all([
-    "/assets/maritime-background.png",
+    "/assets/background.png",
     "/assets/rainbow-uav.png",
     "/assets/carrier.png",
     "/assets/destroyer.png",

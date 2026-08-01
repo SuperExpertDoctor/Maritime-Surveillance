@@ -6,8 +6,8 @@ base_count: 2
 base_capacity: 3
 base_min_distance_cells: 5
 base_land_margin: 0
-# Continuous mainland depth on each coastline that hosts an air base.
-coastal_land_depth_cells: 4
+# The provided chart places the mainland on the left edge of the map.
+mainland_width_cells: 5
 base_task_min_distance_cells: 3
 base_obstacle_clearance_cells: 4
 # Open-water default: sparse 10--20 km islands and thunderstorms.
