@@ -14,6 +14,7 @@ def test_config_loader_reads_merged_environment_and_llm_parameters():
     assert config.llm.heavy_cycle_min == 30
     assert config.llm.reviewer_cycle_min == 15
     assert config.common.clear_outputs_before_run is True
+    assert config.environment.base_position == (2, 14)
 
 
 def test_clear_output_cache_removes_only_output_directory_contents(tmp_path: Path):

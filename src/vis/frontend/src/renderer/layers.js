@@ -13,10 +13,18 @@ function clamp(value, minimum, maximum) {
 }
 
 function normalizeBases(bases, basePosition) {
-  if (bases?.length) return bases;
-  return basePosition
-    ? [{ position: basePosition, number: 1, occupancy: 0, capacity: 3, busy: false }]
-    : [];
+  const source = bases?.length
+    ? bases
+    : basePosition
+      ? [{ position: basePosition, number: 1, occupancy: 0, capacity: 3, busy: false }]
+      : [];
+  return source.map((base, index) => {
+    const [col, row] = base.position || [2 + index, 14];
+    // Historic replay files may contain offshore base coordinates.  The
+    // marker remains anchored on the mainland without changing frame data.
+    const displayPosition = col >= 5 ? [2 + Math.min(index, 1), row] : [col, row];
+    return { ...base, displayPosition };
+  });
 }
 
 function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
@@ -25,30 +33,35 @@ function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
   ctx.fillText(value, x, y);
 }
 
-function drawMapImage(ctx, image, cellSize, ox, oy) {
+function drawMapImage(ctx, image, bounds) {
   if (!image?.complete || !image.naturalWidth || !image.naturalHeight) return;
-  const size = 30 * cellSize;
   ctx.save();
   ctx.beginPath();
-  ctx.rect(ox, oy, size, size);
+  ctx.rect(bounds.x, bounds.y, bounds.width, bounds.height);
   ctx.clip();
-  ctx.globalAlpha = 0.93;
-  ctx.drawImage(image, 0, 0, image.naturalWidth, image.naturalHeight, ox, oy, size, size);
+  ctx.globalAlpha = 0.96;
+  ctx.drawImage(image, 0, 0, image.naturalWidth, image.naturalHeight, bounds.x, bounds.y, bounds.width, bounds.height);
   ctx.restore();
 }
 
-export function drawBackground(ctx, width, height, cellSize, ox, oy, assets) {
+export function drawBackground(ctx, width, height, cellSize, ox, oy, mapBounds, assets) {
   ctx.fillStyle = "#FFFFFF";
   ctx.fillRect(0, 0, width, height);
   ctx.fillStyle = "#075AA6";
-  ctx.fillRect(ox, oy, 30 * cellSize, 30 * cellSize);
-  drawMapImage(ctx, assets?.background, cellSize, ox, oy);
+  ctx.fillRect(mapBounds.x, mapBounds.y, mapBounds.width, mapBounds.height);
+  drawMapImage(ctx, assets?.background, mapBounds);
   ctx.strokeStyle = "#0B3857";
   ctx.lineWidth = 2.25;
+  ctx.strokeRect(mapBounds.x - 1, mapBounds.y - 1, mapBounds.width + 2, mapBounds.height + 2);
+  ctx.save();
+  ctx.strokeStyle = "rgba(15, 23, 42, .94)";
+  ctx.lineWidth = 1.7;
+  ctx.setLineDash([6, 4]);
   ctx.strokeRect(ox - 1, oy - 1, 30 * cellSize + 2, 30 * cellSize + 2);
+  ctx.restore();
   ctx.save();
   ctx.fillStyle = "rgba(255, 255, 255, .88)";
-  ctx.fillRect(ox + 5, oy + 5, Math.max(158, cellSize * 8.7), Math.max(15, cellSize * 0.7));
+  ctx.fillRect(ox + 5, oy + 5, Math.min(30 * cellSize - 10, Math.max(158, cellSize * 8.7)), Math.max(15, cellSize * 0.7));
   text(ctx, "TASK AREA / 300 x 300 KM", ox + 9, oy + Math.max(16, cellSize * 0.62), "#0B3857", Math.max(7, cellSize * 0.27), 700);
   ctx.restore();
 
@@ -308,14 +321,27 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId) {
   }
 }
 
-function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId) {
+function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode) {
   for (const uav of uavs || []) {
     const trail = uav.trail || [];
     if (trail.length < 2) continue;
     const color = UAV_STATUS_COLORS[uav.status] || "#475569";
-    const start = Math.max(1, trail.length - 72);
     ctx.save();
     ctx.lineCap = "round";
+    if (trailMode === "full") {
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = uav.id === selectedId ? 0.9 : 0.62;
+      ctx.lineWidth = uav.id === selectedId ? 2.2 : 1.35;
+      ctx.beginPath();
+      trail.forEach(([col, row], index) => {
+        const point = gridCenter(col, row, cellSize, ox, oy);
+        if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+      });
+      ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    const start = Math.max(1, trail.length - 72);
     for (let index = start; index < trail.length; index += 1) {
       const previous = gridCenter(trail[index - 1][0], trail[index - 1][1], cellSize, ox, oy);
       const current = gridCenter(trail[index][0], trail[index][1], cellSize, ox, oy);
@@ -588,7 +614,8 @@ function drawBaseStar(ctx, center, outerRadius, innerRadius) {
 
 export function drawBases(ctx, bases, cellSize, ox, oy, phase) {
   for (const [index, base] of (bases || []).entries()) {
-    const center = gridCenter(base.position[0], base.position[1], cellSize, ox, oy);
+    const position = base.displayPosition || base.position;
+    const center = gridCenter(position[0], position[1], cellSize, ox, oy);
     const color = "#DC2626";
     const outerRadius = Math.max(8, cellSize * 0.48);
     const innerRadius = outerRadius * 0.46;
@@ -673,25 +700,19 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
   }
 }
 
-export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
-  const canvasWidth = ctx.canvas.clientWidth || ctx.canvas.width;
-  const canvasHeight = ctx.canvas.clientHeight || ctx.canvas.height;
-  const mapRight = ox + 30 * cellSize;
-  const sideSpace = canvasWidth - mapRight;
-  const horizontalInset = 10;
-  const usableWidth = Math.floor(sideSpace - horizontalInset * 2);
-  // The legend belongs only in the right-side whitespace, never over the map.
-  if (usableWidth < 128) return;
-  const width = clamp(usableWidth, 128, 160);
-  const availableHeight = Math.max(0, canvasHeight - oy - 20);
+export function drawTransparencyLegend(ctx, bounds) {
+  if (!bounds || bounds.width < 128) return;
+  const horizontalInset = 8;
+  const width = Math.max(128, bounds.width - horizontalInset * 2);
+  const availableHeight = bounds.height;
   const itemHeight = clamp(Math.floor((availableHeight - 32) / 8), 13, 17);
   const swatchSize = clamp(Math.floor(itemHeight * 0.58), 7, 10);
   const titleSize = clamp(Math.floor(width * 0.055), 7, 8);
   const labelSize = clamp(Math.floor(width * 0.045), 6, 7);
   const height = 24 + 8 * itemHeight + 8;
   if (height > availableHeight) return;
-  const x = mapRight + horizontalInset;
-  const y = Math.max(8, Math.min(oy + 10, canvasHeight - height - 8));
+  const x = bounds.x + horizontalInset;
+  const y = bounds.y + 10;
   ctx.fillStyle = "rgba(255, 255, 255, .94)";
   ctx.strokeStyle = "rgba(71, 85, 105, .72)";
   ctx.lineWidth = 1;
@@ -751,11 +772,20 @@ export function renderFrame(ctx, frame, options = {}) {
     selectedUavId,
     frameCount = 0,
     assets,
+    mapBounds,
+    legendBounds,
+    trailMode = "tail",
   } = options;
   const width = ctx.canvas.clientWidth || ctx.canvas.width;
   const height = ctx.canvas.clientHeight || ctx.canvas.height;
   const bases = normalizeBases(frame?.bases, frame?.base_position);
-  drawBackground(ctx, width, height, cellSize, offsetX, offsetY, assets);
+  const fallbackBounds = {
+    x: offsetX,
+    y: offsetY,
+    width: 30 * cellSize,
+    height: 30 * cellSize,
+  };
+  drawBackground(ctx, width, height, cellSize, offsetX, offsetY, mapBounds || fallbackBounds, assets);
   if (frame) {
     drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY);
     drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
@@ -765,14 +795,14 @@ export function renderFrame(ctx, frame, options = {}) {
     drawMissionEnvelope(ctx, [...(frame.search_regions || []), ...(frame.track_regions || [])], cellSize, offsetX, offsetY);
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
     drawTrackRegions(ctx, frame.track_regions, frame.ships, cellSize, offsetX, offsetY);
-    drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId);
+    drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
     drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
     drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets);
     drawBases(ctx, bases, cellSize, offsetX, offsetY, frameCount);
-    drawTransparencyLegend(ctx, cellSize, offsetX, offsetY);
+    drawTransparencyLegend(ctx, legendBounds);
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);
 }

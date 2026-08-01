@@ -1,7 +1,7 @@
 sea_area_km: [300, 300]
 # Retained as the V1-compatible default and initial StateManager position.
 # The operational base is generated on the coastline on each engine reset.
-base_position: [15, 28]
+base_position: [2, 14]
 base_count: 2
 base_capacity: 3
 base_min_distance_cells: 5

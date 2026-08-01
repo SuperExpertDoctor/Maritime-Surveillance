@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Grid3X3, History, PanelBottom, PanelRight, Radio } from "lucide-react";
+import { Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
 
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
@@ -15,6 +15,7 @@ export default function App() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
+  const [trailMode, setTrailMode] = useState("tail");
   const [liveEvents, setLiveEvents] = useState([]);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
   const live = useWebSocket(mode === "live");
@@ -102,6 +103,34 @@ export default function App() {
           {mode === "live" ? connectionLabel : replay.error || (replay.loading ? "载入中" : `${replay.frames.length} 帧`)}
         </span>
         <div className="top-actions">
+          <div className="trail-mode-switch" role="group" aria-label="UAV轨迹显示模式">
+            <button
+              className={trailMode === "full" ? "active" : ""}
+              onClick={() => setTrailMode("full")}
+              title="完整 UAV 轨迹"
+              aria-label="完整 UAV 轨迹"
+              aria-pressed={trailMode === "full"}
+            >
+              <Route size={16} />
+            </button>
+            <button
+              className={trailMode === "tail" ? "active" : ""}
+              onClick={() => setTrailMode("tail")}
+              title="动态长尾 UAV 轨迹"
+              aria-label="动态长尾 UAV 轨迹"
+              aria-pressed={trailMode === "tail"}
+            >
+              <Wind size={16} />
+            </button>
+          </div>
+          <button
+            className="trail-mode-compact"
+            onClick={() => setTrailMode((value) => (value === "full" ? "tail" : "full"))}
+            title={trailMode === "full" ? "完整 UAV 轨迹，点击切换动态长尾" : "动态长尾 UAV 轨迹，点击切换完整轨迹"}
+            aria-label="切换 UAV 轨迹显示模式"
+          >
+            {trailMode === "full" ? <Route size={17} /> : <Wind size={17} />}
+          </button>
           <button className={showGrid ? "icon-btn active" : "icon-btn"} onClick={() => setShowGrid((value) => !value)} title="网格" aria-label="切换网格">
             <Grid3X3 size={17} />
           </button>
@@ -119,6 +148,7 @@ export default function App() {
         selectedUavId={selectedUavId}
         onSelectUav={setSelectedUavId}
         showGrid={showGrid}
+        trailMode={trailMode}
       />
       <RightSidebar
         frame={frame}

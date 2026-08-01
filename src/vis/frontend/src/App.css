@@ -202,6 +202,51 @@ button {
   margin-left: auto;
 }
 
+.trail-mode-switch {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.trail-mode-switch button {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  background: var(--panel);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.trail-mode-switch button + button {
+  border-left: 1px solid var(--line);
+}
+
+.trail-mode-switch button:hover,
+.trail-mode-switch button.active {
+  background: var(--panel-hover);
+  color: var(--cyan);
+}
+
+.trail-mode-compact {
+  display: none;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.trail-mode-compact:hover {
+  background: var(--panel-hover);
+  border-color: var(--line);
+  color: var(--cyan);
+}
+
 .icon-btn,
 .transport-btn,
 .drawer-close,
@@ -1105,6 +1150,16 @@ button {
   }
 
   .icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .trail-mode-switch {
+    display: none;
+  }
+
+  .trail-mode-compact {
+    display: inline-grid;
     width: 36px;
     height: 36px;
   }

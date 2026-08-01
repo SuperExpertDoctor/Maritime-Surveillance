@@ -53,6 +53,12 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   expect(canvasEvidence.opaque).toBeGreaterThan(100);
   expect(canvasEvidence.colors).toBeGreaterThan(4);
   expect(canvasEvidence.width).toBeGreaterThan(500);
+  await page.locator(".trail-mode-switch button").nth(0).click();
+  await expect(page.locator(".trail-mode-switch button").nth(0)).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: "test-results/trajectory-full.png", fullPage: true });
+  await page.locator(".trail-mode-switch button").nth(1).click();
+  await expect(page.locator(".trail-mode-switch button").nth(1)).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: "test-results/trajectory-tail.png", fullPage: true });
   await page.screenshot({
     path: "test-results/acceptance-live-desktop.png",
     fullPage: true,
@@ -71,6 +77,10 @@ test("live and replay dashboard acceptance", async ({ page }) => {
 
   await page.locator(".timeline-control input").fill("239");
   await expect(readout).toContainText("240 / 480");
+  await page.locator(".trail-mode-switch button").nth(0).click();
+  await page.screenshot({ path: "test-results/trajectory-replay-full.png", fullPage: true });
+  await page.locator(".trail-mode-switch button").nth(1).click();
+  await page.screenshot({ path: "test-results/trajectory-replay-tail.png", fullPage: true });
   await page.locator(".canvas-area").click({ position: { x: 18, y: 18 } });
   await page.keyboard.press("Digit5");
   await expect(readout).toContainText("241 / 480");

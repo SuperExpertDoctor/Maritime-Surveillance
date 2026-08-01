@@ -26,6 +26,7 @@ export default function CanvasMap({
   selectedUavId,
   onSelectUav,
   showGrid = false,
+  trailMode = "tail",
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -79,13 +80,16 @@ export default function CanvasMap({
     let phase = 0;
 
     const render = () => {
-      const { cellSize, offsetX, offsetY } = layoutRef.current;
+      const { cellSize, offsetX, offsetY, mapBounds, legendBounds } = layoutRef.current;
       context.save();
       renderFrame(context, frame, {
         cellSize,
         offsetX,
         offsetY,
+        mapBounds,
+        legendBounds,
         showGrid,
+        trailMode,
         hoverInfo: hoverRef.current,
         selectedUavId,
         frameCount: phase,
@@ -100,7 +104,7 @@ export default function CanvasMap({
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, mapAssets, selectedUavId, showGrid, sizeVersion]);
+  }, [frame, mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;
