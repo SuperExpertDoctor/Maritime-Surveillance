@@ -17,6 +17,18 @@ class TriggerManager:
         self._last_light_time: float = 0.0
 
     def notify_event(self, event_type: str, time: float, **kwargs) -> None:
+        # Dedup: skip duplicate (event_type, uav_id) within a 5-min window
+        # to prevent a single UAV from flooding the event queue with the
+        # same event type (e.g. repeated storm_avoidance or fuel warnings).
+        uav_id = kwargs.get("uav_id", "")
+        if uav_id:
+            for existing in self._pending_events:
+                if (
+                    existing["type"] == event_type
+                    and existing.get("uav_id") == uav_id
+                    and time - existing["time"] <= 5.0
+                ):
+                    return  # duplicate suppressed
         self._pending_events.append({
             "type": event_type,
             "time": time,
@@ -54,13 +66,29 @@ class TriggerManager:
         if not recent:
             return TriggerDecision("none")
 
+        # Heavy: structural changes requiring LLM re-planning
         heavy_types = {
             "uav_returned",
             "target_found",
             "target_lost",
             "lifecycle_completed",
+            # GOAL2: tracking resource released — need LLM to re-plan regions
+            "target_departed",
+            "civilian_released",
+            "target_military",
+            # GOAL2: dynamic environment — storms may open/block searchable area
+            "storm_spawned",
+            "storm_dissipated",
         }
-        light_types = {"search_complete", "uav_refueled"}
+        # Light: incremental adjustments handled by Hungarian pairing only
+        light_types = {
+            "search_complete",
+            "uav_refueled",
+            # GOAL2: base congestion — re-pair idle UAVs without LLM
+            "base_capacity_full",
+            # GOAL2: proactive fuel warning — pre-assign replacement UAV
+            "uav_fuel_low_warning",
+        }
 
         heavy_count = sum(1 for e in recent if e["type"] in heavy_types)
         light_count = sum(1 for e in recent if e["type"] in light_types)

@@ -66,6 +66,7 @@ class UAVEntity:
         self.completed_searches_since_refuel = 0
         self._mission_kind = ""
         self._fuel_low_reported = False
+        self.fuel_warning_sent = False  # GOAL2: proactive 25% fuel warning flag
         self._holding_center: tuple[float, float] | None = None
         self.avoidance_level = 0
         self.avoidance_path: list[Pose] = []
@@ -540,6 +541,7 @@ class UAVEntity:
         self.sensor_mode = "off"
         self._clear_sar_acquisition()
         self._fuel_low_reported = False
+        self.fuel_warning_sent = False  # GOAL2: reset proactive warning
         self.completed_searches_since_refuel = 0
         self.target_group_id = None
         self.assigned_region = None

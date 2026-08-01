@@ -306,6 +306,21 @@ class SimulationEngine:
                 storm_zones=storms,
             )
             self._record_storm_avoidance(uav, t)
+            # GOAL2: proactive fuel warning at 25% — gives the scheduler time
+            # to pre-assign a replacement before the critical 8% return trigger.
+            if (
+                uav.fuel_remaining_pct <= 0.25
+                and not uav.fuel_warning_sent
+                and uav.status in ("searching", "tracking", "transit")
+            ):
+                uav.fuel_warning_sent = True
+                self.allocator.trigger_manager.notify_event(
+                    "uav_fuel_low_warning",
+                    time=t,
+                    uav_id=uav.id,
+                    fuel_pct=round(uav.fuel_remaining_pct, 3),
+                    status=uav.status,
+                )
             if uav.status == "searching":
                 self._sortie_searched[uav.id] = True
                 self._search_started_at.setdefault(uav.id, t)
@@ -413,12 +428,26 @@ class SimulationEngine:
                 active.append(obstacle)
         for storm in dissipated_storms:
             self.allocator.sm.add_event("storm_dissipated", {"storm_id": storm.id})
+            self.allocator.trigger_manager.notify_event(
+                "storm_dissipated",
+                time=self.clock.time,
+                storm_id=storm.id,
+                position={"col": storm.center[0], "row": storm.center[1]},
+                size=storm.size,
+            )
         while sum(isinstance(obstacle, Thunderstorm) for obstacle in active) < self._storm_target_count:
             replacement = self._spawn_thunderstorm(active)
             if replacement is None:
                 break
             active.append(replacement)
             self.allocator.sm.add_event("storm_spawned", {"storm_id": replacement.id})
+            self.allocator.trigger_manager.notify_event(
+                "storm_spawned",
+                time=self.clock.time,
+                storm_id=replacement.id,
+                position={"col": replacement.center[0], "row": replacement.center[1]},
+                size=replacement.size,
+            )
         self.obstacles = active
         self.obstacle_mask = obstacle_grid_mask(
             active,
@@ -1127,6 +1156,12 @@ class SimulationEngine:
                     "occupancy": base.occupancy,
                     "capacity": base.capacity,
                 })
+                self.allocator.trigger_manager.notify_event(
+                    "base_capacity_full",
+                    time=current_time,
+                    uav_id=uav.id,
+                    base_id=base.id,
+                )
         for base in self.bases:
             for uav_id in base.step(self.clock.dt_min):
                 uav = next(item for item in self.uavs if item.id == uav_id)
