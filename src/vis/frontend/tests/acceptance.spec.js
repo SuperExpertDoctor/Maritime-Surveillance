@@ -51,6 +51,50 @@ async function getSensorBeamEvidence(page) {
   });
 }
 
+async function getTrailModeEvidence(page) {
+  return page.evaluate(async () => {
+    const { drawUavTrails } = await import("/src/renderer/layers.js");
+    const trace = Array.from({ length: 100 }, (_, index) => [
+      index * 0.35,
+      12 + Math.sin(index / 10) * 1.4,
+    ]);
+    const renderMetrics = (mode) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 460;
+      canvas.height = 280;
+      const context = canvas.getContext("2d");
+      drawUavTrails(context, [{
+        id: "UAV-TRACE",
+        status: "searching",
+        trail: trace,
+      }], 10, 20, 20, "UAV-TRACE", mode);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let minX = canvas.width;
+      let maxX = 0;
+      let minY = canvas.height;
+      let maxY = 0;
+      let opaque = 0;
+      for (let y = 0; y < canvas.height; y += 1) {
+        for (let x = 0; x < canvas.width; x += 1) {
+          const alpha = pixels[(y * canvas.width + x) * 4 + 3];
+          if (alpha <= 4) continue;
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+          opaque += 1;
+        }
+      }
+      return { minX, maxX, minY, maxY, opaque };
+    };
+    return {
+      full: renderMetrics("full"),
+      tail: renderMetrics("tail"),
+      comet: renderMetrics("comet"),
+    };
+  });
+}
+
 test("sensor beam renderer exposes SAR and EO scan shapes", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".connection-state")).toHaveClass(/connected/);
@@ -133,6 +177,12 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   const sensorBeamEvidence = await getSensorBeamEvidence(page);
   expect(sensorBeamEvidence.sarPixels).toBeGreaterThan(100);
   expect(sensorBeamEvidence.eoPixels).toBeGreaterThan(10);
+  const trailModeEvidence = await getTrailModeEvidence(page);
+  expect(trailModeEvidence.tail.minX).toBeGreaterThan(trailModeEvidence.full.minX + 60);
+  expect(trailModeEvidence.comet.maxY - trailModeEvidence.comet.minY).toBeGreaterThan(
+    trailModeEvidence.full.maxY - trailModeEvidence.full.minY + 2,
+  );
+  expect(trailModeEvidence.comet.opaque).toBeGreaterThan(trailModeEvidence.full.opaque + 200);
   const layerSource = await page.evaluate(() => fetch("/src/renderer/layers.js").then((response) => response.text()));
   expect(layerSource).not.toContain("drawMissionEnvelope");
   await page.locator(".trail-mode-switch button").nth(0).click();
@@ -141,6 +191,11 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await page.locator(".trail-mode-switch button").nth(1).click();
   await expect(page.locator(".trail-mode-switch button").nth(1)).toHaveAttribute("aria-pressed", "true");
   await page.screenshot({ path: "test-results/trajectory-tail.png", fullPage: true });
+  await page.locator(".trail-mode-switch button").nth(2).click();
+  await expect(page.locator(".trail-mode-switch button").nth(2)).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".trail-mode-switch button").nth(0)).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".trail-mode-switch button").nth(1)).toHaveAttribute("aria-pressed", "false");
+  await page.screenshot({ path: "test-results/trajectory-comet.png", fullPage: true });
   await page.screenshot({
     path: "test-results/acceptance-live-desktop.png",
     fullPage: true,
@@ -167,6 +222,9 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await page.screenshot({ path: "test-results/trajectory-replay-full.png", fullPage: true });
   await page.locator(".trail-mode-switch button").nth(1).click();
   await page.screenshot({ path: "test-results/trajectory-replay-tail.png", fullPage: true });
+  await page.locator(".trail-mode-switch button").nth(2).click();
+  await expect(page.locator(".trail-mode-switch button").nth(2)).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: "test-results/trajectory-replay-comet.png", fullPage: true });
   await page.locator(".canvas-area").click({ position: { x: 18, y: 18 } });
   await page.keyboard.press("Digit5");
   await expect(readout).toContainText("241 / 480");

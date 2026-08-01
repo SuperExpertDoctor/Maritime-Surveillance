@@ -13,6 +13,11 @@ from src.utils.storm_avoider import StormAvoider, ThreatLevel
 from src.utils.track_orbit import LGVFTracker
 
 
+# The standard mission lasts eight hours at one simulation sample per minute.
+# Keep its full flight history so the "full" trail mode is not silently truncated.
+MAX_VISUAL_TRAIL_POINTS = 480
+
+
 def _wrap_pi(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
@@ -284,7 +289,7 @@ class UAVEntity:
             )
 
         self.trail.append(self.float_position)
-        if len(self.trail) > 240:
+        if len(self.trail) > MAX_VISUAL_TRAIL_POINTS:
             self.trail.pop(0)
 
         if (

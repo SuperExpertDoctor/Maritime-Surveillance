@@ -79,7 +79,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "along_track": beam.along_track,
                 "polygon": [list(point) for point in beam.polygon],
             }
-        trail = [list(point) for point in entity.trail[-120:]] if entity else []
+        # Preserve a complete standard eight-hour sortie for the full trail mode.
+        trail = [list(point) for point in entity.trail[-480:]] if entity else []
         fallback_heading = entity.heading_deg if entity is not None else u.heading_deg
         uavs.append({
             "id": u.id,

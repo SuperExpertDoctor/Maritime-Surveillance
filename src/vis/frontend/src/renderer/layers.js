@@ -376,7 +376,7 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
   }
 }
 
-function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode) {
+export function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode) {
   for (const uav of uavs || []) {
     const trail = uav.trail || [];
     if (trail.length < 2) continue;

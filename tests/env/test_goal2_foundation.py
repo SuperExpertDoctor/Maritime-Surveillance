@@ -4,6 +4,7 @@ from src.env.base_station import BaseStation
 from src.env.obstacle import Island, Thunderstorm, obstacle_intersects_mask
 from src.env.simulation import SimulationEngine
 from src.env.ship import ShipType
+from src.env.uav_entity import MAX_VISUAL_TRAIL_POINTS, UAVEntity
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox, GridCoord, Region
 from src.vis.backend.frame_builder import build_frame
@@ -25,6 +26,20 @@ def test_initial_scheduler_positions_match_alternating_physical_launch_bases():
     assert [state.position for state in engine.allocator.sm.get_all_uavs()] == [
         uav.position for uav in engine.uavs
     ]
+
+
+def test_uav_visual_trail_keeps_a_full_eight_hour_mission_history():
+    uav = UAVEntity(
+        "UAV-test",
+        GridCoord(1, 1),
+        endurance_h=8.0,
+        cruise_speed_kmh=160.0,
+    )
+
+    for _ in range(MAX_VISUAL_TRAIL_POINTS + 1):
+        uav.step(1.0)
+
+    assert len(uav.trail) == MAX_VISUAL_TRAIL_POINTS
 
 
 def test_default_open_water_has_at_most_two_islands():
@@ -104,6 +119,7 @@ def test_explicit_reset_seed_rebuilds_the_same_clean_scenario():
 def test_frame_exposes_two_bases_and_reset_scenario_metadata():
     engine = SimulationEngine(ConfigLoader.load(), seed=41)
     engine.reset(seed=43)
+    engine.uavs[0].trail = [(float(index), 1.0) for index in range(MAX_VISUAL_TRAIL_POINTS)]
     frame = build_frame(
         engine.allocator.sm,
         cycle=0,
@@ -116,6 +132,7 @@ def test_frame_exposes_two_bases_and_reset_scenario_metadata():
 
     assert len(frame["bases"]) == 2
     assert [base["capacity"] for base in frame["bases"]] == [3, 3]
+    assert len(frame["uavs"][0]["trail"]) == MAX_VISUAL_TRAIL_POINTS
     assert frame["scenario_seed"] == 43
     assert frame["reset_generation"] == 1
     assert frame["task_area"] == {
