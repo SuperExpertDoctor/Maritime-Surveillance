@@ -8,6 +8,7 @@ from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.datatypes import Region
 from src.utils.coverage_planner import CoveragePlanner
 from src.utils.obstacle_avoider import ObstacleAvoider
+from src.utils.conflict_detector import PathConflict
 
 
 def test_sar_is_off_during_dubins_turns():
@@ -310,6 +311,38 @@ def test_return_route_uses_high_budget_fallback_after_transient_rrt_failures(mon
     assert calls >= 3
     assert uav.status == "returning"
     assert engine._return_base_by_uav[uav.id] in engine.bases
+
+
+def test_path_conflict_replan_uses_assigned_region_object(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    uav = engine.uavs[0]
+    candidate = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions[0]
+    region = Region(id="S-conflict-replan", bbox=candidate["bbox"], type="search")
+    region.assigned_uav_id = uav.id
+    engine.allocator.sm.set_search_regions([region])
+    engine.allocator.sm.update_uav_status(
+        uav.id, "transit", uav.position, assigned_region_id=region.id,
+    )
+    uav.assign_mission(region.bbox, [uav.pose, (uav.pose[0] + 1, uav.pose[1], 0.0)])
+    assigned = []
+
+    monkeypatch.setattr(
+        "src.env.simulation.detect_conflicts",
+        lambda *_args, **_kwargs: [PathConflict(uav.id, "UAV-2", (1, 1), 0, 0, 0.0)],
+    )
+    monkeypatch.setattr(
+        "src.env.simulation.resolve_conflicts",
+        lambda *_args, **_kwargs: [uav.id],
+    )
+    monkeypatch.setattr(
+        engine,
+        "_assign_search_route",
+        lambda entity, assigned_region: assigned.append((entity.id, assigned_region.id)),
+    )
+
+    engine._detect_and_resolve_path_conflicts(1.0)
+
+    assert assigned == [(uav.id, region.id)]
 
 
 def test_reserve_return_uses_95_percent_of_remaining_fixed_range():

@@ -45,6 +45,7 @@ class UAVEntity:
         self.waypoints: list[Pose] = []
         self.planned_path: list[Pose] = []
         self.trail: list[tuple[float, float]] = []
+        self.mission_route: list[Pose] = []  # GOAL2: full route persisted for viz even after waypoint consumption
         self._wp_index = 0
         self._transit_end_index = 0
         self._scan_ranges: list[tuple[int, int, str]] = []
@@ -95,6 +96,11 @@ class UAVEntity:
     @property
     def pose(self) -> Pose:
         return self._col, self._row, self.heading_rad
+
+    @property
+    def home_base_grid(self) -> tuple[float, float]:
+        """Grid coordinates of the base this UAV is assigned to (for viz path rendering)."""
+        return self._base_col, self._base_row
 
     @property
     def heading_deg(self) -> float:
@@ -244,6 +250,7 @@ class UAVEntity:
             route.insert(0, self.pose)
         self.waypoints = route
         self.planned_path = list(route)
+        self.mission_route = list(route)  # GOAL2: persisted full route for viz
         self._wp_index = 1 if len(route) > 1 else len(route)
 
     def step(

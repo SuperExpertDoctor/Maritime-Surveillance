@@ -30,6 +30,7 @@ from src.utils.coverage_planner import CoveragePlanner
 from src.utils.ais_discriminator import AISDiscriminator
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
+from src.utils.conflict_detector import detect_conflicts, resolve_conflicts
 
 
 class SimulationEngine:
@@ -399,6 +400,7 @@ class SimulationEngine:
         elif result["trigger_type"] == "light":
             self.light_triggers += 1
         self._sync_assignments()
+        self._detect_and_resolve_path_conflicts(t)
         self._record_statuses()
         return result
 
@@ -1518,6 +1520,75 @@ class SimulationEngine:
                 (uav.id, speed) for uav, speed in zip(members, speeds)
             )
         return commands
+
+    def _detect_and_resolve_path_conflicts(self, current_time: float) -> None:
+        """Detect multi-UAV path conflicts and replan lower-priority airframes."""
+        uav_dicts = [
+            {
+                "id": uav.id,
+                "status": uav.status,
+                "planned_path": [
+                    list(pose) for pose in uav.remaining_path[:60]
+                ],
+            }
+            for uav in self.uavs
+        ]
+        conflicts = detect_conflicts(
+            uav_dicts,
+            cell_size_km=self.config.grid.cell_size_km,
+            time_horizon_steps=30,
+            min_separation_cells=0.5,
+        )
+        if not conflicts:
+            return
+
+        entities = {uav.id: uav for uav in self.uavs}
+        to_replan = resolve_conflicts(conflicts, entities)
+
+        sm = self.allocator.sm
+        search_regions = {
+            region.id: region for region in sm.get_active_search_regions()
+        }
+        for uav_id in to_replan:
+            uav = entities.get(uav_id)
+            if uav is None or uav.status in ("idle", "refueling", "holding", "returning"):
+                continue
+            sm.add_event("path_conflict_resolved", {
+                "uav_id": uav_id,
+                "conflicts": [
+                    {"with": c.uav_b if c.uav_a == uav_id else c.uav_a,
+                     "cell": list(c.cell),
+                     "offset": c.step_offset_a if c.uav_a == uav_id else c.step_offset_b}
+                    for c in conflicts
+                    if uav_id in (c.uav_a, c.uav_b)
+                ],
+            })
+            # Replan: for searching UAVs, re-assign the search route with
+            # a fresh obstacle-avoidance pass; for transit, replan to the
+            # same destination via a different seed.
+            state = sm.get_uav(uav_id)
+            region = search_regions.get(
+                state.assigned_region_id if state is not None else None
+            )
+            if uav.mission_kind == "search" and region is not None:
+                try:
+                    self._assign_search_route(uav, region)
+                except (RuntimeError, ValueError):
+                    sm.add_event("conflict_replan_failed", {
+                        "uav_id": uav_id,
+                        "region_id": region.id if hasattr(region, "id") else "unknown",
+                    })
+            elif uav.mission_kind == "track_entry" and uav.target_group_id:
+                center = self._group_center(uav.target_group_id)
+                if center is not None:
+                    uav.start_tracking(uav.target_group_id, center)
+            else:
+                # Returning airframes keep their fuel-safe route; other
+                # unsupported mission states are recorded but never mutated
+                # with a zero-length waypoint that would not delay motion.
+                sm.add_event("conflict_replan_deferred", {
+                    "uav_id": uav_id,
+                })
 
     def _record_statuses(self) -> None:
         for uav in self.uavs:

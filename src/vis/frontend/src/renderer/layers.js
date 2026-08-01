@@ -292,25 +292,72 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
 
 export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) {
   for (const uav of uavs || []) {
-    const path = uav.planned_path || [];
-    if (path.length >= 2 && uav.status !== "idle") {
-      ctx.strokeStyle = uav.id === selectedId ? "rgba(29, 78, 216, .92)" : "rgba(37, 99, 235, .38)";
-      ctx.lineWidth = uav.id === selectedId ? 1.8 : 1;
-      ctx.setLineDash(uav.id === selectedId ? [] : [3, 4]);
+    const mission = uav.mission_route || uav.planned_path || [];
+    const planned = uav.planned_path || [];
+    const baseGrid = uav.home_base_grid;
+    const isSelected = uav.id === selectedId;
+
+    // ── Full mission route (dashed, dim) ──────────────────────────
+    if (mission.length >= 2 && uav.status !== "idle" && uav.status !== "refueling") {
+      ctx.save();
+      ctx.strokeStyle = isSelected ? "rgba(37, 99, 235, .48)" : "rgba(100, 116, 139, .28)";
+      ctx.lineWidth = isSelected ? 1.4 : 0.9;
+      ctx.setLineDash([4, 5]);
       ctx.beginPath();
-      const baseCenter = baseCenterForUav(uav, baseCenters);
-      const departsFromBase = baseCenter && uav.status === "transit";
-      if (departsFromBase) {
-        ctx.moveTo(baseCenter.x, baseCenter.y);
-      }
-      path.forEach((pose, index) => {
-        const point = gridCenter(pose[0], pose[1], cellSize, ox, oy);
-        if (index === 0 && !departsFromBase) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+      // mission_route[0] is the UAV position when the route was planned.
+      // For transit this is the base; for return it is the in-flight position.
+      // No unconditional prepend — the route already starts at the right place.
+      mission.forEach((pose, index) => {
+        const pt = gridCenter(pose[0], pose[1], cellSize, ox, oy);
+        if (index === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
       });
-      if (baseCenter && uav.status === "returning") ctx.lineTo(baseCenter.x, baseCenter.y);
+      // Returning / holding: draw the final leg back to base
+      if (baseGrid && baseGrid.length >= 2
+          && (uav.status === "returning" || uav.status === "holding")) {
+        const basePt = gridCenter(baseGrid[0], baseGrid[1], cellSize, ox, oy);
+        ctx.lineTo(basePt.x, basePt.y);
+      }
       ctx.stroke();
-      ctx.setLineDash([]);
+      ctx.restore();
     }
+
+    // ── Remaining planned path (solid, prominent) ─────────────────
+    if (planned.length >= 2 && uav.status !== "idle" && uav.status !== "refueling") {
+      ctx.save();
+      ctx.strokeStyle = isSelected ? "rgba(29, 78, 216, .88)" : "rgba(37, 99, 235, .44)";
+      ctx.lineWidth = isSelected ? 2.2 : 1.3;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      planned.forEach((pose, index) => {
+        const pt = gridCenter(pose[0], pose[1], cellSize, ox, oy);
+        if (index === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // ── Standoff orbit ring (tracking) ────────────────────────────
+    if (uav.status === "tracking" && uav.target_group_id) {
+      ctx.save();
+      ctx.strokeStyle = isSelected ? "rgba(190, 18, 60, .72)" : "rgba(190, 18, 60, .34)";
+      ctx.lineWidth = isSelected ? 1.4 : 0.8;
+      ctx.setLineDash([3, 4]);
+      const lastPt = planned.length
+        ? gridCenter(planned[planned.length - 1][0], planned[planned.length - 1][1], cellSize, ox, oy)
+        : uav.position?.length >= 2
+          ? gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy)
+          : null;
+      if (lastPt) {
+        ctx.beginPath();
+        ctx.arc(lastPt.x, lastPt.y, 1.8 * cellSize, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // ── Storm-avoidance detour path (cyan, prominent) ────────────
     const avoidancePath = uav.avoidance_path || [];
     if (avoidancePath.length >= 2) {
       ctx.save();
@@ -319,8 +366,9 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
       ctx.setLineDash([5, 3]);
       ctx.beginPath();
       avoidancePath.forEach((pose, index) => {
-        const point = gridCenter(pose[0], pose[1], cellSize, ox, oy);
-        if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+        const pt = gridCenter(pose[0], pose[1], cellSize, ox, oy);
+        if (index === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
       });
       ctx.stroke();
       ctx.restore();
