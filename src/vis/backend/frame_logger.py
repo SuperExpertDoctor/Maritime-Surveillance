@@ -1,6 +1,7 @@
 """JSONL 帧日志——仿真每步写入一行完整帧 JSON。"""
 import json
 import os
+import time
 from datetime import datetime
 
 
@@ -23,6 +24,16 @@ class FrameLogger:
 
     def write(self, frame: dict) -> None:
         """追加一帧到 JSONL 文件。"""
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(frame, ensure_ascii=False) + "\n")
+        payload = json.dumps(frame, ensure_ascii=False) + "\n"
+        for attempt in range(20):
+            try:
+                with open(self._path, "a", encoding="utf-8") as f:
+                    f.write(payload)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                # Windows readers can briefly deny append access while a
+                # replay file is being inspected. Keep the live run intact.
+                time.sleep(0.05)
         self._count += 1

@@ -55,10 +55,18 @@ function Get-ManagedProcess([string]$PidPath) {
     return Get-Process -Id $pidValue -ErrorAction SilentlyContinue
 }
 
+function Stop-ProcessTree([int]$TargetProcessId) {
+    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$TargetProcessId" -ErrorAction SilentlyContinue
+    foreach ($child in $children) {
+        Stop-ProcessTree $child.ProcessId
+    }
+    Stop-Process -Id $TargetProcessId -Force -ErrorAction SilentlyContinue
+}
+
 function Stop-ManagedProcess([string]$PidPath) {
     $process = Get-ManagedProcess $PidPath
     if ($null -ne $process) {
-        Stop-Process -Id $process.Id -Force
+        Stop-ProcessTree $process.Id
     }
     Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
 }
@@ -103,7 +111,7 @@ if ((Test-LocalPort $BackendPort) -or (Test-LocalPort $FrontendPort)) {
 
 $python = Resolve-BackendPython
 $backend = Start-Process -FilePath $python `
-    -ArgumentList @("main.py", "--steps", "$Steps", "--hold-server", "--port", "$BackendPort") `
+    -ArgumentList @("-u", "main.py", "--steps", "$Steps", "--hold-server", "--port", "$BackendPort") `
     -WorkingDirectory $ProjectRoot `
     -RedirectStandardOutput $BackendLogPath `
     -RedirectStandardError $BackendErrorPath `

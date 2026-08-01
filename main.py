@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 from pathlib import Path
 import shutil
@@ -66,22 +65,20 @@ def main(
         engine.allocator.llm_client.probe(llm_probe_timeout)
         print("LongCat-2.0 connectivity probe passed")
     app = None
-    loop = None
     logger = None
 
     if start_server:
         app = create_app(config, engine.allocator.sm)
         app.state.total_steps = steps
-        loop = asyncio.new_event_loop()
-
         def run_server():
-            asyncio.set_event_loop(loop)
             uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
         threading.Thread(target=run_server, daemon=True).start()
         deadline = time.time() + 5
-        while not loop.is_running() and time.time() < deadline:
+        while getattr(app.state, "event_loop", None) is None and time.time() < deadline:
             time.sleep(0.05)
+        if getattr(app.state, "event_loop", None) is None:
+            raise RuntimeError(f"visualization backend did not start on port {port}")
         print(f"可视化服务已启动: http://localhost:{port}")
     else:
         logger = FrameLogger()
@@ -92,7 +89,7 @@ def main(
             result.get("llm_cycle")
             or current_engine.allocator.llm_client.last_interaction
         )
-        if app is not None and loop is not None:
+        if app is not None:
             app.state.ships = current_engine.ships
             app.state.uav_entities = current_engine.uavs
             app.state.obstacles = current_engine.obstacles
@@ -100,7 +97,7 @@ def main(
             app.state.current_cycle = sm.cycle
             app.state.total_steps = steps
             app.state.llm_cycle = llm_cycle
-            future = broadcast_frame_sync(app, loop)
+            future = broadcast_frame_sync(app)
             if future is not None:
                 future.result(timeout=10)
         else:

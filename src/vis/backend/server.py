@@ -9,6 +9,7 @@
 import json
 import os
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +33,13 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
       - app.state.llm_cycle   (当前 LLM 周期信息, 可选)
       - app.state._live_clients  活跃 WebSocket 连接集合
     """
-    app = FastAPI(title="UAV Surveillance Visualizer")
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        application.state.event_loop = asyncio.get_running_loop()
+        yield
+        application.state.event_loop = None
+
+    app = FastAPI(title="UAV Surveillance Visualizer", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -51,6 +58,7 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
     app.state.obstacles = None
     app.state.bases = None
     app.state._live_clients = set()
+    app.state.event_loop = None
 
     @app.websocket("/ws/live")
     async def websocket_live(ws: WebSocket):
@@ -204,12 +212,16 @@ async def broadcast_frame(app: FastAPI) -> None:
     app.state._live_clients -= dead
 
 
-def broadcast_frame_sync(app: FastAPI, loop: asyncio.AbstractEventLoop) -> None:
+def broadcast_frame_sync(
+    app: FastAPI,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> None:
     """同步版本的广播：从非 async 上下文中安全调用。
 
     使用 run_coroutine_threadsafe 将 async broadcast_frame
     调度到 uvicorn 事件循环上执行。
     """
-    if loop.is_running():
-        return asyncio.run_coroutine_threadsafe(broadcast_frame(app), loop)
+    server_loop = loop or getattr(app.state, "event_loop", None)
+    if server_loop is not None and server_loop.is_running():
+        return asyncio.run_coroutine_threadsafe(broadcast_frame(app), server_loop)
     return None
