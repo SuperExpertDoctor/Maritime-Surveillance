@@ -222,28 +222,6 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
   }
 }
 
-function drawMissionEnvelope(ctx, regions, cellSize, ox, oy) {
-  const active = (regions || []).filter((region) => region?.bbox?.length === 4);
-  if (!active.length) return;
-  const [minCol, minRow, maxCol, maxRow] = active.reduce((bounds, region) => [
-    Math.min(bounds[0], region.bbox[0]),
-    Math.min(bounds[1], region.bbox[1]),
-    Math.max(bounds[2], region.bbox[2]),
-    Math.max(bounds[3], region.bbox[3]),
-  ], [30, 30, 0, 0]);
-  const margin = Math.max(2, cellSize * 0.28);
-  const x = ox + minCol * cellSize - margin;
-  const y = oy + minRow * cellSize - margin;
-  const width = (maxCol - minCol) * cellSize + margin * 2;
-  const height = (maxRow - minRow) * cellSize + margin * 2;
-  ctx.save();
-  ctx.strokeStyle = "rgba(3, 105, 161, .72)";
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([Math.max(7, cellSize * 0.48), Math.max(4, cellSize * 0.3)]);
-  ctx.strokeRect(x, y, width, height);
-  ctx.restore();
-}
-
 function taskCells(region) {
   if (Array.isArray(region.cells) && region.cells.length) return region.cells;
   const [c0, r0, c1, r1] = region.bbox;
@@ -387,27 +365,128 @@ function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode) {
   }
 }
 
-export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy) {
+function fallbackSarBeam(uav) {
+  const [x, y] = uav.position || [];
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const heading = (Number(uav.heading_deg) || 0) * Math.PI / 180;
+  const rightLooking = uav.sar_look_direction !== "left";
+  const side = rightLooking
+    ? [-Math.sin(heading), Math.cos(heading)]
+    : [Math.sin(heading), -Math.cos(heading)];
+  const forward = [Math.cos(heading), Math.sin(heading)];
+  const point = (along, cross) => [
+    x + forward[0] * along + side[0] * cross,
+    y + forward[1] * along + side[1] * cross,
+  ];
+  return {
+    polygon: [point(-2.5, 0.25), point(2.5, 0.25), point(2.5, 2.25), point(-2.5, 2.25)],
+  };
+}
+
+function sensorPhase(id) {
+  return [...String(id || "UAV")].reduce((sum, char) => sum + char.charCodeAt(0), 0) * 0.17;
+}
+
+function lerpPoint(start, end, progress) {
+  return {
+    x: start.x + (end.x - start.x) * progress,
+    y: start.y + (end.y - start.y) * progress,
+  };
+}
+
+function drawSarBeam(ctx, uav, cellSize, ox, oy, phase) {
+  const beam = uav.sar_beam?.polygon?.length === 4 ? uav.sar_beam : fallbackSarBeam(uav);
+  if (!beam?.polygon) return;
+  const points = beam.polygon.map(([col, row]) => gridCenter(col, row, cellSize, ox, oy));
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(ox, oy, 30 * cellSize, 30 * cellSize);
+  ctx.clip();
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+  });
+  ctx.closePath();
+  ctx.fillStyle = "rgba(8, 145, 178, .13)";
+  ctx.strokeStyle = "rgba(14, 116, 144, .86)";
+  ctx.lineWidth = 1.25;
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(103, 232, 249, .92)";
+  ctx.lineWidth = Math.max(1, cellSize * 0.07);
+  const sweep = 0.5 + 0.5 * Math.sin(phase * 0.055 + sensorPhase(uav.id));
+  const sweepStart = lerpPoint(points[0], points[3], sweep);
+  const sweepEnd = lerpPoint(points[1], points[2], sweep);
+  ctx.beginPath();
+  ctx.moveTo(sweepStart.x, sweepStart.y);
+  ctx.lineTo(sweepEnd.x, sweepEnd.y);
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(14, 116, 144, .52)";
+  ctx.setLineDash([Math.max(2, cellSize * 0.14), Math.max(2, cellSize * 0.12)]);
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  ctx.lineTo(points[1].x, points[1].y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEoBeam(ctx, uav, cellSize, ox, oy, phase) {
+  const fov = uav.eo_fov;
+  if (!fov?.origin) return;
+  const origin = gridCenter(fov.origin[0], fov.origin[1], cellSize, ox, oy);
+  const heading = Number.isFinite(Number(fov.heading))
+    ? Number(fov.heading)
+    : (Number(uav.heading_deg) || 0) * Math.PI / 180;
+  const halfAngle = Number(fov.half_angle) || Math.PI / 45;
+  const radius = Math.max(cellSize * 0.25, Number(fov.max_range || 0.25) * cellSize);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(ox, oy, 30 * cellSize, 30 * cellSize);
+  ctx.clip();
+  ctx.beginPath();
+  ctx.moveTo(origin.x, origin.y);
+  ctx.arc(origin.x, origin.y, radius, heading - halfAngle, heading + halfAngle);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(245, 158, 11, .15)";
+  ctx.strokeStyle = "rgba(180, 83, 9, .9)";
+  ctx.lineWidth = 1.2;
+  ctx.fill();
+  ctx.stroke();
+
+  const sweepAngle = heading + halfAngle * 0.88 * Math.sin(phase * 0.07 + sensorPhase(uav.id));
+  ctx.strokeStyle = "rgba(253, 230, 138, .98)";
+  ctx.lineWidth = Math.max(1, cellSize * 0.07);
+  ctx.beginPath();
+  ctx.moveTo(origin.x, origin.y);
+  ctx.lineTo(
+    origin.x + Math.cos(sweepAngle) * radius,
+    origin.y + Math.sin(sweepAngle) * radius,
+  );
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(217, 119, 6, .34)";
+  ctx.lineWidth = 0.8;
+  for (const ratio of [0.55, 0.8]) {
+    ctx.beginPath();
+    ctx.arc(origin.x, origin.y, radius * ratio, heading - halfAngle, heading + halfAngle);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy, phase = 0) {
   for (const uav of uavs || []) {
     if (uav.sensor_mode === "sar") {
-      ctx.fillStyle = "rgba(8, 145, 178, .18)";
+      drawSarBeam(ctx, uav, cellSize, ox, oy, phase);
+      ctx.fillStyle = "rgba(6, 182, 212, .16)";
       for (const [col, row] of uav.sar_footprint || []) {
         const point = coordToPixel(col, row, cellSize, ox, oy);
         ctx.fillRect(point.x + 1, point.y + 1, cellSize - 2, cellSize - 2);
       }
     }
-    if (uav.sensor_mode === "eo" && uav.eo_fov?.polygon) {
-      ctx.beginPath();
-      uav.eo_fov.polygon.forEach(([col, row], index) => {
-        const point = gridCenter(col, row, cellSize, ox, oy);
-        if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
-      });
-      ctx.closePath();
-      ctx.fillStyle = "rgba(202, 138, 4, .18)";
-      ctx.strokeStyle = "rgba(161, 98, 7, .82)";
-      ctx.fill();
-      ctx.stroke();
-    }
+    if (uav.sensor_mode === "eo") drawEoBeam(ctx, uav, cellSize, ox, oy, phase);
   }
 }
 
@@ -736,14 +815,26 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCe
 
 export function drawTransparencyLegend(ctx, bounds) {
   if (!bounds || bounds.width < 128) return;
+  const swatches = [
+    { color: "#D97706", label: "TASK CELLS" },
+    { color: "#0F766E", label: "FRESH SAR" },
+    { color: "#0891B2", label: "SAR BEAM", shape: "strip" },
+    { color: "#D97706", label: "EO / IR FOV", shape: "cone" },
+    { color: "#DC2626", label: "NO-FLY STORM" },
+    { color: "#0E7490", label: "SHIP RADAR" },
+    { color: "#2563EB", label: "UAV TRANSIT" },
+    { color: "#BE123C", label: "TARGET CONTACT" },
+    { color: "#DC2626", label: "BASE STAR" },
+    { color: "#334155", label: "TASK BORDER" },
+  ];
   const horizontalInset = 8;
   const width = Math.max(128, bounds.width - horizontalInset * 2);
   const availableHeight = bounds.height;
-  const itemHeight = clamp(Math.floor((availableHeight - 32) / 8), 13, 17);
+  const itemHeight = clamp(Math.floor((availableHeight - 32) / swatches.length), 13, 17);
   const swatchSize = clamp(Math.floor(itemHeight * 0.58), 7, 10);
   const titleSize = clamp(Math.floor(width * 0.055), 7, 8);
   const labelSize = clamp(Math.floor(width * 0.045), 6, 7);
-  const height = 24 + 8 * itemHeight + 8;
+  const height = 24 + swatches.length * itemHeight + 8;
   if (height > availableHeight) return;
   const x = bounds.x + horizontalInset;
   const y = bounds.y + 10;
@@ -753,23 +844,26 @@ export function drawTransparencyLegend(ctx, bounds) {
   ctx.fillRect(x, y, width, height);
   ctx.strokeRect(x, y, width, height);
   text(ctx, "MAP LEGEND", x + 8, y + 13, "#334155", titleSize, 700);
-  const swatches = [
-    { color: "#D97706", label: "TASK CELLS" },
-    { color: "#0F766E", label: "FRESH SAR" },
-    { color: "#DC2626", label: "NO-FLY STORM" },
-    { color: "#0E7490", label: "SHIP RADAR" },
-    { color: "#2563EB", label: "UAV TRANSIT" },
-    { color: "#BE123C", label: "TARGET CONTACT" },
-    { color: "#DC2626", label: "BASE STAR" },
-    { color: "#334155", label: "TASK BORDER" },
-  ];
   swatches.forEach((swatch, index) => {
     const itemX = x + 9;
     const itemY = y + 22 + index * itemHeight;
     ctx.fillStyle = swatch.color;
-    ctx.fillRect(itemX, itemY, swatchSize, swatchSize);
     ctx.strokeStyle = "#64748B";
-    ctx.strokeRect(itemX, itemY, swatchSize, swatchSize);
+    if (swatch.shape === "strip") {
+      ctx.fillRect(itemX, itemY + swatchSize * 0.2, swatchSize, swatchSize * 0.6);
+      ctx.strokeRect(itemX, itemY + swatchSize * 0.2, swatchSize, swatchSize * 0.6);
+    } else if (swatch.shape === "cone") {
+      ctx.beginPath();
+      ctx.moveTo(itemX, itemY + swatchSize);
+      ctx.lineTo(itemX + swatchSize, itemY + swatchSize * 0.15);
+      ctx.lineTo(itemX + swatchSize, itemY + swatchSize);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillRect(itemX, itemY, swatchSize, swatchSize);
+      ctx.strokeRect(itemX, itemY, swatchSize, swatchSize);
+    }
     text(ctx, swatch.label, itemX + swatchSize + 4, itemY + swatchSize - 1, "#475569", labelSize, 600);
   });
 }
@@ -828,12 +922,11 @@ export function renderFrame(ctx, frame, options = {}) {
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
-    drawMissionEnvelope(ctx, [...(frame.search_regions || []), ...(frame.track_regions || [])], cellSize, offsetX, offsetY);
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
     drawTrackRegions(ctx, frame.track_regions, frame.ships, cellSize, offsetX, offsetY);
     drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, baseCenters);
-    drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY);
+    drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY, frameCount);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
     drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
     drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets, baseCenters);

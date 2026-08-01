@@ -55,7 +55,26 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "origin": list(entity.eo_fov.origin),
                 "target": list(entity.eo_fov.target),
                 "polygon": [list(point) for point in entity.eo_fov.polygon],
+                "heading": entity.eo_fov.heading,
+                "half_angle": entity.eo_fov.half_angle,
                 "max_range": entity.eo_fov.max_range,
+            }
+        sar_beam = None
+        if entity is not None and entity.sensor_mode == "sar":
+            beam = entity.sar_sensor.compute_swath_beam(
+                entity.float_position,
+                entity.heading_rad,
+                entity.sar_look_direction,
+                along_track_cells=entity.sar_along_track_cells,
+            )
+            sar_beam = {
+                "origin": list(beam.origin),
+                "heading": beam.heading,
+                "look_direction": beam.look_direction,
+                "near_range": beam.near_range,
+                "far_range": beam.far_range,
+                "along_track": beam.along_track,
+                "polygon": [list(point) for point in beam.polygon],
             }
         trail = [list(point) for point in entity.trail[-120:]] if entity else []
         fallback_heading = entity.heading_deg if entity is not None else u.heading_deg
@@ -74,6 +93,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "trail": trail,
             "sar_look_direction": entity.sar_look_direction if entity else None,
             "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],
+            "sar_beam": sar_beam,
             "eo_fov": eo_fov,
             "avoidance_level": entity.avoidance_level if entity else 0,
             "avoidance_path": [list(pose) for pose in entity.avoidance_path] if entity else [],

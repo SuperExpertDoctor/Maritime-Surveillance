@@ -7,6 +7,61 @@ const VIEWPORTS = [
   { name: "mobile", width: 390, height: 844 },
 ];
 
+async function getSensorBeamEvidence(page) {
+  return page.evaluate(async () => {
+    const { drawSensorFootprints } = await import("/src/renderer/layers.js");
+    const testCanvas = document.createElement("canvas");
+    testCanvas.width = 460;
+    testCanvas.height = 460;
+    const context = testCanvas.getContext("2d");
+    drawSensorFootprints(context, [
+      {
+        id: "UAV-SAR",
+        position: [9, 8],
+        heading_deg: 0,
+        sensor_mode: "sar",
+        sar_look_direction: "right",
+        sar_footprint: [[8, 9], [9, 9]],
+      },
+      {
+        id: "UAV-EO",
+        position: [19, 19],
+        heading_deg: 0,
+        sensor_mode: "eo",
+        eo_fov: {
+          origin: [19, 19],
+          heading: 0,
+          half_angle: Math.PI / 45,
+          max_range: 2,
+        },
+      },
+    ], 12, 20, 20, 24);
+    const pixels = context.getImageData(0, 0, testCanvas.width, testCanvas.height).data;
+    let sarPixels = 0;
+    let eoPixels = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const red = pixels[index];
+      const green = pixels[index + 1];
+      const blue = pixels[index + 2];
+      const alpha = pixels[index + 3];
+      if (alpha && green > red && blue > red) sarPixels += 1;
+      if (alpha && red > green && green > blue) eoPixels += 1;
+    }
+    return { sarPixels, eoPixels };
+  });
+}
+
+test("sensor beam renderer exposes SAR and EO scan shapes", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".connection-state")).toHaveClass(/connected/);
+  const evidence = await getSensorBeamEvidence(page);
+  expect(evidence.sarPixels).toBeGreaterThan(100);
+  expect(evidence.eoPixels).toBeGreaterThan(10);
+  const source = await page.evaluate(() => fetch("/src/renderer/layers.js").then((response) => response.text()));
+  expect(source).not.toContain("drawMissionEnvelope");
+  await page.screenshot({ path: "test-results/sensor-beams-live.png", fullPage: true });
+});
+
 test("live and replay dashboard acceptance", async ({ page }) => {
   const runtimeErrors = [];
   page.on("console", (message) => {
@@ -75,6 +130,11 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   expect(canvasEvidence.opaque).toBeGreaterThan(100);
   expect(canvasEvidence.colors).toBeGreaterThan(4);
   expect(canvasEvidence.width).toBeGreaterThan(500);
+  const sensorBeamEvidence = await getSensorBeamEvidence(page);
+  expect(sensorBeamEvidence.sarPixels).toBeGreaterThan(100);
+  expect(sensorBeamEvidence.eoPixels).toBeGreaterThan(10);
+  const layerSource = await page.evaluate(() => fetch("/src/renderer/layers.js").then((response) => response.text()));
+  expect(layerSource).not.toContain("drawMissionEnvelope");
   await page.locator(".trail-mode-switch button").nth(0).click();
   await expect(page.locator(".trail-mode-switch button").nth(0)).toHaveAttribute("aria-pressed", "true");
   await page.screenshot({ path: "test-results/trajectory-full.png", fullPage: true });

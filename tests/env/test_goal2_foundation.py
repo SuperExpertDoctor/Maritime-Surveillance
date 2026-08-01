@@ -265,6 +265,43 @@ def test_frame_heading_uses_recent_motion_not_only_planned_heading():
     assert frame["ships"][0]["heading_deg"] == 0.0
 
 
+def test_frame_exposes_continuous_sar_and_eo_beam_geometry():
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    sar_uav, eo_uav = engine.uavs[:2]
+    sar_uav.status = "searching"
+    sar_uav.sensor_mode = "sar"
+    sar_uav.sar_footprint = sar_uav.sar_sensor.compute_swath_footprint(
+        sar_uav.float_position,
+        sar_uav.heading_rad,
+        sar_uav.sar_look_direction,
+        along_track_cells=sar_uav.sar_along_track_cells,
+    )
+    eo_uav.status = "tracking"
+    eo_uav.sensor_mode = "eo"
+    eo_uav.eo_fov = eo_uav.eo_sensor.compute_fov(
+        eo_uav.float_position,
+        eo_uav.heading_rad,
+        (eo_uav.float_position[0] + 1.0, eo_uav.float_position[1]),
+    )
+
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    sar_frame = next(uav for uav in frame["uavs"] if uav["id"] == sar_uav.id)
+    eo_frame = next(uav for uav in frame["uavs"] if uav["id"] == eo_uav.id)
+    assert len(sar_frame["sar_beam"]["polygon"]) == 4
+    assert sar_frame["sar_beam"]["look_direction"] in {"left", "right"}
+    assert len(eo_frame["eo_fov"]["polygon"]) == 3
+    assert math.isclose(eo_frame["eo_fov"]["half_angle"], math.radians(4.0))
+
+
 def test_frame_exposes_search_tasks_as_colored_grid_cell_sets():
     engine = SimulationEngine(ConfigLoader.load(), seed=41)
     engine.allocator.sm.set_search_regions([

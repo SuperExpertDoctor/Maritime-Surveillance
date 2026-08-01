@@ -9,6 +9,7 @@ import numpy as np
 
 from src.env.base_station import BaseStation
 from src.env.ais_signal import generate_ais_signal
+from src.env.eo_sensor import EOSensor
 from src.env.obstacle import (
     Island,
     Thunderstorm,
@@ -109,8 +110,9 @@ class SimulationEngine:
                 detection_probability=config.sensor.sar.detection_probability,
                 grid_shape=config.grid.resolution,
             )
-            uav.eo_sensor.max_range_cells = (
-                config.sensor.eoir.detection_range_km / config.grid.cell_size_km
+            uav.eo_sensor = EOSensor(
+                fov_deg=config.sensor.eoir.fov_deg,
+                max_range_cells=config.sensor.eoir.detection_range_km / config.grid.cell_size_km,
             )
             uav.storm_avoider.eo_detection_range_cells = uav.eo_sensor.max_range_cells
         self.ships = self._create_ships()
@@ -624,7 +626,7 @@ class SimulationEngine:
                     uav.float_position,
                     uav.heading_rad,
                     uav.sar_look_direction,
-                    along_track_cells=5.0,
+                    along_track_cells=uav.sar_along_track_cells,
                 )
                 uav.sar_footprint = footprint
                 for cell in footprint:

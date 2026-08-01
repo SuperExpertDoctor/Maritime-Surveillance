@@ -2,9 +2,21 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from src.schedule.datatypes import GridCoord
+
+
+@dataclass(frozen=True)
+class SwathBeam:
+    origin: tuple[float, float]
+    heading: float
+    look_direction: str
+    near_range: float
+    far_range: float
+    along_track: float
+    polygon: tuple[tuple[float, float], ...]
 
 
 class SARSensor:
@@ -54,6 +66,45 @@ class SARSensor:
                     cells.append(GridCoord(col, row))
         return cells
 
+    def compute_swath_beam(
+        self,
+        uav_position: Sequence[float],
+        heading: float,
+        look_direction: str,
+        along_track_cells: float = 1.0,
+    ) -> SwathBeam:
+        """Return the continuous side-looking ground beam used by the UI."""
+        if along_track_cells <= 0:
+            raise ValueError("along_track_cells must be positive")
+        x, y = float(uav_position[0]), float(uav_position[1])
+        side_x, side_y = self._side_vector(heading, look_direction)
+        forward_x, forward_y = math.cos(heading), math.sin(heading)
+        near = self.near_range_cells
+        far = near + self.swath_width_cells
+        half_along = float(along_track_cells) / 2.0
+
+        def point(along: float, cross: float) -> tuple[float, float]:
+            return (
+                x + forward_x * along + side_x * cross,
+                y + forward_y * along + side_y * cross,
+            )
+
+        polygon = (
+            point(-half_along, near),
+            point(half_along, near),
+            point(half_along, far),
+            point(-half_along, far),
+        )
+        return SwathBeam(
+            origin=(x, y),
+            heading=float(heading),
+            look_direction=look_direction,
+            near_range=near,
+            far_range=far,
+            along_track=float(along_track_cells),
+            polygon=polygon,
+        )
+
     def is_cell_in_swath(
         self,
         cell: GridCoord | Sequence[int],
@@ -92,4 +143,4 @@ class SARSensor:
         return 1.0 / (1.0 + math.exp(-slope * (snr_db - threshold_db)))
 
 
-__all__ = ["SARSensor"]
+__all__ = ["SARSensor", "SwathBeam"]

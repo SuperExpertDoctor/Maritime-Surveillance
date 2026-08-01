@@ -49,6 +49,7 @@ class UAVEntity:
         self._transit_end_index = 0
         self._scan_ranges: list[tuple[int, int, str]] = []
         self.sar_look_direction = "right"
+        self.sar_along_track_cells = 5.0
         self.sar_footprint: list[GridCoord] = []
         self.eo_fov: FOVCone | None = None
         self.search_complete_pending = False

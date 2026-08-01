@@ -9,8 +9,8 @@ sar:
 
 # === EO/IR 光电/红外 ===
 eoir:
-  fov_deg: 30                 # 视场角
-  detection_range_km: 25      # 最大探测距离 (受气象影响)
+  fov_deg: 8                  # 凝视跟踪窄视场
+  detection_range_km: 20      # 最大探测距离 (受气象影响)
   detection_probability: 0.70 # 单次检测概率
   false_alarm_rate: 0.02      # 虚警率
   resolution_m: 0.5           # 分辨率
