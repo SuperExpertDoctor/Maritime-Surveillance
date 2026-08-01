@@ -43,6 +43,22 @@ class Marker:
 
 
 @dataclass
+class TargetReport:
+    """A target position that was actually observed by a UAV sensor.
+
+    This object deliberately contains no reference to the environment's
+    ground-truth ship instance.  Scheduling and LLM prompts may use only this
+    report after a contact has been established.
+    """
+    group_id: str
+    position: GridCoord
+    observed_at: float
+    source_uav_id: str
+    velocity_cells_per_min: tuple[float, float] = (0.0, 0.0)
+    observation_count: int = 1
+
+
+@dataclass
 class RegionInfoRow:
     """One row in the InfoValueTable."""
     region_id: str

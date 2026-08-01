@@ -51,6 +51,7 @@ class Ship:
         self._evasive = False
         self._phase = random.uniform(0, 2 * math.pi)
         self._base_heading = random.uniform(0, 2 * math.pi) if base_heading is None else float(base_heading)
+        self.heading_rad = self._base_heading
         self.trail: list[tuple[float, float]] = []
 
     @property
@@ -134,6 +135,7 @@ class Ship:
         """Advance one coherent-formation member while respecting islands."""
         if self.departed or dt_min <= 0:
             return
+        start = self.float_position
         heading = self._avoid_islands(self._motion_heading(), dt_min, islands)
         self._col += self.speed_cells_per_min * math.cos(heading) * dt_min
         self._row += self.speed_cells_per_min * math.sin(heading) * dt_min
@@ -151,6 +153,10 @@ class Ship:
             self._col = max(0.0, min(29.0, self._col))
             self._row = max(0.0, min(29.0, self._row))
             self._phase = (self._phase + math.pi / 3.0) % (2 * math.pi)
+
+        dx, dy = self._col - start[0], self._row - start[1]
+        if math.hypot(dx, dy) > 1e-9:
+            self.heading_rad = math.atan2(dy, dx)
 
         self.trail.append(self.float_position)
         if len(self.trail) > 120:

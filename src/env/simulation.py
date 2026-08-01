@@ -665,6 +665,14 @@ class SimulationEngine:
         samples.append(estimate)
         if len(samples) > 12:
             del samples[:-12]
+        # The scheduler receives this EO-derived estimate only.  It never
+        # receives the target_position truth value used by the sensor model.
+        self.allocator.sm.record_target_observation(
+            group_id,
+            GridCoord(int(round(estimate[0])), int(round(estimate[1]))),
+            uav.id,
+            current_time,
+        )
         started = self._ais_tracking_started_at.setdefault(uav.id, current_time)
         if current_time - started < self.config.ship.ais_discrimination_delay_min:
             return
@@ -700,6 +708,7 @@ class SimulationEngine:
     ) -> None:
         """Release a civilian or departed target without creating a loss marker."""
         sm = self.allocator.sm
+        sm.clear_target_report(group_id)
         for member in self.ships:
             if member.group_id == group_id:
                 member.set_tracked(False)
@@ -748,16 +757,20 @@ class SimulationEngine:
 
     def _handle_detection(self, uav: UAVEntity, ship: Ship, current_time: float) -> None:
         sm = self.allocator.sm
-        for member in self.ships:
-            if member.group_id != ship.group_id or member.detected:
-                continue
-            member.mark_detected()
+        if not ship.detected:
+            ship.mark_detected()
             sm.add_event("ship_detected", {
-                "ship_id": member.id,
-                "group_id": member.group_id,
+                "ship_id": ship.id,
+                "group_id": ship.group_id,
                 "uav_id": uav.id,
-                "position": member.position,
+                "position": ship.position,
             })
+        sm.record_target_observation(
+            ship.group_id,
+            ship.position,
+            uav.id,
+            current_time,
+        )
         existing = sm.get_track_region_for_group(ship.group_id)
         if existing is not None:
             return
@@ -807,6 +820,7 @@ class SimulationEngine:
         self._ais_tracking_started_at.pop(uav.id, None)
         self._ais_measurements.pop(uav.id, None)
         if uav.target_group_id:
+            report = sm.get_target_report(uav.target_group_id)
             track = sm.get_track_region_for_group(uav.target_group_id)
             if track is not None and track.assigned_uav_id == uav.id:
                 sm.release_track_region(track.id, uav.id, create_marker=release_marker)
@@ -818,6 +832,13 @@ class SimulationEngine:
                     "uav_id": uav.id,
                     "group_id": uav.target_group_id,
                 })
+                if report is not None:
+                    sm.add_event("target_handoff_report", {
+                        "uav_id": uav.id,
+                        "group_id": report.group_id,
+                        "position": report.position,
+                        "observed_at": report.observed_at,
+                    })
             for member in self.ships:
                 if member.group_id == uav.target_group_id:
                     member.set_tracked(False)

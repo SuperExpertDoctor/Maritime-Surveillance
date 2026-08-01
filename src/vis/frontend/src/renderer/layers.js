@@ -43,9 +43,14 @@ export function drawBackground(ctx, width, height, cellSize, ox, oy, assets) {
   ctx.fillStyle = "#075AA6";
   ctx.fillRect(ox, oy, 30 * cellSize, 30 * cellSize);
   drawMapImage(ctx, assets?.background, cellSize, ox, oy);
-  ctx.strokeStyle = "rgba(14, 116, 144, .56)";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(ox - 0.5, oy - 0.5, 30 * cellSize + 1, 30 * cellSize + 1);
+  ctx.strokeStyle = "#0B3857";
+  ctx.lineWidth = 2.25;
+  ctx.strokeRect(ox - 1, oy - 1, 30 * cellSize + 2, 30 * cellSize + 2);
+  ctx.save();
+  ctx.fillStyle = "rgba(255, 255, 255, .88)";
+  ctx.fillRect(ox + 5, oy + 5, Math.max(158, cellSize * 8.7), Math.max(15, cellSize * 0.7));
+  text(ctx, "TASK AREA / 300 x 300 KM", ox + 9, oy + Math.max(16, cellSize * 0.62), "#0B3857", Math.max(7, cellSize * 0.27), 700);
+  ctx.restore();
 
   ctx.save();
   ctx.fillStyle = "#526E7A";
@@ -201,13 +206,6 @@ function drawMissionEnvelope(ctx, regions, cellSize, ox, oy) {
   ctx.setLineDash([Math.max(7, cellSize * 0.48), Math.max(4, cellSize * 0.3)]);
   ctx.strokeRect(x, y, width, height);
   ctx.restore();
-  const label = `MISSION AREA / ${active.length} TASKS`;
-  const fontSize = Math.max(8, Math.min(10, cellSize * 0.32));
-  ctx.font = `700 ${fontSize}px ${FONT}`;
-  const labelWidth = ctx.measureText(label).width + 10;
-  ctx.fillStyle = "rgba(255, 255, 255, .94)";
-  ctx.fillRect(x + 4, Math.max(oy + 2, y - fontSize - 6), labelWidth, fontSize + 6);
-  text(ctx, label, x + 9, Math.max(oy + fontSize + 1, y - 4), "#075985", fontSize, 700);
 }
 
 function taskCells(region) {
@@ -436,7 +434,9 @@ function drawShipHull(ctx, ship, center, size, color, assets) {
     source,
     center,
     modelWidth,
-    (Number(ship.heading_deg) || 0) * Math.PI / 180 + Math.PI,
+    // The carrier image has its bow to the left; the destroyer image has
+    // its bow at the top. Canvas heading zero points to the right.
+    (Number(ship.heading_deg) || 0) * Math.PI / 180 + (carrier ? Math.PI : Math.PI / 2),
   )) return;
   ctx.fillStyle = color;
   if (carrier) {
@@ -515,8 +515,9 @@ function drawShipRadar(ctx, ship, center, cellSize) {
 }
 
 export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
-  drawGroupRings(ctx, ships, cellSize, ox, oy);
-  for (const ship of ships || []) {
+  const observedShips = (ships || []).filter((ship) => ship?.is_detected);
+  drawGroupRings(ctx, observedShips, cellSize, ox, oy);
+  for (const ship of observedShips) {
     const military = ship.is_military === true || ship.discrimination === "military";
     const color = military ? "#E11D48" : ship.is_military === false ? "#0369A1" : ship.is_detected ? "#CA8A04" : "#475569";
     const size = Math.max(4, cellSize * (ship.ship_type === "carrier" ? 0.38 : 0.28));
@@ -628,7 +629,8 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
       { x: 36, y: 180, width: 1444, height: 632 },
       center,
       Math.max(20, cellSize * (uav.id === selectedId ? 1.75 : 1.45)),
-      (Number(uav.heading_deg) || 0) * Math.PI / 180 + Math.PI,
+      // The Rainbow UAV cutout has its nose at the top of the source image.
+      (Number(uav.heading_deg) || 0) * Math.PI / 180 + Math.PI / 2,
     );
     if (!renderedModel) {
       ctx.translate(center.x, center.y);
@@ -673,11 +675,14 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
 
 export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
   const width = Math.max(194, cellSize * 8.2);
-  const height = 82;
+  const height = 100;
   const canvasWidth = ctx.canvas.clientWidth || ctx.canvas.width;
   const canvasHeight = ctx.canvas.clientHeight || ctx.canvas.height;
-  const x = Math.max(8, canvasWidth - width - 12);
-  const y = Math.max(8, canvasHeight - height - 38);
+  const mapRight = ox + 30 * cellSize;
+  const sideSpace = canvasWidth - mapRight;
+  const useSidePanel = sideSpace >= width + 14;
+  const x = useSidePanel ? mapRight + 10 : Math.max(8, canvasWidth - width - 12);
+  const y = useSidePanel ? Math.max(8, oy + 10) : Math.max(8, canvasHeight - height - 38);
   ctx.fillStyle = "rgba(255, 255, 255, .94)";
   ctx.strokeStyle = "rgba(71, 85, 105, .72)";
   ctx.lineWidth = 1;
@@ -686,11 +691,13 @@ export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
   text(ctx, "MAP LEGEND", x + 7, y + 13, "#334155", 8, 700);
   const swatches = [
     { color: "#D97706", label: "TASK CELLS" },
-    { color: "#0F766E", label: "SAR COVERAGE" },
+    { color: "#0F766E", label: "FRESH SAR" },
     { color: "#DC2626", label: "NO-FLY STORM" },
     { color: "#0E7490", label: "SHIP RADAR" },
     { color: "#2563EB", label: "UAV TRANSIT" },
-    { color: "#BE123C", label: "EVASIVE SHIP" },
+    { color: "#BE123C", label: "TARGET CONTACT" },
+    { color: "#DC2626", label: "BASE STAR" },
+    { color: "#334155", label: "TASK BORDER" },
   ];
   swatches.forEach((swatch, index) => {
     const column = index % 2;

@@ -71,7 +71,11 @@ class CandidateExtractor:
         # Keep legal, LLM-approved recovery sorties ready before they land so
         # refueled airframes can launch immediately instead of waiting for
         # the next 30-minute planning window.
-        K = 10 if sm.lifecycle_mode else min(available * 2, 10)
+        has_handoff_report = any(
+            sm.get_track_region_for_group(report.group_id) is None
+            for report in sm.get_target_reports()
+        )
+        K = 10 if sm.lifecycle_mode else min(max(available * 2, int(has_handoff_report)), 10)
         clusters = clusters[:max(K * 4, K)]
 
         # Step 5: rectangle fitting and track-region overlap filtering
@@ -139,6 +143,11 @@ class CandidateExtractor:
             exploration_mode,
         ))
 
+        # A returning tracker leaves a sensor-derived report, not a live ship
+        # position.  Offer a compact high-priority search box around its
+        # short-horizon projection so the LLM can explicitly plan hand-off.
+        candidates.extend(self._handoff_candidates(sm, occupied, V, I, seen))
+
         # Cap final candidates at K and keep them mutually disjoint so a model
         # can safely copy the supplied candidate list as its additions.
         base_positions = sm.get_base_positions()
@@ -155,6 +164,8 @@ class CandidateExtractor:
                 math.dist(center, base_position)
                 for base_position in base_positions
             )
+            if item.get("target_group_id"):
+                return (-2, distance, -item["total_value"])
             if sm.lifecycle_mode:
                 return (-unseen_density, distance,
                         abs(area - gc.search_min_cells),
@@ -204,6 +215,82 @@ class CandidateExtractor:
             candidate_regions=candidates,
             fragment_alerts=fragments,
         )
+
+    def _handoff_candidates(
+        self,
+        sm: StateManager,
+        occupied: np.ndarray,
+        values: np.ndarray,
+        info: np.ndarray,
+        seen: np.ndarray,
+    ) -> list[dict]:
+        """Build legal successor search regions from observed target reports."""
+        active_groups = {
+            region.target_group_id
+            for region in sm.get_track_regions()
+            if region.target_group_id
+        }
+        gc = sm.config.grid
+        cols, rows = gc.resolution
+        side = int(math.ceil(math.sqrt(gc.search_min_cells)))
+        side = max(1, min(side, gc.search_max_cells))
+        half = side // 2
+        swath_width = sm.config.sensor.sar.swath_km / gc.cell_size_km
+        candidates = []
+
+        for report in sm.get_target_reports():
+            if report.group_id in active_groups:
+                continue
+            elapsed = max(0.0, sm.current_time - report.observed_at)
+            horizon = min(12.0, elapsed + 5.0)
+            predicted = (
+                report.position.col + report.velocity_cells_per_min[0] * horizon,
+                report.position.row + report.velocity_cells_per_min[1] * horizon,
+            )
+            seed_col, seed_row = int(round(predicted[0])), int(round(predicted[1]))
+            # Try a nearby deterministic ring when the direct projection
+            # intersects land, an island, or a thunderstorm safety area.
+            offsets = [(0, 0), (side, 0), (-side, 0), (0, side), (0, -side),
+                       (side, side), (-side, side), (side, -side), (-side, -side)]
+            for dc, dr in offsets:
+                center_col = min(cols - half - 1, max(half + 1, seed_col + dc))
+                center_row = min(rows - half - 1, max(half + 1, seed_row + dr))
+                bbox = BBox(
+                    center_col - half,
+                    center_row - half,
+                    center_col - half + side,
+                    center_row - half + side,
+                )
+                if not gc.search_min_cells <= side * side <= gc.search_max_cells:
+                    continue
+                if np.any(occupied[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]):
+                    continue
+                if not self._has_turning_clearance(bbox, sm.obstacle_mask):
+                    continue
+                if self._distance_to_bases(bbox, sm.get_base_positions()) < (
+                    sm.config.environment.base_task_min_distance_cells
+                ):
+                    continue
+                if not self.coverage_planner.is_region_feasible(
+                    bbox, swath_width, 1.0, sm.obstacle_mask,
+                ):
+                    continue
+                patch_value = values[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
+                patch_info = info[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
+                candidates.append({
+                    "bbox": bbox,
+                    "cell_count": side * side,
+                    # The priority comes from the observed contact, not from
+                    # an unobserved target or a fabricated information value.
+                    "total_value": float(patch_value.sum()) + 1000.0,
+                    "avg_info": float(patch_info.mean()),
+                    "unseen_count": int((~seen[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]).sum()),
+                    "target_group_id": report.group_id,
+                    "observed_position": [report.position.col, report.position.row],
+                    "observed_at": report.observed_at,
+                })
+                break
+        return candidates
 
     def _order_lifecycle_candidates(
         self,

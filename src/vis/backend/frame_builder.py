@@ -5,6 +5,19 @@ from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 
 
+def _heading_from_motion(trail, fallback_deg: float) -> float:
+    """Prefer the measured direction of travel over a planned heading."""
+    points = list(trail or [])
+    if len(points) >= 2:
+        end = points[-1]
+        for start in reversed(points[:-1]):
+            dx = float(end[0]) - float(start[0])
+            dy = float(end[1]) - float(start[1])
+            if math.hypot(dx, dy) > 1e-5:
+                return math.degrees(math.atan2(dy, dx)) % 360.0
+    return float(fallback_deg) % 360.0
+
+
 def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 total_steps: int = 480, llm_cycle: dict | None = None,
                 ships: list | None = None,
@@ -44,11 +57,13 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "polygon": [list(point) for point in entity.eo_fov.polygon],
                 "max_range": entity.eo_fov.max_range,
             }
+        trail = [list(point) for point in entity.trail[-120:]] if entity else []
+        fallback_heading = entity.heading_deg if entity is not None else u.heading_deg
         uavs.append({
             "id": u.id,
             "status": u.status,
             "position": position,
-            "heading_deg": entity.heading_deg if entity is not None else u.heading_deg,
+            "heading_deg": _heading_from_motion(trail, fallback_heading),
             "remaining_range_km": round(u.fuel_remaining_pct * max_range),
             "fuel_remaining_pct": u.fuel_remaining_pct,
             "assigned_region_id": u.assigned_region_id,
@@ -56,7 +71,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "time_to_available_min": u.time_to_available,
             "sensor_mode": entity.sensor_mode if entity is not None else u.sensor_mode,
             "planned_path": [list(pose) for pose in entity.planned_path[-500:]] if entity else [],
-            "trail": [list(point) for point in entity.trail[-120:]] if entity else [],
+            "trail": trail,
             "sar_look_direction": entity.sar_look_direction if entity else None,
             "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],
             "eo_fov": eo_fov,
@@ -117,13 +132,19 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     ship_list = []
     if ships:
         for s in ships:
+            # Contacts exist in the physics engine before discovery, but the
+            # UI and decision layer must never receive their hidden state.
+            if not getattr(s, "detected", False):
+                continue
+            trail = [list(point) for point in s.trail[-60:]]
+            fallback_heading = math.degrees(getattr(s, "heading_rad", getattr(s, "base_heading", 0.0)))
             ship_list.append({
                 "id": s.id,
                 "position": list(getattr(s, "float_position", (s.position.col, s.position.row))),
                 "group_id": s.group_id or "G0",
                 "is_detected": s.detected,
                 "ship_type": getattr(getattr(s, "ship_type", None), "value", "destroyer"),
-                "heading_deg": math.degrees(getattr(s, "base_heading", 0.0)) % 360.0,
+                "heading_deg": _heading_from_motion(trail, fallback_heading),
                 "is_military": getattr(s, "is_military", None),
                 "departed": bool(getattr(s, "departed", False)),
                 "is_evasive": bool(getattr(s, "is_evading", False)),
@@ -141,7 +162,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                     else None
                 ),
                 "discrimination": getattr(s, "discrimination", None),
-                "trail": list(s.trail[-60:]),  # 最近 60 个轨迹点
+                "trail": trail,  # 最近 60 个轨迹点
             })
 
     step = int(state.current_time)
@@ -196,6 +217,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "reset_generation": getattr(state, "scenario_generation", 0),
         "info_matrix": info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat,
         "value_matrix": value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat,
+        "task_area": {
+            "width_km": config.grid.resolution[1] * config.grid.cell_size_km,
+            "height_km": config.grid.resolution[0] * config.grid.cell_size_km,
+            "cell_size_km": config.grid.cell_size_km,
+        },
         **coverage,
         "uavs": uavs,
         "search_regions": search_regions,

@@ -123,6 +123,11 @@ class TaskAllocator:
 
         # Step 6: Create Region objects with ID continuity
         new_regions = []
+        candidate_target_by_bbox = {
+            tuple(candidate["bbox"]): candidate.get("target_group_id")
+            for candidate in candidate_result.candidate_regions
+            if candidate.get("target_group_id")
+        }
         prev_regions = self.sm.get_previous_search_regions()
         prev_by_id = {r.id: r for r in prev_regions}
         assigned_ids: set[str] = {region.id for region in retained_regions}
@@ -154,8 +159,12 @@ class TaskAllocator:
                 id=matched_id,
                 bbox=bbox,
                 type="search",
-                priority=sr.get("priority", "medium"),
+                priority=(
+                    "high" if tuple(bbox) in candidate_target_by_bbox
+                    else sr.get("priority", "medium")
+                ),
                 info_value=0.0,  # calculated later by InfoValueTable
+                target_group_id=candidate_target_by_bbox.get(tuple(bbox)),
             )
             new_regions.append(region)
 

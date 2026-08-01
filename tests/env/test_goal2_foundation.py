@@ -110,6 +110,84 @@ def test_frame_exposes_two_bases_and_reset_scenario_metadata():
     assert [base["capacity"] for base in frame["bases"]] == [3, 3]
     assert frame["scenario_seed"] == 43
     assert frame["reset_generation"] == 1
+    assert frame["task_area"] == {
+        "width_km": 300,
+        "height_km": 300,
+        "cell_size_km": 10,
+    }
+
+
+def test_unobserved_ships_are_not_exported_to_the_visualization_or_llm_state():
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    contact = engine.ships[0]
+
+    initial_frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+    assert initial_frame["ships"] == []
+    assert engine.allocator.sm.get_target_reports() == []
+
+    engine._handle_detection(engine.uavs[0], contact, 1.0)
+    discovered_frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    assert [ship["id"] for ship in discovered_frame["ships"]] == [contact.id]
+    report = engine.allocator.sm.get_target_report(contact.group_id)
+    assert report is not None
+    assert report.position == contact.position
+
+
+def test_tracker_return_keeps_only_last_observed_contact_for_handoff():
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    contact = engine.ships[0]
+    uav = engine.uavs[0]
+    engine._handle_detection(uav, contact, 1.0)
+
+    engine._begin_return(uav, 2.0)
+
+    assert uav.status == "returning"
+    assert engine.allocator.sm.get_track_region_for_group(contact.group_id) is None
+    report = engine.allocator.sm.get_target_report(contact.group_id)
+    assert report is not None
+    candidates = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions
+    handoffs = [item for item in candidates if item.get("target_group_id") == contact.group_id]
+    assert handoffs
+
+
+def test_frame_heading_uses_recent_motion_not_only_planned_heading():
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    uav = engine.uavs[0]
+    contact = engine.ships[0]
+    contact.mark_detected()
+    uav.heading_rad = 0.0
+    uav.trail = [(4.0, 4.0), (4.0, 5.0)]
+    contact.trail = [(12.0, 12.0), (13.0, 12.0)]
+
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    assert frame["uavs"][0]["heading_deg"] == 90.0
+    assert frame["ships"][0]["heading_deg"] == 0.0
 
 
 def test_frame_exposes_search_tasks_as_colored_grid_cell_sets():

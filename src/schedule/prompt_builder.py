@@ -35,10 +35,13 @@ class PromptBuilder:
             area = (b.col_end - b.col_start) * (b.row_end - b.row_start)
             info = cand.get("avg_info", 0.0)
             situation = "黑" if info < 0.2 else ("灰" if info <= 0.7 else "白")
+            handoff = ""
+            if cand.get("target_group_id"):
+                handoff = f" 接力目标={cand['target_group_id']}(仅最后观测推算)"
             parts.append(
                 f"{i+1}. bbox({b.col_start},{b.row_start},{b.col_end},{b.row_end}) "
                 f"面积{area}格 平均信息{info:.2f}({situation}) "
-                f"总价值{cand.get('total_value', 0):.2f}"
+                f"总价值{cand.get('total_value', 0):.2f}{handoff}"
             )
         if not candidate_result.candidate_regions:
             parts.append(
@@ -56,6 +59,17 @@ class PromptBuilder:
                 parts.append(
                     f"{t.id}: bbox({b.col_start},{b.row_start},{b.col_end},{b.row_end}) "
                     f"UAV={uav_id}"
+                )
+
+        reports = sm.get_target_reports()
+        if reports:
+            parts.append("\n【已观测目标报告】(仅此处信息可用于目标接力；未观测船舶不可推断)")
+            for report in reports:
+                velocity = report.velocity_cells_per_min
+                parts.append(
+                    f"- {report.group_id}: 最后观测=({report.position.col},{report.position.row}) "
+                    f"时刻={report.observed_at:.1f}min 来源={report.source_uav_id} "
+                    f"观测速度=({velocity[0]:.3f},{velocity[1]:.3f})格/min"
                 )
 
         # 上一轮搜索区状态

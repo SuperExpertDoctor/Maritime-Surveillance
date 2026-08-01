@@ -6,7 +6,7 @@ from typing import Optional
 import numpy as np
 
 from src.schedule.config_loader import AppConfig
-from src.schedule.datatypes import BBox, GridCoord, Marker, Region, UAVState
+from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
 from src.schedule.info_field import InfoField
 
 
@@ -32,6 +32,7 @@ class StateManager:
         self._marker_counter = 0
         self._events: list[dict] = []
         self._known_target_groups: set[str] = set()
+        self._target_reports: dict[str, TargetReport] = {}
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
         self.land_mask = np.zeros(config.grid.resolution, dtype=bool)
@@ -144,6 +145,56 @@ class StateManager:
 
     def is_target_group_known(self, target_group_id: str) -> bool:
         return target_group_id in self._known_target_groups
+
+    def record_target_observation(
+        self,
+        group_id: str,
+        position: GridCoord,
+        source_uav_id: str,
+        observed_at: Optional[float] = None,
+    ) -> TargetReport:
+        """Store a sensor-derived fix without exposing any ship truth state."""
+        timestamp = self.current_time if observed_at is None else float(observed_at)
+        normalized = GridCoord(int(round(position.col)), int(round(position.row)))
+        previous = self._target_reports.get(group_id)
+        velocity = (0.0, 0.0)
+        observations = 1
+        if previous is not None:
+            elapsed = timestamp - previous.observed_at
+            if elapsed > 1e-6:
+                raw_velocity = (
+                    (normalized.col - previous.position.col) / elapsed,
+                    (normalized.row - previous.position.row) / elapsed,
+                )
+                # EO fixes may be noisy.  Keep a useful uncertainty growth
+                # rate without allowing a one-cell quantization jump to make
+                # the successor search area leap across the map.
+                speed = float(np.hypot(*raw_velocity))
+                scale = min(1.0, 0.20 / speed) if speed else 1.0
+                velocity = (raw_velocity[0] * scale, raw_velocity[1] * scale)
+            else:
+                velocity = previous.velocity_cells_per_min
+            observations = previous.observation_count + 1
+        report = TargetReport(
+            group_id=group_id,
+            position=normalized,
+            observed_at=timestamp,
+            source_uav_id=source_uav_id,
+            velocity_cells_per_min=velocity,
+            observation_count=observations,
+        )
+        self._target_reports[group_id] = report
+        self._known_target_groups.add(group_id)
+        return report
+
+    def get_target_report(self, group_id: str) -> Optional[TargetReport]:
+        return self._target_reports.get(group_id)
+
+    def get_target_reports(self) -> list[TargetReport]:
+        return sorted(self._target_reports.values(), key=lambda item: item.group_id)
+
+    def clear_target_report(self, group_id: str) -> None:
+        self._target_reports.pop(group_id, None)
 
     def create_track_region(self, target_group_id: str, center: GridCoord) -> Region:
         existing = self.get_track_region_for_group(target_group_id)
