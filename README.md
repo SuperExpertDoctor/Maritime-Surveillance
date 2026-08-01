@@ -473,3 +473,5 @@ npm run test:acceptance
 | **仿真引擎** | `src/env/simulation.py` | 环境 + UAV + 舰船 + 调度集成 |
 | **WebSocket** | `src/vis/backend` | 直播推送 + JSONL 回放 |
 | **Canvas 渲染** | `src/vis/frontend` | 9+ 层 Canvas 2D 可视化 |
+#   M a r i t i m e - S u r v e i l l a n c e  
+ 
