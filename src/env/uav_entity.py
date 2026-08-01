@@ -70,7 +70,7 @@ class UAVEntity:
         self.avoidance_level = 0
         self.avoidance_path: list[Pose] = []
         self._avoidance_index = 0
-        self._fuel_consumption_rate = 1.0 / (endurance_h * 60.0)
+        self._distance_this_step = 0.0
         self.lgvf = LGVFTracker(R_min=R_min)
         self.sar_sensor = SARSensor()
         self.eo_sensor = EOSensor()
@@ -98,6 +98,23 @@ class UAVEntity:
     @property
     def heading_deg(self) -> float:
         return math.degrees(self.heading_rad) % 360.0
+
+    @property
+    def total_range_km(self) -> float:
+        """Fixed sortie range determined by the airframe and fuel load."""
+        return self.cruise_speed_kmh * self.endurance_h
+
+    @property
+    def remaining_range_km(self) -> float:
+        return self.fuel_remaining_pct * self.total_range_km
+
+    @property
+    def remaining_range_cells(self) -> float:
+        return self.remaining_range_km / self.cell_size_km
+
+    @property
+    def total_range_cells(self) -> float:
+        return self.total_range_km / self.cell_size_km
 
     @property
     def mission_kind(self) -> str:
@@ -238,11 +255,8 @@ class UAVEntity:
         """Advance the vehicle and report a newly reached low-fuel threshold."""
         if dt_min <= 0:
             return False
-        if self.status not in ("idle", "refueling"):
-            self.fuel_remaining_pct = max(
-                0.0,
-                self.fuel_remaining_pct - self._fuel_consumption_rate * dt_min,
-            )
+        airborne = self.status not in ("idle", "refueling")
+        self._distance_this_step = 0.0
 
         if self.status == "tracking" and target_position is not None:
             self._step_tracking(dt_min, target_position, tracking_speed_cells_min, storm_zones)
@@ -250,6 +264,16 @@ class UAVEntity:
             self._step_holding(dt_min)
         else:
             self._follow_route(dt_min)
+
+        if airborne:
+            # Fuel represents a fixed mileage budget, not a clock budget.
+            # Accumulate the actual route/orbit segments rather than the
+            # chord between two simulation ticks, which undercounts turns.
+            self.fuel_remaining_pct = max(
+                0.0,
+                self.fuel_remaining_pct
+                - self._distance_this_step / self.total_range_cells,
+            )
 
         self.trail.append(self.float_position)
         if len(self.trail) > 240:
@@ -277,6 +301,7 @@ class UAVEntity:
             if remaining >= distance:
                 self._col, self._row, self.heading_rad = target
                 remaining -= distance
+                self._distance_this_step += distance
                 self._wp_index += 1
                 self._update_route_state()
             else:
@@ -285,6 +310,7 @@ class UAVEntity:
                 self._col += (target[0] - self._col) * ratio
                 self._row += (target[1] - self._row) * ratio
                 self.heading_rad = _wrap_pi(self.heading_rad + heading_delta * ratio)
+                self._distance_this_step += remaining
                 remaining = 0.0
         self._update_scan_direction()
 
@@ -452,6 +478,7 @@ class UAVEntity:
         self.heading_rad = _wrap_pi(self.heading_rad + rate * dt_min)
         self._col = max(0.0, min(29.0, self._col))
         self._row = max(0.0, min(29.0, self._row))
+        self._distance_this_step += abs(speed) * dt_min
 
     def _follow_avoidance_route(
         self,
@@ -470,6 +497,7 @@ class UAVEntity:
             if remaining >= distance:
                 self._col, self._row, self.heading_rad = target
                 remaining -= distance
+                self._distance_this_step += distance
                 self._avoidance_index += 1
             else:
                 ratio = remaining / distance
@@ -478,6 +506,7 @@ class UAVEntity:
                 self.heading_rad = _wrap_pi(
                     self.heading_rad + _wrap_pi(target[2] - self.heading_rad) * ratio
                 )
+                self._distance_this_step += remaining
                 remaining = 0.0
         self.eo_fov = self.eo_sensor.compute_fov(
             self.float_position, self.heading_rad, target_position
@@ -500,15 +529,10 @@ class UAVEntity:
 
     def _step_holding(self, dt_min: float) -> None:
         speed = self.cruise_speed_kmh / self.cell_size_km / 60.0
-        rate, _ = self.lgvf.compute_guidance(
+        rate, commanded_speed = self.lgvf.compute_guidance(
             self.pose, self._holding_center, 1.2, speed
         )
-        mid = self.heading_rad + rate * dt_min / 2.0
-        self._col += speed * math.cos(mid) * dt_min
-        self._row += speed * math.sin(mid) * dt_min
-        self.heading_rad = _wrap_pi(self.heading_rad + rate * dt_min)
-        self._col = max(0.0, min(29.0, self._col))
-        self._row = max(0.0, min(29.0, self._row))
+        self._integrate_guidance(rate, commanded_speed, dt_min)
 
     def refuel(self) -> None:
         self.fuel_remaining_pct = 1.0

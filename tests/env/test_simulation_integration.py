@@ -255,7 +255,7 @@ def test_return_route_uses_nearest_land_recovery_base():
     assert math.dist(uav.remaining_path[-1][:2], tuple(expected)) < 1e-6
 
 
-def test_return_route_balances_completed_refuels_before_distance():
+def test_return_route_prefers_nearest_base_over_historical_refuel_count():
     config = ConfigLoader.load()
     config.environment.base_count = 3
     engine = SimulationEngine(config, seed=42)
@@ -269,10 +269,10 @@ def test_return_route_balances_completed_refuels_before_distance():
 
     engine._set_return_route(uav, 10.0)
 
-    assert engine._return_base_by_uav[uav.id] is not busiest
+    assert engine._return_base_by_uav[uav.id] is busiest
 
 
-def test_return_route_balances_already_scheduled_recoveries():
+def test_return_route_skips_base_with_full_reserved_maintenance_capacity():
     config = ConfigLoader.load()
     config.environment.base_count = 3
     engine = SimulationEngine(config, seed=42)
@@ -286,3 +286,63 @@ def test_return_route_balances_already_scheduled_recoveries():
     engine._set_return_route(uav, 10.0)
 
     assert engine._return_base_by_uav[uav.id] is not busiest
+
+
+def test_reserve_return_uses_95_percent_of_remaining_fixed_range():
+    engine = SimulationEngine(ConfigLoader.load())
+    uav = engine.uavs[0]
+    uav.position = GridCoord(15, 15)
+    uav.status = "searching"
+    base = engine._nearest_available_base(uav.float_position, exclude_uav_id=uav.id)
+    assert base is not None
+    distance_home = math.dist(
+        uav.float_position,
+        (base.position.col, base.position.row),
+    )
+
+    uav.fuel_remaining_pct = (
+        distance_home / 0.95 + 0.1
+    ) / uav.total_range_cells
+    assert not engine._needs_reserve_return(uav)
+
+    uav.fuel_remaining_pct = (
+        distance_home / 0.95 - 0.1
+    ) / uav.total_range_cells
+    assert engine._needs_reserve_return(uav)
+
+
+def test_return_route_uses_next_nearest_base_when_closest_is_full():
+    engine = SimulationEngine(ConfigLoader.load())
+    uav = engine.uavs[0]
+    closest = engine.bases[0]
+    uav.position = closest.position
+    uav.heading_rad = engine._inward_heading(closest.position)
+    for slot in range(closest.capacity):
+        assert closest.land_uav(f"maintenance-{slot}")
+
+    expected = engine._nearest_available_base(
+        uav.float_position,
+        exclude_uav_id=uav.id,
+    )
+    assert expected is not None
+
+    engine._set_return_route(uav, 10.0)
+
+    assert engine._return_base_by_uav[uav.id] is expected
+
+
+def test_fixed_range_consumption_uses_actual_route_distance():
+    engine = SimulationEngine(ConfigLoader.load())
+    uav = engine.uavs[0]
+    start_col, start_row = uav.float_position
+    uav._set_route([(start_col + 1.0, start_row, 0.0)])
+    uav.status = "transit"
+
+    uav.step(3.75)
+
+    assert math.isclose(
+        uav.fuel_remaining_pct,
+        1.0 - 1.0 / uav.total_range_cells,
+        rel_tol=0,
+        abs_tol=1e-9,
+    )

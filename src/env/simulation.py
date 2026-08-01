@@ -897,21 +897,25 @@ class SimulationEngine:
         sm.add_event("uav_returned", {"uav_id": uav.id})
 
     def _set_return_route(self, uav: UAVEntity, current_time: float) -> None:
-        accepting = [base for base in self.bases if base.can_accept()]
+        accepting = self._available_recovery_bases(exclude_uav_id=uav.id)
+        # Recovery doctrine: fly to the nearest base that can still maintain
+        # this airframe.  Current refuelling slots and inbound reservations
+        # both consume capacity, so simultaneous returns cannot overbook it.
         bases = sorted(
             accepting or self.bases,
             key=lambda base: (
-                # Keep recovery work balanced across the independently
-                # capacity-limited coastal bases.  Equal-work bases still
-                # use geometric distance as their final route tiebreaker.
-                self._recovery_load(base),
-                base.occupancy,
                 math.dist(
                     uav.float_position,
                     (base.position.col, base.position.row),
                 ),
+                base.id,
             ),
         )
+        if not accepting:
+            self.allocator.sm.add_event("no_recovery_capacity", {
+                "uav_id": uav.id,
+                "fallback_base_id": bases[0].id,
+            })
         center = (
             (self.config.grid.resolution[0] - 1) / 2,
             (self.config.grid.resolution[1] - 1) / 2,
@@ -920,7 +924,7 @@ class SimulationEngine:
         col, row = uav.position
         local_mask[max(0, col - 1):col + 2, max(0, row - 1):row + 2] = False
         errors = []
-        best_path: tuple[int, int, float, BaseStation, list] | None = None
+        best_path: tuple[float, float, BaseStation, list] | None = None
         for base_index, base in enumerate(bases):
             arrival_heading = math.atan2(
                 base.position.row - center[1],
@@ -958,18 +962,21 @@ class SimulationEngine:
                     math.dist(start[:2], end[:2])
                     for start, end in zip(path, path[1:])
                 )
-                max_range_cells = (
-                    uav.cruise_speed_kmh * uav.endurance_h / uav.cell_size_km
-                )
-                if length >= uav.fuel_remaining_pct * max_range_cells * 0.98:
+                if length > uav.remaining_range_cells:
                     errors.append(f"{base.id}: insufficient fuel for {length:.2f} cells")
                     break
-                candidate_key = (self._recovery_load(base), base.occupancy, length)
-                if best_path is None or candidate_key < best_path[:3]:
+                candidate_key = (
+                    math.dist(
+                        uav.float_position,
+                        (base.position.col, base.position.row),
+                    ),
+                    length,
+                )
+                if best_path is None or candidate_key < best_path[:2]:
                     best_path = (*candidate_key, base, path)
                 break
         if best_path is not None:
-            _, _, _, base, path = best_path
+            _, _, base, path = best_path
             self._return_base_by_uav[uav.id] = base
             uav.plan_return(path)
             return
@@ -978,12 +985,52 @@ class SimulationEngine:
             + "; ".join(errors)
         )
 
-    def _recovery_load(self, base: BaseStation) -> int:
-        """Completed and already-reserved recovery work for one base."""
-        scheduled = sum(
-            assigned is base for assigned in self._return_base_by_uav.values()
+    def _base_maintenance_load(
+        self,
+        base: BaseStation,
+        *,
+        exclude_uav_id: str | None = None,
+    ) -> int:
+        """Concurrent maintenance load, including inbound reservations."""
+        inbound = sum(
+            assigned is base
+            and uav_id != exclude_uav_id
+            and not base.is_refueling(uav_id)
+            for uav_id, assigned in self._return_base_by_uav.items()
         )
-        return base.refuel_count + scheduled
+        return base.occupancy + inbound
+
+    def _available_recovery_bases(
+        self,
+        *,
+        exclude_uav_id: str | None = None,
+    ) -> list[BaseStation]:
+        return [
+            base for base in self.bases
+            if self._base_maintenance_load(
+                base,
+                exclude_uav_id=exclude_uav_id,
+            ) < base.capacity
+        ]
+
+    def _nearest_available_base(
+        self,
+        position,
+        *,
+        exclude_uav_id: str | None = None,
+    ) -> BaseStation | None:
+        available = self._available_recovery_bases(
+            exclude_uav_id=exclude_uav_id,
+        )
+        if not available:
+            return None
+        return min(
+            available,
+            key=lambda base: math.dist(
+                position,
+                (base.position.col, base.position.row),
+            ),
+        )
 
     def _process_search_completions(self, current_time: float) -> None:
         sm = self.allocator.sm
@@ -1048,17 +1095,20 @@ class SimulationEngine:
             return False
         if uav.status == "idle" and not include_idle:
             return False
-        max_range_cells = (
-            uav.cruise_speed_kmh * uav.endurance_h / uav.cell_size_km
+        base = self._nearest_available_base(
+            uav.float_position,
+            exclude_uav_id=uav.id,
         )
-        remaining_cells = uav.fuel_remaining_pct * max_range_cells
-        base = self._nearest_base(uav.float_position)
+        if base is None:
+            # All bases are currently full.  Returning to the closest coast
+            # minimizes fuel risk; the UAV enters that base's holding pattern
+            # until a maintenance position opens.
+            base = self._nearest_base(uav.float_position)
         direct_home = math.dist(
             uav.float_position,
             (base.position.col, base.position.row),
         )
-        reserve_cells = direct_home * 1.25 + 3.0
-        return remaining_cells <= reserve_cells
+        return direct_home > uav.remaining_range_cells * 0.95
 
     def _process_refuelling(self, current_time: float) -> None:
         for uav in self.uavs:
