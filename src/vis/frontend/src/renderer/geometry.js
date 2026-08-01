@@ -24,7 +24,9 @@ export function computeLayout(canvasW, canvasH) {
     GRID_CELLS,
     Math.floor(Math.min(chartHeight - taskInset * 2, chartWidth - taskInset * 2)),
   );
-  const offsetX = chartX + taskInset;
+  // Keep the square surveillance sector in open water, away from the
+  // mainland occupying the left edge of the 16:9 chart.
+  const offsetX = chartX + chartWidth - taskSize - taskInset;
   const offsetY = chartY + (chartHeight - taskSize) / 2;
   const mapBounds = { x: chartX, y: chartY, width: chartWidth, height: chartHeight };
   const legendBounds = legendWidth
@@ -35,6 +37,7 @@ export function computeLayout(canvasW, canvasH) {
     cellSize: taskSize / GRID_CELLS,
     offsetX,
     offsetY,
+    taskBounds: { x: offsetX, y: offsetY, width: taskSize, height: taskSize },
     mapBounds,
     legendBounds,
   };

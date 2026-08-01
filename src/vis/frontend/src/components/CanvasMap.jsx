@@ -6,9 +6,9 @@ import { renderFrame } from "../renderer/layers";
 
 const MAP_ASSET_SOURCES = {
   background: "/assets/background.png",
-  uav: "/assets/rainbow-uav.png",
-  carrier: "/assets/carrier.png",
-  destroyer: "/assets/destroyer.png",
+  uav: "/assets/rainbow-uav.png?v=20260801",
+  carrier: "/assets/carrier.png?v=20260801",
+  destroyer: "/assets/destroyer.png?v=20260801",
 };
 
 function loadMapAsset(source) {

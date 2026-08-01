@@ -36,6 +36,29 @@ test("live and replay dashboard acceptance", async ({ page }) => {
     "/assets/destroyer.png",
   ].map(async (path) => ({ path, status: (await fetch(path)).status }))));
   expect(assetStatuses.every(({ status }) => status === 200)).toBe(true);
+  const assetDimensions = await page.evaluate(() => Promise.all([
+    ["/assets/rainbow-uav.png?v=20260801", 1536, 1024],
+    ["/assets/carrier.png?v=20260801", 1536, 1024],
+    ["/assets/destroyer.png?v=20260801", 1024, 1536],
+  ].map(([source, width, height]) => new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve({ source, width: image.naturalWidth, height: image.naturalHeight, expected: [width, height] });
+    image.src = source;
+  }))));
+  for (const asset of assetDimensions) {
+    expect([asset.width, asset.height]).toEqual(asset.expected);
+  }
+  const offshoreLayout = await page.evaluate(async () => {
+    const { computeLayout } = await import("/src/renderer/geometry.js");
+    return computeLayout(1100, 650);
+  });
+  const taskSize = offshoreLayout.cellSize * 30;
+  expect(offshoreLayout.taskBounds.width).toBe(offshoreLayout.taskBounds.height);
+  expect(offshoreLayout.taskBounds.width).toBeCloseTo(taskSize, 5);
+  expect(offshoreLayout.offsetX).toBeGreaterThan(offshoreLayout.mapBounds.x + offshoreLayout.mapBounds.width * 0.4);
+  expect(offshoreLayout.offsetX + taskSize).toBeLessThanOrEqual(
+    offshoreLayout.mapBounds.x + offshoreLayout.mapBounds.width,
+  );
 
   const canvasEvidence = await page.locator("canvas").evaluate((canvas) => {
     const context = canvas.getContext("2d");

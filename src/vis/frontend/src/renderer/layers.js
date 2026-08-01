@@ -18,13 +18,36 @@ function normalizeBases(bases, basePosition) {
     : basePosition
       ? [{ position: basePosition, number: 1, occupancy: 0, capacity: 3, busy: false }]
       : [];
-  return source.map((base, index) => {
-    const [col, row] = base.position || [2 + index, 14];
-    // Historic replay files may contain offshore base coordinates.  The
-    // marker remains anchored on the mainland without changing frame data.
-    const displayPosition = col >= 5 ? [2 + Math.min(index, 1), row] : [col, row];
-    return { ...base, displayPosition };
+  return source;
+}
+
+function buildBaseCenters(bases, mapBounds) {
+  return (bases || []).map((base, index) => {
+    const row = Number(base.position?.[1] ?? 10 + index * 10);
+    return {
+      x: mapBounds.x + mapBounds.width * (0.052 + Math.min(index, 1) * 0.038),
+      y: mapBounds.y + mapBounds.height * clamp((row + 0.5) / 30, 0.14, 0.86),
+    };
   });
+}
+
+function baseCenterForUav(uav, baseCenters) {
+  if (!baseCenters?.length) return null;
+  const number = Number(String(uav.id || "").match(/\d+/)?.[0] || 1);
+  return baseCenters[(number - 1) % baseCenters.length];
+}
+
+function groundedUavCenter(uav, baseCenters, cellSize) {
+  const baseCenter = baseCenterForUav(uav, baseCenters);
+  if (!baseCenter) return null;
+  const number = Number(String(uav.id || "").match(/\d+/)?.[0] || 1);
+  const slot = Math.floor((number - 1) / baseCenters.length) % 5;
+  const angle = -Math.PI / 2 + slot * Math.PI * 0.4;
+  const radius = Math.max(3, cellSize * 0.34);
+  return {
+    x: baseCenter.x + Math.cos(angle) * radius,
+    y: baseCenter.y + Math.sin(angle) * radius,
+  };
 }
 
 function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
@@ -289,7 +312,7 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
   }
 }
 
-export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId) {
+export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) {
   for (const uav of uavs || []) {
     const path = uav.planned_path || [];
     if (path.length >= 2 && uav.status !== "idle") {
@@ -297,10 +320,16 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId) {
       ctx.lineWidth = uav.id === selectedId ? 1.8 : 1;
       ctx.setLineDash(uav.id === selectedId ? [] : [3, 4]);
       ctx.beginPath();
+      const baseCenter = baseCenterForUav(uav, baseCenters);
+      const departsFromBase = baseCenter && uav.status === "transit";
+      if (departsFromBase) {
+        ctx.moveTo(baseCenter.x, baseCenter.y);
+      }
       path.forEach((pose, index) => {
         const point = gridCenter(pose[0], pose[1], cellSize, ox, oy);
-        if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+        if (index === 0 && !departsFromBase) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
       });
+      if (baseCenter && uav.status === "returning") ctx.lineTo(baseCenter.x, baseCenter.y);
       ctx.stroke();
       ctx.setLineDash([]);
     }
@@ -451,9 +480,11 @@ function drawShipHull(ctx, ship, center, size, color, assets) {
   const carrier = ship.ship_type === "carrier";
   const model = carrier ? assets?.carrier : assets?.destroyer;
   const source = carrier
-    ? { x: 196, y: 244, width: 1072, height: 540 }
-    : { x: 48, y: 64, width: 1420, height: 908 };
-  const modelWidth = Math.max(carrier ? 20 : 17, cellSizeForShip(size, carrier));
+    ? { x: 32, y: 74, width: 1472, height: 842 }
+    : { x: 400, y: 78, width: 224, height: 1290 };
+  const modelWidth = carrier
+    ? Math.max(22, cellSizeForShip(size, true))
+    : Math.max(6.5, size * 0.82);
   if (drawSprite(
     ctx,
     model,
@@ -612,10 +643,10 @@ function drawBaseStar(ctx, center, outerRadius, innerRadius) {
   ctx.closePath();
 }
 
-export function drawBases(ctx, bases, cellSize, ox, oy, phase) {
+export function drawBases(ctx, bases, baseCenters, cellSize, phase) {
   for (const [index, base] of (bases || []).entries()) {
-    const position = base.displayPosition || base.position;
-    const center = gridCenter(position[0], position[1], cellSize, ox, oy);
+    const center = baseCenters[index];
+    if (!center) continue;
     const color = "#DC2626";
     const outerRadius = Math.max(8, cellSize * 0.48);
     const innerRadius = outerRadius * 0.46;
@@ -643,9 +674,12 @@ export function drawBases(ctx, bases, cellSize, ox, oy, phase) {
   }
 }
 
-export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
+export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCenters) {
   for (const uav of uavs || []) {
-    const center = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
+    const taskCenter = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
+    const center = ["idle", "refueling"].includes(uav.status)
+      ? groundedUavCenter(uav, baseCenters, cellSize) || taskCenter
+      : taskCenter;
     const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";
     const size = Math.max(5, cellSize * (uav.id === selectedId ? 0.42 : 0.32));
     ctx.save();
@@ -653,7 +687,7 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
     const renderedModel = drawSprite(
       ctx,
       assets?.uav,
-      { x: 36, y: 180, width: 1444, height: 632 },
+      { x: 74, y: 205, width: 1388, height: 526 },
       center,
       Math.max(20, cellSize * (uav.id === selectedId ? 1.75 : 1.45)),
       // The Rainbow UAV cutout has its nose at the top of the source image.
@@ -785,7 +819,9 @@ export function renderFrame(ctx, frame, options = {}) {
     width: 30 * cellSize,
     height: 30 * cellSize,
   };
-  drawBackground(ctx, width, height, cellSize, offsetX, offsetY, mapBounds || fallbackBounds, assets);
+  const resolvedMapBounds = mapBounds || fallbackBounds;
+  const baseCenters = buildBaseCenters(bases, resolvedMapBounds);
+  drawBackground(ctx, width, height, cellSize, offsetX, offsetY, resolvedMapBounds, assets);
   if (frame) {
     drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY);
     drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
@@ -796,12 +832,12 @@ export function renderFrame(ctx, frame, options = {}) {
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
     drawTrackRegions(ctx, frame.track_regions, frame.ships, cellSize, offsetX, offsetY);
     drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
-    drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId);
+    drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, baseCenters);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
     drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
-    drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets);
-    drawBases(ctx, bases, cellSize, offsetX, offsetY, frameCount);
+    drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets, baseCenters);
+    drawBases(ctx, bases, baseCenters, cellSize, frameCount);
     drawTransparencyLegend(ctx, legendBounds);
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);
