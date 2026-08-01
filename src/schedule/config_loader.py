@@ -63,6 +63,7 @@ class UAVConfig:
     lifecycle_required_cycles: int = 3
     freshness_patrol_start_min: float = 120.0
     freshness_patrol_count: int = 5
+    freshness_patrol_coverage_threshold_pct: float = 80.0
 
 
 @dataclass

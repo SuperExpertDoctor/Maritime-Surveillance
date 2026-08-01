@@ -18,3 +18,7 @@ lifecycle_required_cycles: 3
 # continues expanding unique coverage.
 freshness_patrol_start_min: 120
 freshness_patrol_count: 5
+# Do not reserve aircraft for local revisits until the first broad search
+# pass is complete.  Before this gate, every completed sector returns to the
+# exploration pool so unique offshore coverage can reach the 8-hour target.
+freshness_patrol_coverage_threshold_pct: 80

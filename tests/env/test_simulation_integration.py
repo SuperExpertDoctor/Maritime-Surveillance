@@ -451,6 +451,8 @@ def test_post_coverage_completion_restarts_local_revisit_without_idling():
 def test_freshness_patrol_caps_local_revisit_fleet_size():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     start = engine.config.uav.freshness_patrol_start_min
+    searchable = engine.allocator.sm.get_searchable_mask()
+    engine.allocator.sm.info_field.last_scan_time[searchable] = 1.0
     selected = [
         engine._should_continue_freshness_patrol(uav, start)
         for uav in engine.uavs
@@ -461,3 +463,11 @@ def test_freshness_patrol_caps_local_revisit_fleet_size():
         engine.uavs[-1],
         start - 1,
     )
+
+
+def test_freshness_patrol_defers_revisits_until_broad_coverage():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    start = engine.config.uav.freshness_patrol_start_min
+
+    assert not engine._should_continue_freshness_patrol(engine.uavs[0], start)
+    assert not engine._freshness_patrol_uavs

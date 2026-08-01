@@ -1171,6 +1171,9 @@ class SimulationEngine:
         cfg = self.config.uav
         if current_time < cfg.freshness_patrol_start_min:
             return False
+        coverage = self.allocator.sm.get_coverage_stats()["coverage_pct"]
+        if coverage < cfg.freshness_patrol_coverage_threshold_pct:
+            return False
         if uav.id in self._freshness_patrol_uavs:
             return True
         if len(self._freshness_patrol_uavs) >= cfg.freshness_patrol_count:
