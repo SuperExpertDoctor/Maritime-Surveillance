@@ -77,6 +77,11 @@ class ShipConfig:
     carrier_max: int = 1
     carrier_speed_kn: float = 14.0
     destroyer_speed_kn: float = 20.0
+    zigzag_heading_deg: float = 18.0
+    max_turn_rate_deg_min: float = 12.0
+    yaw_time_constant_min: float = 2.5
+    heading_control_gain_per_min: float = 0.35
+    turn_speed_loss_fraction: float = 0.12
     ais_discrepancy_threshold_cells: float = 2.0
     ais_update_interval_min: float = 1.0
     ais_discrimination_delay_min: float = 2.0

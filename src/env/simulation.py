@@ -198,6 +198,11 @@ class SimulationEngine:
                     base_heading=heading,
                     formation_offset=offset,
                     actual_military=military,
+                    zigzag_heading_deg=cfg.zigzag_heading_deg,
+                    max_turn_rate_deg_min=cfg.max_turn_rate_deg_min,
+                    yaw_time_constant_min=cfg.yaw_time_constant_min,
+                    heading_control_gain_per_min=cfg.heading_control_gain_per_min,
+                    turn_speed_loss_fraction=cfg.turn_speed_loss_fraction,
                 )
                 ship.ais_mode = (
                     "civilian"

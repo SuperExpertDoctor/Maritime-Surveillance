@@ -1,9 +1,14 @@
 count_min: 3
 max_groups: 3
 speed_kn: 18
-zigzag_amplitude_km: 5
-zigzag_period_min: 10
+zigzag_amplitude_km: 0.5
+zigzag_period_min: 24
 zigzag_phase_random: true
+zigzag_heading_deg: 18
+max_turn_rate_deg_min: 12
+yaw_time_constant_min: 2.5
+heading_control_gain_per_min: 0.35
+turn_speed_loss_fraction: 0.12
 # GOAL2 target fleet and AIS discrimination settings.
 target_min: 3
 target_max: 5

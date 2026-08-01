@@ -342,8 +342,39 @@ def test_target_ship_changes_course_and_starts_zigzagging_when_tracked():
     ship.set_tracked(True)
 
     assert ship.is_evading
-    assert ship.base_heading != original_heading
-    assert ship._motion_heading() != ship.base_heading
+    assert ship.base_heading == original_heading
+    assert ship.heading_rad == original_heading
+
+    headings = []
+    for _ in range(18):
+        previous = ship.heading_rad
+        ship.step(1.0)
+        headings.append(ship.heading_rad)
+        delta = abs((ship.heading_rad - previous + math.pi) % (2 * math.pi) - math.pi)
+        assert math.degrees(delta) <= engine.config.ship.max_turn_rate_deg_min + 1e-6
+
+    assert any(abs((heading - original_heading + math.pi) % (2 * math.pi) - math.pi) > math.radians(1) for heading in headings)
+
+
+def test_target_ship_nomoto_response_has_bounded_yaw_and_turn_speed_loss():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    ship = engine.ships[0]
+    ship._col = ship._row = 15.0
+    ship._base_heading = ship.heading_rad = 0.0
+    ship.set_tracked(True)
+    nominal_step = ship.speed_cells_per_min
+    positions = [ship.float_position]
+    rates = []
+
+    for _ in range(48):
+        ship.step(1.0)
+        positions.append(ship.float_position)
+        rates.append(abs(ship.turn_rate_deg_min))
+
+    distances = [math.dist(start, end) for start, end in zip(positions, positions[1:])]
+    assert max(rates) <= engine.config.ship.max_turn_rate_deg_min + 1e-6
+    assert max(distances) <= nominal_step + 1e-9
+    assert any(distance < nominal_step * 0.999 for distance in distances)
 
 
 def test_dissipated_storm_is_replaced_at_configured_density():

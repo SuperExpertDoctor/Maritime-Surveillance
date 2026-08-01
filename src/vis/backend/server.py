@@ -146,6 +146,13 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
                 "count_min": cfg.ship.count_min,
                 "max_groups": cfg.ship.max_groups,
                 "speed_kn": cfg.ship.speed_kn,
+                "zigzag_amplitude_km": cfg.ship.zigzag_amplitude_km,
+                "zigzag_period_min": cfg.ship.zigzag_period_min,
+                "zigzag_heading_deg": cfg.ship.zigzag_heading_deg,
+                "max_turn_rate_deg_min": cfg.ship.max_turn_rate_deg_min,
+                "yaw_time_constant_min": cfg.ship.yaw_time_constant_min,
+                "heading_control_gain_per_min": cfg.ship.heading_control_gain_per_min,
+                "turn_speed_loss_fraction": cfg.ship.turn_speed_loss_fraction,
             },
             "llm": {
                 "heavy_cycle_min": cfg.llm.heavy_cycle_min,

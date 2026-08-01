@@ -69,7 +69,7 @@ def generate_ais_signal(ship: "Ship", timestamp: float) -> AISSignal | None:
         mmsi=f"{100000000 + serial % 899999999:09d}",
         reported_position=reported,
         reported_speed_kn=ship.speed_kn,
-        reported_heading_deg=math.degrees(ship.base_heading) % 360.0,
+        reported_heading_deg=math.degrees(ship.heading_rad) % 360.0,
         ship_name=ship_name,
         ship_type=vessel_type,
         timestamp=float(timestamp),
