@@ -383,6 +383,8 @@ export function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode
     const color = UAV_STATUS_COLORS[uav.status] || "#475569";
     ctx.save();
     ctx.lineCap = "round";
+
+    // ── Mode: full ── uniform thin line over the entire trail ─────
     if (trailMode === "full") {
       ctx.strokeStyle = color;
       ctx.globalAlpha = uav.id === selectedId ? 0.9 : 0.62;
@@ -396,6 +398,73 @@ export function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode
       ctx.restore();
       continue;
     }
+
+    // ── Mode: comet ── filled tapered shape, wide at UAV, point at tail
+    if (trailMode === "comet") {
+      const maxHalfWidth = cellSize * (uav.id === selectedId ? 0.52 : 0.30);
+      const maxAlpha = uav.id === selectedId ? 0.48 : 0.26;
+      // Build polygon vertices from tail to head along left edge,
+      // then back along right edge.
+      const left = [];
+      const right = [];
+      for (let i = 0; i < trail.length; i += 1) {
+        const t = i / Math.max(1, trail.length - 1); // 0→tail  1→head
+        const halfW = Math.max(0.2, maxHalfWidth * t * t); // quadratic taper
+        let dx = 0, dy = 0;
+        if (i < trail.length - 1) {
+          dx = trail[i + 1][0] - trail[i][0];
+          dy = trail[i + 1][1] - trail[i][1];
+        } else if (i > 0) {
+          dx = trail[i][0] - trail[i - 1][0];
+          dy = trail[i][1] - trail[i - 1][1];
+        }
+        const len = Math.hypot(dx, dy) || 1;
+        const px = -dy / len * halfW;
+        const py = dx / len * halfW;
+        const pt = gridCenter(trail[i][0], trail[i][1], cellSize, ox, oy);
+        left.push({ x: pt.x + px, y: pt.y + py, t });
+        right.push({ x: pt.x - px, y: pt.y - py, t });
+      }
+      // Draw filled polygon
+      const headAlpha = maxAlpha;
+      ctx.globalAlpha = headAlpha;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      for (let i = 0; i < left.length; i += 1) {
+        if (i === 0) ctx.moveTo(left[i].x, left[i].y);
+        else ctx.lineTo(left[i].x, left[i].y);
+      }
+      for (let i = right.length - 1; i >= 0; i -= 1) {
+        ctx.lineTo(right[i].x, right[i].y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      // Thin centerline on top for definition
+      ctx.globalAlpha = headAlpha * 1.3;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(0.5, cellSize * (uav.id === selectedId ? 0.12 : 0.07));
+      ctx.beginPath();
+      trail.forEach(([col, row], index) => {
+        const pt = gridCenter(col, row, cellSize, ox, oy);
+        if (index === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      ctx.stroke();
+      // Glow head dot
+      if (trail.length) {
+        const head = trail[trail.length - 1];
+        const h = gridCenter(head[0], head[1], cellSize, ox, oy);
+        ctx.globalAlpha = headAlpha * 1.5;
+        ctx.fillStyle = "#FFFFFF";
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, maxHalfWidth * 0.85, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      continue;
+    }
+
+    // ── Mode: tail (default) ── gradient-width line, last 72 points
     const start = Math.max(1, trail.length - 72);
     for (let index = start; index < trail.length; index += 1) {
       const previous = gridCenter(trail[index - 1][0], trail[index - 1][1], cellSize, ox, oy);

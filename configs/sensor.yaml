@@ -1,19 +1,24 @@
 # === SAR 合成孔径雷达 ===
+# Calibrated against CH-4-class X-band stripmap payloads (e.g. STARLite tier).
+# Swath-resolution product obeys the stripmap ambiguity constraint.
+# Pfa raised from raw ATR 1e-4 to account for dense inshore traffic clutter.
 sar:
-  swath_km: 20                # 条带宽度 (2 grid cells, strip mode)
-  detection_range_km: 80      # 最大探测距离
-  detection_probability: 0.90 # 单次扫描检测概率 Pd
-  false_alarm_rate: 0.01      # 虚警率
-  resolution_m: 3             # 分辨率 (strip mode)
+  swath_km: 15                # 条带宽度 (1.5 grid cells, stripmap)
+  detection_range_km: 60      # 最大探测距离 (中位海况 SS3)
+  detection_probability: 0.90 # 单次扫描检测概率 Pd (大型舰船)
+  false_alarm_rate: 0.002     # 虚警率 (近岸密集交通杂波修正)
+  resolution_m: 3             # 分辨率 (stripmap)
   mode: "strip"               # strip | spotlight | scan
 
 # === EO/IR 光电/红外 ===
+# High-end targeting turret (WMD-7 / MX-15 tier) in narrow-FOV track mode.
+# Pd reflects lock-after-acquisition confidence, not cold-search detection.
 eoir:
-  fov_deg: 8                  # 凝视跟踪窄视场
-  detection_range_km: 20      # 最大探测距离 (受气象影响)
-  detection_probability: 0.70 # 单次检测概率
-  false_alarm_rate: 0.02      # 虚警率
-  resolution_m: 0.5           # 分辨率
+  fov_deg: 8                  # 中窄视场 凝视跟踪
+  detection_range_km: 20      # 最大探测距离 (晴朗天气)
+  detection_probability: 0.92 # 锁定跟踪置信度
+  false_alarm_rate: 0.008     # 自动跟踪器虚警 (海浪反光/云雾)
+  resolution_m: 0.5           # 分辨率 @20km
 
 # === Radar/ESM 雷帧 ===
 radar:

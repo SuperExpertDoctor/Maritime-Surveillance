@@ -23,6 +23,32 @@ class ShipType(str, Enum):
     DESTROYER = "destroyer"
 
 
+def formation_offsets(group_size: int, has_carrier: bool) -> list[tuple[float, float]]:
+    """Return (forward, right) local offsets in cells for each group member.
+
+    Member 0 is the formation leader at (0, 0).  Offsets are applied in the
+    leader's local frame: *forward* = +heading direction, *right* = starboard.
+    """
+    if has_carrier:
+        templates = {
+            2: [(0, 0), (1.2, 0.8)],
+            3: [(0, 0), (-0.8, 1.0), (0.8, 1.0)],
+            4: [(0, 0), (-1.0, 1.2), (1.0, 1.2), (0, -1.5)],
+            5: [(0, 0), (-1.2, 1.5), (1.2, 1.5), (-1.0, -1.5), (1.0, -1.5)],
+        }
+    else:
+        templates = {
+            2: [(0, 0), (1.5, 0)],
+            3: [(0, 0), (-1.0, 0.8), (1.0, 0.8)],
+            4: [(0, 0), (-1.2, 1.0), (1.2, 1.0), (0, -1.2)],
+            5: [(0, 0), (-1.5, 1.2), (1.5, 1.2), (-1.2, -1.2), (1.2, -1.2)],
+        }
+    template = templates.get(group_size)
+    if template is None:
+        return [(0, 0)] * max(1, group_size)
+    return list(template)
+
+
 class Ship:
     def __init__(
         self,
@@ -58,6 +84,9 @@ class Ship:
         self.ship_type = ShipType(ship_type)
         self.group_id = group_id
         self.formation_offset = tuple(map(float, formation_offset))
+        self.is_formation_leader = (
+            formation_offset == (0.0, 0.0) or all(abs(v) < 1e-9 for v in formation_offset)
+        )
         self.actual_military = bool(actual_military)
         self.is_military: bool | None = None
         self.ais_signal = None
@@ -203,21 +232,63 @@ class Ship:
         self._yaw_rate_rad_per_min = new_rate
         return _wrap_pi(old_heading + delta / 2.0)
 
-    def step(self, dt_min: float, islands: Iterable[Island] = ()) -> None:
+    def _formation_target(
+        self,
+        leader_position: tuple[float, float],
+        leader_heading: float,
+    ) -> tuple[float, float]:
+        """World-space position this ship should occupy in formation."""
+        fwd, right = self.formation_offset
+        cos_h, sin_h = math.cos(leader_heading), math.sin(leader_heading)
+        return (
+            leader_position[0] + fwd * cos_h - right * sin_h,
+            leader_position[1] + fwd * sin_h + right * cos_h,
+        )
+
+    def step(
+        self,
+        dt_min: float,
+        islands: Iterable[Island] = (),
+        leader: "Ship | None" = None,
+    ) -> None:
         """Advance one coherent-formation member while respecting islands."""
         if self.departed or dt_min <= 0:
             return
-        start = self.float_position
-        desired_heading = self._avoid_boundaries(self._motion_heading())
-        desired_heading = self._avoid_islands(desired_heading, dt_min, islands)
-        motion_heading = self._integrate_yaw(desired_heading, dt_min)
-        turn_fraction = abs(self._yaw_rate_rad_per_min) / max(self.max_turn_rate_rad_per_min, 1e-9)
-        effective_speed = self.speed_cells_per_min * (1.0 - self.turn_speed_loss_fraction * turn_fraction)
-        self._col += effective_speed * math.cos(motion_heading) * dt_min
-        self._row += effective_speed * math.sin(motion_heading) * dt_min
-        angular_rate = 2.0 * math.pi / max(self.zigzag_period_min, 1e-6)
-        if self._evasive:
-            self._phase = (self._phase + angular_rate * dt_min) % (2 * math.pi)
+
+        if leader is not None and not self.is_formation_leader:
+            # ── Formation follower: steer toward assigned station ──────
+            target = self._formation_target(
+                leader.float_position, leader.heading_rad,
+            )
+            dx, dy = target[0] - self._col, target[1] - self._row
+            station_error = math.hypot(dx, dy)
+            bearing = math.atan2(dy, dx)
+            # Gentle proportional steering — a follower should not snap
+            gain = min(0.6, station_error / max(self.speed_cells_per_min * dt_min, 0.01))
+            desired_heading = _wrap_pi(
+                self.heading_rad + gain * _wrap_pi(bearing - self.heading_rad)
+            )
+            desired_heading = self._avoid_islands(desired_heading, dt_min, islands)
+            motion_heading = self._integrate_yaw(desired_heading, dt_min)
+            speed_factor = max(0.3, 1.0 - station_error * 0.4)
+            effective_speed = min(
+                self.speed_cells_per_min,
+                leader.speed_cells_per_min,
+            ) * speed_factor
+            self._col += effective_speed * math.cos(motion_heading) * dt_min
+            self._row += effective_speed * math.sin(motion_heading) * dt_min
+        else:
+            # ── Formation leader / solo ship: navigate normally ────────
+            desired_heading = self._avoid_boundaries(self._motion_heading())
+            desired_heading = self._avoid_islands(desired_heading, dt_min, islands)
+            motion_heading = self._integrate_yaw(desired_heading, dt_min)
+            turn_fraction = abs(self._yaw_rate_rad_per_min) / max(self.max_turn_rate_rad_per_min, 1e-9)
+            effective_speed = self.speed_cells_per_min * (1.0 - self.turn_speed_loss_fraction * turn_fraction)
+            self._col += effective_speed * math.cos(motion_heading) * dt_min
+            self._row += effective_speed * math.sin(motion_heading) * dt_min
+            angular_rate = 2.0 * math.pi / max(self.zigzag_period_min, 1e-6)
+            if self._evasive:
+                self._phase = (self._phase + angular_rate * dt_min) % (2 * math.pi)
 
         outside = self._col < -0.5 or self._col > 29.5 or self._row < -0.5 or self._row > 29.5
         if outside and self._detected and self._being_tracked:

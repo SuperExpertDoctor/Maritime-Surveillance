@@ -20,7 +20,7 @@ from src.env.obstacle import (
     obstacle_intersects_mask,
 )
 from src.env.sar_sensor import SARSensor
-from src.env.ship import Ship, ShipType
+from src.env.ship import Ship, ShipType, formation_offsets
 from src.env.sim_clock import SimClock
 from src.env.uav_entity import UAVEntity
 from src.schedule.config_loader import AppConfig
@@ -192,16 +192,22 @@ class SimulationEngine:
             center = self._random_ship_group_center(islands)
             heading = self.rng.uniform(0, 2 * math.pi)
             military = group == carrier_group or self.rng.choice((True, False))
+            has_carrier = group == carrier_group
+            offsets = formation_offsets(size, has_carrier)
+            cos_h, sin_h = math.cos(heading), math.sin(heading)
             for member in range(size):
                 ship_type = (
                     ShipType.AIRCRAFT_CARRIER
                     if group == carrier_group and member == 0
                     else ShipType.DESTROYER
                 )
-                offset = self._formation_offset(member, size)
+                # Local (forward, right) → world offset rotated by group heading
+                fwd, right = offsets[member]
+                world_dx = fwd * cos_h - right * sin_h
+                world_dy = fwd * sin_h + right * cos_h
                 position = GridCoord(
-                    int(round(center[0] + offset[0])),
-                    int(round(center[1] + offset[1])),
+                    int(round(center[0] + world_dx)),
+                    int(round(center[1] + world_dy)),
                 )
                 speed = cfg.carrier_speed_kn if ship_type is ShipType.AIRCRAFT_CARRIER else cfg.destroyer_speed_kn
                 ship = Ship(
@@ -214,7 +220,7 @@ class SimulationEngine:
                     ship_type=ship_type,
                     group_id=f"G{group + 1}",
                     base_heading=heading,
-                    formation_offset=offset,
+                    formation_offset=offsets[member],
                     actual_military=military,
                     zigzag_heading_deg=cfg.zigzag_heading_deg,
                     max_turn_rate_deg_min=cfg.max_turn_rate_deg_min,
@@ -263,13 +269,6 @@ class SimulationEngine:
             ):
                 return center
         return 15.0, 15.0
-
-    @staticmethod
-    def _formation_offset(member: int, size: int) -> tuple[float, float]:
-        if size == 1:
-            return 0.0, 0.0
-        phase = 2.0 * math.pi * member / size
-        return 1.25 * math.cos(phase), 1.25 * math.sin(phase)
 
     def _inward_heading(self, position: GridCoord) -> float:
         if position.col < self.config.environment.mainland_width_cells:
@@ -542,14 +541,14 @@ class SimulationEngine:
             if ship.group_id and not ship.departed:
                 groups[ship.group_id].append(ship)
         for members in groups.values():
-            # Carrier groups travel at the carrier's safe formation speed; the
-            # members still retain their own declared ship-type performance.
-            formation_speed = min(member.speed_cells_per_min for member in members)
+            # Formation leader (member 0) navigates normally; followers
+            # steer to maintain their assigned station offsets.
+            leader = members[0] if members else None
             for ship in members:
-                original = ship.speed_cells_per_min
-                ship.speed_cells_per_min = formation_speed
-                ship.step(self.clock.dt_min, islands)
-                ship.speed_cells_per_min = original
+                if ship.is_formation_leader or len(members) == 1:
+                    ship.step(self.clock.dt_min, islands)
+                else:
+                    ship.step(self.clock.dt_min, islands, leader=leader)
         departed_groups = {
             ship.group_id for ship in self.ships
             if ship.group_id and ship.departed

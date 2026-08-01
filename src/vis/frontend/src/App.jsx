@@ -116,20 +116,33 @@ export default function App() {
             <button
               className={trailMode === "tail" ? "active" : ""}
               onClick={() => setTrailMode("tail")}
-              title="动态长尾 UAV 轨迹"
-              aria-label="动态长尾 UAV 轨迹"
+              title="渐变长尾 UAV 轨迹"
+              aria-label="渐变长尾 UAV 轨迹"
               aria-pressed={trailMode === "tail"}
             >
               <Wind size={16} />
             </button>
+            <button
+              className={trailMode === "comet" ? "active" : ""}
+              onClick={() => setTrailMode("comet")}
+              title="彗星拖尾 UAV 轨迹"
+              aria-label="彗星拖尾 UAV 轨迹"
+              aria-pressed={trailMode === "comet"}
+            >
+              <span style={{ fontSize: 13, lineHeight: 1 }}>☄</span>
+            </button>
           </div>
           <button
             className="trail-mode-compact"
-            onClick={() => setTrailMode((value) => (value === "full" ? "tail" : "full"))}
-            title={trailMode === "full" ? "完整 UAV 轨迹，点击切换动态长尾" : "动态长尾 UAV 轨迹，点击切换完整轨迹"}
+            onClick={() => setTrailMode((value) => {
+              if (value === "full") return "tail";
+              if (value === "tail") return "comet";
+              return "full";
+            })}
+            title={`UAV 轨迹: ${trailMode === "full" ? "完整" : trailMode === "tail" ? "渐变长尾" : "彗星拖尾"} — 点击切换`}
             aria-label="切换 UAV 轨迹显示模式"
           >
-            {trailMode === "full" ? <Route size={17} /> : <Wind size={17} />}
+            {trailMode === "full" ? <Route size={17} /> : trailMode === "tail" ? <Wind size={17} /> : <span style={{ fontSize: 14 }}>☄</span>}
           </button>
           <button className={showGrid ? "icon-btn active" : "icon-btn"} onClick={() => setShowGrid((value) => !value)} title="网格" aria-label="切换网格">
             <Grid3X3 size={17} />
