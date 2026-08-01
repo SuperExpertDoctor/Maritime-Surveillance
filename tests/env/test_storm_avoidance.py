@@ -45,6 +45,27 @@ def test_tracking_never_enters_thunderstorm_safety_zone():
         assert not storm.contains(uav.float_position, safety_margin=1.0)
 
 
+def test_tracking_recovers_after_transient_thunderstorm_moves_away():
+    uav = UAVEntity("UAV-recovery", GridCoord(0, 0), 8, 160)
+    uav._col, uav._row = 6.8, 5.0
+    uav.heading_rad = 0.0
+    uav.status = "tracking"
+    storm = Thunderstorm((8.4, 5.0), 1)
+
+    uav.step(1.0, (5.0, 5.0), storm_zones=[storm])
+
+    assert uav.status == "tracking"
+    assert uav.avoidance_level > 0
+    assert not storm.contains(uav.float_position, safety_margin=1.0)
+
+    storm.center = (20.0, 20.0)
+    uav.step(1.0, (5.0, 5.0), storm_zones=[storm])
+
+    assert uav.status == "tracking"
+    assert uav.avoidance_level == 0
+    assert uav.eo_fov is not None
+
+
 def test_lgvf_storm_guidance_preserves_fixed_wing_turn_limit():
     tracker = LGVFTracker(R_min=1.0)
     speed = 0.28
