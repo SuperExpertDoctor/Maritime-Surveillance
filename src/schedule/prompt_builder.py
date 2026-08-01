@@ -28,6 +28,14 @@ class PromptBuilder:
                            required_search_regions: int) -> str:
         parts = []
 
+        grid = sm.config.grid
+        parts.append(
+            "【当前运行硬参数】"
+            f"搜索区面积必须为 {grid.search_min_cells}-{grid.search_max_cells} 格，"
+            f"长宽比不超过 {grid.aspect_ratio_max:.1f}:1；"
+            "候选 bbox 是唯一允许输出的搜索区域。"
+        )
+
         # 长期记忆
         if reviewer_memory:
             parts.append(f"【长期记忆】\n{reviewer_memory}")
