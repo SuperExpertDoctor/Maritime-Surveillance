@@ -8,6 +8,7 @@ from collections import defaultdict
 import numpy as np
 
 from src.env.base_station import BaseStation
+from src.env.dubins import DubinsPath
 from src.env.ais_signal import generate_ais_signal
 from src.env.eo_sensor import EOSensor
 from src.env.obstacle import (
@@ -157,6 +158,8 @@ class SimulationEngine:
         self._lifecycle_completed = False
         self._return_base_by_uav: dict[str, BaseStation] = {}
         self._holding_base_by_uav: dict[str, BaseStation] = {}
+        self._freshness_patrol_uavs: set[str] = set()
+        self._return_reason_counts: dict[str, int] = defaultdict(int)
         self.departed_ship_count = 0
         self._departed_groups: set[str] = set()
         self.last_result: dict = {"trigger_type": "none", "action": None}
@@ -353,12 +356,26 @@ class SimulationEngine:
                 and t - self._tracking_started_at[uav.id]
                 >= self.config.uav.lifecycle_search_dwell_min
             )
-            if (
-                fuel_low
-                or lifecycle_search_due
-                or tracking_due
-                or self._needs_reserve_return(uav)
-            ):
+            return_reason = next(
+                (
+                    reason
+                    for reason, triggered in (
+                        ("fuel_low", fuel_low),
+                        ("lifecycle_search", lifecycle_search_due),
+                        ("lifecycle_tracking", tracking_due),
+                        ("range_reserve", self._needs_reserve_return(uav)),
+                    )
+                    if triggered
+                ),
+                None,
+            )
+            if return_reason is not None:
+                self._return_reason_counts[return_reason] += 1
+                sm.add_event("return_triggered", {
+                    "uav_id": uav.id,
+                    "reason": return_reason,
+                    "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
+                })
                 self._begin_return(uav, t)
 
         self._update_sensors_and_detections(t)
@@ -411,6 +428,7 @@ class SimulationEngine:
             "storm_avoidance_events": self.storm_avoidance_events,
             "departed_ship_count": self.departed_ship_count,
             "base_refuel_counts": {base.id: base.refuel_count for base in self.bases},
+            "return_reason_counts": dict(self._return_reason_counts),
             "markers": len(self.allocator.sm.get_active_markers()),
             "lifecycle_cycles": dict(self.lifecycle_cycles),
             "min_lifecycle_cycles": min(self.lifecycle_cycles.values(), default=0),
@@ -898,6 +916,7 @@ class SimulationEngine:
         release_marker: bool = True,
     ) -> None:
         sm = self.allocator.sm
+        self._freshness_patrol_uavs.discard(uav.id)
         self._search_started_at.pop(uav.id, None)
         self._tracking_started_at.pop(uav.id, None)
         self._ais_tracking_started_at.pop(uav.id, None)
@@ -1091,14 +1110,18 @@ class SimulationEngine:
             # a fresh cross-map transit solely to revisit stale information.
             if (
                 assigned_region is not None
-                and self.allocator.sm.get_coverage_stats()["coverage_pct"] >= 80.0
+                and self._should_continue_freshness_patrol(uav, current_time)
                 and not self._needs_reserve_return(uav, include_idle=True)
             ):
                 try:
                     uav.search_complete_pending = False
                     assigned_region.status = "active"
                     assigned_region.assigned_uav_id = uav.id
-                    self._assign_search_route(uav, assigned_region)
+                    self._assign_search_route(
+                        uav,
+                        assigned_region,
+                        allow_revisit=True,
+                    )
                     sm.update_uav_status(
                         uav.id,
                         uav.status,
@@ -1112,6 +1135,7 @@ class SimulationEngine:
                     })
                     continue
                 except (RuntimeError, ValueError) as exc:
+                    self._freshness_patrol_uavs.discard(uav.id)
                     sm.add_event("revisit_route_plan_failed", {
                         "uav_id": uav.id,
                         "region_id": assigned_region.id,
@@ -1138,6 +1162,21 @@ class SimulationEngine:
                 or self._needs_reserve_return(uav, include_idle=True)
             ):
                 self._begin_return(uav, current_time)
+
+    def _should_continue_freshness_patrol(
+        self,
+        uav: UAVEntity,
+        current_time: float,
+    ) -> bool:
+        cfg = self.config.uav
+        if current_time < cfg.freshness_patrol_start_min:
+            return False
+        if uav.id in self._freshness_patrol_uavs:
+            return True
+        if len(self._freshness_patrol_uavs) >= cfg.freshness_patrol_count:
+            return False
+        self._freshness_patrol_uavs.add(uav.id)
+        return True
 
     def _update_lifecycle_mode(self, current_time: float) -> None:
         """Start base rotations after the four-hour coverage gate is secure."""
@@ -1334,14 +1373,20 @@ class SimulationEngine:
                     "error": str(exc),
                 })
 
-    def _assign_search_route(self, uav: UAVEntity, region) -> None:
+    def _assign_search_route(
+        self,
+        uav: UAVEntity,
+        region,
+        *,
+        allow_revisit: bool = False,
+    ) -> None:
         swath_width = self.config.sensor.sar.swath_km / self.config.grid.cell_size_km
         coverage = self.coverage_planner.plan(
             region.bbox, uav.pose, swath_width, uav.R_min
         )
         scan_times = self.allocator.sm.info_field.last_scan_time
         coverage_pct = self.allocator.sm.get_coverage_stats()["coverage_pct"]
-        if coverage_pct < 80.0:
+        if coverage_pct < 80.0 and not allow_revisit:
             # Before broad area coverage is established, do not spend a scan
             # leg repeating information that is already available.
             swaths = [
@@ -1370,17 +1415,29 @@ class SimulationEngine:
         transit_end_index = 0
         for index, swath in enumerate(swaths):
             entry = (swath.start[0], swath.start[1], swath.heading)
-            try:
-                connector = self.obstacle_avoider.plan_path(
-                    full_path[-1], entry, self.obstacle_mask, uav.R_min
-                )
-            except RuntimeError:
-                connector = ObstacleAvoider(
-                    max_iterations=2400,
-                    seed=31 + index * 101,
-                ).plan_path(
-                    full_path[-1], entry, self.obstacle_mask, uav.R_min
-                )
+            direct_connector = DubinsPath.compute(
+                full_path[-1],
+                entry,
+                uav.R_min,
+                self.coverage_planner.sample_step,
+            ).waypoints
+            if self.obstacle_avoider.is_path_safe(
+                direct_connector,
+                self.obstacle_mask,
+            ):
+                connector = direct_connector
+            else:
+                try:
+                    connector = self.obstacle_avoider.plan_path(
+                        full_path[-1], entry, self.obstacle_mask, uav.R_min
+                    )
+                except RuntimeError:
+                    connector = ObstacleAvoider(
+                        max_iterations=2400,
+                        seed=31 + index * 101,
+                    ).plan_path(
+                        full_path[-1], entry, self.obstacle_mask, uav.R_min
+                    )
             full_path.extend(connector[1:])
             if index == 0:
                 transit_end_index = len(full_path) - 1

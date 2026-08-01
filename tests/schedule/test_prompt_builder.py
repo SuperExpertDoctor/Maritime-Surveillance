@@ -71,4 +71,24 @@ def test_prompt_requires_parallel_task_count_when_idle_uavs_need_work():
         required_search_regions=1,
     )
 
+
+def test_prompt_exposes_ready_uav_transit_cost():
+    state = StateManager(ConfigLoader.load())
+    candidates = CandidateResult(candidate_regions=[{
+        "bbox": BBox(8, 8, 12, 13),
+        "cell_count": 20,
+        "avg_info": 0.0,
+        "total_value": 20.0,
+        "nearest_ready_distance_cells": 4.5,
+    }])
+
+    _, user_prompt = PromptBuilder().build(
+        state,
+        InfoValueTable(state),
+        candidates,
+        required_search_regions=1,
+    )
+
+    assert "4.5" in user_prompt
+
     assert "恰好选择 1 个互不重叠的新区域" in user_prompt

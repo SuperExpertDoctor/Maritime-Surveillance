@@ -384,6 +384,40 @@ def test_post_coverage_search_assignment_keeps_stale_revisit_swaths():
     assert uav.planned_path
 
 
+def test_freshness_patrol_assignment_revisits_before_global_coverage_target():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    candidate = engine.allocator.extractor.extract(
+        engine.allocator.sm
+    ).candidate_regions[0]
+    region = Region(id="S-early-patrol", bbox=candidate["bbox"], type="search")
+    scan_times = engine.allocator.sm.info_field.last_scan_time
+    scan_times[region.bbox.col_start:region.bbox.col_end,
+               region.bbox.row_start:region.bbox.row_end] = 1.0
+    uav = engine.uavs[0]
+
+    engine._assign_search_route(uav, region, allow_revisit=True)
+
+    assert uav.status == "transit"
+    assert uav._scan_ranges
+
+
+def test_search_route_uses_short_dubins_connectors_when_clear(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    engine.obstacle_mask = np.zeros(engine.config.grid.resolution, dtype=bool)
+    uav = engine.uavs[0]
+    uav._col, uav._row, uav.heading_rad = 9.0, 10.0, 0.0
+    region = Region(id="S-clear", bbox=BBox(10, 10, 18, 15), type="search")
+
+    def unexpected_rrt(*_args, **_kwargs):
+        raise AssertionError("clear connector should not invoke RRT*")
+
+    monkeypatch.setattr(engine.obstacle_avoider, "plan_path", unexpected_rrt)
+    engine._assign_search_route(uav, region)
+
+    assert uav.status == "transit"
+    assert uav._scan_ranges
+
+
 def test_post_coverage_completion_restarts_local_revisit_without_idling():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     candidate = engine.allocator.extractor.extract(
@@ -404,9 +438,26 @@ def test_post_coverage_completion_restarts_local_revisit_without_idling():
     uav.status = "idle"
     uav.search_complete_pending = True
 
-    engine._process_search_completions(10.0)
+    engine._process_search_completions(
+        engine.config.uav.freshness_patrol_start_min,
+    )
 
     assert uav.status == "transit"
     assert not uav.search_complete_pending
     assert region.status == "active"
     assert region.assigned_uav_id == uav.id
+
+
+def test_freshness_patrol_caps_local_revisit_fleet_size():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    start = engine.config.uav.freshness_patrol_start_min
+    selected = [
+        engine._should_continue_freshness_patrol(uav, start)
+        for uav in engine.uavs
+    ]
+
+    assert sum(selected) == engine.config.uav.freshness_patrol_count
+    assert not engine._should_continue_freshness_patrol(
+        engine.uavs[-1],
+        start - 1,
+    )

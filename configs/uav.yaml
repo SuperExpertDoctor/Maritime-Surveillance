@@ -13,3 +13,8 @@ lifecycle_coverage_threshold_pct: 100
 lifecycle_search_dwell_min: 5
 lifecycle_candidate_max_distance_cells: 12
 lifecycle_required_cycles: 3
+# Once broad initial reconnaissance is underway, keep a subset of the fleet
+# on its LLM-approved regions for short revisit cycles while the remainder
+# continues expanding unique coverage.
+freshness_patrol_start_min: 120
+freshness_patrol_count: 5

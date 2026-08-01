@@ -41,6 +41,15 @@ class TriggerManager:
         if decision.trigger_type != "none":
             return decision
 
+        # The fleet begins with no approved SAR partition.  Waiting an entire
+        # periodic cycle before the first real LLM decision strands every UAV
+        # at its land base during the most valuable coverage window.
+        if self._sm.cycle == 0 and current_time > 0.0:
+            return TriggerDecision(
+                trigger_type="heavy",
+                reason="initial fleet deployment",
+            )
+
         # 周期定时（独立于事件）
         cycle = self._sm.config.llm.heavy_cycle_min
         if current_time >= cycle and current_time - self._last_heavy_time >= cycle:

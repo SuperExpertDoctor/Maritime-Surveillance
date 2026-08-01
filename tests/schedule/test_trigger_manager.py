@@ -27,6 +27,15 @@ def test_periodic_heavy_trigger(sm, config):
     assert d.trigger_type == "heavy"
 
 
+def test_initial_deployment_triggers_heavy_without_waiting_for_periodic_cycle(sm):
+    tm = TriggerManager(sm)
+
+    decision = tm.check(1.0)
+
+    assert decision.trigger_type == "heavy"
+    assert decision.reason == "initial fleet deployment"
+
+
 def test_uav_search_complete_light_trigger(sm):
     tm = TriggerManager(sm)
     tm.notify_event("search_complete", time=10.0, uav_id="UAV-1", region_id="S1")

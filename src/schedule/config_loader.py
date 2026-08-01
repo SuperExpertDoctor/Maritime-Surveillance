@@ -61,6 +61,8 @@ class UAVConfig:
     lifecycle_search_dwell_min: float = 5.0
     lifecycle_candidate_max_distance_cells: float = 12.0
     lifecycle_required_cycles: int = 3
+    freshness_patrol_start_min: float = 120.0
+    freshness_patrol_count: int = 5
 
 
 @dataclass

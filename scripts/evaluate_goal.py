@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -33,6 +34,52 @@ def _timeliness_metrics(engine: SimulationEngine) -> dict[str, float]:
         "black_pct": round(float((info < state.config.grid.gray_threshold).mean() * 100.0), 3),
         "white_pct": round(float((info > state.config.grid.white_threshold).mean() * 100.0), 3),
         "stale_pct": round(float((age > 60.0).mean() * 100.0), 3),
+    }
+
+
+def _theoretical_limits(engine: SimulationEngine) -> dict[str, float | int]:
+    """Upper bounds assuming every UAV spends all time in valid SAR imaging."""
+    cfg = engine.config
+    searchable_cells = int(engine.allocator.sm.get_searchable_mask().sum())
+    swath_cells = cfg.sensor.sar.swath_km / cfg.grid.cell_size_km
+    cells_per_hour_per_uav = (
+        cfg.uav.cruise_speed_kmh / cfg.grid.cell_size_km * swath_cells
+    )
+    fleet_cells_per_hour = cfg.uav.count_max * cells_per_hour_per_uav
+    white_window_min = (
+        cfg.grid.decay_half_life_min
+        * math.log2(1.0 / cfg.grid.white_threshold)
+    )
+    fresh_window_min = (
+        cfg.grid.decay_half_life_min
+        * math.log2(1.0 / cfg.grid.gray_threshold)
+    )
+    max_white_pct = min(
+        100.0,
+        fleet_cells_per_hour * white_window_min / 60.0
+        / max(searchable_cells, 1) * 100.0,
+    )
+    min_black_pct = max(
+        0.0,
+        100.0 - fleet_cells_per_hour * fresh_window_min / 60.0
+        / max(searchable_cells, 1) * 100.0,
+    )
+    required_white_uavs = math.ceil(
+        0.20 * searchable_cells
+        / (cells_per_hour_per_uav * white_window_min / 60.0)
+    )
+    required_black_uavs = math.ceil(
+        0.65 * searchable_cells
+        / (cells_per_hour_per_uav * fresh_window_min / 60.0)
+    )
+    return {
+        "fleet_cells_per_hour_at_100pct_sar": round(fleet_cells_per_hour, 3),
+        "white_window_min": round(white_window_min, 3),
+        "fresh_window_min": round(fresh_window_min, 3),
+        "max_white_pct_at_100pct_sar": round(max_white_pct, 3),
+        "min_black_pct_at_100pct_sar": round(min_black_pct, 3),
+        "uavs_needed_for_20pct_white": required_white_uavs,
+        "uavs_needed_for_35pct_black": required_black_uavs,
     }
 
 
@@ -123,6 +170,7 @@ def evaluate(steps: int = 480, seed: int = 42) -> dict:
     })
     return {
         "summary": engine.summary(),
+        "theoretical_limits": _theoretical_limits(engine),
         "checkpoints": checkpoints,
         "final_metrics": final_metrics,
         "status_minutes": dict(sorted(status_totals.items())),

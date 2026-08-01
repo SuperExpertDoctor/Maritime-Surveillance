@@ -42,10 +42,15 @@ class PromptBuilder:
             handoff = ""
             if cand.get("target_group_id"):
                 handoff = f" 接力目标={cand['target_group_id']}(仅最后观测推算)"
+            transit = cand.get("nearest_ready_distance_cells")
+            transit_text = (
+                f" 最近可用UAV转场约{transit:.1f}格"
+                if transit is not None else ""
+            )
             parts.append(
                 f"{i+1}. bbox({b.col_start},{b.row_start},{b.col_end},{b.row_end}) "
                 f"面积{area}格 平均信息{info:.2f}({situation}) "
-                f"总价值{cand.get('total_value', 0):.2f}{handoff}"
+                f"总价值{cand.get('total_value', 0):.2f}{transit_text}{handoff}"
             )
         if not candidate_result.candidate_regions:
             parts.append(
@@ -146,6 +151,10 @@ class PromptBuilder:
                 f"【硬约束】当前有待分配的可用侦察资源；必须从候选列表中"
                 f"恰好选择 {required} 个互不重叠的新区域，使每架可用 UAV "
                 "都有并行搜索任务。"
+            )
+            parts.append(
+                "在同等情报价值下，优先选择最近可用UAV转场距离更短的候选区，"
+                "以减少非搜索飞行时间。"
             )
 
         parts.append("\n请输出本周期任务区域划分方案。")

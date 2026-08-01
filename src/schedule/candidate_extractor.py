@@ -183,7 +183,7 @@ class CandidateExtractor:
                 # sortie spends its limited early window on SAR imaging
                 # rather than a long deadhead transit across the map.
                 return (-unseen_density, -unseen_count, distance,
-                        abs(area - 24), -item["total_value"])
+                        abs(area - gc.search_max_cells), -item["total_value"])
             return (-item["total_value"], distance)
 
         candidates.sort(key=candidate_key)
@@ -213,6 +213,14 @@ class CandidateExtractor:
             seen_bboxes.add(bbox_key)
             if any(self._bboxes_overlap(bbox, item["bbox"]) for item in selected):
                 continue
+            center = (
+                (bbox.col_start + bbox.col_end) / 2,
+                (bbox.row_start + bbox.row_end) / 2,
+            )
+            candidate["nearest_ready_distance_cells"] = round(
+                min(math.dist(center, position) for position in ready_positions),
+                2,
+            )
             candidate.pop("unseen_count", None)
             selected.append(candidate)
             if len(selected) >= K:
@@ -438,7 +446,7 @@ class CandidateExtractor:
             raw.sort(key=lambda item: (
                 -(item["unseen_count"] / item["cell_count"]),
                 -item["unseen_count"],
-                abs(item["cell_count"] - 24),
+                abs(item["cell_count"] - gc.search_max_cells),
                 -item["total_value"],
                 item["distance"],
             ))
@@ -647,7 +655,12 @@ class CandidateExtractor:
                 # Around 24 cells typically needs two scan lines with the
                 # configured two-cell SAR swath, preserving the validated
                 # coverage throughput of the normal exploration phase.
-                choices.append((-abs(mean_area - 24.0), n_cols * n_rows, n_cols, n_rows))
+                choices.append((
+                    -abs(mean_area - gc.search_max_cells),
+                    n_cols * n_rows,
+                    n_cols,
+                    n_rows,
+                ))
         if not choices:
             n = max(1, math.ceil(math.sqrt(width * height / gc.search_max_cells)))
             return n, n

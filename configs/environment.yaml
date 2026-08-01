@@ -35,6 +35,6 @@ grid:
   track_min_cells: 6
   track_max_cells: 16
   search_min_cells: 20
-  search_max_cells: 40
+  search_max_cells: 48
   aspect_ratio_max: 2.0
   stability_iou_threshold: 0.7
