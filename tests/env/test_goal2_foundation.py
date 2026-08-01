@@ -1,7 +1,7 @@
 import math
 
 from src.env.base_station import BaseStation
-from src.env.obstacle import Island, Thunderstorm
+from src.env.obstacle import Island, Thunderstorm, obstacle_intersects_mask
 from src.env.simulation import SimulationEngine
 from src.env.ship import ShipType
 from src.schedule.config_loader import ConfigLoader
@@ -29,9 +29,11 @@ def test_default_open_water_has_at_most_two_islands():
     islands = [obstacle for obstacle in engine.obstacles if isinstance(obstacle, Island)]
     assert 0 <= len(islands) <= 2
     assert all(island.size <= 2 for island in islands)
+    assert all(not obstacle_intersects_mask(island, engine.land_mask) for island in islands)
     storms = [obstacle for obstacle in engine.obstacles if isinstance(obstacle, Thunderstorm)]
     assert 2 <= len(storms) <= 3
     assert all(storm.size <= 2 for storm in storms)
+    assert all(not obstacle_intersects_mask(storm, engine.land_mask, safety_margin=1.0) for storm in storms)
     assert all(
         obstacle.distance_to_boundary((base.position.col + 0.5, base.position.row + 0.5))
         >= engine.config.environment.base_obstacle_clearance_cells
@@ -46,6 +48,13 @@ def test_candidate_regions_keep_thirty_kilometres_clear_of_land_base():
     candidates = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions
 
     assert candidates
+    assert all(
+        not engine.land_mask[
+            candidate["bbox"].col_start:candidate["bbox"].col_end,
+            candidate["bbox"].row_start:candidate["bbox"].row_end,
+        ].any()
+        for candidate in candidates
+    )
     assert all(
         engine.allocator.extractor._distance_to_bases(candidate["bbox"], base_positions)
         >= engine.config.environment.base_task_min_distance_cells
@@ -172,6 +181,7 @@ def test_dissipated_storm_is_replaced_at_configured_density():
     assert len(storms) == engine._storm_target_count
     assert initial_id not in {item.id for item in storms}
     assert all(storm.size <= 2 for storm in storms)
+    assert all(not obstacle_intersects_mask(storm, engine.land_mask, safety_margin=1.0) for storm in storms)
     assert all(
         storm.distance_to_boundary((base.position.col + 0.5, base.position.row + 0.5))
         >= engine.config.environment.base_obstacle_clearance_cells

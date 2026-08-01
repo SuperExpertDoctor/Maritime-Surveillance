@@ -34,6 +34,7 @@ class StateManager:
         self._known_target_groups: set[str] = set()
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
+        self.land_mask = np.zeros(config.grid.resolution, dtype=bool)
         self._base_positions: tuple[tuple[int, int], ...] = (config.environment.base_position,)
 
     def step(self, current_time: float) -> None:
@@ -97,6 +98,13 @@ class StateManager:
     def set_environment_obstacles(self, obstacles: list, mask) -> None:
         self.obstacles = list(obstacles)
         self.obstacle_mask = np.asarray(mask, dtype=bool)
+
+    def set_land_mask(self, mask) -> None:
+        """Publish the reset-specific mainland cells to all schedulers."""
+        normalized = np.asarray(mask, dtype=bool)
+        if normalized.shape != self.obstacle_mask.shape:
+            raise ValueError("land mask must match the grid resolution")
+        self.land_mask = normalized
 
     def set_base_positions(self, positions) -> None:
         """Publish reset-specific land bases to scheduling and coverage code."""
@@ -226,6 +234,7 @@ class StateManager:
     def get_searchable_mask(self) -> np.ndarray:
         """Return cells that can be searched under the operational rules."""
         searchable = ~np.asarray(self.obstacle_mask, dtype=bool).copy()
+        searchable &= ~self.land_mask
         if searchable.size:
             searchable[0, :] = False
             searchable[-1, :] = False

@@ -179,6 +179,66 @@ def obstacle_grid_mask(
     return mask
 
 
+def coastal_land_mask(
+    base_positions: Iterable[Sequence[float]],
+    resolution: tuple[int, int] = (30, 30),
+    depth_cells: int = 4,
+) -> np.ndarray:
+    """Build continuous mainland bands on the coastline hosting each base."""
+    cols, rows = resolution
+    mask = np.zeros((cols, rows), dtype=bool)
+    depth = max(1, min(int(depth_cells), min(cols, rows) // 2))
+    for position in base_positions:
+        col, row = int(position[0]), int(position[1])
+        edge = min(
+            (row, "top"),
+            (rows - 1 - row, "bottom"),
+            (col, "left"),
+            (cols - 1 - col, "right"),
+            key=lambda item: item[0],
+        )[1]
+        if edge == "top":
+            mask[:, :depth] = True
+        elif edge == "bottom":
+            mask[:, rows - depth:] = True
+        elif edge == "left":
+            mask[:depth, :] = True
+        else:
+            mask[cols - depth:, :] = True
+    return mask
+
+
+def obstacle_intersects_mask(
+    obstacle: Thunderstorm | Island,
+    mask: np.ndarray | None,
+    safety_margin: float = 0.0,
+) -> bool:
+    """Return whether an obstacle footprint touches any true mask cell."""
+    if mask is None:
+        return False
+    grid = np.asarray(mask, dtype=bool)
+    if grid.ndim != 2:
+        raise ValueError("mask must be a two-dimensional grid")
+    min_x, min_y, max_x, max_y = obstacle.bounds
+    margin = max(0.0, safety_margin) if isinstance(obstacle, Thunderstorm) else 0.0
+    cols, rows = grid.shape
+    c0 = max(0, int(math.floor(min_x - margin)))
+    r0 = max(0, int(math.floor(min_y - margin)))
+    c1 = min(cols - 1, int(math.floor(max_x + margin)))
+    r1 = min(rows - 1, int(math.floor(max_y + margin)))
+    for col in range(c0, c1 + 1):
+        for row in range(r0, r1 + 1):
+            if not grid[col, row]:
+                continue
+            point = (col + 0.5, row + 0.5)
+            if isinstance(obstacle, Thunderstorm):
+                if obstacle.contains(point, margin):
+                    return True
+            elif obstacle.contains(point):
+                return True
+    return False
+
+
 def default_obstacles(
     seed: int = 42,
     *,
@@ -187,6 +247,7 @@ def default_obstacles(
     thunderstorm_count: int | None = None,
     base_clearance_cells: float = 4.0,
     resolution: tuple[int, int] = (30, 30),
+    land_mask: np.ndarray | None = None,
 ) -> list[Thunderstorm | Island]:
     """Generate a deterministic sparse open-water state for one reset."""
     rng = random.Random(seed)
@@ -198,8 +259,10 @@ def default_obstacles(
         for _ in range(300):
             size = rng.randint(1, 2)
             h = size / 2.0
-            center = (rng.uniform(2.0 + h, cols - 2.0 - h), rng.uniform(2.0 + h, rows - 2.0 - h))
+            center = (rng.uniform(5.0 + h, cols - 5.0 - h), rng.uniform(5.0 + h, rows - 5.0 - h))
             candidate = Island(center, size, f"island-{index + 1}")
+            if obstacle_intersects_mask(candidate, land_mask):
+                continue
             if any(
                 candidate.distance_to_boundary((base[0] + 0.5, base[1] + 0.5))
                 < base_clearance_cells
@@ -223,6 +286,8 @@ def default_obstacles(
                 rng.uniform(h + 1.0, rows - h - 1.0),
             )
             candidate = Thunderstorm(center, size)
+            if obstacle_intersects_mask(candidate, land_mask, safety_margin=1.0):
+                continue
             if any(
                 candidate.distance_to_boundary((base[0] + 0.5, base[1] + 0.5))
                 < base_clearance_cells
@@ -241,4 +306,11 @@ def default_obstacles(
     return [*storms, *islands]
 
 
-__all__ = ["Thunderstorm", "Island", "obstacle_grid_mask", "default_obstacles"]
+__all__ = [
+    "Thunderstorm",
+    "Island",
+    "coastal_land_mask",
+    "obstacle_grid_mask",
+    "obstacle_intersects_mask",
+    "default_obstacles",
+]

@@ -37,6 +37,7 @@ class CandidateExtractor:
         # Step 1: track-region occupancy mask
         occupied = np.zeros((cols, rows), dtype=bool)
         occupied |= getattr(sm, "obstacle_mask", occupied)
+        occupied |= getattr(sm, "land_mask", occupied)
         for col, row in sm.get_base_positions():
             occupied[col, row] = True
         # A one-cell flight margin lets a radius-1 Dubins U-turn bulge

@@ -2,7 +2,6 @@ import { coordToPixel } from "./geometry";
 import { markerColor, PRIORITY_COLORS, UAV_STATUS_COLORS } from "./colors";
 
 const FONT = '"Fira Code", "Microsoft YaHei", monospace';
-const BASE_COLORS = ["#3B82F6", "#10B981", "#F59E0B"];
 const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
 
 function gridCenter(col, row, cellSize, ox, oy) {
@@ -48,10 +47,12 @@ function drawMapImage(ctx, image, cellSize, ox, oy, bases) {
   ctx.clip();
   ctx.translate(ox + size / 2, oy + size / 2);
   ctx.rotate(rotation);
-  ctx.globalAlpha = 0.44;
+  // The source chart adds seabed texture, while the semantic sea/land layers
+  // below remain the authoritative geography for the operational view.
+  ctx.globalAlpha = 0.16;
   ctx.drawImage(image, 0, 0, crop, crop, -size / 2, -size / 2, size, size);
   ctx.globalAlpha = 1;
-  ctx.fillStyle = "rgba(255, 255, 255, .44)";
+  ctx.fillStyle = "rgba(255, 255, 255, .56)";
   ctx.fillRect(-size / 2, -size / 2, size, size);
   ctx.restore();
 }
@@ -59,7 +60,7 @@ function drawMapImage(ctx, image, cellSize, ox, oy, bases) {
 export function drawBackground(ctx, width, height, cellSize, ox, oy, bases, assets) {
   ctx.fillStyle = "#FFFFFF";
   ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = "#E7F4F8";
+  ctx.fillStyle = "#B9E0F2";
   ctx.fillRect(ox, oy, 30 * cellSize, 30 * cellSize);
   drawMapImage(ctx, assets?.background, cellSize, ox, oy, bases);
   ctx.strokeStyle = "rgba(14, 116, 144, .56)";
@@ -137,21 +138,23 @@ function drawCoastlineForBase(ctx, base, cellSize, ox, oy) {
   if (!base?.position) return;
   const [col, row] = base.position;
   const mapSize = 30 * cellSize;
-  const center = gridCenter(col, row, cellSize, ox, oy);
   const edge = coastlineEdge(base.position);
-  const span = Math.min(mapSize, 9 * cellSize);
-  const depth = 1.55 * cellSize;
-  const variation = [0.72, 0.9, 0.76, 1.02, 0.8, 0.95, 0.7];
-  const horizontalStart = clamp(center.x - span / 2, ox, ox + mapSize - span);
-  const verticalStart = clamp(center.y - span / 2, oy, oy + mapSize - span);
+  const span = mapSize;
+  const depth = 4 * cellSize;
+  const variation = [0.84, 0.92, 0.81, 0.96, 0.87, 0.94, 0.82, 0.9, 0.85];
+  const horizontalStart = ox;
+  const verticalStart = oy;
 
   ctx.save();
-  ctx.fillStyle = "#DDE7C9";
-  ctx.strokeStyle = "#65764D";
-  ctx.lineWidth = 1.7;
+  ctx.beginPath();
+  ctx.rect(ox, oy, mapSize, mapSize);
+  ctx.clip();
+  ctx.fillStyle = "#A7CB80";
+  ctx.strokeStyle = "#517444";
+  ctx.lineWidth = 1.8;
   ctx.beginPath();
   if (edge === "top" || edge === "bottom") {
-    const outerY = edge === "top" ? oy - cellSize : oy + mapSize + cellSize;
+    const outerY = edge === "top" ? oy : oy + mapSize;
     ctx.moveTo(horizontalStart, outerY);
     ctx.lineTo(horizontalStart + span, outerY);
     for (let index = variation.length - 1; index >= 0; index -= 1) {
@@ -174,6 +177,15 @@ function drawCoastlineForBase(ctx, base, cellSize, ox, oy) {
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
+  ctx.globalAlpha = 0.18;
+  ctx.fillStyle = "#EAF5DD";
+  if (edge === "top" || edge === "bottom") {
+    const y = edge === "top" ? oy : oy + mapSize - depth * 0.44;
+    ctx.fillRect(ox, y, mapSize, depth * 0.44);
+  } else {
+    const x = edge === "left" ? ox : ox + mapSize - depth * 0.44;
+    ctx.fillRect(x, oy, depth * 0.44, mapSize);
+  }
   ctx.restore();
 }
 
@@ -603,36 +615,46 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
   }
 }
 
+function drawBaseStar(ctx, center, outerRadius, innerRadius) {
+  ctx.beginPath();
+  for (let point = 0; point < 10; point += 1) {
+    const radius = point % 2 === 0 ? outerRadius : innerRadius;
+    const angle = -Math.PI / 2 + point * Math.PI / 5;
+    const x = center.x + Math.cos(angle) * radius;
+    const y = center.y + Math.sin(angle) * radius;
+    if (point === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
 export function drawBases(ctx, bases, cellSize, ox, oy, phase) {
   for (const [index, base] of (bases || []).entries()) {
     const center = gridCenter(base.position[0], base.position[1], cellSize, ox, oy);
-    const color = BASE_COLORS[index % BASE_COLORS.length];
-    const size = Math.max(18, cellSize * 0.82);
-    const landSize = Math.max(26, cellSize * 1.14);
+    const color = "#DC2626";
+    const outerRadius = Math.max(8, cellSize * 0.48);
+    const innerRadius = outerRadius * 0.46;
     ctx.save();
-    ctx.fillStyle = "rgba(231, 211, 167, .96)";
-    ctx.strokeStyle = "rgba(120, 88, 45, .78)";
-    ctx.lineWidth = 1;
-    ctx.fillRect(center.x - landSize / 2, center.y - landSize / 2, landSize, landSize);
-    ctx.strokeRect(center.x - landSize / 2, center.y - landSize / 2, landSize, landSize);
-    ctx.beginPath();
-    ctx.moveTo(center.x - landSize / 2 + 3, center.y + landSize / 2 - 3);
-    ctx.lineTo(center.x + landSize / 2 - 3, center.y - landSize / 2 + 3);
-    ctx.strokeStyle = "rgba(120, 88, 45, .42)";
+    if (base.busy) {
+      ctx.strokeStyle = `rgba(220, 38, 38, ${0.32 + Math.sin(phase / 16) * 0.12})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, outerRadius + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    drawBaseStar(ctx, center, outerRadius, innerRadius);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "#7F1D1D";
+    ctx.lineWidth = 1.3;
     ctx.stroke();
-    ctx.fillStyle = "#FFFFFF";
-    ctx.strokeStyle = base.busy ? `rgba(248, 113, 113, ${0.65 + Math.sin(phase / 16) * 0.2})` : color;
-    ctx.lineWidth = base.busy ? 2 : 1.3;
-    ctx.fillRect(center.x - size / 2, center.y - size / 2, size, size);
-    ctx.strokeRect(center.x - size / 2, center.y - size / 2, size, size);
     ctx.restore();
     const baseLabel = `B${base.number || index + 1}`;
     const edge = coastlineEdge(base.position);
-    const labelX = edge === "right" ? center.x - size / 2 - 30 : center.x + size / 2 + 4;
+    const labelX = edge === "right" ? center.x - outerRadius - 30 : center.x + outerRadius + 4;
     const labelY = edge === "bottom" ? center.y - 7 : center.y + 2;
     const fontSize = Math.max(7, cellSize * 0.25);
     text(ctx, baseLabel, labelX, labelY, color, fontSize, 700);
-    text(ctx, `${base.occupancy || 0}/${base.capacity || 3}`, labelX, labelY + fontSize + 3, "#334155", Math.max(6, cellSize * 0.21), 600);
+    text(ctx, `${base.occupancy || 0}/${base.capacity || 3}`, labelX, labelY + fontSize + 3, "#7F1D1D", Math.max(6, cellSize * 0.21), 600);
   }
 }
 
@@ -761,8 +783,8 @@ export function renderFrame(ctx, frame, options = {}) {
     drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY);
     drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
-    drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawCoastline(ctx, bases, cellSize, offsetX, offsetY);
+    drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
     drawMissionEnvelope(ctx, [...(frame.search_regions || []), ...(frame.track_regions || [])], cellSize, offsetX, offsetY);
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
@@ -771,9 +793,9 @@ export function renderFrame(ctx, frame, options = {}) {
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
-    drawBases(ctx, bases, cellSize, offsetX, offsetY, frameCount);
     drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
     drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets);
+    drawBases(ctx, bases, cellSize, offsetX, offsetY, frameCount);
     drawTransparencyLegend(ctx, cellSize, offsetX, offsetY);
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);

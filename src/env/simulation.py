@@ -9,7 +9,14 @@ import numpy as np
 
 from src.env.base_station import BaseStation
 from src.env.ais_signal import generate_ais_signal
-from src.env.obstacle import Island, Thunderstorm, default_obstacles, obstacle_grid_mask
+from src.env.obstacle import (
+    Island,
+    Thunderstorm,
+    coastal_land_mask,
+    default_obstacles,
+    obstacle_grid_mask,
+    obstacle_intersects_mask,
+)
 from src.env.sar_sensor import SARSensor
 from src.env.ship import Ship, ShipType
 from src.env.sim_clock import SimClock
@@ -45,6 +52,12 @@ class SimulationEngine:
         self.allocator = TaskAllocator(config)
         self.allocator.llm_client.assert_ready()
         self.allocator.sm.set_base_positions(base_positions)
+        self.land_mask = coastal_land_mask(
+            base_positions,
+            config.grid.resolution,
+            config.environment.coastal_land_depth_cells,
+        )
+        self.allocator.sm.set_land_mask(self.land_mask)
         self.allocator.sm.scenario_seed = seed
         self.allocator.sm.scenario_generation = self.reset_generation
         self.coverage_planner = CoveragePlanner(sample_step=0.2)
@@ -65,6 +78,7 @@ class SimulationEngine:
             thunderstorm_count=self._storm_target_count,
             base_clearance_cells=config.environment.base_obstacle_clearance_cells,
             resolution=config.grid.resolution,
+            land_mask=self.land_mask,
         )
         self._next_storm_id = 1 + sum(
             isinstance(obstacle, Thunderstorm) for obstacle in self.obstacles
@@ -219,7 +233,11 @@ class SimulationEngine:
     def _random_ship_group_center(self, islands: list[Island]) -> tuple[float, float]:
         for _ in range(200):
             center = (self.rng.uniform(4.0, 25.0), self.rng.uniform(4.0, 25.0))
-            if all(not island.contains(center) and island.distance_to_boundary(center) >= 2.0 for island in islands):
+            col, row = int(round(center[0])), int(round(center[1]))
+            if (
+                not self.land_mask[col, row]
+                and all(not island.contains(center) and island.distance_to_boundary(center) >= 2.0 for island in islands)
+            ):
                 return center
         return 15.0, 15.0
 
@@ -372,7 +390,14 @@ class SimulationEngine:
         for obstacle in self.obstacles:
             if hasattr(obstacle, "step"):
                 if obstacle.step(self.clock.dt_min, self.config.grid.resolution):
-                    active.append(obstacle)
+                    if isinstance(obstacle, Thunderstorm) and obstacle_intersects_mask(
+                        obstacle,
+                        self.land_mask,
+                        safety_margin=1.0,
+                    ):
+                        dissipated_storms.append(obstacle)
+                    else:
+                        active.append(obstacle)
                 elif isinstance(obstacle, Thunderstorm):
                     dissipated_storms.append(obstacle)
             else:
@@ -414,6 +439,8 @@ class SimulationEngine:
                 intensity=self.rng.uniform(0.3, 1.0),
                 id=f"storm-{self._next_storm_id}",
             )
+            if obstacle_intersects_mask(candidate, self.land_mask, safety_margin=1.0):
+                continue
             if any(
                 candidate.distance_to_boundary((base.position.col + 0.5, base.position.row + 0.5))
                 < self.config.environment.base_obstacle_clearance_cells

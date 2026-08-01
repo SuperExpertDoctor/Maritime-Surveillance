@@ -22,6 +22,7 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   const config = await page.evaluate(() => fetch("/api/config").then((response) => response.json()));
   expect(config.environment.base_count).toBe(2);
   expect(config.environment.base_land_margin).toBe(0);
+  expect(config.environment.coastal_land_depth_cells).toBe(4);
   expect(config.environment.island_count_min).toBe(0);
   expect(config.environment.island_count_max).toBe(2);
   expect(config.environment.base_task_min_distance_cells).toBe(3);
@@ -52,6 +53,10 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   expect(canvasEvidence.opaque).toBeGreaterThan(100);
   expect(canvasEvidence.colors).toBeGreaterThan(4);
   expect(canvasEvidence.width).toBeGreaterThan(500);
+  await page.screenshot({
+    path: "test-results/acceptance-live-desktop.png",
+    fullPage: true,
+  });
 
   await page.locator(".mode-switch button").nth(1).click();
   const fileSelect = page.locator(".file-select");

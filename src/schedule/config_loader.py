@@ -15,6 +15,7 @@ class EnvironmentConfig:
     base_capacity: int = 3
     base_min_distance_cells: float = 5.0
     base_land_margin: int = 0
+    coastal_land_depth_cells: int = 4
     base_task_min_distance_cells: float = 3.0
     base_obstacle_clearance_cells: float = 4.0
     island_count_min: int = 0
