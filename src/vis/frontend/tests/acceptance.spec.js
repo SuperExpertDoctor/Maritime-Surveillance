@@ -19,6 +19,22 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".connection-state")).toHaveClass(/connected/);
   await expect(page.locator("canvas")).toBeVisible();
+  const config = await page.evaluate(() => fetch("/api/config").then((response) => response.json()));
+  expect(config.environment.base_count).toBe(2);
+  expect(config.environment.base_land_margin).toBe(0);
+  expect(config.environment.island_count_min).toBe(0);
+  expect(config.environment.island_count_max).toBe(2);
+  expect(config.environment.base_task_min_distance_cells).toBe(3);
+  expect(config.environment.base_obstacle_clearance_cells).toBe(4);
+  expect(config.environment.thunderstorm_count_min).toBe(2);
+  expect(config.environment.thunderstorm_count_max).toBe(3);
+  const assetStatuses = await page.evaluate(() => Promise.all([
+    "/assets/maritime-background.png",
+    "/assets/rainbow-uav.png",
+    "/assets/carrier.png",
+    "/assets/destroyer.png",
+  ].map(async (path) => ({ path, status: (await fetch(path)).status }))));
+  expect(assetStatuses.every(({ status }) => status === 200)).toBe(true);
 
   const canvasEvidence = await page.locator("canvas").evaluate((canvas) => {
     const context = canvas.getContext("2d");
@@ -59,6 +75,8 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await expect(page.locator(".transport-btn.primary")).toHaveAttribute("title", "暂停");
   await page.keyboard.press("Space");
 
+  await page.locator(".top-actions .icon-btn").nth(1).click();
+  await expect(page.locator(".bottom-drawer")).toBeVisible();
   await page.locator(".drawer-tabs > button").nth(1).click();
   await expect(page.locator(".region-table")).toBeVisible();
   await page.locator(".drawer-tabs > button").nth(2).click();
@@ -67,6 +85,8 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await expect(page.locator(".ais-table")).toBeVisible();
   await page.locator(".drawer-tabs > button").nth(4).click();
   await expect(page.locator(".params-grid")).toBeVisible();
+  await page.locator(".drawer-close").click();
+  await expect(page.locator(".bottom-drawer")).toHaveCount(0);
 
   for (const viewport of VIEWPORTS) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });

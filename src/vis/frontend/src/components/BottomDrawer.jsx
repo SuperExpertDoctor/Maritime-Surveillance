@@ -18,11 +18,12 @@ const EVENT_NAMES = {
   llm_decision: "模型决策",
   route_plan_failed: "航路失败",
   route_replanned: "航路重规划",
+  environment_reset: "环境重置",
 };
 
 export default function BottomDrawer({ frame, events = [], llmCycle, visible, onToggle }) {
   const [activeTab, setActiveTab] = useState(0);
-  const [height, setHeight] = useState(260);
+  const [height, setHeight] = useState(220);
   const [config, setConfig] = useState(null);
   const [configError, setConfigError] = useState("");
   const drag = useRef(null);

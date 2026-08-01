@@ -108,6 +108,12 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
                 "base_capacity": cfg.environment.base_capacity,
                 "base_min_distance_cells": cfg.environment.base_min_distance_cells,
                 "base_land_margin": cfg.environment.base_land_margin,
+                "base_task_min_distance_cells": cfg.environment.base_task_min_distance_cells,
+                "base_obstacle_clearance_cells": cfg.environment.base_obstacle_clearance_cells,
+                "island_count_min": cfg.environment.island_count_min,
+                "island_count_max": cfg.environment.island_count_max,
+                "thunderstorm_count_min": cfg.environment.thunderstorm_count_min,
+                "thunderstorm_count_max": cfg.environment.thunderstorm_count_max,
             },
             "grid": {
                 "resolution": list(cfg.grid.resolution),

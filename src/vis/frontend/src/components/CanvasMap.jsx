@@ -4,6 +4,23 @@ import { RadioTower } from "lucide-react";
 import { computeLayout, pixelToCoord } from "../renderer/geometry";
 import { renderFrame } from "../renderer/layers";
 
+const MAP_ASSET_SOURCES = {
+  background: "/assets/maritime-background.png",
+  uav: "/assets/rainbow-uav.png",
+  carrier: "/assets/carrier.png",
+  destroyer: "/assets/destroyer.png",
+};
+
+function loadMapAsset(source) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => resolve(image);
+    image.onerror = () => resolve(null);
+    image.src = source;
+  });
+}
+
 export default function CanvasMap({
   frame,
   selectedUavId,
@@ -16,6 +33,18 @@ export default function CanvasMap({
   const hoverRef = useRef(null);
   const [hovered, setHovered] = useState(false);
   const [sizeVersion, setSizeVersion] = useState(0);
+  const [mapAssets, setMapAssets] = useState({});
+
+  useEffect(() => {
+    let disposed = false;
+    Promise.all(Object.entries(MAP_ASSET_SOURCES).map(async ([key, source]) => [
+      key,
+      await loadMapAsset(source),
+    ])).then((entries) => {
+      if (!disposed) setMapAssets(Object.fromEntries(entries.filter(([, image]) => image)));
+    });
+    return () => { disposed = true; };
+  }, []);
 
   const updateSize = useCallback(() => {
     const canvas = canvasRef.current;
@@ -60,6 +89,7 @@ export default function CanvasMap({
         hoverInfo: hoverRef.current,
         selectedUavId,
         frameCount: phase,
+        assets: mapAssets,
       });
       context.restore();
       phase += 1;
@@ -70,7 +100,7 @@ export default function CanvasMap({
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, selectedUavId, showGrid, sizeVersion]);
+  }, [frame, mapAssets, selectedUavId, showGrid, sizeVersion]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;

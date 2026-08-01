@@ -1,4 +1,6 @@
 ﻿"""从 StateManager 构建 WebSocket/JSONL 帧 JSON。"""
+import math
+
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 
@@ -120,6 +122,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "group_id": s.group_id or "?",
                 "is_detected": s.detected,
                 "ship_type": getattr(getattr(s, "ship_type", None), "value", "destroyer"),
+                "heading_deg": math.degrees(getattr(s, "base_heading", 0.0)) % 360.0,
                 "is_military": getattr(s, "is_military", None),
                 "departed": bool(getattr(s, "departed", False)),
                 "estimated_position": (
@@ -184,6 +187,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "sim_time_min": state.current_time,
         "total_steps": total_steps,
         "mode": "live",
+        "scenario_seed": getattr(state, "scenario_seed", None),
+        "reset_generation": getattr(state, "scenario_generation", 0),
         "info_matrix": info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat,
         "value_matrix": value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat,
         **coverage,

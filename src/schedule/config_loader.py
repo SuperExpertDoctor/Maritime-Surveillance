@@ -14,11 +14,13 @@ class EnvironmentConfig:
     base_count: int = 1
     base_capacity: int = 3
     base_min_distance_cells: float = 5.0
-    base_land_margin: int = 1
-    island_count_min: int = 2
-    island_count_max: int = 6
-    thunderstorm_count_min: int = 3
-    thunderstorm_count_max: int = 8
+    base_land_margin: int = 0
+    base_task_min_distance_cells: float = 3.0
+    base_obstacle_clearance_cells: float = 4.0
+    island_count_min: int = 0
+    island_count_max: int = 2
+    thunderstorm_count_min: int = 2
+    thunderstorm_count_max: int = 3
     storm_safety_margin_cells: float = 1.0
 
 

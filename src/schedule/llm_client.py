@@ -152,6 +152,7 @@ class LLMClient:
                 [*sm.get_track_regions(), *reserved_regions],
                 sm.get_previous_search_regions(),
                 sm.obstacle_mask,
+                base_positions=sm.get_base_positions(),
                 # An empty plan is a valid model decision when retained work
                 # already consumes every search/track slot. Retrying it only
                 # creates artificial failures and cannot add legal regions.

@@ -1,19 +1,64 @@
 import math
 
 from src.env.base_station import BaseStation
+from src.env.obstacle import Island, Thunderstorm
 from src.env.simulation import SimulationEngine
 from src.env.ship import ShipType
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import GridCoord
+from src.vis.backend.frame_builder import build_frame
 
 
-def test_reset_generates_separated_coastal_bases():
+def test_default_engine_has_two_coastal_bases_with_three_refuelling_slots_each():
     config = ConfigLoader.load()
-    config.environment.base_count = 3
+    engine = SimulationEngine(config, seed=19)
+
+    assert len(engine.bases) == 2
+    cols, rows = config.grid.resolution
+    assert all(base.capacity == 3 for base in engine.bases)
+    assert all(
+        base.position.col in {0, cols - 1} or base.position.row in {0, rows - 1}
+        for base in engine.bases
+    )
+    assert math.dist(engine.bases[0].position, engine.bases[1].position) >= config.environment.base_min_distance_cells
+
+
+def test_default_open_water_has_at_most_two_islands():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+
+    islands = [obstacle for obstacle in engine.obstacles if isinstance(obstacle, Island)]
+    assert 0 <= len(islands) <= 2
+    assert all(island.size <= 2 for island in islands)
+    storms = [obstacle for obstacle in engine.obstacles if isinstance(obstacle, Thunderstorm)]
+    assert 2 <= len(storms) <= 3
+    assert all(storm.size <= 2 for storm in storms)
+    assert all(
+        obstacle.distance_to_boundary((base.position.col + 0.5, base.position.row + 0.5))
+        >= engine.config.environment.base_obstacle_clearance_cells
+        for obstacle in engine.obstacles
+        for base in engine.bases
+    )
+
+
+def test_candidate_regions_keep_thirty_kilometres_clear_of_land_base():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    base_positions = engine.allocator.sm.get_base_positions()
+    candidates = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions
+
+    assert candidates
+    assert all(
+        engine.allocator.extractor._distance_to_bases(candidate["bbox"], base_positions)
+        >= engine.config.environment.base_task_min_distance_cells
+        for candidate in candidates
+    )
+
+
+def test_reset_generates_a_fresh_two_base_coastal_scenario():
+    config = ConfigLoader.load()
     engine = SimulationEngine(config, seed=7)
     first_positions = tuple(base.position for base in engine.bases)
 
-    assert len(first_positions) == 3
+    assert len(first_positions) == 2
     for position in first_positions:
         assert (
             position.col <= config.environment.base_land_margin
@@ -29,6 +74,43 @@ def test_reset_generates_separated_coastal_bases():
 
     engine.reset()
     assert tuple(base.position for base in engine.bases) != first_positions
+    assert engine.reset_generation == 1
+    assert engine.clock.time == 0
+    assert all(uav.status == "idle" and not uav.trail for uav in engine.uavs)
+    assert any(event["type"] == "environment_reset" for event in engine.allocator.sm.get_recent_events(0))
+
+
+def test_explicit_reset_seed_rebuilds_the_same_clean_scenario():
+    config = ConfigLoader.load()
+    engine = SimulationEngine(config, seed=5)
+    engine.step()
+    engine.reset(seed=31)
+    fresh = SimulationEngine(config, seed=31)
+
+    assert tuple(base.position for base in engine.bases) == tuple(base.position for base in fresh.bases)
+    assert [(type(item).__name__, item.center, item.size) for item in engine.obstacles] == [
+        (type(item).__name__, item.center, item.size) for item in fresh.obstacles
+    ]
+    assert engine.summary()["steps"] == 0
+
+
+def test_frame_exposes_two_bases_and_reset_scenario_metadata():
+    engine = SimulationEngine(ConfigLoader.load(), seed=41)
+    engine.reset(seed=43)
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    assert len(frame["bases"]) == 2
+    assert [base["capacity"] for base in frame["bases"]] == [3, 3]
+    assert frame["scenario_seed"] == 43
+    assert frame["reset_generation"] == 1
 
 
 def test_base_capacity_sends_fourth_arrival_to_holding_then_refuels():
@@ -89,3 +171,10 @@ def test_dissipated_storm_is_replaced_at_configured_density():
     storms = [item for item in engine.obstacles if hasattr(item, "intensity")]
     assert len(storms) == engine._storm_target_count
     assert initial_id not in {item.id for item in storms}
+    assert all(storm.size <= 2 for storm in storms)
+    assert all(
+        storm.distance_to_boundary((base.position.col + 0.5, base.position.row + 0.5))
+        >= engine.config.environment.base_obstacle_clearance_cells
+        for storm in storms
+        for base in engine.bases
+    )

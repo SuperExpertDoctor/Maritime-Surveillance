@@ -12,7 +12,7 @@ import useWebSocket from "./hooks/useWebSocket";
 export default function App() {
   const [mode, setMode] = useState("live");
   const [selectedUavId, setSelectedUavId] = useState(null);
-  const [drawerVisible, setDrawerVisible] = useState(true);
+  const [drawerVisible, setDrawerVisible] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [liveEvents, setLiveEvents] = useState([]);
@@ -105,7 +105,7 @@ export default function App() {
           <button className={showGrid ? "icon-btn active" : "icon-btn"} onClick={() => setShowGrid((value) => !value)} title="网格" aria-label="切换网格">
             <Grid3X3 size={17} />
           </button>
-          <button className="icon-btn" onClick={() => setDrawerVisible((value) => !value)} title="任务详情" aria-label="切换任务详情面板">
+          <button className={drawerVisible ? "icon-btn active" : "icon-btn"} onClick={() => setDrawerVisible((value) => !value)} title="任务详情" aria-label="切换任务详情面板" aria-pressed={drawerVisible}>
             <PanelBottom size={17} />
           </button>
           <button className="icon-btn mobile-only" onClick={() => setSidebarOpen((value) => !value)} title="编队状态" aria-label="切换编队状态面板">

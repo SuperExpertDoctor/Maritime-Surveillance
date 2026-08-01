@@ -8,8 +8,12 @@
 
 export function computeLayout(canvasW, canvasH) {
   const cellSize = Math.max(1, Math.floor(Math.min(canvasW, canvasH) / 32));
+  const mapSize = 30 * cellSize;
+  const compactViewport = canvasW <= 620 && canvasH > mapSize * 1.35;
   const offsetX = (canvasW - 30 * cellSize) / 2;
-  const offsetY = (canvasH - 30 * cellSize) / 2;
+  const offsetY = compactViewport
+    ? Math.max(18, Math.round((canvasH - mapSize) * 0.1))
+    : (canvasH - mapSize) / 2;
   return { cellSize, offsetX, offsetY };
 }
 

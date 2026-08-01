@@ -162,7 +162,7 @@ def obstacle_grid_mask(
     storm_safety_margin: float = 1.0,
     include_islands: bool = False,
 ) -> np.ndarray:
-    """Rasterise no-fly hazards; islands stay flyable for fixed-wing UAVs."""
+    """Rasterise no-fly hazards, optionally including static islands."""
     cols, rows = resolution
     mask = np.zeros((cols, rows), dtype=bool)
     for obstacle in obstacles:
@@ -185,31 +185,36 @@ def default_obstacles(
     base_positions: Iterable[Sequence[float]] = (),
     island_count: int | None = None,
     thunderstorm_count: int | None = None,
+    base_clearance_cells: float = 4.0,
     resolution: tuple[int, int] = (30, 30),
 ) -> list[Thunderstorm | Island]:
-    """Generate a deterministic GOAL2 sea state for one environment reset."""
+    """Generate a deterministic sparse open-water state for one reset."""
     rng = random.Random(seed)
     cols, rows = resolution
     bases = [tuple(map(float, position[:2])) for position in base_positions]
     islands: list[Island] = []
-    requested_islands = island_count if island_count is not None else rng.randint(2, 6)
+    requested_islands = island_count if island_count is not None else rng.randint(0, 2)
     for index in range(requested_islands):
         for _ in range(300):
-            size = rng.randint(1, 3)
+            size = rng.randint(1, 2)
             h = size / 2.0
             center = (rng.uniform(2.0 + h, cols - 2.0 - h), rng.uniform(2.0 + h, rows - 2.0 - h))
             candidate = Island(center, size, f"island-{index + 1}")
-            if any(candidate.contains(base) for base in bases):
+            if any(
+                candidate.distance_to_boundary((base[0] + 0.5, base[1] + 0.5))
+                < base_clearance_cells
+                for base in bases
+            ):
                 continue
             if any(candidate.distance_to_boundary(other.center) < 1.0 + other.half_extent for other in islands):
                 continue
             islands.append(candidate)
             break
     storms: list[Thunderstorm] = []
-    requested_storms = thunderstorm_count if thunderstorm_count is not None else rng.randint(3, 8)
+    requested_storms = thunderstorm_count if thunderstorm_count is not None else rng.randint(2, 3)
     for index in range(requested_storms):
         for _ in range(200):
-            size = rng.randint(1, 4)
+            size = rng.randint(1, 2)
             h = size / 2.0
             # Keep the one-cell airborne safety margin clear of the coastal
             # launch/recovery strip, including every generated base.
@@ -218,7 +223,11 @@ def default_obstacles(
                 rng.uniform(h + 1.0, rows - h - 1.0),
             )
             candidate = Thunderstorm(center, size)
-            if any(candidate.contains(base, safety_margin=1.0) for base in bases):
+            if any(
+                candidate.distance_to_boundary((base[0] + 0.5, base[1] + 0.5))
+                < base_clearance_cells
+                for base in bases
+            ):
                 continue
             storms.append(Thunderstorm(
                 center,

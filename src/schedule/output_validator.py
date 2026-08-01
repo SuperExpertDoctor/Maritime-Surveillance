@@ -1,4 +1,6 @@
 ﻿from dataclasses import dataclass, field
+import math
+
 from src.schedule.datatypes import BBox, Region
 from src.schedule.config_loader import AppConfig
 from src.utils.coverage_planner import CoveragePlanner
@@ -17,6 +19,7 @@ def validate(llm_output: dict, config: AppConfig,
              track_regions: list[Region],
              prev_search_regions: list[Region],
              obstacle_mask=None,
+             base_positions=None,
              allow_empty: bool = False) -> ValidationResult:
     """校验 LLM 输出的搜索区域划分方案。"""
     errors = []
@@ -60,6 +63,14 @@ def validate(llm_output: dict, config: AppConfig,
             errors.append(f"Region {i} aspect={aspect:.2f}: exceeds max {gc.aspect_ratio_max}")
 
         bboxes.append((i, b))
+        if base_positions:
+            distance = min(_distance_to_bbox(position, b) for position in base_positions)
+            minimum = config.environment.base_task_min_distance_cells
+            if distance < minimum:
+                errors.append(
+                    f"Region {i} is {distance:.2f} cells from a land base; "
+                    f"minimum is {minimum:.2f}"
+                )
         if obstacle_mask is not None and obstacle_mask[
             c0:c1,
             r0:r1,
@@ -101,6 +112,13 @@ def validate(llm_output: dict, config: AppConfig,
     # after validation, so reusing an old display ID is not a validation error.
 
     return ValidationResult(is_valid=len(errors) == 0, errors=errors)
+
+
+def _distance_to_bbox(position, bbox: BBox) -> float:
+    col, row = position
+    dx = max(bbox.col_start - col, 0, col - bbox.col_end)
+    dy = max(bbox.row_start - row, 0, row - bbox.row_end)
+    return math.hypot(dx, dy)
 
 
 def _bboxes_overlap(a: BBox, b: BBox) -> bool:

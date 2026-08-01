@@ -3,7 +3,7 @@ import { markerColor, PRIORITY_COLORS, UAV_STATUS_COLORS } from "./colors";
 
 const FONT = '"Fira Code", "Microsoft YaHei", monospace';
 const BASE_COLORS = ["#3B82F6", "#10B981", "#F59E0B"];
-const GROUP_COLORS = ["#67E8F9", "#FBBF24", "#A3E635"];
+const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
 
 function gridCenter(col, row, cellSize, ox, oy) {
   return { x: ox + (col + 0.5) * cellSize, y: oy + (row + 0.5) * cellSize };
@@ -13,32 +13,73 @@ function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
-function normalizeBases(bases, basePosition, supportBases) {
+function normalizeBases(bases, basePosition) {
   if (bases?.length) return bases;
-  return [
-    ...(basePosition ? [{ position: basePosition, number: 1, occupancy: 0, capacity: 3, busy: false }] : []),
-    ...((supportBases || []).map((position, index) => ({
-      position, number: index + 2, occupancy: 0, capacity: 3, busy: false,
-    }))),
-  ];
+  return basePosition
+    ? [{ position: basePosition, number: 1, occupancy: 0, capacity: 3, busy: false }]
+    : [];
 }
 
-function text(ctx, value, x, y, color = "#F8FAFC", size = 10, weight = 500) {
+function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
   ctx.font = `${weight} ${size}px ${FONT}`;
   ctx.fillStyle = color;
   ctx.fillText(value, x, y);
 }
 
-export function drawBackground(ctx, width, height, cellSize, ox, oy) {
-  ctx.fillStyle = "#050A0E";
+function coastlineEdge(position) {
+  const [col, row] = position;
+  return [
+    [row, "top"],
+    [29 - row, "bottom"],
+    [col, "left"],
+    [29 - col, "right"],
+  ].sort((left, right) => left[0] - right[0])[0][1];
+}
+
+function drawMapImage(ctx, image, cellSize, ox, oy, bases) {
+  if (!image?.complete || !image.naturalWidth || !image.naturalHeight) return;
+  const size = 30 * cellSize;
+  const crop = Math.min(image.naturalWidth, image.naturalHeight);
+  const edge = bases?.[0]?.position ? coastlineEdge(bases[0].position) : "left";
+  const rotation = { left: 0, top: Math.PI / 2, right: Math.PI, bottom: -Math.PI / 2 }[edge];
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(ox, oy, size, size);
+  ctx.clip();
+  ctx.translate(ox + size / 2, oy + size / 2);
+  ctx.rotate(rotation);
+  ctx.globalAlpha = 0.44;
+  ctx.drawImage(image, 0, 0, crop, crop, -size / 2, -size / 2, size, size);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(255, 255, 255, .44)";
+  ctx.fillRect(-size / 2, -size / 2, size, size);
+  ctx.restore();
+}
+
+export function drawBackground(ctx, width, height, cellSize, ox, oy, bases, assets) {
+  ctx.fillStyle = "#FFFFFF";
   ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = "#071821";
+  ctx.fillStyle = "#E7F4F8";
   ctx.fillRect(ox, oy, 30 * cellSize, 30 * cellSize);
-  ctx.strokeStyle = "rgba(103, 232, 249, .08)";
+  drawMapImage(ctx, assets?.background, cellSize, ox, oy, bases);
+  ctx.strokeStyle = "rgba(14, 116, 144, .56)";
   ctx.lineWidth = 1;
-  for (let ring = 5; ring < 30; ring += 5) {
-    ctx.strokeRect(ox + ring * cellSize / 2, oy + ring * cellSize / 2, (30 - ring) * cellSize, (30 - ring) * cellSize);
+  ctx.strokeRect(ox - 0.5, oy - 0.5, 30 * cellSize + 1, 30 * cellSize + 1);
+
+  ctx.save();
+  ctx.fillStyle = "#526E7A";
+  ctx.font = `600 ${Math.max(7, Math.min(9, cellSize * 0.3))}px ${FONT}`;
+  ctx.textAlign = "center";
+  for (const index of [0, 5, 10, 15, 20, 25, 29]) {
+    const x = ox + (index + 0.5) * cellSize;
+    ctx.fillText(String(index).padStart(2, "0"), x, oy - Math.max(4, cellSize * 0.25));
   }
+  ctx.textAlign = "right";
+  for (const index of [0, 5, 10, 15, 20, 25, 29]) {
+    const y = oy + (index + 0.5) * cellSize + 3;
+    ctx.fillText(String(index).padStart(2, "0"), ox - Math.max(4, cellSize * 0.25), y);
+  }
+  ctx.restore();
 }
 
 export function drawHeatmap(ctx, info, values, cellSize, ox, oy) {
@@ -47,9 +88,9 @@ export function drawHeatmap(ctx, info, values, cellSize, ox, oy) {
       const freshness = Number(info?.[col]?.[row] || 0);
       const value = Number(values?.[col]?.[row] || 0);
       const { x, y } = coordToPixel(col, row, cellSize, ox, oy);
-      if (freshness > 0.7) ctx.fillStyle = `rgba(45, 212, 191, ${0.12 + freshness * 0.26})`;
-      else if (freshness >= 0.2) ctx.fillStyle = `rgba(250, 204, 21, ${0.07 + freshness * 0.18})`;
-      else ctx.fillStyle = `rgba(248, 113, 113, ${0.015 + value * 0.085})`;
+      if (freshness > 0.7) ctx.fillStyle = `rgba(13, 148, 136, ${0.12 + freshness * 0.2})`;
+      else if (freshness >= 0.2) ctx.fillStyle = `rgba(217, 119, 6, ${0.08 + freshness * 0.14})`;
+      else ctx.fillStyle = `rgba(37, 99, 235, ${0.018 + value * 0.045})`;
       ctx.fillRect(x + 0.5, y + 0.5, Math.max(0, cellSize - 1), Math.max(0, cellSize - 1));
     }
   }
@@ -60,17 +101,88 @@ export function drawTransparencyOverlay(ctx, info, cellSize, ox, oy) {
     for (let row = 0; row < 30; row += 1) {
       const freshness = clamp(Number(info?.[col]?.[row] || 0), 0, 1);
       const { x, y } = coordToPixel(col, row, cellSize, ox, oy);
-      ctx.fillStyle = `rgba(0, 0, 0, ${1 - freshness * 0.9})`;
+      ctx.fillStyle = `rgba(15, 23, 42, ${0.1 - freshness * 0.08})`;
       ctx.fillRect(x, y, cellSize, cellSize);
     }
   }
 }
 
+export function drawOceanTexture(ctx, cellSize, ox, oy) {
+  const size = 30 * cellSize;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(ox, oy, size, size);
+  ctx.clip();
+  ctx.strokeStyle = "rgba(8, 145, 178, .16)";
+  ctx.lineWidth = 1;
+  for (let row = 2; row < 30; row += 4) {
+    ctx.beginPath();
+    for (let col = 0; col <= 30; col += 1) {
+      const x = ox + col * cellSize;
+      const y = oy + (row + Math.sin((col + row) * 0.55) * 0.12) * cellSize;
+      if (col === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+export function drawCoastline(ctx, bases, cellSize, ox, oy) {
+  for (const base of bases || []) {
+    drawCoastlineForBase(ctx, base, cellSize, ox, oy);
+  }
+}
+
+function drawCoastlineForBase(ctx, base, cellSize, ox, oy) {
+  if (!base?.position) return;
+  const [col, row] = base.position;
+  const mapSize = 30 * cellSize;
+  const center = gridCenter(col, row, cellSize, ox, oy);
+  const edge = coastlineEdge(base.position);
+  const span = Math.min(mapSize, 9 * cellSize);
+  const depth = 1.55 * cellSize;
+  const variation = [0.72, 0.9, 0.76, 1.02, 0.8, 0.95, 0.7];
+  const horizontalStart = clamp(center.x - span / 2, ox, ox + mapSize - span);
+  const verticalStart = clamp(center.y - span / 2, oy, oy + mapSize - span);
+
+  ctx.save();
+  ctx.fillStyle = "#DDE7C9";
+  ctx.strokeStyle = "#65764D";
+  ctx.lineWidth = 1.7;
+  ctx.beginPath();
+  if (edge === "top" || edge === "bottom") {
+    const outerY = edge === "top" ? oy - cellSize : oy + mapSize + cellSize;
+    ctx.moveTo(horizontalStart, outerY);
+    ctx.lineTo(horizontalStart + span, outerY);
+    for (let index = variation.length - 1; index >= 0; index -= 1) {
+      const x = horizontalStart + (index / (variation.length - 1)) * span;
+      const offset = variation[index] * depth;
+      const y = edge === "top" ? oy + offset : oy + mapSize - offset;
+      ctx.lineTo(x, y);
+    }
+  } else {
+    const outerX = edge === "left" ? ox - cellSize : ox + mapSize + cellSize;
+    ctx.moveTo(outerX, verticalStart);
+    ctx.lineTo(outerX, verticalStart + span);
+    for (let index = variation.length - 1; index >= 0; index -= 1) {
+      const y = verticalStart + (index / (variation.length - 1)) * span;
+      const offset = variation[index] * depth;
+      const x = edge === "left" ? ox + offset : ox + mapSize - offset;
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 export function drawGridLines(ctx, cellSize, ox, oy, showGrid) {
   if (!showGrid) return;
-  ctx.strokeStyle = "rgba(148, 163, 184, .11)";
-  ctx.lineWidth = 0.5;
   for (let index = 0; index <= 30; index += 1) {
+    const major = index % 5 === 0;
+    ctx.strokeStyle = major ? "rgba(30, 64, 88, .36)" : "rgba(71, 85, 105, .19)";
+    ctx.lineWidth = major ? 0.9 : 0.5;
     ctx.beginPath();
     ctx.moveTo(ox + index * cellSize, oy);
     ctx.lineTo(ox + index * cellSize, oy + 30 * cellSize);
@@ -88,13 +200,13 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
       const x = center.x - size / 2;
       const y = center.y - size / 2;
       const pulse = 0.56 + Math.sin(phase / 24) * 0.12;
-      ctx.fillStyle = "rgba(239, 68, 68, .4)";
-      ctx.strokeStyle = `rgba(248, 113, 113, ${pulse})`;
+      ctx.fillStyle = "rgba(239, 68, 68, .22)";
+      ctx.strokeStyle = `rgba(185, 28, 28, ${pulse + 0.25})`;
       ctx.lineWidth = 1.5;
       ctx.fillRect(x, y, size, size);
       ctx.strokeRect(x, y, size, size);
       ctx.save();
-      ctx.strokeStyle = "#FDE2E2";
+      ctx.strokeStyle = "#FFFFFF";
       ctx.lineWidth = Math.max(1, cellSize * 0.08);
       ctx.beginPath();
       ctx.moveTo(center.x + size * 0.07, center.y - size * 0.28);
@@ -105,11 +217,11 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
       ctx.restore();
       ctx.save();
       ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = "rgba(250, 204, 21, .7)";
+      ctx.strokeStyle = "rgba(217, 119, 6, .88)";
       ctx.lineWidth = 1;
       ctx.strokeRect(x - cellSize, y - cellSize, size + 2 * cellSize, size + 2 * cellSize);
       ctx.restore();
-      text(ctx, "STORM", x + 3, y + Math.max(10, cellSize * 0.45), "#FECACA", Math.max(7, cellSize * 0.28), 700);
+      text(ctx, "STORM", x + 3, y + Math.max(10, cellSize * 0.45), "#7F1D1D", Math.max(7, cellSize * 0.28), 700);
     } else {
       const vertices = obstacle.vertices || [];
       if (!vertices.length) continue;
@@ -121,9 +233,9 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
       ctx.closePath();
       ctx.save();
       ctx.globalAlpha = 0.7;
-      ctx.fillStyle = "#92400E";
-      ctx.strokeStyle = "#FFFFFF";
-      ctx.lineWidth = 1.2;
+      ctx.fillStyle = "#A16207";
+      ctx.strokeStyle = "#713F12";
+      ctx.lineWidth = 1.5;
       ctx.fill();
       ctx.stroke();
       ctx.restore();
@@ -138,6 +250,35 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
   }
 }
 
+function drawMissionEnvelope(ctx, regions, cellSize, ox, oy) {
+  const active = (regions || []).filter((region) => region?.bbox?.length === 4);
+  if (!active.length) return;
+  const [minCol, minRow, maxCol, maxRow] = active.reduce((bounds, region) => [
+    Math.min(bounds[0], region.bbox[0]),
+    Math.min(bounds[1], region.bbox[1]),
+    Math.max(bounds[2], region.bbox[2]),
+    Math.max(bounds[3], region.bbox[3]),
+  ], [30, 30, 0, 0]);
+  const margin = Math.max(2, cellSize * 0.28);
+  const x = ox + minCol * cellSize - margin;
+  const y = oy + minRow * cellSize - margin;
+  const width = (maxCol - minCol) * cellSize + margin * 2;
+  const height = (maxRow - minRow) * cellSize + margin * 2;
+  ctx.save();
+  ctx.strokeStyle = "rgba(3, 105, 161, .72)";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([Math.max(7, cellSize * 0.48), Math.max(4, cellSize * 0.3)]);
+  ctx.strokeRect(x, y, width, height);
+  ctx.restore();
+  const label = `MISSION AREA / ${active.length} TASKS`;
+  const fontSize = Math.max(8, Math.min(10, cellSize * 0.32));
+  ctx.font = `700 ${fontSize}px ${FONT}`;
+  const labelWidth = ctx.measureText(label).width + 10;
+  ctx.fillStyle = "rgba(255, 255, 255, .94)";
+  ctx.fillRect(x + 4, Math.max(oy + 2, y - fontSize - 6), labelWidth, fontSize + 6);
+  text(ctx, label, x + 9, Math.max(oy + fontSize + 1, y - 4), "#075985", fontSize, 700);
+}
+
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
   for (const region of regions || []) {
     const [c0, r0, c1, r1] = region.bbox;
@@ -145,19 +286,27 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
     const width = (c1 - c0) * cellSize;
     const height = (r1 - r0) * cellSize;
     const color = PRIORITY_COLORS[region.priority] || PRIORITY_COLORS.medium;
-    ctx.fillStyle = `${color}12`;
+    ctx.fillStyle = `${color}0D`;
     ctx.fillRect(x, y, width, height);
+    ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.35;
+    ctx.setLineDash([Math.max(4, cellSize * 0.34), Math.max(3, cellSize * 0.24)]);
     ctx.strokeRect(x, y, width, height);
+    ctx.restore();
     const uav = (uavs || []).find((item) => item.id === region.assigned_uav_id);
     const arrow = uav?.sar_look_direction === "left" ? "<" : ">";
-    const label = `${region.id}  ${Math.round(region.completion_pct || 0)}%  ${arrow}`;
-    ctx.font = `600 ${Math.max(9, Math.min(12, cellSize * 0.42))}px ${FONT}`;
-    const labelWidth = ctx.measureText(label).width + 8;
-    ctx.fillStyle = "rgba(5, 10, 14, .88)";
-    ctx.fillRect(x + 2, y + 2, labelWidth, 18);
-    text(ctx, label, x + 6, y + 15, color, Math.max(9, Math.min(12, cellSize * 0.42)), 600);
+    const fontSize = Math.max(8, Math.min(10, cellSize * 0.34));
+    const fullLabel = `${region.id} ${Math.round(region.completion_pct || 0)}% ${arrow}`;
+    ctx.font = `700 ${fontSize}px ${FONT}`;
+    const availableWidth = Math.max(0, width - 8);
+    const label = ctx.measureText(fullLabel).width <= availableWidth ? fullLabel : region.id;
+    const labelWidth = Math.min(availableWidth, ctx.measureText(label).width + 8);
+    if (labelWidth > 0) {
+      ctx.fillStyle = "rgba(255, 255, 255, .9)";
+      ctx.fillRect(x + 3, y + 3, labelWidth, fontSize + 6);
+      text(ctx, label, x + 7, y + fontSize + 5, color, fontSize, 700);
+    }
   }
 }
 
@@ -165,9 +314,9 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
   for (const region of regions || []) {
     const [c0, r0, c1, r1] = region.bbox;
     const { x, y } = coordToPixel(c0, r0, cellSize, ox, oy);
-    ctx.fillStyle = "rgba(251, 113, 133, .07)";
+    ctx.fillStyle = "rgba(190, 18, 60, .06)";
     ctx.fillRect(x, y, (c1 - c0) * cellSize, (r1 - r0) * cellSize);
-    ctx.strokeStyle = "#FB7185";
+    ctx.strokeStyle = "#BE123C";
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5, 4]);
     ctx.strokeRect(x, y, (c1 - c0) * cellSize, (r1 - r0) * cellSize);
@@ -177,7 +326,7 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
       const centerCol = group.reduce((sum, ship) => sum + ship.position[0], 0) / group.length;
       const centerRow = group.reduce((sum, ship) => sum + ship.position[1], 0) / group.length;
       const center = gridCenter(centerCol, centerRow, cellSize, ox, oy);
-      ctx.strokeStyle = "rgba(251, 113, 133, .6)";
+      ctx.strokeStyle = "rgba(190, 18, 60, .72)";
       ctx.setLineDash([3, 4]);
       ctx.beginPath();
       ctx.arc(center.x, center.y, 1.8 * cellSize, 0, Math.PI * 2);
@@ -191,7 +340,7 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId) {
   for (const uav of uavs || []) {
     const path = uav.planned_path || [];
     if (path.length >= 2 && uav.status !== "idle") {
-      ctx.strokeStyle = uav.id === selectedId ? "rgba(125, 211, 252, .88)" : "rgba(96, 165, 250, .26)";
+      ctx.strokeStyle = uav.id === selectedId ? "rgba(29, 78, 216, .92)" : "rgba(37, 99, 235, .38)";
       ctx.lineWidth = uav.id === selectedId ? 1.8 : 1;
       ctx.setLineDash(uav.id === selectedId ? [] : [3, 4]);
       ctx.beginPath();
@@ -205,7 +354,7 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId) {
     const avoidancePath = uav.avoidance_path || [];
     if (avoidancePath.length >= 2) {
       ctx.save();
-      ctx.strokeStyle = "rgba(34, 211, 238, .9)";
+      ctx.strokeStyle = "rgba(8, 145, 178, .92)";
       ctx.lineWidth = 1.6;
       ctx.setLineDash([5, 3]);
       ctx.beginPath();
@@ -219,10 +368,34 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId) {
   }
 }
 
+function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId) {
+  for (const uav of uavs || []) {
+    const trail = uav.trail || [];
+    if (trail.length < 2) continue;
+    const color = UAV_STATUS_COLORS[uav.status] || "#475569";
+    const start = Math.max(1, trail.length - 72);
+    ctx.save();
+    ctx.lineCap = "round";
+    for (let index = start; index < trail.length; index += 1) {
+      const previous = gridCenter(trail[index - 1][0], trail[index - 1][1], cellSize, ox, oy);
+      const current = gridCenter(trail[index][0], trail[index][1], cellSize, ox, oy);
+      const progress = (index - start + 1) / Math.max(1, trail.length - start);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.1 + progress * (uav.id === selectedId ? 0.82 : 0.52);
+      ctx.lineWidth = (uav.id === selectedId ? 2.25 : 1.45) * (0.62 + progress * 0.38);
+      ctx.beginPath();
+      ctx.moveTo(previous.x, previous.y);
+      ctx.lineTo(current.x, current.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
 export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy) {
   for (const uav of uavs || []) {
     if (uav.sensor_mode === "sar") {
-      ctx.fillStyle = "rgba(34, 211, 238, .22)";
+      ctx.fillStyle = "rgba(8, 145, 178, .18)";
       for (const [col, row] of uav.sar_footprint || []) {
         const point = coordToPixel(col, row, cellSize, ox, oy);
         ctx.fillRect(point.x + 1, point.y + 1, cellSize - 2, cellSize - 2);
@@ -235,8 +408,8 @@ export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy) {
         if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
       });
       ctx.closePath();
-      ctx.fillStyle = "rgba(250, 204, 21, .24)";
-      ctx.strokeStyle = "rgba(250, 204, 21, .75)";
+      ctx.fillStyle = "rgba(202, 138, 4, .18)";
+      ctx.strokeStyle = "rgba(161, 98, 7, .82)";
       ctx.fill();
       ctx.stroke();
     }
@@ -256,7 +429,7 @@ export function drawMarkers(ctx, markers, cellSize, ox, oy, time, phase) {
     ctx.arc(center.x, center.y, 4 + Math.sin(phase / 12) * 1.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-    text(ctx, marker.id, center.x + 7, center.y - 7, "#F8FAFC", 10);
+    text(ctx, marker.id, center.x + 7, center.y - 7, "#0F172A", 10);
   }
 }
 
@@ -287,13 +460,48 @@ function drawGroupRings(ctx, ships, cellSize, ox, oy) {
   }
 }
 
-function drawShipHull(ctx, ship, center, size, color) {
+function drawSprite(ctx, image, source, center, width, rotation) {
+  if (!image?.complete || !image.naturalWidth || !image.naturalHeight) return false;
+  const height = width * source.height / source.width;
+  ctx.save();
+  ctx.translate(center.x, center.y);
+  ctx.rotate(rotation);
+  ctx.drawImage(
+    image,
+    source.x,
+    source.y,
+    source.width,
+    source.height,
+    -width / 2,
+    -height / 2,
+    width,
+    height,
+  );
+  ctx.restore();
+  return true;
+}
+
+function drawShipHull(ctx, ship, center, size, color, assets) {
+  const carrier = ship.ship_type === "carrier";
+  const model = carrier ? assets?.carrier : assets?.destroyer;
+  const source = carrier
+    ? { x: 196, y: 244, width: 1072, height: 540 }
+    : { x: 48, y: 64, width: 1420, height: 908 };
+  const modelWidth = Math.max(carrier ? 20 : 17, cellSizeForShip(size, carrier));
+  if (drawSprite(
+    ctx,
+    model,
+    source,
+    center,
+    modelWidth,
+    (Number(ship.heading_deg) || 0) * Math.PI / 180 + Math.PI,
+  )) return;
   ctx.fillStyle = color;
-  if (ship.ship_type === "carrier") {
+  if (carrier) {
     ctx.fillRect(center.x - size * 1.15, center.y - size * 0.52, size * 2.3, size * 1.04);
-    ctx.fillStyle = "#0F172A";
+    ctx.fillStyle = "#FFFFFF";
     ctx.fillRect(center.x - size * 0.15, center.y - size * 0.42, size * 0.34, size * 0.84);
-    ctx.strokeStyle = "#E2E8F0";
+    ctx.strokeStyle = "#334155";
     ctx.lineWidth = 0.8;
     ctx.strokeRect(center.x - size * 1.15, center.y - size * 0.52, size * 2.3, size * 1.04);
     return;
@@ -305,6 +513,10 @@ function drawShipHull(ctx, ship, center, size, color) {
   ctx.lineTo(center.x - size * 0.7, center.y + size * 0.58);
   ctx.closePath();
   ctx.fill();
+}
+
+function cellSizeForShip(size, carrier) {
+  return size * (carrier ? 4.6 : 4.15);
 }
 
 function drawClassificationSymbol(ctx, ship, center, size, military) {
@@ -326,7 +538,7 @@ function drawClassificationSymbol(ctx, ship, center, size, military) {
     ctx.quadraticCurveTo(x + 2, y + 6, x + 4, y + 2);
     ctx.stroke();
   } else if (ship.is_military === false) {
-    ctx.fillStyle = "#E0F2FE";
+    ctx.fillStyle = "#0369A1";
     ctx.beginPath();
     ctx.moveTo(center.x + size + 2, center.y - 2);
     ctx.lineTo(center.x + size + 9, center.y - 2);
@@ -337,11 +549,11 @@ function drawClassificationSymbol(ctx, ship, center, size, military) {
   ctx.restore();
 }
 
-export function drawShips(ctx, ships, cellSize, ox, oy) {
+export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
   drawGroupRings(ctx, ships, cellSize, ox, oy);
   for (const ship of ships || []) {
     const military = ship.is_military === true || ship.discrimination === "military";
-    const color = military ? "#FB7185" : ship.is_military === false ? "#E0F2FE" : ship.is_detected ? "#FBBF24" : "#94A3B8";
+    const color = military ? "#E11D48" : ship.is_military === false ? "#0369A1" : ship.is_detected ? "#CA8A04" : "#475569";
     const size = Math.max(4, cellSize * (ship.ship_type === "carrier" ? 0.38 : 0.28));
     if (ship.trail?.length > 1) {
       ctx.save();
@@ -363,7 +575,7 @@ export function drawShips(ctx, ships, cellSize, ox, oy) {
     };
     ctx.save();
     ctx.globalAlpha = ship.departed ? 0.36 : 1;
-    drawShipHull(ctx, ship, center, size, color);
+    drawShipHull(ctx, ship, center, size, color, assets);
     if (ship.is_detected && !ship.departed) {
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
@@ -386,7 +598,7 @@ export function drawShips(ctx, ships, cellSize, ox, oy) {
       ctx.restore();
     }
     const state = ship.departed ? "DEPARTED" : military ? "M" : ship.is_military === false ? "C" : "?";
-    const stateColor = ship.departed ? "#94A3B8" : military ? "#F87171" : "#CBD5E1";
+    const stateColor = ship.departed ? "#64748B" : military ? "#BE123C" : "#334155";
     text(ctx, state, center.x + size + 3, center.y + 3, stateColor, Math.max(7, cellSize * 0.26), 700);
   }
 }
@@ -395,43 +607,69 @@ export function drawBases(ctx, bases, cellSize, ox, oy, phase) {
   for (const [index, base] of (bases || []).entries()) {
     const center = gridCenter(base.position[0], base.position[1], cellSize, ox, oy);
     const color = BASE_COLORS[index % BASE_COLORS.length];
-    const size = Math.max(12, cellSize * 0.66);
+    const size = Math.max(18, cellSize * 0.82);
+    const landSize = Math.max(26, cellSize * 1.14);
     ctx.save();
-    ctx.fillStyle = "#091116";
+    ctx.fillStyle = "rgba(231, 211, 167, .96)";
+    ctx.strokeStyle = "rgba(120, 88, 45, .78)";
+    ctx.lineWidth = 1;
+    ctx.fillRect(center.x - landSize / 2, center.y - landSize / 2, landSize, landSize);
+    ctx.strokeRect(center.x - landSize / 2, center.y - landSize / 2, landSize, landSize);
+    ctx.beginPath();
+    ctx.moveTo(center.x - landSize / 2 + 3, center.y + landSize / 2 - 3);
+    ctx.lineTo(center.x + landSize / 2 - 3, center.y - landSize / 2 + 3);
+    ctx.strokeStyle = "rgba(120, 88, 45, .42)";
+    ctx.stroke();
+    ctx.fillStyle = "#FFFFFF";
     ctx.strokeStyle = base.busy ? `rgba(248, 113, 113, ${0.65 + Math.sin(phase / 16) * 0.2})` : color;
     ctx.lineWidth = base.busy ? 2 : 1.3;
     ctx.fillRect(center.x - size / 2, center.y - size / 2, size, size);
     ctx.strokeRect(center.x - size / 2, center.y - size / 2, size, size);
     ctx.restore();
-    text(ctx, `B${base.number || index + 1}`, center.x - size / 2 + 2, center.y - 1, color, Math.max(7, cellSize * 0.25), 700);
-    text(ctx, `${base.occupancy || 0}/${base.capacity || 3}`, center.x - size / 2 + 2, center.y + Math.max(8, cellSize * 0.3), "#CBD5E1", Math.max(6, cellSize * 0.21), 600);
+    const baseLabel = `B${base.number || index + 1}`;
+    const edge = coastlineEdge(base.position);
+    const labelX = edge === "right" ? center.x - size / 2 - 30 : center.x + size / 2 + 4;
+    const labelY = edge === "bottom" ? center.y - 7 : center.y + 2;
+    const fontSize = Math.max(7, cellSize * 0.25);
+    text(ctx, baseLabel, labelX, labelY, color, fontSize, 700);
+    text(ctx, `${base.occupancy || 0}/${base.capacity || 3}`, labelX, labelY + fontSize + 3, "#334155", Math.max(6, cellSize * 0.21), 600);
   }
 }
 
-export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId) {
+export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
   for (const uav of uavs || []) {
     const center = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
     const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";
     const size = Math.max(5, cellSize * (uav.id === selectedId ? 0.42 : 0.32));
     ctx.save();
     ctx.globalAlpha = uav.status === "refueling" ? 0.34 : 1;
-    ctx.translate(center.x, center.y);
-    ctx.rotate((uav.heading_deg || 0) * Math.PI / 180);
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(size * 1.25, 0);
-    ctx.lineTo(-size * 0.3, -size * 0.22);
-    ctx.lineTo(-size * 0.85, -size);
-    ctx.lineTo(-size * 0.55, -size * 0.12);
-    ctx.lineTo(-size, 0);
-    ctx.lineTo(-size * 0.55, size * 0.12);
-    ctx.lineTo(-size * 0.85, size);
-    ctx.lineTo(-size * 0.3, size * 0.22);
-    ctx.closePath();
-    ctx.fill();
+    const renderedModel = drawSprite(
+      ctx,
+      assets?.uav,
+      { x: 36, y: 180, width: 1444, height: 632 },
+      center,
+      Math.max(20, cellSize * (uav.id === selectedId ? 1.75 : 1.45)),
+      (Number(uav.heading_deg) || 0) * Math.PI / 180 + Math.PI,
+    );
+    if (!renderedModel) {
+      ctx.translate(center.x, center.y);
+      ctx.rotate((uav.heading_deg || 0) * Math.PI / 180);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(size * 1.25, 0);
+      ctx.lineTo(-size * 0.3, -size * 0.22);
+      ctx.lineTo(-size * 0.85, -size);
+      ctx.lineTo(-size * 0.55, -size * 0.12);
+      ctx.lineTo(-size, 0);
+      ctx.lineTo(-size * 0.55, size * 0.12);
+      ctx.lineTo(-size * 0.85, size);
+      ctx.lineTo(-size * 0.3, size * 0.22);
+      ctx.closePath();
+      ctx.fill();
+    }
     ctx.restore();
     if (uav.id === selectedId) {
-      ctx.strokeStyle = "#E0F2FE";
+      ctx.strokeStyle = "#0F172A";
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.arc(center.x, center.y, size + 5, 0, Math.PI * 2);
@@ -445,7 +683,7 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId) {
       ctx.arc(center.x, center.y, size + 3, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
       ctx.stroke();
     }
-    text(ctx, uav.id.replace("UAV-", "U"), center.x + size + 3, center.y - size - 1, "#F8FAFC", 9, 600);
+    text(ctx, uav.id.replace("UAV-", "U"), center.x + size + 3, center.y - size - 1, "#0F172A", 9, 700);
     if (uav.avoidance_level > 0) {
       const level = Number(uav.avoidance_level);
       const levelColor = level >= 3 ? "#F87171" : level === 2 ? "#FBBF24" : "#67E8F9";
@@ -461,12 +699,12 @@ export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
   const canvasHeight = ctx.canvas.clientHeight || ctx.canvas.height;
   const x = Math.max(8, canvasWidth - width - 12);
   const y = Math.max(8, canvasHeight - height - 38);
-  ctx.fillStyle = "rgba(5, 10, 14, .86)";
-  ctx.strokeStyle = "rgba(100, 116, 139, .7)";
+  ctx.fillStyle = "rgba(255, 255, 255, .94)";
+  ctx.strokeStyle = "rgba(71, 85, 105, .72)";
   ctx.lineWidth = 1;
   ctx.fillRect(x, y, width, height);
   ctx.strokeRect(x, y, width, height);
-  text(ctx, "SCAN TRANSPARENCY", x + 7, y + 13, "#CBD5E1", 8, 700);
+  text(ctx, "SCAN TRANSPARENCY", x + 7, y + 13, "#334155", 8, 700);
   const swatches = [
     { color: "#050505", label: "BLACK 0.0" },
     { color: "#737373", label: "GRAY 0.5" },
@@ -478,51 +716,64 @@ export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
     ctx.fillRect(itemX, y + 21, 10, 10);
     ctx.strokeStyle = "#64748B";
     ctx.strokeRect(itemX, y + 21, 10, 10);
-    text(ctx, swatch.label, itemX + 13, y + 30, "#94A3B8", 7, 600);
+    text(ctx, swatch.label, itemX + 13, y + 30, "#475569", 7, 600);
   });
 }
 
 export function drawHoverTooltip(ctx, hover, cellSize, ox, oy, width, height) {
   if (!hover) return;
   const point = coordToPixel(hover.col, hover.row, cellSize, ox, oy);
-  ctx.strokeStyle = "#E2E8F0";
+  ctx.strokeStyle = "#0F172A";
   ctx.lineWidth = 1.5;
   ctx.strokeRect(point.x, point.y, cellSize, cellSize);
   const tipWidth = 188;
   const tipHeight = 70;
   const x = Math.min(width - tipWidth - 8, point.x + cellSize + 8);
   const y = Math.max(8, Math.min(height - tipHeight - 8, point.y));
-  ctx.fillStyle = "rgba(8, 15, 20, .96)";
-  ctx.strokeStyle = "#334155";
+  ctx.fillStyle = "rgba(255, 255, 255, .97)";
+  ctx.strokeStyle = "#64748B";
   ctx.fillRect(x, y, tipWidth, tipHeight);
   ctx.strokeRect(x, y, tipWidth, tipHeight);
-  text(ctx, `CELL ${String(hover.col).padStart(2, "0")} / ${String(hover.row).padStart(2, "0")}`, x + 9, y + 17, "#F8FAFC", 11);
-  text(ctx, `INFO ${hover.I.toFixed(2)}   VALUE ${hover.V.toFixed(2)}`, x + 9, y + 35, "#94A3B8", 10);
-  text(ctx, `OPACITY ${(1 - hover.I * 0.9).toFixed(2)}`, x + 9, y + 52, "#94A3B8", 10);
+  text(ctx, `CELL ${String(hover.col).padStart(2, "0")} / ${String(hover.row).padStart(2, "0")}`, x + 9, y + 17, "#0F172A", 11);
+  text(ctx, `INFO ${hover.I.toFixed(2)}   VALUE ${hover.V.toFixed(2)}`, x + 9, y + 35, "#475569", 10);
+  text(ctx, `SHADE ${(0.1 - hover.I * 0.08).toFixed(2)}`, x + 9, y + 52, "#475569", 10);
   const state = hover.category === "white" ? "FRESH" : hover.category === "gray" ? "AGING" : "UNSCANNED";
   const stateColor = hover.category === "white" ? "#2DD4BF" : hover.category === "gray" ? "#FACC15" : "#F87171";
   text(ctx, state, x + 112, y + 52, stateColor, 10, 700);
 }
 
 export function renderFrame(ctx, frame, options = {}) {
-  const { cellSize, offsetX, offsetY, showGrid, hoverInfo, selectedUavId, frameCount = 0 } = options;
+  const {
+    cellSize,
+    offsetX,
+    offsetY,
+    showGrid,
+    hoverInfo,
+    selectedUavId,
+    frameCount = 0,
+    assets,
+  } = options;
   const width = ctx.canvas.clientWidth || ctx.canvas.width;
   const height = ctx.canvas.clientHeight || ctx.canvas.height;
-  drawBackground(ctx, width, height, cellSize, offsetX, offsetY);
+  const bases = normalizeBases(frame?.bases, frame?.base_position);
+  drawBackground(ctx, width, height, cellSize, offsetX, offsetY, bases, assets);
   if (frame) {
-    const bases = normalizeBases(frame.bases, frame.base_position, frame.support_base_positions);
     drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY);
     drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
+    drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
+    drawCoastline(ctx, bases, cellSize, offsetX, offsetY);
     drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
+    drawMissionEnvelope(ctx, [...(frame.search_regions || []), ...(frame.track_regions || [])], cellSize, offsetX, offsetY);
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
     drawTrackRegions(ctx, frame.track_regions, frame.ships, cellSize, offsetX, offsetY);
+    drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
     drawBases(ctx, bases, cellSize, offsetX, offsetY, frameCount);
-    drawShips(ctx, frame.ships, cellSize, offsetX, offsetY);
-    drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId);
+    drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
+    drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets);
     drawTransparencyLegend(ctx, cellSize, offsetX, offsetY);
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);

@@ -27,6 +27,7 @@ class SimulationEngine:
     def __init__(self, config: AppConfig, seed: int = 42):
         self.config = config
         self.seed = seed
+        self.reset_generation = 0
         self.rng = random.Random(seed)
         random.seed(seed)
         self.clock = SimClock()
@@ -44,6 +45,8 @@ class SimulationEngine:
         self.allocator = TaskAllocator(config)
         self.allocator.llm_client.assert_ready()
         self.allocator.sm.set_base_positions(base_positions)
+        self.allocator.sm.scenario_seed = seed
+        self.allocator.sm.scenario_generation = self.reset_generation
         self.coverage_planner = CoveragePlanner(sample_step=0.2)
         self.obstacle_avoider = ObstacleAvoider(max_iterations=1000, seed=seed)
         self.phase_coordinator = PhaseCoordinator()
@@ -60,6 +63,7 @@ class SimulationEngine:
             base_positions=base_positions,
             island_count=island_count,
             thunderstorm_count=self._storm_target_count,
+            base_clearance_cells=config.environment.base_obstacle_clearance_cells,
             resolution=config.grid.resolution,
         )
         self._next_storm_id = 1 + sum(
@@ -69,6 +73,7 @@ class SimulationEngine:
             self.obstacles,
             config.grid.resolution,
             config.environment.storm_safety_margin_cells,
+            include_islands=True,
         )
         self.allocator.sm.set_environment_obstacles(self.obstacles, self.obstacle_mask)
 
@@ -239,9 +244,19 @@ class SimulationEngine:
         return -math.pi / 2.0
 
     def reset(self, seed: int | None = None) -> "SimulationEngine":
-        """Create a fresh randomized GOAL2 environment in this engine."""
+        """Fully rebuild the scenario, optionally reproducing a supplied seed."""
+        previous_seed = self.seed
+        generation = self.reset_generation + 1
         next_seed = self.seed + 1 if seed is None else int(seed)
         self.__init__(self.config, next_seed)
+        self.reset_generation = generation
+        self.allocator.sm.scenario_generation = generation
+        self.allocator.sm.add_event("environment_reset", {
+            "previous_seed": previous_seed,
+            "seed": next_seed,
+            "generation": generation,
+            "base_ids": [base.id for base in self.bases],
+        })
         return self
 
     def step(self) -> dict:
@@ -346,6 +361,8 @@ class SimulationEngine:
             "lifecycle_cycles": dict(self.lifecycle_cycles),
             "min_lifecycle_cycles": min(self.lifecycle_cycles.values(), default=0),
             "status_history": dict(self.status_history),
+            "scenario_seed": self.seed,
+            "reset_generation": self.reset_generation,
         }
 
     def _update_obstacles(self) -> None:
@@ -373,6 +390,7 @@ class SimulationEngine:
             active,
             self.config.grid.resolution,
             self.config.environment.storm_safety_margin_cells,
+            include_islands=True,
         )
         self.allocator.sm.set_environment_obstacles(active, self.obstacle_mask)
         if not np.array_equal(previous_mask, self.obstacle_mask):
@@ -382,7 +400,7 @@ class SimulationEngine:
         """Restore the configured moving-storm density after dissipation."""
         cols, rows = self.config.grid.resolution
         for _ in range(200):
-            size = self.rng.randint(1, 4)
+            size = self.rng.randint(1, 2)
             half_extent = size / 2.0
             center = (
                 self.rng.uniform(half_extent + 1.0, cols - half_extent - 1.0),
@@ -396,12 +414,23 @@ class SimulationEngine:
                 intensity=self.rng.uniform(0.3, 1.0),
                 id=f"storm-{self._next_storm_id}",
             )
-            if any(candidate.contains(base.position, safety_margin=1.0) for base in self.bases):
+            if any(
+                candidate.distance_to_boundary((base.position.col + 0.5, base.position.row + 0.5))
+                < self.config.environment.base_obstacle_clearance_cells
+                for base in self.bases
+            ):
                 continue
             if any(
                 isinstance(other, Thunderstorm)
                 and math.dist(candidate.center, other.center)
                 < candidate.half_extent + other.half_extent + 1.0
+                for other in obstacles
+            ):
+                continue
+            if any(
+                isinstance(other, Island)
+                and other.distance_to_boundary(candidate.center)
+                < candidate.half_extent + 1.0
                 for other in obstacles
             ):
                 continue
@@ -1087,9 +1116,17 @@ class SimulationEngine:
         transit_end_index = 0
         for index, swath in enumerate(swaths):
             entry = (swath.start[0], swath.start[1], swath.heading)
-            connector = self.obstacle_avoider.plan_path(
-                full_path[-1], entry, self.obstacle_mask, uav.R_min
-            )
+            try:
+                connector = self.obstacle_avoider.plan_path(
+                    full_path[-1], entry, self.obstacle_mask, uav.R_min
+                )
+            except RuntimeError:
+                connector = ObstacleAvoider(
+                    max_iterations=2400,
+                    seed=31 + index * 101,
+                ).plan_path(
+                    full_path[-1], entry, self.obstacle_mask, uav.R_min
+                )
             full_path.extend(connector[1:])
             if index == 0:
                 transit_end_index = len(full_path) - 1

@@ -95,6 +95,8 @@ class CandidateExtractor:
                     bbox.row_start:bbox.row_end,
                 ]):
                     continue
+                if not self._has_turning_clearance(bbox, sm.obstacle_mask):
+                    continue
                 swath_width = (
                     sm.config.sensor.sar.swath_km
                     / sm.config.grid.cell_size_km
@@ -168,6 +170,10 @@ class CandidateExtractor:
         seen_bboxes = set()
         for candidate in candidates:
             bbox = candidate["bbox"]
+            if self._distance_to_bases(bbox, base_positions) < (
+                sm.config.environment.base_task_min_distance_cells
+            ):
+                continue
             if sm.lifecycle_mode:
                 center = (
                     (bbox.col_start + bbox.col_end) / 2,
@@ -258,9 +264,19 @@ class CandidateExtractor:
 
         # Preserve the general lifecycle priority for any unused capacity.
         ordered_keys = {tuple(item["bbox"]) for item in ordered}
+        remaining = [
+            item for item in candidates
+            if tuple(item["bbox"]) not in ordered_keys
+        ]
+        remaining.sort(key=lambda item: (
+            abs(item["cell_count"] - sm.config.grid.search_min_cells),
+            min(math.dist(center(item), base) for base in base_positions),
+            -item.get("unseen_count", 0),
+            -item["total_value"],
+        ))
         return [
             *ordered,
-            *(item for item in candidates if tuple(item["bbox"]) not in ordered_keys),
+            *remaining,
         ]
 
     def _fit_feasible_windows(
@@ -296,19 +312,18 @@ class CandidateExtractor:
                         if exploration_mode and unseen_count / area < 0.25:
                             continue
                         bbox = BBox(c0, r0, c1, r1)
+                        if not self._has_turning_clearance(bbox, sm.obstacle_mask):
+                            continue
+                        distance = self._distance_to_bases(bbox, base_positions)
+                        if distance < sm.config.environment.base_task_min_distance_cells:
+                            continue
                         raw.append({
                             "bbox": bbox,
                             "cell_count": area,
                             "unseen_count": unseen_count,
                             "total_value": float(values[c0:c1, r0:r1].sum()),
                             "avg_info": float(info[c0:c1, r0:r1].mean()),
-                            "distance": min(
-                                math.dist(
-                                    ((c0 + c1) / 2, (r0 + r1) / 2),
-                                    base_position,
-                                )
-                                for base_position in base_positions
-                            ),
+                            "distance": distance,
                         })
 
         if sm.lifecycle_mode:
@@ -352,6 +367,19 @@ class CandidateExtractor:
             if len(selected) >= max(limit * 4, 20):
                 break
         return selected
+
+    @staticmethod
+    def _has_turning_clearance(
+        bbox: BBox,
+        obstacle_mask: np.ndarray,
+        margin_cells: int = 2,
+    ) -> bool:
+        """Reserve space for the radius-1 Dubins turns between SAR swaths."""
+        c0 = max(0, bbox.col_start - margin_cells)
+        r0 = max(0, bbox.row_start - margin_cells)
+        c1 = min(obstacle_mask.shape[0], bbox.col_end + margin_cells)
+        r1 = min(obstacle_mask.shape[1], bbox.row_end + margin_cells)
+        return not bool(obstacle_mask[c0:c1, r0:r1].any())
 
     # ------------------------------------------------------------------
     # Connected-component analysis
@@ -580,6 +608,16 @@ class CandidateExtractor:
     # ------------------------------------------------------------------
     # BBox utilities
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _distance_to_bases(bbox: BBox, base_positions: tuple) -> float:
+        def distance(base_position) -> float:
+            col, row = base_position
+            dx = max(bbox.col_start - col, 0, col - bbox.col_end)
+            dy = max(bbox.row_start - row, 0, row - bbox.row_end)
+            return math.hypot(dx, dy)
+
+        return min(distance(base) for base in base_positions)
 
     @staticmethod
     def _bboxes_overlap(a: BBox, b: BBox) -> bool:

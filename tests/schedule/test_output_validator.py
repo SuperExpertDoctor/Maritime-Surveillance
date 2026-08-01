@@ -82,3 +82,16 @@ def test_reused_display_id_does_not_imply_region_mutation(config):
     result = validate(output, config, [], previous)
 
     assert result.is_valid
+
+
+def test_region_too_close_to_land_base_is_rejected(config):
+    result = validate(
+        make_output([[10, 2, 15, 6]]),
+        config,
+        [],
+        [],
+        base_positions=[(12, 0)],
+    )
+
+    assert not result.is_valid
+    assert any("land base" in error for error in result.errors)

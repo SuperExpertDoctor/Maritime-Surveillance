@@ -87,6 +87,35 @@ def test_every_initial_candidate_has_a_safe_executable_route():
         )
 
 
+def test_search_stays_off_until_uav_reaches_region_boundary():
+    engine = SimulationEngine(ConfigLoader.load(), seed=23)
+    candidate = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions[0]
+    region = Region(id="S-boundary", bbox=candidate["bbox"], type="search")
+    uav = engine.uavs[0]
+
+    engine._assign_search_route(uav, region)
+
+    assert uav.status == "transit"
+    assert uav.sensor_mode == "off"
+    assert uav._transit_end_index == uav._scan_ranges[0][0]
+    entry = uav.planned_path[uav._transit_end_index]
+    bbox = region.bbox
+    assert (
+        math.isclose(entry[0], bbox.col_start, abs_tol=0.3)
+        or math.isclose(entry[0], bbox.col_end, abs_tol=0.3)
+        or math.isclose(entry[1], bbox.row_start, abs_tol=0.3)
+        or math.isclose(entry[1], bbox.row_end, abs_tol=0.3)
+    )
+
+    uav._wp_index = uav._transit_end_index
+    uav._update_scan_direction()
+    assert uav.sensor_mode == "off"
+    uav._wp_index = uav._transit_end_index + 1
+    uav._update_scan_direction()
+    assert uav.status == "searching"
+    assert uav.sensor_mode == "sar"
+
+
 def test_simulation_applies_phase_speed_control_to_shared_trackers():
     engine = SimulationEngine(ConfigLoader.load())
     center = engine._group_center("G1")
@@ -192,7 +221,9 @@ def test_return_route_uses_nearest_land_recovery_base():
 
 
 def test_return_route_balances_completed_refuels_before_distance():
-    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    config = ConfigLoader.load()
+    config.environment.base_count = 3
+    engine = SimulationEngine(config, seed=42)
     uav = engine.uavs[0]
     busiest = engine.bases[0]
     for base in engine.bases:
@@ -207,7 +238,9 @@ def test_return_route_balances_completed_refuels_before_distance():
 
 
 def test_return_route_balances_already_scheduled_recoveries():
-    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    config = ConfigLoader.load()
+    config.environment.base_count = 3
+    engine = SimulationEngine(config, seed=42)
     uav = engine.uavs[0]
     busiest = engine.bases[0]
     uav.position = busiest.position
