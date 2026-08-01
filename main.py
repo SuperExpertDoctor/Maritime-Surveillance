@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
+import shutil
 import threading
 import time
 
@@ -14,6 +16,22 @@ from src.schedule.config_loader import ConfigLoader
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend.server import broadcast_frame_sync, create_app
+
+
+def clear_output_cache(output_dir: str = "outputs") -> int:
+    """Remove cached run artifacts while preserving the output directory itself."""
+    output_path = Path(output_dir).resolve()
+    if output_path.name != "outputs":
+        raise ValueError("output cache path must be an outputs directory")
+    output_path.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    for entry in output_path.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+        removed += 1
+    return removed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,6 +58,9 @@ def main(
     llm_probe_timeout: float = 20.0,
 ) -> dict:
     config = ConfigLoader.load(config_path)
+    if config.common.clear_outputs_before_run:
+        removed = clear_output_cache()
+        print(f"Cleared {removed} cached output item(s)")
     engine = SimulationEngine(config)
     if probe_llm:
         engine.allocator.llm_client.probe(llm_probe_timeout)

@@ -674,22 +674,30 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets) {
 }
 
 export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
-  const width = Math.max(178, Math.min(184, cellSize * 7.8));
-  const itemHeight = 18;
-  const height = 24 + 8 * itemHeight + 8;
   const canvasWidth = ctx.canvas.clientWidth || ctx.canvas.width;
   const canvasHeight = ctx.canvas.clientHeight || ctx.canvas.height;
   const mapRight = ox + 30 * cellSize;
   const sideSpace = canvasWidth - mapRight;
-  const useSidePanel = sideSpace >= width + 14 && canvasHeight >= oy + height + 10;
-  const x = useSidePanel ? mapRight + 10 : Math.max(8, canvasWidth - width - 12);
-  const y = useSidePanel ? Math.max(8, oy + 10) : Math.max(8, canvasHeight - height - 14);
+  const horizontalInset = 10;
+  const usableWidth = Math.floor(sideSpace - horizontalInset * 2);
+  // The legend belongs only in the right-side whitespace, never over the map.
+  if (usableWidth < 128) return;
+  const width = clamp(usableWidth, 128, 160);
+  const availableHeight = Math.max(0, canvasHeight - oy - 20);
+  const itemHeight = clamp(Math.floor((availableHeight - 32) / 8), 13, 17);
+  const swatchSize = clamp(Math.floor(itemHeight * 0.58), 7, 10);
+  const titleSize = clamp(Math.floor(width * 0.055), 7, 8);
+  const labelSize = clamp(Math.floor(width * 0.045), 6, 7);
+  const height = 24 + 8 * itemHeight + 8;
+  if (height > availableHeight) return;
+  const x = mapRight + horizontalInset;
+  const y = Math.max(8, Math.min(oy + 10, canvasHeight - height - 8));
   ctx.fillStyle = "rgba(255, 255, 255, .94)";
   ctx.strokeStyle = "rgba(71, 85, 105, .72)";
   ctx.lineWidth = 1;
   ctx.fillRect(x, y, width, height);
   ctx.strokeRect(x, y, width, height);
-  text(ctx, "MAP LEGEND", x + 7, y + 13, "#334155", 8, 700);
+  text(ctx, "MAP LEGEND", x + 8, y + 13, "#334155", titleSize, 700);
   const swatches = [
     { color: "#D97706", label: "TASK CELLS" },
     { color: "#0F766E", label: "FRESH SAR" },
@@ -704,10 +712,10 @@ export function drawTransparencyLegend(ctx, cellSize, ox, oy) {
     const itemX = x + 9;
     const itemY = y + 22 + index * itemHeight;
     ctx.fillStyle = swatch.color;
-    ctx.fillRect(itemX, itemY, 10, 10);
+    ctx.fillRect(itemX, itemY, swatchSize, swatchSize);
     ctx.strokeStyle = "#64748B";
-    ctx.strokeRect(itemX, itemY, 10, 10);
-    text(ctx, swatch.label, itemX + 13, itemY + 9, "#475569", 7, 600);
+    ctx.strokeRect(itemX, itemY, swatchSize, swatchSize);
+    text(ctx, swatch.label, itemX + swatchSize + 4, itemY + swatchSize - 1, "#475569", labelSize, 600);
   });
 }
 

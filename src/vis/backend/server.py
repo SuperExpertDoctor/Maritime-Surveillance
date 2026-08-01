@@ -152,6 +152,9 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
                 "reviewer_cycle_min": cfg.llm.reviewer_cycle_min,
                 "max_retries": cfg.llm.max_retries,
             },
+            "common": {
+                "clear_outputs_before_run": cfg.common.clear_outputs_before_run,
+            },
         })
 
     return app

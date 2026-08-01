@@ -90,6 +90,11 @@ class LLMConfig:
 
 
 @dataclass
+class CommonConfig:
+    clear_outputs_before_run: bool = True
+
+
+@dataclass
 class AppConfig:
     environment: EnvironmentConfig
     grid: GridConfig
@@ -97,6 +102,7 @@ class AppConfig:
     ship: ShipConfig
     llm: LLMConfig
     sensor: SensorConfig
+    common: CommonConfig
 
 
 class ConfigLoader:
@@ -113,18 +119,20 @@ class ConfigLoader:
                 return yaml.safe_load(f)
 
         env_data = _read("environment.yaml")
+        grid_data = env_data.pop("grid")
         env_data["sea_area_km"] = tuple(env_data["sea_area_km"])
         env_data["base_position"] = tuple(env_data["base_position"])
-        grid_data = _read("grid.yaml")
         grid_data["resolution"] = tuple(grid_data["resolution"])
+        llm_params_data = _read("llm_params.yaml")
 
         return AppConfig(
             environment=ConfigLoader._dict_to_dataclass(env_data, EnvironmentConfig),
             grid=ConfigLoader._dict_to_dataclass(grid_data, GridConfig),
             uav=ConfigLoader._dict_to_dataclass(_read("uav.yaml"), UAVConfig),
             ship=ConfigLoader._dict_to_dataclass(_read("ship.yaml"), ShipConfig),
-            llm=ConfigLoader._dict_to_dataclass(_read("llm.yaml"), LLMConfig),
+            llm=ConfigLoader._dict_to_dataclass(llm_params_data["cycles"], LLMConfig),
             sensor=ConfigLoader._load_sensor_config(base_path),
+            common=ConfigLoader._dict_to_dataclass(_read("common.yaml") or {}, CommonConfig),
         )
 
     @staticmethod
