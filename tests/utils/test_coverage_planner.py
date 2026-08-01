@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from src.schedule.datatypes import BBox, GridCoord
+from src.env.dubins import DubinsPath
 from src.utils.coverage_planner import CoveragePlanner
 
 
@@ -21,6 +22,21 @@ def test_long_bbox_scans_along_long_axis():
     path = CoveragePlanner().plan(BBox(0, 0, 10, 3), (-2, -2, 0), 2, 1)
     assert len(path.swaths) == 2
     assert all(abs(swath.end[0] - swath.start[0]) > abs(swath.end[1] - swath.start[1]) for swath in path.swaths)
+
+
+def test_initial_scan_direction_uses_shortest_dubins_entry():
+    planner = CoveragePlanner(sample_step=0.2)
+    bbox = BBox(5, 5, 13, 9)
+    pose = (3.0, 8.5, math.pi)
+    path = planner.plan(bbox, pose, 2, 1)
+    first = path.swaths[0]
+    entry = (first.start[0], first.start[1], first.heading)
+    opposite = (first.end[0], first.end[1], (first.heading + math.pi) % (2 * math.pi) - math.pi)
+
+    selected_length = DubinsPath.compute(pose, entry, 1, 0.2).total_length
+    opposite_length = DubinsPath.compute(pose, opposite, 1, 0.2).total_length
+
+    assert selected_length <= opposite_length + 1e-9
 
 
 def test_scan_line_samples_are_collinear_and_equidistant():

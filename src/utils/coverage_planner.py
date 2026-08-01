@@ -64,19 +64,34 @@ class CoveragePlanner:
 
         orientation = direction or ("horizontal" if width >= height else "vertical")
         swaths = self._build_swaths(box, swath_width, R_min, orientation)
-        if swaths and math.dist(tuple(start_pose[:2]), swaths[0].end) < math.dist(
-            tuple(start_pose[:2]), swaths[0].start
-        ):
-            swaths = [
-                ScanSwath(
-                    swath.end,
-                    swath.start,
-                    "left" if swath.look_direction == "right" else "right",
-                    swath.footprint,
-                    _wrap_heading(swath.heading + math.pi),
-                )
-                for swath in swaths
-            ]
+        if swaths:
+            forward_entry = (
+                swaths[0].start[0],
+                swaths[0].start[1],
+                swaths[0].heading,
+            )
+            reverse_entry = (
+                swaths[0].end[0],
+                swaths[0].end[1],
+                _wrap_heading(swaths[0].heading + math.pi),
+            )
+            forward_length = DubinsPath.compute(
+                start_pose, forward_entry, R_min, self.sample_step,
+            ).total_length
+            reverse_length = DubinsPath.compute(
+                start_pose, reverse_entry, R_min, self.sample_step,
+            ).total_length
+            if reverse_length < forward_length:
+                swaths = [
+                    ScanSwath(
+                        swath.end,
+                        swath.start,
+                        "left" if swath.look_direction == "right" else "right",
+                        swath.footprint,
+                        _wrap_heading(swath.heading + math.pi),
+                    )
+                    for swath in swaths
+                ]
         result = CoveragePath(swaths=swaths)
         current = tuple(map(float, start_pose))
 
