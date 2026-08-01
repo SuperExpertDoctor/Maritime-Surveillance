@@ -33,6 +33,7 @@ def detect_conflicts(
     cell_size_km: float = 10.0,
     time_horizon_steps: int = 30,
     min_separation_cells: float = 0.5,
+    min_prediction_offset: int = 5,
 ) -> list[PathConflict]:
     """Detect spatiotemporal conflicts across UAV planned paths.
 
@@ -63,6 +64,12 @@ def detect_conflicts(
     for uav in active:
         path = uav["planned_path"]
         for offset, pose in enumerate(path[:time_horizon_steps]):
+            # Offset zero is the UAV's already-occupied current pose.  A
+            # common base launch or crossing at that instant cannot be
+            # resolved by resetting a route; only future conflicts with
+            # enough lead time are actionable.
+            if offset < min_prediction_offset:
+                continue
             cell = (int(round(pose[0])), int(round(pose[1])))
             occupancy[offset][cell].append(uav["id"])
 
