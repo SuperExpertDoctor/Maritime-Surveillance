@@ -18,6 +18,28 @@ def _heading_from_motion(trail, fallback_deg: float) -> float:
     return float(fallback_deg) % 360.0
 
 
+def _transit_progress(entity) -> float | None:
+    """Return normalized progress through the departure leg of an active route."""
+    if getattr(entity, "status", None) != "transit":
+        return None
+    waypoints = getattr(entity, "waypoints", ())
+    transit_end = min(int(getattr(entity, "_transit_end_index", 0)), len(waypoints) - 1)
+    if transit_end <= 0:
+        return 1.0
+
+    total = sum(math.dist(waypoints[index - 1][:2], waypoints[index][:2]) for index in range(1, transit_end + 1))
+    if total <= 1e-9:
+        return 1.0
+
+    next_index = min(max(1, int(getattr(entity, "_wp_index", 1))), transit_end)
+    completed = sum(math.dist(waypoints[index - 1][:2], waypoints[index][:2]) for index in range(1, next_index))
+    segment_start = waypoints[next_index - 1][:2]
+    segment_end = waypoints[next_index][:2]
+    segment_length = math.dist(segment_start, segment_end)
+    completed += min(math.dist(segment_start, entity.float_position), segment_length)
+    return max(0.0, min(1.0, completed / total))
+
+
 def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 total_steps: int = 480, llm_cycle: dict | None = None,
                 ships: list | None = None,
@@ -114,6 +136,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "planned_path": [list(pose) for pose in entity.planned_path[-planned_limit:]] if entity else [],
             "mission_route": [list(pose) for pose in entity.mission_route[-mission_limit:]] if entity else [],
             "home_base_grid": list(entity.home_base_grid) if entity else [u.position.col, u.position.row],
+            "transit_progress": _transit_progress(entity) if entity else None,
             "trail": trail,
             "sar_look_direction": entity.sar_look_direction if entity else None,
             "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],

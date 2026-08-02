@@ -50,6 +50,31 @@ function groundedUavCenter(uav, baseCenters, cellSize) {
   };
 }
 
+export function resolveUavDisplayCenter(uav, cellSize, ox, oy, baseCenters) {
+  const taskCenter = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
+  const baseCenter = groundedUavCenter(uav, baseCenters, cellSize);
+  if (["idle", "refueling"].includes(uav.status) || !baseCenter) {
+    return baseCenter || taskCenter;
+  }
+
+  const progress = Number(uav.transit_progress);
+  if (uav.status === "transit" && Number.isFinite(progress)) {
+    const departure = clamp(progress, 0, 1);
+    return {
+      x: baseCenter.x + (taskCenter.x - baseCenter.x) * departure,
+      y: baseCenter.y + (taskCenter.y - baseCenter.y) * departure,
+    };
+  }
+
+  // Historical replay files do not carry transit_progress.  Keep their
+  // first assigned frame at the visible base instead of drawing it at the
+  // task-grid coordinate that happens to represent the same base location.
+  const home = uav.home_base_grid;
+  const atHome = home?.length >= 2
+    && Math.hypot(Number(uav.position[0]) - Number(home[0]), Number(uav.position[1]) - Number(home[1])) < 1e-4;
+  return atHome ? baseCenter : taskCenter;
+}
+
 function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
   ctx.font = `${weight} ${size}px ${FONT}`;
   ctx.fillStyle = color;
@@ -1004,10 +1029,7 @@ export function drawBases(ctx, bases, baseCenters, cellSize, phase) {
 
 export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCenters) {
   for (const uav of uavs || []) {
-    const taskCenter = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
-    const center = ["idle", "refueling"].includes(uav.status)
-      ? groundedUavCenter(uav, baseCenters, cellSize) || taskCenter
-      : taskCenter;
+    const center = resolveUavDisplayCenter(uav, cellSize, ox, oy, baseCenters);
     const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";
     const size = Math.max(5, cellSize * (uav.id === selectedId ? 0.42 : 0.32));
     ctx.save();

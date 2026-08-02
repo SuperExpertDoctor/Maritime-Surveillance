@@ -28,6 +28,26 @@ def test_initial_scheduler_positions_match_alternating_physical_launch_bases():
     ]
 
 
+def test_frame_reports_zero_progress_before_a_transit_uav_leaves_its_base():
+    engine = SimulationEngine(ConfigLoader.load(), seed=19)
+    uav = engine.uavs[0]
+    uav.assign_mission(BBox(8, 8, 10, 10), [(8.0, 11.0, 0.0)], transit_end_index=1)
+    engine.allocator.sm.update_uav_status(uav.id, "transit", uav.position)
+
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    assert frame["uavs"][0]["position"] == list(uav.home_base_grid)
+    assert frame["uavs"][0]["transit_progress"] == 0.0
+
+
 def test_uav_visual_trail_keeps_a_full_eight_hour_mission_history():
     uav = UAVEntity(
         "UAV-test",

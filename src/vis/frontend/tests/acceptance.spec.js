@@ -95,12 +95,35 @@ async function getTrailModeEvidence(page) {
   });
 }
 
+async function getDeparturePositionEvidence(page) {
+  return page.evaluate(async () => {
+    const { resolveUavDisplayCenter } = await import("/src/renderer/layers.js");
+    const uav = {
+      id: "UAV-1",
+      status: "transit",
+      position: [8, 11],
+      home_base_grid: [1, 11],
+    };
+    const baseCenters = [{ x: 30, y: 120 }];
+    return {
+      launch: resolveUavDisplayCenter({ ...uav, position: [1, 11], transit_progress: 0 }, 10, 100, 20, baseCenters),
+      halfway: resolveUavDisplayCenter({ ...uav, transit_progress: 0.5 }, 10, 100, 20, baseCenters),
+      arrival: resolveUavDisplayCenter({ ...uav, transit_progress: 1 }, 10, 100, 20, baseCenters),
+    };
+  });
+}
+
 test("sensor beam renderer exposes SAR and EO scan shapes", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".connection-state")).toHaveClass(/connected/);
   const evidence = await getSensorBeamEvidence(page);
   expect(evidence.sarPixels).toBeGreaterThan(100);
   expect(evidence.eoPixels).toBeGreaterThan(10);
+  const departure = await getDeparturePositionEvidence(page);
+  expect(departure.launch).toEqual({ x: 30, y: 116.6 });
+  expect(departure.halfway.x).toBeGreaterThan(departure.launch.x);
+  expect(departure.halfway.x).toBeLessThan(departure.arrival.x);
+  expect(departure.arrival).toEqual({ x: 185, y: 135 });
   const source = await page.evaluate(() => fetch("/src/renderer/layers.js").then((response) => response.text()));
   expect(source).not.toContain("drawMissionEnvelope");
   await page.screenshot({ path: "test-results/sensor-beams-live.png", fullPage: true });
