@@ -10,11 +10,16 @@
 import json
 import os
 import asyncio
+import shutil
+import subprocess
+import tempfile
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from pathlib import Path
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 from src.vis.backend.frame_builder import build_frame
@@ -22,6 +27,50 @@ from src.vis.backend.frame_logger import FrameLogger
 
 OUTPUT_DIR = "outputs"
 _FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+_MAX_VIDEO_UPLOAD_BYTES = 250 * 1024 * 1024
+
+
+def _find_ffmpeg() -> str | None:
+    """Locate a system encoder or the binary bundled by imageio-ffmpeg."""
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, OSError, RuntimeError):
+        return None
+
+
+def _transcode_webm_to_mp4(payload: bytes) -> tuple[Path, Path]:
+    """Transcode a browser-recorded WebM payload and return its temp paths."""
+    executable = _find_ffmpeg()
+    if not executable:
+        raise RuntimeError("MP4 encoder unavailable")
+    work_dir = Path(tempfile.mkdtemp(prefix="uav-mp4-"))
+    source = work_dir / "replay.webm"
+    output = work_dir / "uav-mission-replay.mp4"
+    source.write_bytes(payload)
+    try:
+        completed = subprocess.run(
+            [
+                executable, "-y", "-i", str(source),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", str(output),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            check=False,
+        )
+        if completed.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+            message = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(message or "MP4 encoding failed")
+        return work_dir, output
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
 
 
 def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
@@ -156,6 +205,32 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
             "limit": limit,
             "has_more": (offset + limit) < total,
         })
+
+    @app.get("/api/export/capabilities")
+    async def export_capabilities():
+        return JSONResponse({"mp4": _find_ffmpeg() is not None})
+
+    @app.post("/api/export/mp4")
+    async def export_mp4(request: Request):
+        payload = await request.body()
+        if not payload:
+            return JSONResponse({"error": "empty video payload"}, status_code=400)
+        if len(payload) > _MAX_VIDEO_UPLOAD_BYTES:
+            return JSONResponse({"error": "video payload exceeds 250 MB"}, status_code=413)
+        if not _find_ffmpeg():
+            return JSONResponse({"error": "MP4 encoder is unavailable"}, status_code=503)
+        try:
+            work_dir, output = await asyncio.to_thread(_transcode_webm_to_mp4, payload)
+        except subprocess.TimeoutExpired:
+            return JSONResponse({"error": "MP4 encoding timed out"}, status_code=504)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
+        return FileResponse(
+            output,
+            media_type="video/mp4",
+            filename="uav-mission-replay.mp4",
+            background=BackgroundTask(shutil.rmtree, work_dir, ignore_errors=True),
+        )
 
     @app.get("/api/config")
     async def get_config():

@@ -110,6 +110,20 @@ export default function useReplay(enabled) {
     ensureLoaded(clamped);
   }, [ensureLoaded]);
 
+  const loadAll = useCallback(async (onProgress) => {
+    if (!selectedFile || totalRef.current <= 0) return [];
+    const totalChunks = Math.ceil(totalRef.current / CHUNK_SIZE);
+    for (let chunk = 0; chunk < totalChunks; chunk += 1) {
+      await fetchChunk(selectedFile, chunk * CHUNK_SIZE);
+      onProgress?.((chunk + 1) / totalChunks);
+    }
+    const complete = framesRef.current.slice(0, totalRef.current);
+    if (complete.some((frame) => frame == null)) {
+      throw new Error("Replay frames are incomplete");
+    }
+    return complete;
+  }, [fetchChunk, selectedFile]);
+
   useEffect(() => {
     if (!enabled || !isPlaying) return undefined;
     const timer = window.setInterval(() => {
@@ -191,5 +205,6 @@ export default function useReplay(enabled) {
     loading,
     error,
     markers,
+    loadAll,
   };
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { RadioTower } from "lucide-react";
 
 import { computeLayout, pixelToCoord } from "../renderer/geometry";
@@ -21,13 +21,13 @@ function loadMapAsset(source) {
   });
 }
 
-export default function CanvasMap({
+const CanvasMap = forwardRef(function CanvasMap({
   frame,
   selectedUavId,
   onSelectUav,
   showGrid = false,
   trailMode = "tail",
-}) {
+}, ref) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const layoutRef = useRef({ cellSize: 20, offsetX: 0, offsetY: 0 });
@@ -39,6 +39,7 @@ export default function CanvasMap({
   const frameReceivedRef = useRef(0);
   const [sizeVersion, setSizeVersion] = useState(0);
   const [mapAssets, setMapAssets] = useState({});
+  const exportingRef = useRef(false);
 
   useEffect(() => {
     let disposed = false;
@@ -99,6 +100,7 @@ export default function CanvasMap({
     };
 
     const render = () => {
+      if (exportingRef.current) return;
       const prev = prevFrameRef.current;
       const target = targetFrameRef.current;
       let displayFrame = target;
@@ -173,6 +175,51 @@ export default function CanvasMap({
     };
   }, [frame, hoverVersion, mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
 
+  useImperativeHandle(ref, () => ({
+    async recordReplay(frames, { fps = 20, onProgress } = {}) {
+      const canvas = canvasRef.current;
+      if (!canvas?.captureStream || !window.MediaRecorder) {
+        throw new Error("This browser cannot record the mission map");
+      }
+      if (!frames?.length) throw new Error("No replay frames available");
+      const mimeType = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
+        .find((candidate) => MediaRecorder.isTypeSupported(candidate));
+      if (!mimeType) throw new Error("This browser does not support WebM recording");
+
+      const context = canvas.getContext("2d");
+      const stream = canvas.captureStream(fps);
+      const chunks = [];
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 7_000_000 });
+      const finished = new Promise((resolve, reject) => {
+        recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+        recorder.onerror = () => reject(new Error("Mission map recording failed"));
+      });
+
+      exportingRef.current = true;
+      recorder.start();
+      try {
+        for (let index = 0; index < frames.length; index += 1) {
+          const { cellSize, offsetX, offsetY, mapBounds, legendBounds } = layoutRef.current;
+          context.save();
+          renderFrame(context, frames[index], {
+            cellSize, offsetX, offsetY, mapBounds, legendBounds,
+            showGrid, trailMode, hoverInfo: null, selectedUavId,
+            frameCount: index, assets: mapAssets,
+          });
+          context.restore();
+          onProgress?.((index + 1) / frames.length);
+          await new Promise((resolve) => window.setTimeout(resolve, 1000 / fps));
+        }
+      } finally {
+        exportingRef.current = false;
+        recorder.stop();
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      return finished;
+    },
+  }), [mapAssets, selectedUavId, showGrid, trailMode]);
+
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;
     if (!canvas || !frame) return;
@@ -245,4 +292,6 @@ export default function CanvasMap({
       <div className="map-scale" aria-hidden="true"><i />20 KM</div>
     </div>
   );
-}
+});
+
+export default CanvasMap;

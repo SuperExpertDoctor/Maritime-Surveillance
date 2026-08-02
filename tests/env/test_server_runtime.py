@@ -71,3 +71,30 @@ def test_replay_total_refreshes_while_a_live_jsonl_file_is_growing(tmp_path, mon
 
     assert first["total"] == 1
     assert second["total"] == 2
+
+
+def test_mp4_export_reports_encoder_availability(monkeypatch):
+    monkeypatch.setattr(server, "_find_ffmpeg", lambda: None)
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+
+    with TestClient(app) as client:
+        response = client.get("/api/export/capabilities")
+
+    assert response.json() == {"mp4": False}
+
+
+def test_mp4_export_transcodes_browser_recording_and_returns_download(tmp_path, monkeypatch):
+    encoded = tmp_path / "encoded.mp4"
+    encoded.write_bytes(b"mp4")
+    monkeypatch.setattr(server, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(server, "_transcode_webm_to_mp4", lambda _payload: (tmp_path, encoded))
+    monkeypatch.setattr(server.shutil, "rmtree", lambda *_args, **_kwargs: None)
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+
+    with TestClient(app) as client:
+        response = client.post("/api/export/mp4", content=b"webm", headers={"content-type": "video/webm"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["content-disposition"].endswith('filename="uav-mission-replay.mp4"')
+    assert response.content == b"mp4"
