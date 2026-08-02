@@ -253,6 +253,11 @@ async def broadcast_frame(app: FastAPI) -> None:
     frame = _build_frame_inner(app)
     # 写入 JSONL
     app.state.frame_logger.write(frame)
+    await broadcast_payload(app, frame)
+
+
+async def broadcast_payload(app: FastAPI, frame: dict) -> None:
+    """Send a pre-built live frame without touching replay persistence."""
     # 广播给所有直播客户端
     clients = getattr(app.state, "_live_clients", set())
     dead = set()
@@ -277,4 +282,16 @@ def broadcast_frame_sync(
     server_loop = loop or getattr(app.state, "event_loop", None)
     if server_loop is not None and server_loop.is_running():
         return asyncio.run_coroutine_threadsafe(broadcast_frame(app), server_loop)
+    return None
+
+
+def broadcast_payload_sync(
+    app: FastAPI,
+    frame: dict,
+    loop: asyncio.AbstractEventLoop | None = None,
+):
+    """Schedule a pre-built frame on the FastAPI event loop without waiting."""
+    server_loop = loop or getattr(app.state, "event_loop", None)
+    if server_loop is not None and server_loop.is_running():
+        return asyncio.run_coroutine_threadsafe(broadcast_payload(app, frame), server_loop)
     return None

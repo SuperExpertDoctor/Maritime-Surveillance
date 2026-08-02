@@ -33,6 +33,7 @@ export default function CanvasMap({
   const layoutRef = useRef({ cellSize: 20, offsetX: 0, offsetY: 0 });
   const hoverRef = useRef(null);
   const [hovered, setHovered] = useState(false);
+  const [hoverVersion, setHoverVersion] = useState(0);
   const prevFrameRef = useRef(null);
   const targetFrameRef = useRef(null);
   const frameReceivedRef = useRef(0);
@@ -85,6 +86,7 @@ export default function CanvasMap({
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     const context = canvas.getContext("2d");
+    if (!targetFrameRef.current) return undefined;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let animationFrame = null;
     let phase = 0;
@@ -159,14 +161,17 @@ export default function CanvasMap({
       });
       context.restore();
       phase += 1;
-      if (!reducedMotion) animationFrame = window.requestAnimationFrame(render);
+      const elapsed = performance.now() - frameReceivedRef.current;
+      if (!reducedMotion && prev && target && elapsed < INTERP_MS) {
+        animationFrame = window.requestAnimationFrame(render);
+      }
     };
 
     render();
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
+  }, [frame, hoverVersion, mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;
@@ -187,15 +192,18 @@ export default function CanvasMap({
       const category = info >= 0.7 ? "white" : info >= 0.2 ? "gray" : "black";
       hoverRef.current = { col: coord.col, row: coord.row, I: info, V: value, category };
       setHovered(true);
+      setHoverVersion((version) => version + 1);
     } else {
       hoverRef.current = null;
       setHovered(false);
+      setHoverVersion((version) => version + 1);
     }
   }, [frame]);
 
   const handleMouseLeave = useCallback(() => {
     hoverRef.current = null;
     setHovered(false);
+    setHoverVersion((version) => version + 1);
   }, []);
 
   const handleClick = useCallback((event) => {

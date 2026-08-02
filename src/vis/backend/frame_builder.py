@@ -23,7 +23,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 ships: list | None = None,
                 uav_entities: list | None = None,
                 obstacles: list | None = None,
-                bases: list | None = None) -> dict:
+                bases: list | None = None, *, realtime: bool = False,
+                include_matrices: bool = True) -> dict:
     """从 StateManager 当前状态构建一帧完整 JSON。
 
     Args:
@@ -92,8 +93,12 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "along_track": beam.along_track,
                 "polygon": [list(point) for point in beam.polygon],
             }
-        # Preserve a complete standard eight-hour sortie for the full trail mode.
-        trail = [list(point) for point in entity.trail[-480:]] if entity else []
+        # Replay keeps the full sortie.  Live frames trade historical detail
+        # for a bounded payload because the client receives frequent updates.
+        trail_limit = 120 if realtime else 480
+        planned_limit = 100 if realtime else 500
+        mission_limit = 200 if realtime else 800
+        trail = [list(point) for point in entity.trail[-trail_limit:]] if entity else []
         fallback_heading = entity.heading_deg if entity is not None else u.heading_deg
         uavs.append({
             "id": u.id,
@@ -106,8 +111,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "target_group_id": u.target_group_id,
             "time_to_available_min": u.time_to_available,
             "sensor_mode": entity.sensor_mode if entity is not None else u.sensor_mode,
-            "planned_path": [list(pose) for pose in entity.planned_path[-500:]] if entity else [],
-            "mission_route": [list(pose) for pose in entity.mission_route[-800:]] if entity else [],
+            "planned_path": [list(pose) for pose in entity.planned_path[-planned_limit:]] if entity else [],
+            "mission_route": [list(pose) for pose in entity.mission_route[-mission_limit:]] if entity else [],
             "home_base_grid": list(entity.home_base_grid) if entity else [u.position.col, u.position.row],
             "trail": trail,
             "sar_look_direction": entity.sar_look_direction if entity else None,
@@ -173,9 +178,6 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     # 近期事件（本帧内新事件）
     recent_events = state.get_recent_events(state.current_time - 1.0)
 
-    # 信息矩阵（直接传 numpy 数组的 list 形式）
-    info_mat = state.get_info_matrix()
-    value_mat = state.get_value_matrix()
     coverage = state.get_coverage_stats()
 
     # 船舶列表（从 wm 实体构建）
@@ -265,8 +267,6 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "mode": "live",
         "scenario_seed": getattr(state, "scenario_seed", None),
         "reset_generation": getattr(state, "scenario_generation", 0),
-        "info_matrix": info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat,
-        "value_matrix": value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat,
         "task_area": {
             "width_km": config.grid.resolution[1] * config.grid.cell_size_km,
             "height_km": config.grid.resolution[0] * config.grid.cell_size_km,
@@ -286,6 +286,13 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "bases": base_list,
         "obstacles": obstacle_list,
     }
+    if include_matrices:
+        # Matrix conversion dominates live payload size, so compact live
+        # frames carry it periodically while the client retains the last copy.
+        info_mat = state.get_info_matrix()
+        value_mat = state.get_value_matrix()
+        frame["info_matrix"] = info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat
+        frame["value_matrix"] = value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat
     return frame
 
 
