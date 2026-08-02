@@ -1,7 +1,8 @@
 ﻿"""FastAPI + WebSocket 服务器。
 
 嵌入仿真进程运行，提供:
-  - /ws/live      实时帧推送
+  - /              前端可视化界面 (dist 静态文件)
+  - /ws/live       实时帧推送
   - /api/replay/list   可回放文件列表
   - /api/replay?file=  回放文件内容
   - /api/config        只读配置参数
@@ -13,12 +14,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
 
 OUTPUT_DIR = "outputs"
+_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
 
 def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
@@ -60,6 +63,18 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
     app.state._live_clients = set()
     app.state.event_loop = None
 
+    # --- 静态前端文件 ---
+    if os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
+        app.mount("/assets", StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")), name="assets")
+
+    @app.get("/")
+    async def serve_frontend():
+        """返回前端 index.html，SPA 路由由前端自行处理。"""
+        index_path = os.path.join(_FRONTEND_DIST, "index.html")
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+        return JSONResponse({"detail": "frontend not built — run `npm run build` in src/vis/frontend"}, status_code=404)
+
     @app.websocket("/ws/live")
     async def websocket_live(ws: WebSocket):
         await ws.accept()
@@ -91,8 +106,12 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
         return JSONResponse({"files": files})
 
     @app.get("/api/replay")
-    async def replay_file(file: str = Query(...)):
-        """返回完整 JSONL 文件内容，前端一次加载。
+    async def replay_file(
+        file: str = Query(...),
+        offset: int = Query(0, ge=0),
+        limit: int = Query(120, ge=1, le=300),
+    ):
+        """返回 JSONL 文件的分页切片，避免一次加载数百 MB。
 
         通过 realpath 校验防止路径遍历攻击。
         """
@@ -102,7 +121,35 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
             return JSONResponse({"error": "invalid file path"}, status_code=400)
         if not os.path.isfile(requested_path):
             return JSONResponse({"error": "file not found"}, status_code=404)
-        return FileResponse(requested_path, media_type="application/x-ndjson")
+
+        # Cache the total line count per file (JSONL files are write-once).
+        cache_key = f"_replay_total_{file}"
+        total = getattr(app.state, cache_key, None)
+        if total is None:
+            with open(requested_path, "r", encoding="utf-8") as handle:
+                total = sum(1 for _ in handle)
+            setattr(app.state, cache_key, total)
+
+        frames: list[dict] = []
+        try:
+            with open(requested_path, "r", encoding="utf-8") as handle:
+                for index, line in enumerate(handle):
+                    if index < offset:
+                        continue
+                    if index >= offset + limit:
+                        break
+                    if line.strip():
+                        frames.append(json.loads(line))
+        except (json.JSONDecodeError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+        return JSONResponse({
+            "frames": frames,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": (offset + limit) < total,
+        })
 
     @app.get("/api/config")
     async def get_config():

@@ -89,11 +89,15 @@ class SARSensor:
                 y + forward_y * along + side_y * cross,
             )
 
+        # Fan-shaped beam anchored at the UAV: the apex is the aircraft
+        # itself, then the polygon opens to the side into a trapezoidal
+        # ground swath — visually a side-looking fan, not a detached strip.
         polygon = (
-            point(-half_along, near),
-            point(half_along, near),
-            point(half_along, far),
-            point(-half_along, far),
+            (x, y),                     # UAV (beam apex)
+            point(-half_along, near),   # behind-near
+            point(-half_along, far),    # behind-far
+            point(half_along, far),     # ahead-far
+            point(half_along, near),    # ahead-near
         )
         return SwathBeam(
             origin=(x, y),

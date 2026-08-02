@@ -1,3 +1,5 @@
+import math
+
 from src.utils.conflict_detector import PathConflict, detect_conflicts, resolve_conflicts
 
 
@@ -18,6 +20,21 @@ def test_conflict_detector_ignores_current_pose_overlap():
     ])
 
     assert conflicts == []
+
+
+def test_conflict_detector_catches_a_mid_step_crossing():
+    conflicts = detect_conflicts([
+        {"id": "UAV-1", "status": "transit", "planned_path": [
+            (0.0, 0.0, 0.0), (2.0, 0.0, 0.0),
+        ]},
+        {"id": "UAV-2", "status": "transit", "planned_path": [
+            (2.0, 0.0, math.pi), (0.0, 0.0, math.pi),
+        ]},
+    ], min_separation_cells=0.5)
+
+    assert len(conflicts) == 1
+    assert conflicts[0].cell == (1, 0)
+    assert conflicts[0].distance_cells == 0.0
 
 
 def test_conflict_resolver_preserves_tracking_airframe_priority():

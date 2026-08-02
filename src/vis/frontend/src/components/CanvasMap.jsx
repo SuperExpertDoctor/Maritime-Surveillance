@@ -33,6 +33,9 @@ export default function CanvasMap({
   const layoutRef = useRef({ cellSize: 20, offsetX: 0, offsetY: 0 });
   const hoverRef = useRef(null);
   const [hovered, setHovered] = useState(false);
+  const prevFrameRef = useRef(null);
+  const targetFrameRef = useRef(null);
+  const frameReceivedRef = useRef(0);
   const [sizeVersion, setSizeVersion] = useState(0);
   const [mapAssets, setMapAssets] = useState({});
 
@@ -72,17 +75,76 @@ export default function CanvasMap({
   }, [updateSize]);
 
   useEffect(() => {
+    if (!frame) return;
+    prevFrameRef.current = targetFrameRef.current;
+    targetFrameRef.current = frame;
+    frameReceivedRef.current = performance.now();
+  }, [frame]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     const context = canvas.getContext("2d");
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let animationFrame = null;
     let phase = 0;
+    const INTERP_MS = 180;
+
+    const lerpAngle = (a, b, k) => {
+      if (a == null || b == null) return b ?? a ?? 0;
+      let d = ((b - a) % 360 + 540) % 360 - 180;
+      return a + d * k;
+    };
 
     const render = () => {
+      const prev = prevFrameRef.current;
+      const target = targetFrameRef.current;
+      let displayFrame = target;
+
+      if (prev && target) {
+        const elapsed = performance.now() - frameReceivedRef.current;
+        const raw = Math.min(1, elapsed / INTERP_MS);
+        if (raw < 1) {
+          const t = 1 - (1 - raw) ** 2; // ease-out quad
+
+          const prevUavMap = new Map();
+          for (const u of prev.uavs || []) prevUavMap.set(u.id, u);
+          const prevShipMap = new Map();
+          for (const s of prev.ships || []) prevShipMap.set(s.id, s);
+
+          const uavs = (target.uavs || []).map((u) => {
+            const prevU = prevUavMap.get(u.id);
+            if (!prevU) return u;
+            return {
+              ...u,
+              position: [
+                prevU.position[0] + (u.position[0] - prevU.position[0]) * t,
+                prevU.position[1] + (u.position[1] - prevU.position[1]) * t,
+              ],
+              heading_deg: lerpAngle(prevU.heading_deg, u.heading_deg, t),
+            };
+          });
+
+          const ships = (target.ships || []).map((s) => {
+            const prevS = prevShipMap.get(s.id);
+            if (!prevS) return s;
+            return {
+              ...s,
+              position: [
+                prevS.position[0] + (s.position[0] - prevS.position[0]) * t,
+                prevS.position[1] + (s.position[1] - prevS.position[1]) * t,
+              ],
+              heading_deg: lerpAngle(prevS.heading_deg, s.heading_deg, t),
+            };
+          });
+
+          displayFrame = { ...target, uavs, ships };
+        }
+      }
+
       const { cellSize, offsetX, offsetY, mapBounds, legendBounds } = layoutRef.current;
       context.save();
-      renderFrame(context, frame, {
+      renderFrame(context, displayFrame, {
         cellSize,
         offsetX,
         offsetY,
@@ -104,7 +166,7 @@ export default function CanvasMap({
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
+  }, [mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;

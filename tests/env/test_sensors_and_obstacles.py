@@ -14,16 +14,17 @@ def test_sar_footprint_is_strictly_side_looking():
     assert GridCoord(5, 4) not in cells
 
 
-def test_sar_beam_is_an_offset_side_looking_quadrilateral():
+def test_sar_beam_is_a_side_looking_fan_with_the_uav_as_its_apex():
     sensor = SARSensor(swath_width_cells=2, near_range_cells=0.25)
     beam = sensor.compute_swath_beam((5.0, 5.0), 0.0, "right", along_track_cells=4.0)
 
-    assert len(beam.polygon) == 4
+    assert len(beam.polygon) == 5
+    assert beam.polygon[0] == (5.0, 5.0)
     assert beam.near_range == 0.25
     assert beam.far_range == 2.25
-    assert all(point[1] > 5.0 for point in beam.polygon)
-    assert math.dist(beam.polygon[0], beam.polygon[1]) == 4.0
-    assert math.dist(beam.polygon[1], beam.polygon[2]) == 2.0
+    assert all(point[1] > 5.0 for point in beam.polygon[1:])
+    assert math.dist(beam.polygon[1], beam.polygon[-1]) == 4.0
+    assert math.dist(beam.polygon[2], beam.polygon[3]) == 4.0
 
 
 def test_sar_snr_decreases_with_altitude_and_speed():

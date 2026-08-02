@@ -204,9 +204,16 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await page.locator(".mode-switch button").nth(1).click();
   const fileSelect = page.locator(".file-select");
   await expect.poll(async () => fileSelect.locator("option").count()).toBeGreaterThan(0);
-  const replayFile = await fileSelect.locator("option").evaluateAll((options) => (
-    options.map((option) => option.value).find(Boolean) || ""
-  ));
+  const replayFile = await page.evaluate(async () => {
+    const files = await fetch("/api/replay/list").then((response) => response.json());
+    const candidates = await Promise.all((files.files || []).map(async (file) => {
+      const payload = await fetch(
+        `/api/replay?file=${encodeURIComponent(file)}&offset=0&limit=1`,
+      ).then((response) => response.json());
+      return { file, total: Number(payload.total) || 0 };
+    }));
+    return candidates.sort((left, right) => right.total - left.total)[0]?.file || "";
+  });
   expect(replayFile).toMatch(/^simulation_.*\.jsonl$/);
   await fileSelect.selectOption(replayFile);
   await expect(page.locator(".playback-readout").first()).toContainText("480");

@@ -183,7 +183,7 @@ export default function App() {
         isPlaying={replay.isPlaying}
         onPlayPause={() => replay.setIsPlaying((value) => !value)}
         frameIndex={replay.index}
-        totalFrames={replay.frames.length}
+        totalFrames={replay.total || replay.frames.length}
         onSeek={replay.seek}
         playSpeed={replay.speed}
         onSpeedChange={replay.setSpeed}

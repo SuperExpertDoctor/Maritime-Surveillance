@@ -54,7 +54,7 @@ class UAVEntity:
         self._wp_index = 0
         self._transit_end_index = 0
         self._scan_ranges: list[tuple[int, int, str]] = []
-        self.sar_look_direction = "right"
+        self.sar_look_direction = None
         # A stripmap image is formed by coherently integrating successive
         # side-looking pulses along a stable track.  The instantaneous
         # footprint is intentionally short; the visible aperture history is
@@ -161,6 +161,7 @@ class UAVEntity:
         self._scan_ranges = list(scan_ranges or [])
         self.status = "transit"
         self.sensor_mode = "off"
+        self.sar_look_direction = None
         self._clear_sar_acquisition()
         self.search_complete_pending = False
 
@@ -184,6 +185,7 @@ class UAVEntity:
         self._wp_index = 0
         self.status = "idle"
         self.sensor_mode = "off"
+        self.sar_look_direction = None
         self._clear_sar_acquisition()
         self.eo_fov = None
         self.avoidance_level = 0
@@ -218,6 +220,7 @@ class UAVEntity:
         self._transit_end_index = len(self.waypoints) - 1
         self.status = "returning"
         self.sensor_mode = "off"
+        self.sar_look_direction = None
         self.sar_footprint = []
         self._clear_sar_acquisition()
         self.eo_fov = None
@@ -235,6 +238,7 @@ class UAVEntity:
         self._wp_index = 0
         self.status = "holding"
         self.sensor_mode = "off"
+        self.sar_look_direction = None
         self.sar_footprint = []
         self._clear_sar_acquisition()
         self.eo_fov = None
