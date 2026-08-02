@@ -277,7 +277,9 @@ Reviewer 每 15 分钟（仿真时间）独立于 Decision Maker 运行一次，
 
 新区域与上一轮同 ID 区域的 IoU（Intersection over Union）满足阈值时复用旧 ID，保证 UAV 不需要因 ID 变化而重新分配：
 
-$$\text{IoU}(A, B) = \frac{|A \cap B|}{|A \cup B|} \geq \text{stability\_iou\_threshold} \quad (\text{默认 } 0.7)$$
+$$\operatorname{IoU}(A, B) = \frac{|A \cap B|}{|A \cup B|} \geq 0.7$$
+
+阈值由配置项 `stability_iou_threshold` 控制，默认值为 `0.7`。
 
 ### 2.7 Hungarian 配对
 
