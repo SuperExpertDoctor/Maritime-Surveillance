@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_logger import FrameLogger
+from src.vis.backend import server
 from src.vis.backend.server import broadcast_frame_sync, create_app
 
 
@@ -53,3 +54,20 @@ def test_frame_logger_retries_a_transient_windows_sharing_violation(tmp_path, mo
 
     assert attempts == 3
     assert logger.count == 1
+
+
+def test_replay_total_refreshes_while_a_live_jsonl_file_is_growing(tmp_path, monkeypatch):
+    replay = tmp_path / "simulation_live.jsonl"
+    replay.write_text('{"frame_id": 1}\n', encoding="utf-8")
+    monkeypatch.setattr(server, "OUTPUT_DIR", str(tmp_path))
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+
+    with TestClient(app) as client:
+        first = client.get("/api/replay", params={"file": replay.name}).json()
+        replay.write_text(
+            '{"frame_id": 1}\n{"frame_id": 2}\n', encoding="utf-8",
+        )
+        second = client.get("/api/replay", params={"file": replay.name}).json()
+
+    assert first["total"] == 1
+    assert second["total"] == 2

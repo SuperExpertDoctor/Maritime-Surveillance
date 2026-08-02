@@ -11,6 +11,53 @@ from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.conflict_detector import PathConflict
 
 
+def test_sync_assignments_submits_independent_search_routes_to_process_pool(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    candidates = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions
+    regions = [
+        Region(id=f"S-parallel-{index}", bbox=candidate["bbox"], type="search")
+        for index, candidate in enumerate(candidates[:2], start=1)
+    ]
+    engine.allocator.sm.set_search_regions(regions)
+    submitted = []
+
+    class ImmediateFuture:
+        def __init__(self, request):
+            self.request = request
+
+        def result(self):
+            from src.utils.search_route_planner import plan_search_route
+            return plan_search_route(self.request)
+
+    class RecordingProcessPool:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, _function, request):
+            submitted.append(request)
+            return ImmediateFuture(request)
+
+    monkeypatch.setattr("src.env.simulation.ProcessPoolExecutor", RecordingProcessPool)
+    monkeypatch.setattr("src.env.simulation.as_completed", lambda futures: futures)
+    for uav, region in zip(engine.uavs[:2], regions):
+        region.assigned_uav_id = uav.id
+        engine.allocator.sm.update_uav_status(
+            uav.id, "transit", uav.position, assigned_region_id=region.id,
+        )
+
+    engine._sync_assignments()
+
+    assert [request.uav_id for request in submitted] == [uav.id for uav in engine.uavs[:2]]
+    assert all(request.obstacle_mask.flags.owndata for request in submitted)
+    assert all(uav.mission_kind == "search" for uav in engine.uavs[:2])
+
+
 def test_sar_is_off_during_dubins_turns():
     engine = SimulationEngine(ConfigLoader.load())
     uav = engine.uavs[0]
@@ -337,12 +384,18 @@ def test_path_conflict_replan_uses_assigned_region_object(monkeypatch):
     monkeypatch.setattr(
         engine,
         "_assign_search_route",
-        lambda entity, assigned_region: assigned.append((entity.id, assigned_region.id)),
+        lambda entity, assigned_region, **kwargs: assigned.append(
+            (entity.id, assigned_region.id, kwargs)
+        ),
     )
 
     engine._detect_and_resolve_path_conflicts(1.0)
 
-    assert assigned == [(uav.id, region.id)]
+    assert assigned == [(
+        uav.id,
+        region.id,
+        {"allow_revisit": True, "direction": "vertical"},
+    )]
 
 
 def test_reserve_return_uses_95_percent_of_remaining_fixed_range():

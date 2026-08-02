@@ -122,13 +122,19 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
         if not os.path.isfile(requested_path):
             return JSONResponse({"error": "file not found"}, status_code=404)
 
-        # Cache the total line count per file (JSONL files are write-once).
+        # A live run writes its JSONL file incrementally.  Reuse a count only
+        # while the file metadata is unchanged, otherwise replay would remain
+        # stuck at the partial total first observed by a browser client.
         cache_key = f"_replay_total_{file}"
-        total = getattr(app.state, cache_key, None)
-        if total is None:
+        stat = os.stat(requested_path)
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+        cached = getattr(app.state, cache_key, None)
+        if cached is None or cached[0] != fingerprint:
             with open(requested_path, "r", encoding="utf-8") as handle:
                 total = sum(1 for _ in handle)
-            setattr(app.state, cache_key, total)
+            setattr(app.state, cache_key, (fingerprint, total))
+        else:
+            total = cached[1]
 
         frames: list[dict] = []
         try:

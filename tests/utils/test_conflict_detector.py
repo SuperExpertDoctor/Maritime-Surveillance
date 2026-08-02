@@ -37,16 +37,16 @@ def test_conflict_detector_catches_a_mid_step_crossing():
     assert conflicts[0].distance_cells == 0.0
 
 
-def test_conflict_resolver_preserves_tracking_airframe_priority():
+def test_conflict_resolver_makes_lower_numeric_id_yield_regardless_of_state():
     class Entity:
         def __init__(self, status, fuel):
             self.status = status
             self.fuel_remaining_pct = fuel
 
-    conflicts = [PathConflict("UAV-1", "UAV-2", (3, 4), 0, 0, 0.1)]
+    conflicts = [PathConflict("UAV-2", "UAV-10", (3, 4), 0, 0, 0.1)]
     replan = resolve_conflicts(conflicts, {
-        "UAV-1": Entity("tracking", 0.1),
-        "UAV-2": Entity("searching", 1.0),
+        "UAV-2": Entity("tracking", 0.1),
+        "UAV-10": Entity("searching", 1.0),
     })
 
     assert replan == ["UAV-2"]

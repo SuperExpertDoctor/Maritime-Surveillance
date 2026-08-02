@@ -7,6 +7,7 @@ and resolves them by replanning the lower-priority UAV.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -136,24 +137,27 @@ def _moving_segment_distance(
 def resolve_conflicts(
     conflicts: list[PathConflict],
     uav_entities: dict,
-    priority_key: str = "fuel_remaining_pct",
+    priority_key: str = "uav_id",
 ) -> list[str]:
     """Resolve detected conflicts by selecting which UAV to replan.
 
-    Strategy: for each conflicting pair, the UAV with lower priority
-    (lower fuel / later assignment) is flagged for replanning.
-    The other UAV keeps its current path.
+    Strategy: for each conflicting pair, the numerically larger UAV ID has
+    priority.  The lower-ID airframe is flagged to yield and keeps its task
+    assignment while the main thread inserts a continuous detour.
 
     Args:
         conflicts: Detected conflicts from ``detect_conflicts``.
         uav_entities: Dict of uav_id → UAVEntity for priority comparison.
-        priority_key: Attribute to compare for priority (higher = keep path).
+        priority_key: Retained for compatibility; UAV ID priority is always used.
 
     Returns:
         List of uav_ids that should be replanned.
     """
     replan: set[str] = set()
     handled_pairs: set[tuple[str, str]] = set()
+    # This result deliberately ignores mutable aircraft state so every
+    # lockstep tick makes the same priority decision.
+    _ = uav_entities, priority_key
 
     for conflict in conflicts:
         pair = tuple(sorted((conflict.uav_a, conflict.uav_b)))
@@ -161,21 +165,7 @@ def resolve_conflicts(
             continue
         handled_pairs.add(pair)
 
-        entity_a = uav_entities.get(conflict.uav_a)
-        entity_b = uav_entities.get(conflict.uav_b)
-
-        priority_a = getattr(entity_a, priority_key, 0.5) if entity_a else 0.5
-        priority_b = getattr(entity_b, priority_key, 0.5) if entity_b else 0.5
-
-        # Tracking UAVs get priority over searching/transit UAVs
-        status_a = entity_a.status if entity_a else "idle"
-        status_b = entity_b.status if entity_b else "idle"
-        if status_a == "tracking" and status_b != "tracking":
-            priority_a = 2.0  # absolute priority
-        elif status_b == "tracking" and status_a != "tracking":
-            priority_b = 2.0
-
-        if priority_a >= priority_b:
+        if uav_id_priority(conflict.uav_a) >= uav_id_priority(conflict.uav_b):
             replan.add(conflict.uav_b)
         else:
             replan.add(conflict.uav_a)
@@ -183,4 +173,13 @@ def resolve_conflicts(
     return sorted(replan)
 
 
-__all__ = ["ConflictReport", "PathConflict", "detect_conflicts", "resolve_conflicts"]
+def uav_id_priority(uav_id: str) -> tuple[int, str]:
+    """Return a deterministic priority where a larger numeric UAV ID wins."""
+    matches = re.findall(r"\d+", str(uav_id))
+    return (int(matches[-1]) if matches else -1, str(uav_id))
+
+
+__all__ = [
+    "ConflictReport", "PathConflict", "detect_conflicts", "resolve_conflicts",
+    "uav_id_priority",
+]
