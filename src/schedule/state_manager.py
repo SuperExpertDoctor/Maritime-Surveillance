@@ -35,6 +35,7 @@ class StateManager:
         self._target_reports: dict[str, TargetReport] = {}
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
+        self.obstacle_version = 0
         self.land_mask = np.zeros(config.grid.resolution, dtype=bool)
         self._base_positions: tuple[tuple[int, int], ...] = (config.environment.base_position,)
 
@@ -98,7 +99,10 @@ class StateManager:
     # Environment ----------------------------------------------------
     def set_environment_obstacles(self, obstacles: list, mask) -> None:
         self.obstacles = list(obstacles)
-        self.obstacle_mask = np.asarray(mask, dtype=bool)
+        normalized = np.array(mask, dtype=np.bool_, copy=True)
+        if not np.array_equal(self.obstacle_mask, normalized):
+            self.obstacle_version += 1
+        self.obstacle_mask = normalized
 
     def set_land_mask(self, mask) -> None:
         """Publish the reset-specific mainland cells to all schedulers."""
