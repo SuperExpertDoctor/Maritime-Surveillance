@@ -78,6 +78,9 @@ class UAVEntity:
         self.avoidance_path: list[Pose] = []
         self._avoidance_index = 0
         self._distance_this_step = 0.0
+        self.last_requested_command = None
+        self.last_applied_command = None
+        self.last_safety_interventions = ()
         self.lgvf = LGVFTracker(R_min=R_min)
         self.sar_sensor = SARSensor()
         self.eo_sensor = EOSensor()
@@ -97,6 +100,25 @@ class UAVEntity:
     @property
     def float_position(self) -> tuple[float, float]:
         return self._col, self._row
+
+    def apply_motion(
+        self,
+        turn_rate_rad_min: float,
+        speed_cells_min: float,
+        dt_min: float,
+    ) -> float:
+        """Integrate one already-validated fixed-wing motion command."""
+        mid_heading = self.heading_rad + turn_rate_rad_min * dt_min / 2.0
+        distance = speed_cells_min * dt_min
+        self._col += distance * math.cos(mid_heading)
+        self._row += distance * math.sin(mid_heading)
+        self.heading_rad = _wrap_pi(self.heading_rad + turn_rate_rad_min * dt_min)
+        self._distance_this_step = distance
+        self.fuel_remaining_pct = max(
+            0.0,
+            self.fuel_remaining_pct - distance / self.total_range_cells,
+        )
+        return distance
 
     @property
     def pose(self) -> Pose:

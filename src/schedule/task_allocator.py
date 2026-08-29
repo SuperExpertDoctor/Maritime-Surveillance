@@ -1,4 +1,4 @@
-﻿from src.schedule.config_loader import ConfigLoader, AppConfig
+﻿from src.schedule.config_loader import AppConfig
 from src.schedule.state_manager import StateManager
 from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
@@ -6,8 +6,7 @@ from src.schedule.llm_client import LLMClient
 from src.schedule.llm_reviewer import LLMReviewer
 from src.schedule.hungarian import hungarian_pair
 from src.schedule.trigger_manager import TriggerManager
-from src.schedule.output_validator import validate
-from src.schedule.datatypes import Region, BBox, GridCoord
+from src.schedule.datatypes import Region, BBox
 
 
 class TaskAllocator:
@@ -64,8 +63,8 @@ class TaskAllocator:
     def _handle_light_trigger(self, current_time: float, decision) -> dict:
         """Pair idle UAVs only with regions already approved by the LLM."""
         self.retire_search_track_conflicts()
-        idle_uavs = self.sm.get_available_uavs()
-        if not idle_uavs:
+        eligible_uavs = self.sm.get_available_uavs()
+        if not eligible_uavs:
             return {"trigger_type": "light", "action": "no_idle_uavs"}
 
         unassigned = [
@@ -90,7 +89,7 @@ class TaskAllocator:
 
         # Hungarian pairing
         pairs = hungarian_pair(
-            [{"id": u.id, "position": u.position} for u in idle_uavs],
+            [{"id": u.id, "position": u.position} for u in eligible_uavs],
             unassigned,
         )
 
@@ -246,14 +245,14 @@ class TaskAllocator:
         )
 
     def _pair_available_regions(self, regions: list[Region]) -> list[tuple[str, str]]:
-        idle_uavs = self.sm.get_available_uavs()
+        eligible_uavs = self.sm.get_available_uavs()
         unassigned = [
             {"id": region.id, "bbox": region.bbox}
             for region in regions
             if region.assigned_uav_id is None
         ]
         pairs = hungarian_pair(
-            [{"id": uav.id, "position": uav.position} for uav in idle_uavs],
+            [{"id": uav.id, "position": uav.position} for uav in eligible_uavs],
             unassigned,
         )
         by_id = {region.id: region for region in regions}

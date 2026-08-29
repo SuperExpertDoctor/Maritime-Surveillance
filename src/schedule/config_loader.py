@@ -102,6 +102,39 @@ class CommonConfig:
     clear_outputs_before_run: bool = True
 
 
+@dataclass(frozen=True)
+class ObservationControlConfig:
+    schema_version: str = "control-observation/v1"
+    local_window_cells: int = 11
+
+
+@dataclass(frozen=True)
+class SafetyControlConfig:
+    min_speed_fraction: float = 0.6
+    max_speed_fraction: float = 1.2
+    reserve_range_cells: float = 4.0
+    max_invalid_commands: int = 3
+
+
+@dataclass(frozen=True)
+class HeuristicControlConfig:
+    astar_dynamic_replan_limit: int = 3
+    astar_xy_resolution_cells: float = 0.5
+    astar_heading_bins: int = 72
+    astar_candidate_limit: int = 32
+    astar_primitive_length_cells: float = 1.0
+    path_sample_step_cells: float = 0.2
+
+
+@dataclass(frozen=True)
+class ControlConfig:
+    default_mode: str
+    per_uav: dict[str, str]
+    observation: ObservationControlConfig
+    safety: SafetyControlConfig
+    heuristic: HeuristicControlConfig
+
+
 @dataclass
 class AppConfig:
     environment: EnvironmentConfig
@@ -111,6 +144,7 @@ class AppConfig:
     llm: LLMConfig
     sensor: SensorConfig
     common: CommonConfig
+    control: ControlConfig
 
 
 class ConfigLoader:
@@ -132,6 +166,37 @@ class ConfigLoader:
         env_data["base_position"] = tuple(env_data["base_position"])
         grid_data["resolution"] = tuple(grid_data["resolution"])
         llm_params_data = _read("llm_params.yaml")
+        control_data = _read("control.yaml")
+        configured_modes = {
+            control_data["default_mode"],
+            *control_data.get("per_uav", {}).values(),
+        }
+        unknown_modes = configured_modes - {"heuristic", "bc", "rl"}
+        if unknown_modes:
+            raise ValueError(f"unsupported control modes: {sorted(unknown_modes)}")
+        raw_window = control_data["observation"]["local_window_cells"]
+        if (
+            isinstance(raw_window, bool)
+            or not isinstance(raw_window, int)
+            or raw_window <= 0
+            or raw_window % 2 == 0
+        ):
+            raise ValueError(
+                "control observation local_window_cells must be a positive odd integer"
+            )
+        control = ControlConfig(
+            default_mode=control_data["default_mode"],
+            per_uav=dict(control_data.get("per_uav", {})),
+            observation=ConfigLoader._dict_to_dataclass(
+                control_data["observation"], ObservationControlConfig
+            ),
+            safety=ConfigLoader._dict_to_dataclass(
+                control_data["safety"], SafetyControlConfig
+            ),
+            heuristic=ConfigLoader._dict_to_dataclass(
+                control_data["heuristic"], HeuristicControlConfig
+            ),
+        )
 
         return AppConfig(
             environment=ConfigLoader._dict_to_dataclass(env_data, EnvironmentConfig),
@@ -141,6 +206,7 @@ class ConfigLoader:
             llm=ConfigLoader._dict_to_dataclass(llm_params_data["cycles"], LLMConfig),
             sensor=ConfigLoader._load_sensor_config(base_path),
             common=ConfigLoader._dict_to_dataclass(_read("common.yaml") or {}, CommonConfig),
+            control=control,
         )
 
     @staticmethod

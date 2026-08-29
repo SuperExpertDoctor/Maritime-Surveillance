@@ -295,6 +295,28 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
                 "reviewer_cycle_min": cfg.llm.reviewer_cycle_min,
                 "max_retries": cfg.llm.max_retries,
             },
+            "control": {
+                "default_mode": cfg.control.default_mode,
+                "per_uav": dict(cfg.control.per_uav),
+                "observation": {
+                    "schema_version": cfg.control.observation.schema_version,
+                    "local_window_cells": cfg.control.observation.local_window_cells,
+                },
+                "safety": {
+                    "min_speed_fraction": cfg.control.safety.min_speed_fraction,
+                    "max_speed_fraction": cfg.control.safety.max_speed_fraction,
+                    "reserve_range_cells": cfg.control.safety.reserve_range_cells,
+                    "max_invalid_commands": cfg.control.safety.max_invalid_commands,
+                },
+                "heuristic": {
+                    "astar_dynamic_replan_limit": cfg.control.heuristic.astar_dynamic_replan_limit,
+                    "astar_xy_resolution_cells": cfg.control.heuristic.astar_xy_resolution_cells,
+                    "astar_heading_bins": cfg.control.heuristic.astar_heading_bins,
+                    "astar_candidate_limit": cfg.control.heuristic.astar_candidate_limit,
+                    "astar_primitive_length_cells": cfg.control.heuristic.astar_primitive_length_cells,
+                    "path_sample_step_cells": cfg.control.heuristic.path_sample_step_cells,
+                },
+            },
             "common": {
                 "clear_outputs_before_run": cfg.common.clear_outputs_before_run,
             },

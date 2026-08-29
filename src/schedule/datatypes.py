@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from collections import namedtuple
 
@@ -32,6 +32,11 @@ class UAVState:
     time_to_available: float = 0.0  # minutes until refueled/ready
     heading_deg: float = 0.0
     sensor_mode: str = "off"
+    control_mode: str = "heuristic"
+    control_owner: str = "system"
+    operation_mode: str = "idle"
+    controller_generation: int = 0
+    safety_intervened: bool = False
 
 
 @dataclass

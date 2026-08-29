@@ -1,4 +1,6 @@
 import builtins
+import asyncio
+import json
 
 from fastapi.testclient import TestClient
 
@@ -33,6 +35,23 @@ def test_sync_broadcast_uses_the_running_server_event_loop():
 
     assert len(sink.frames) == 1
     assert sink.frames[0]["frame_id"] == 0
+
+
+def test_api_config_exposes_control_strategy_contract():
+    config = ConfigLoader.load()
+    app = create_app(config, StateManager(config))
+    route = next(
+        item for item in app.routes
+        if getattr(item, "path", None) == "/api/config"
+    )
+    response = asyncio.run(route.endpoint())
+    payload = json.loads(response.body)
+
+    assert payload["control"]["default_mode"] == "heuristic"
+    assert payload["control"]["per_uav"] == {}
+    assert payload["control"]["observation"]["schema_version"] == "control-observation/v1"
+    assert payload["control"]["safety"]["max_invalid_commands"] == 3
+    assert "heuristic" in payload["control"]
 
 
 def test_frame_logger_retries_a_transient_windows_sharing_violation(tmp_path, monkeypatch):

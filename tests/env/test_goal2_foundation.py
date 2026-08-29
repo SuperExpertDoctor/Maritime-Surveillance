@@ -160,6 +160,11 @@ def test_frame_exposes_two_bases_and_reset_scenario_metadata():
         "height_km": 300,
         "cell_size_km": 10,
     }
+    uav_frame = frame["uavs"][0]
+    assert uav_frame["control_mode"] == "heuristic"
+    assert uav_frame["control_owner"] in {"system", "heuristic", "learning"}
+    assert isinstance(uav_frame["controller_generation"], int)
+    assert isinstance(uav_frame["safety_intervened"], bool)
 
 
 def test_unobserved_ships_are_not_exported_to_the_visualization_or_llm_state():

@@ -1,0 +1,20 @@
+default_mode: heuristic
+per_uav: {}
+
+observation:
+  schema_version: control-observation/v1
+  local_window_cells: 11
+
+safety:
+  min_speed_fraction: 0.6
+  max_speed_fraction: 1.2
+  reserve_range_cells: 4.0
+  max_invalid_commands: 3
+
+heuristic:
+  astar_dynamic_replan_limit: 3
+  astar_xy_resolution_cells: 0.5
+  astar_heading_bins: 72
+  astar_candidate_limit: 32
+  astar_primitive_length_cells: 1.0
+  path_sample_step_cells: 0.2
