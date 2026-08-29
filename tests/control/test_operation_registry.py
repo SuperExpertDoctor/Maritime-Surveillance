@@ -225,6 +225,53 @@ def test_leaving_track_preserves_another_uav_binding(registry, learning_command)
     assert state_manager.get_uav("UAV-1").assigned_region_id is None
 
 
+def test_track_region_ids_remain_unique_after_releasing_another_group_binding(
+    registry,
+):
+    operation_registry, state_manager = registry
+    first_command = TRACK_COMMAND
+    second_command = replace(TRACK_COMMAND, target_contact_id="C2")
+    third_command = replace(TRACK_COMMAND, target_contact_id="C3")
+    first_observation = _observation(ControlMode.BC, position=(10.0, 10.0))
+
+    def observation_for(contact_id, group_id, position):
+        contact = replace(
+            first_observation.contacts[0],
+            contact_id=contact_id,
+            group_id=group_id,
+            estimated_position=position,
+        )
+        return replace(
+            first_observation,
+            contacts=(contact,),
+            action_mask=replace(
+                first_observation.action_mask, target_contact_ids=(contact_id,)
+            ),
+        )
+
+    second_observation = observation_for("C2", "G2", (14.0, 14.0))
+    third_observation = observation_for("C3", "G3", (18.0, 18.0))
+    operation_registry.reconcile(
+        "UAV-1", None, first_command, first_observation
+    )
+    operation_registry.reconcile("UAV-2", None, second_command, second_observation)
+    first_region_id = state_manager.get_uav("UAV-1").assigned_region_id
+    second_region_id = state_manager.get_uav("UAV-2").assigned_region_id
+    coverage = ControlCommand(0.0, 1.0, SensorMode.SAR, OperationMode.COVERAGE)
+
+    operation_registry.reconcile(
+        "UAV-1", first_command, coverage, first_observation
+    )
+    operation_registry.reconcile("UAV-1", None, third_command, third_observation)
+
+    third_region_id = state_manager.get_uav("UAV-1").assigned_region_id
+    assert (first_region_id, second_region_id, third_region_id) == ("T1", "T2", "T3")
+    assert state_manager.get_uav("UAV-2").assigned_region_id == second_region_id
+    assert state_manager.get_uav("UAV-2").target_group_id == "G2"
+    assert state_manager.get_uav("UAV-1").assigned_region_id == third_region_id
+    assert state_manager.get_uav("UAV-1").target_group_id == "G3"
+
+
 def test_unknown_track_contact_raises_without_changing_world_state(
     registry, learning_command
 ):

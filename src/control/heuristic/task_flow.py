@@ -84,7 +84,9 @@ class HeuristicTaskFlow:
                 f"event for {event.uav_id} cannot transition {lease.uav_id}"
             )
         controller = self._controllers[lease.uav_id]
-        current_task = self._pending_tasks.get(lease.uav_id)
+        current_task = self._active_task(
+            controller, self._pending_tasks.get(lease.uav_id)
+        )
         if (
             lease.owner is not ControlOwner.HEURISTIC
             or event.event_type not in EVENT_TRANSITIONS
@@ -113,7 +115,7 @@ class HeuristicTaskFlow:
                 current_lease = self._ownership.replace(
                     lease,
                     ControlOwner.HEURISTIC,
-                    f"{replacement_task.task_type.value}:{replacement_task.task_id}",
+                    self._controller_id(replacement_task),
                     event.timestamp_min,
                 )
             self._controllers[lease.uav_id] = replacement
@@ -183,6 +185,19 @@ class HeuristicTaskFlow:
             "target_departed",
         }:
             self._saved_coverage_tasks.pop(uav_id, None)
+
+    @staticmethod
+    def _active_task(
+        controller: ControllerBase, fallback: ControlTask | None
+    ) -> ControlTask | None:
+        context = getattr(controller, "context", None)
+        task = getattr(context, "task", None)
+        return task if isinstance(task, ControlTask) else fallback
+
+    @staticmethod
+    def _controller_id(task: ControlTask) -> str:
+        prefix = "tracking" if task.task_type is OperationMode.TRACK else task.task_type.value
+        return f"{prefix}:{task.task_id}"
 
     @staticmethod
     def _validate_replacement(

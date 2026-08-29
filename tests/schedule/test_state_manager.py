@@ -60,6 +60,15 @@ def test_get_available_uavs(sm):
     assert len(available) == sm.config.uav.count_max - 2
 
 
+def test_available_uavs_excludes_refueling_despite_idle_operation_snapshot(sm):
+    sm.update_uav_status("UAV-1", "refueling", GridCoord(5, 5))
+
+    uav = sm.get_uav("UAV-1")
+
+    assert uav.operation_mode == "idle"
+    assert "UAV-1" not in {item.id for item in sm.get_available_uavs()}
+
+
 def test_uav_control_snapshot_defaults_preserve_construction_compatibility():
     uav = UAVState("UAV-X", "idle", GridCoord(1, 2))
 

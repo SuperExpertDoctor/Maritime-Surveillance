@@ -38,6 +38,7 @@ class StateManager:
         ]
         self._search_regions: list[Region] = []
         self._track_regions: list[Region] = []
+        self._track_region_counter = 0
         self._previous_search_regions: list[Region] = []
         self._markers: list[Marker] = []
         self._marker_counter = 0
@@ -77,6 +78,7 @@ class StateManager:
             for uav in self._uavs
             if uav.control_mode == "heuristic"
             and uav.control_owner == "system"
+            and uav.status in {"idle", "holding"}
             and uav.operation_mode in {"idle", "holding"}
         ]
 
@@ -288,10 +290,11 @@ class StateManager:
         existing = self.get_track_region_for_group(target_group_id)
         if existing is not None:
             return existing
+        self._track_region_counter += 1
         col, row = center
         half = 2
         region = Region(
-            id=f"T{len(self._track_regions) + 1}",
+            id=f"T{self._track_region_counter}",
             bbox=BBox(
                 max(0, col - half),
                 max(0, row - half),

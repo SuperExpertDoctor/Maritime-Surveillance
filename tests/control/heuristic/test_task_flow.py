@@ -9,6 +9,7 @@ from src.control.common.contracts import (
     ControlEvent,
     ControlOwner,
     ControlTask,
+    ControllerContext,
     ObservationSpec,
     OperationMode,
 )
@@ -120,6 +121,7 @@ def test_target_found_atomically_replaces_coverage_with_unstarted_tracking(
     assert transition.previous_lease is lease
     assert transition.previous_lease.generation + 1 == transition.current_lease.generation
     assert transition.current_lease.owner is ControlOwner.HEURISTIC
+    assert transition.current_lease.controller_id.startswith("tracking:")
     assert isinstance(transition.controller, TrackingController)
     assert transition.controller.operation_mode is OperationMode.TRACK
     assert transition.controller.task is None
@@ -156,6 +158,37 @@ def test_tracking_exit_restores_the_saved_coverage_task(
     assert controllers["UAV-1"] is restored.controller
     assert pending_tasks["UAV-1"] is coverage_task
     assert not restored.request_assignment
+
+
+def test_target_found_recovers_active_coverage_after_pending_task_is_popped(
+    factory, coverage_task
+):
+    flow, _, coverage_lease, controllers, pending_tasks, coverage_controller = (
+        _heuristic_flow(factory, coverage_task)
+    )
+    coverage_controller.reset(
+        ControllerContext(
+            "UAV-1",
+            1.0,
+            coverage_controller.observation_spec,
+            coverage_controller.action_spec,
+            "UAV-1:1",
+            coverage_task,
+        )
+    )
+    pending_tasks.pop("UAV-1")
+
+    tracking = flow.handle(
+        _event("target_found", sequence=1, contact_id="C1"), coverage_lease
+    )
+    restored = flow.handle(
+        _event("target_lost", sequence=2), tracking.current_lease
+    )
+
+    assert restored.task is coverage_task
+    assert isinstance(restored.controller, CoverageController)
+    assert pending_tasks["UAV-1"] is coverage_task
+    assert controllers["UAV-1"] is restored.controller
 
 
 @pytest.mark.parametrize("event_type", ["search_complete", "task_failed"])
