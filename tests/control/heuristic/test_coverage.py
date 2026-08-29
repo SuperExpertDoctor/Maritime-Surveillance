@@ -14,9 +14,15 @@ from src.control.common.contracts import (
     ObservationSpec,
     OperationMode,
     SensorMode,
+    StopReason,
     UAVObservation,
 )
-from src.control.heuristic.coverage import CoverageController, CoveragePhase
+from src.control.common.safety import InvalidControlCommand
+from src.control.heuristic.coverage import (
+    CoverageController,
+    CoveragePhase,
+    CoverageRouteBlockedError,
+)
 from src.control.scan_pattern import generate_scan_waypoints
 from src.control.waypoint import navigate_to_region
 from src.schedule.datatypes import BBox, GridCoord
@@ -36,6 +42,25 @@ class NavigatorSpy:
         goal = min(goals)
         heading = math.atan2(goal[1] - start[1], goal[0] - start[0])
         return [tuple(start), (goal[0], goal[1], heading)]
+
+
+class DetourNavigator(NavigatorSpy):
+    def plan_grid(
+        self, start, goals, obstacle_mask, r_min, planning_map_version=0
+    ):
+        direct = super().plan_grid(
+            start, goals, obstacle_mask, r_min, planning_map_version
+        )
+        if self.plan_calls == 1:
+            return direct
+        goal = min(goals)
+        detour_col = max(start[0], goal[0]) + 1.0
+        return [
+            tuple(start),
+            (detour_col, start[1], 0.0),
+            (detour_col, goal[1], math.pi / 2.0),
+            (goal[0], goal[1], math.pi),
+        ]
 
 
 @pytest.fixture
@@ -190,25 +215,124 @@ def test_coverage_emits_search_complete_once_after_final_scan_pose(
     assert repeated.events == ()
 
 
-def test_coverage_replans_only_when_changed_map_blocks_unflown_route(
+def test_coverage_updates_the_map_version_when_unflown_route_is_still_safe(
     started_controller, observation
 ):
     unchanged_route = _with_pose(observation, started_controller.route[0])
     started_controller.act(unchanged_route)
-    updated_mask = np.array(observation.planning_obstacle_mask, copy=True)
-    blocked_pose = started_controller.route[1]
-    updated_mask[math.floor(blocked_pose[0]), math.floor(blocked_pose[1])] = True
-    blocked_route = _with_pose(
+    updated_route = _with_pose(
         observation,
         started_controller.route[0],
         planning_map_version=2,
-        obstacle_mask=updated_mask,
     )
 
-    started_controller.act(blocked_route)
+    started_controller.act(updated_route)
 
-    assert started_controller.navigator.plan_calls == 2
+    assert started_controller.navigator.plan_calls == 1
     assert started_controller.planning_map_version == 2
+
+
+def test_coverage_rejects_a_continuous_route_segment_that_crosses_a_blocked_cell(
+    controller, observation
+):
+    blocked_mask = np.array(observation.planning_obstacle_mask, copy=True)
+    # The direct A* entry segment is (2, 10) -> (10, 9.75).  This cell is
+    # crossed by the segment, but neither endpoint is inside it.
+    blocked_mask[4, 9] = True
+    blocked_observation = replace(observation, planning_obstacle_mask=blocked_mask)
+
+    with pytest.raises(CoverageRouteBlockedError, match="coverage route blocked"):
+        controller.start_task(
+            ControlTask(
+                "S1", OperationMode.COVERAGE, region_bbox=BBox(10, 10, 15, 15)
+            ),
+            blocked_observation,
+        )
+
+
+def test_coverage_rejects_a_new_obstacle_on_an_unflown_scan_leg(
+    started_controller, observation
+):
+    scan_start, scan_end = started_controller.scan_ranges[0]
+    current_observation = _with_pose(
+        observation, started_controller.route[scan_start]
+    )
+    started_controller.act(current_observation)
+    current_index = started_controller.follower.index
+    assert scan_start <= current_index < scan_end - 1
+    blocked_mask = np.array(observation.planning_obstacle_mask, copy=True)
+    blocked_pose = started_controller.route[current_index + 1]
+    blocked_mask[math.floor(blocked_pose[0]), math.floor(blocked_pose[1])] = True
+    blocked_observation = _with_pose(
+        observation,
+        started_controller.route[current_index],
+        planning_map_version=2,
+        obstacle_mask=blocked_mask,
+    )
+
+    with pytest.raises(CoverageRouteBlockedError, match="coverage route blocked"):
+        started_controller.act(blocked_observation)
+
+
+def test_coverage_replan_starts_at_next_unconsumed_scan_band(
+    controller, observation
+):
+    controller.navigator = DetourNavigator()
+    controller.r_min = 1.5
+    controller.start_task(
+        ControlTask("S1", OperationMode.COVERAGE, region_bbox=BBox(10, 10, 15, 15)),
+        observation,
+    )
+    first_scan_end = controller.scan_ranges[0][1]
+    for pose in controller.route[1 : first_scan_end + 1]:
+        controller.act(_with_pose(observation, pose))
+    previous_index = controller.follower.index
+    next_scan_start = next(
+        start for start, end in controller.scan_ranges if end > previous_index
+    )
+    next_scan_entry = controller.route[next_scan_start]
+    blocked_mask = np.array(observation.planning_obstacle_mask, copy=True)
+    # The prior connector swings through this cell, while the detour to the
+    # second band remains free.  It must not restart at the first scan entry.
+    blocked_mask[17, 10] = True
+    replan_observation = _with_pose(
+        observation,
+        controller.route[previous_index],
+        planning_map_version=2,
+        obstacle_mask=blocked_mask,
+    )
+
+    controller.act(replan_observation)
+
+    assert controller.navigator.plan_arguments[-1][1] == {next_scan_entry[:2]}
+    assert controller.route[3][:2] == next_scan_entry[:2]
+    assert controller.route[3][:2] != observation.self_state.position
+
+
+def test_coverage_stop_before_final_pose_is_not_complete_and_is_idempotent(
+    started_controller, observation
+):
+    started_controller.stop_task(StopReason.CANCELLED)
+    started_controller.stop_task(StopReason.CANCELLED)
+
+    assert started_controller.phase is CoveragePhase.TRANSIT_ASTAR
+    assert not started_controller.is_complete(observation)
+    assert not started_controller.follower.is_complete
+
+
+def test_coverage_rejects_disallowed_operation_mode(started_controller, observation):
+    scan_start, _ = started_controller.scan_ranges[0]
+    restricted_observation = replace(
+        _with_pose(observation, started_controller.route[scan_start + 1]),
+        action_mask=ActionMask(
+            (SensorMode.OFF, SensorMode.SAR),
+            (OperationMode.TRANSIT,),
+            (),
+        ),
+    )
+
+    with pytest.raises(InvalidControlCommand, match="operation mode is absent"):
+        started_controller.act(restricted_observation)
 
 
 def test_legacy_navigation_wrapper_warns_and_returns_grid_coordinates():

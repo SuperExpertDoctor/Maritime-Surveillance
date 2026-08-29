@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from enum import Enum
 import math
@@ -17,6 +18,7 @@ from src.control.common.contracts import (
     SensorMode,
     StopReason,
 )
+from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
 from src.control.heuristic.base import HeuristicControllerBase, RouteFollower, _wrap_pi
 from src.control.heuristic.navigation import AStarNavigator
 from src.utils.coverage_planner import CoveragePath, CoveragePlanner
@@ -28,6 +30,22 @@ class CoveragePhase(str, Enum):
     ALIGN_SCAN = "align_scan"
     SCANNING = "scanning"
     COMPLETED = "completed"
+
+
+class CoverageRouteBlockedError(RuntimeError):
+    """Raised when a required coverage route intersects the planning mask."""
+
+    def __init__(
+        self, segment_index: int, cell: tuple[int, int], planning_map_version: int
+    ) -> None:
+        self.segment_index = segment_index
+        self.cell = cell
+        self.planning_map_version = planning_map_version
+        super().__init__(
+            "coverage route blocked: "
+            f"segment={segment_index}, cell={cell}, "
+            f"planning_map_version={planning_map_version}"
+        )
 
 
 def scan_endpoint_poses(coverage: CoveragePath) -> tuple[tuple[float, float, float], ...]:
@@ -91,15 +109,21 @@ class CoverageController(HeuristicControllerBase):
             raise ValueError("coverage tasks require a coverage mode and region_bbox")
         self.task = task
         self.phase = CoveragePhase.CREATED
+        self.follower = None
+        self.route = ()
+        self.scan_ranges = ()
+        self.planning_map_version = None
         self._completion_event_emitted = False
         self._plan_route(observation)
 
     def is_complete(self, observation: ControlObservation) -> bool:
-        return self.phase is CoveragePhase.COMPLETED
+        del observation
+        return self.follower is not None and self.follower.is_complete
 
     def stop_task(self, reason: StopReason) -> None:
         del reason
-        self.phase = CoveragePhase.COMPLETED
+        # This controller owns no external resources.  Completion remains tied
+        # to RouteFollower consuming the final pose, so stopping is idempotent.
 
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.task is None or self.follower is None:
@@ -119,6 +143,7 @@ class CoverageController(HeuristicControllerBase):
             else SensorMode.OFF
         )
         operation_mode = self.operation_mode
+        self._validate_command_modes(sensor_mode, operation_mode, observation)
         command = replace(
             command, sensor_mode=sensor_mode, operation_mode=operation_mode
         )
@@ -151,12 +176,16 @@ class CoverageController(HeuristicControllerBase):
             self.task.region_bbox, entry, self.swath_width, self.r_min
         )
         offset = len(transit) - 1
-        self.route = tuple(transit) + tuple(coverage.waypoints[1:])
-        self.scan_ranges = tuple(
+        route = tuple(transit) + tuple(coverage.waypoints[1:])
+        scan_ranges = tuple(
             (offset + start, offset + end) for start, end in coverage.scan_ranges
         )
-        self.follower = RouteFollower(self.route)
-        self.planning_map_version = observation.planning_map_version
+        self._set_route(
+            route,
+            scan_ranges,
+            observation.planning_obstacle_mask,
+            observation.planning_map_version,
+        )
         self.phase = CoveragePhase.TRANSIT_ASTAR
 
     def _refresh_invalidated_route(self, observation: ControlObservation) -> None:
@@ -164,10 +193,84 @@ class CoverageController(HeuristicControllerBase):
             return
         assert self.follower is not None
         unflown = self.route[self.follower.index + 1 :]
-        if any(self._pose_blocked(pose, observation.planning_obstacle_mask) for pose in unflown):
-            self._plan_route(observation)
+        current_pose = (
+            *observation.self_state.position,
+            observation.self_state.heading_rad,
+        )
+        if self._route_blocked(
+            (current_pose, *unflown), observation.planning_obstacle_mask
+        ) is not None:
+            self._replan_unflown_suffix(observation)
         else:
             self.planning_map_version = observation.planning_map_version
+
+    def _replan_unflown_suffix(self, observation: ControlObservation) -> None:
+        assert self.follower is not None
+        suffix_start = self._next_unconsumed_scan_start()
+        suffix = self.route[suffix_start:]
+        if not suffix:
+            raise CoverageRouteBlockedError(
+                self.follower.index,
+                (
+                    math.floor(observation.self_state.position[0]),
+                    math.floor(observation.self_state.position[1]),
+                ),
+                observation.planning_map_version,
+            )
+        start_pose = (
+            *observation.self_state.position,
+            observation.self_state.heading_rad,
+        )
+        transit = self.navigator.plan_grid(
+            start_pose,
+            {suffix[0][:2]},
+            observation.planning_obstacle_mask,
+            self.r_min,
+            observation.planning_map_version,
+        )
+        offset = len(transit) - 1
+        scan_ranges = tuple(
+            (
+                offset + max(0, start - suffix_start),
+                offset + end - suffix_start,
+            )
+            for start, end in self.scan_ranges
+            if end >= suffix_start
+        )
+        route = tuple(transit) + suffix[1:]
+        self._set_route(
+            route,
+            scan_ranges,
+            observation.planning_obstacle_mask,
+            observation.planning_map_version,
+        )
+        self.phase = CoveragePhase.TRANSIT_ASTAR
+
+    def _next_unconsumed_scan_start(self) -> int:
+        assert self.follower is not None
+        index = self.follower.index
+        for start, end in self.scan_ranges:
+            if index < start:
+                return start
+            if start <= index < end:
+                return index + 1
+        return len(self.route)
+
+    def _set_route(
+        self,
+        route: Sequence[tuple[float, float, float]],
+        scan_ranges: tuple[tuple[int, int], ...],
+        obstacle_mask: object,
+        planning_map_version: int,
+    ) -> None:
+        blocked = self._route_blocked(route, obstacle_mask)
+        if blocked is not None:
+            segment_index, cell = blocked
+            raise CoverageRouteBlockedError(segment_index, cell, planning_map_version)
+        self.route = tuple(route)
+        self.scan_ranges = scan_ranges
+        self.follower = RouteFollower(self.route)
+        self.planning_map_version = planning_map_version
 
     def _update_phase(self, observation: ControlObservation) -> None:
         assert self.follower is not None
@@ -196,10 +299,35 @@ class CoverageController(HeuristicControllerBase):
         self.phase = CoveragePhase.ALIGN_SCAN
 
     @staticmethod
-    def _pose_blocked(pose: tuple[float, float, float], obstacle_mask: object) -> bool:
-        cols, rows = obstacle_mask.shape
-        col, row = math.floor(pose[0]), math.floor(pose[1])
-        return not (0 <= col < cols and 0 <= row < rows) or bool(obstacle_mask[col, row])
+    def _route_blocked(
+        route: Sequence[tuple[float, float, float]], obstacle_mask: object
+    ) -> tuple[int, tuple[int, int]] | None:
+        if not route:
+            return (0, (0, 0))
+        first_cell = (math.floor(route[0][0]), math.floor(route[0][1]))
+        if SafetyEnvelope._cell_blocked(*first_cell, obstacle_mask):
+            return (0, first_cell)
+        for index, (start, end) in enumerate(zip(route, route[1:])):
+            for cell in SafetyEnvelope._traversed_cells(*start[:2], *end[:2]):
+                if SafetyEnvelope._cell_blocked(*cell, obstacle_mask):
+                    return (index, cell)
+        return None
+
+    @staticmethod
+    def _validate_command_modes(
+        sensor_mode: SensorMode,
+        operation_mode: OperationMode,
+        observation: ControlObservation,
+    ) -> None:
+        if operation_mode not in observation.action_mask.allowed_operation_modes:
+            raise InvalidControlCommand("operation mode is absent from action mask")
+        if sensor_mode not in observation.action_mask.allowed_sensor_modes:
+            raise InvalidControlCommand("sensor mode is absent from action mask")
 
 
-__all__ = ["CoverageController", "CoveragePhase", "scan_endpoint_poses"]
+__all__ = [
+    "CoverageController",
+    "CoveragePhase",
+    "CoverageRouteBlockedError",
+    "scan_endpoint_poses",
+]
