@@ -764,6 +764,30 @@ def test_recovery_planner_rejects_a_path_to_a_different_base():
     assert candidates == ()
 
 
+@pytest.mark.parametrize(
+    "route_origin",
+    [(2.0, 1.0, 0.0), (1.0, 1.0, 0.1)],
+    ids=["position", "heading"],
+)
+def test_recovery_planner_rejects_a_path_from_a_different_origin(route_origin):
+    start = (1.0, 1.0, 0.0)
+    navigator = RecoveryNavigatorSpy(
+        {(8.0, 1.0): [route_origin, (8.0, 1.0, 0.0)]}
+    )
+
+    candidates = RecoveryPlanner(navigator=navigator).evaluate(
+        start,
+        100.0,
+        (BaseObservation("base-A", (8.0, 1.0), 1, 0),),
+        np.zeros((12, 12), dtype=bool),
+        3,
+        1.0,
+        2.0,
+    )
+
+    assert candidates == ()
+
+
 def test_return_requires_a_reserved_recovery_plan(action_spec, observation):
     controller = _return_controller(action_spec, RecoveryNavigatorSpy(), [])
     return_observation = _return_observation(observation)
@@ -779,6 +803,26 @@ def test_return_requires_a_reserved_recovery_plan(action_spec, observation):
             ),
             return_observation,
         )
+
+
+def test_return_rejects_a_recovery_plan_from_a_different_start_pose(
+    action_spec, observation
+):
+    controller = _return_controller(action_spec, RecoveryNavigatorSpy(), [])
+    plan = replace(
+        _recovery_plan(),
+        path=((1.0, 5.0, 0.0), (4.0, 5.0, 0.0), (8.0, 5.0, 0.0)),
+        path_length_cells=7.0,
+    )
+
+    with pytest.raises(ValueError, match="current observation pose"):
+        controller.start_task(
+            ControlTask("R1", OperationMode.RETURN, recovery_plan=plan),
+            _return_observation(observation),
+        )
+
+    assert controller.recovery_plan is None
+    assert controller.reservation_id is None
 
 
 def test_return_follows_only_the_reserved_plan_and_emits_system_return(
@@ -827,6 +871,42 @@ def test_return_arrival_consumes_the_reservation(action_spec, observation):
     at_base = _with_pose(_return_observation(observation), (8.0, 5.0, 0.0))
 
     assert controller.is_complete(at_base)
+    controller.stop_task(StopReason.COMPLETED)
+
+    assert released == []
+
+
+def test_return_does_not_consume_reservation_outside_fixed_arrival_tolerance(
+    action_spec, observation
+):
+    released = []
+    controller = _return_controller(action_spec, RecoveryNavigatorSpy(), released)
+    controller.start_task(
+        ControlTask("R1", OperationMode.RETURN, recovery_plan=_recovery_plan()),
+        _return_observation(observation),
+    )
+    near_base = _with_pose(_return_observation(observation), (7.1, 5.0, 0.0))
+
+    assert not controller.is_complete(near_base)
+    controller.stop_task(StopReason.CANCELLED)
+
+    assert released == ["reservation-1"]
+
+
+def test_return_arrival_remains_latched_after_a_displaced_observation(
+    action_spec, observation
+):
+    released = []
+    controller = _return_controller(action_spec, RecoveryNavigatorSpy(), released)
+    controller.start_task(
+        ControlTask("R1", OperationMode.RETURN, recovery_plan=_recovery_plan()),
+        _return_observation(observation),
+    )
+    at_base = _with_pose(_return_observation(observation), (8.0, 5.0, 0.0))
+    displaced = _with_pose(_return_observation(observation), (6.0, 5.0, 0.0))
+
+    assert controller.is_complete(at_base)
+    assert controller.is_complete(displaced)
     controller.stop_task(StopReason.COMPLETED)
 
     assert released == []
@@ -883,6 +963,42 @@ def test_return_replans_to_only_the_reserved_base_and_retains_reservation(
     assert controller.planning_map_version == 2
     assert released == []
     assert decision.command.operation_mode is OperationMode.RETURN
+
+
+def test_return_rejects_and_latches_a_replan_from_a_different_origin(
+    action_spec, observation
+):
+    stale_origin_route = [
+        (2.0, 5.0, 0.0),
+        (2.0, 7.0, math.pi / 2.0),
+        (8.0, 7.0, 0.0),
+        (8.0, 5.0, -math.pi / 2.0),
+    ]
+    navigator = RecoveryNavigatorSpy({(8.0, 5.0): stale_origin_route})
+    released = []
+    controller = _return_controller(action_spec, navigator, released)
+    initial = _return_observation(observation)
+    controller.start_task(
+        ControlTask("R1", OperationMode.RETURN, recovery_plan=_recovery_plan()),
+        initial,
+    )
+    blocked = np.array(initial.planning_obstacle_mask, copy=True)
+    blocked[4, 5] = True
+    changed = replace(
+        _with_pose(initial, (3.0, 5.0, 0.0)),
+        planning_obstacle_mask=blocked,
+        planning_map_version=2,
+    )
+
+    with pytest.raises(NoSafeRecoveryPath, match="current observation pose"):
+        controller.act(changed)
+    with pytest.raises(NoSafeRecoveryPath, match="current observation pose"):
+        controller.act(initial)
+
+    assert controller.route == ()
+    assert controller.follower is None
+    assert controller.reservation_id == "reservation-1"
+    assert released == []
 
 
 @pytest.mark.parametrize("failure_kind", ["no_path", "range"])

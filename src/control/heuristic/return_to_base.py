@@ -27,6 +27,11 @@ from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.utils.track_orbit import LGVFTracker
 
 
+DEFAULT_ARRIVAL_TOLERANCE_CELLS = 0.05
+ROUTE_ORIGIN_POSITION_TOLERANCE_CELLS = 1e-6
+ROUTE_ORIGIN_HEADING_TOLERANCE_RAD = 1e-6
+
+
 @dataclass(frozen=True)
 class RecoveryCandidate:
     base: BaseObservation
@@ -110,6 +115,8 @@ class RecoveryPlanner:
                 path = _normalise_route(planned)
             except ValueError:
                 continue
+            if not _poses_match(path[0], start_pose):
+                continue
             if path[-1][:2] != tuple(map(float, base.position)):
                 continue
             if _route_blocked(path, planning_obstacle_mask):
@@ -148,14 +155,22 @@ class ReturnToBaseController(HeuristicControllerBase):
         navigator: AStarNavigator | None = None,
         release_reservation: Callable[[str], None] | None = None,
         r_min: float = 1.0,
+        arrival_tolerance_cells: float = DEFAULT_ARRIVAL_TOLERANCE_CELLS,
     ) -> None:
         if not math.isfinite(r_min) or r_min <= 0.0:
             raise ValueError("r_min must be finite and positive")
+        if (
+            not math.isfinite(arrival_tolerance_cells)
+            or arrival_tolerance_cells <= 0.0
+        ):
+            raise ValueError("arrival_tolerance_cells must be finite and positive")
         self._observation_spec = observation_spec
         self._action_spec = action_spec
         self.navigator = navigator or AStarNavigator()
         self._release_reservation = release_reservation or (lambda _: None)
         self.r_min = float(r_min)
+        # Arrival is a fixed spatial test, independent of speed and control period.
+        self.arrival_tolerance_cells = float(arrival_tolerance_cells)
         self.task: ControlTask | None = None
         self.recovery_plan: RecoveryPlan | None = None
         self.route: tuple[Pose, ...] = ()
@@ -193,6 +208,10 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise ValueError("RETURN task requires a RecoveryPlan")
         plan = task.recovery_plan
         route = _normalise_route(plan.path)
+        if not _poses_match(route[0], _current_pose(observation)):
+            raise ValueError(
+                "RecoveryPlan path must start at the current observation pose"
+            )
         if route[-1][:2] != tuple(map(float, plan.base_position)):
             raise ValueError("RecoveryPlan path must end at base_position")
         if not all(
@@ -245,15 +264,9 @@ class ReturnToBaseController(HeuristicControllerBase):
     def is_complete(self, observation: ControlObservation) -> bool:
         if self.recovery_plan is None:
             return False
-        arrival_radius = max(
-            observation.self_state.speed_cells_min * observation.dt_min, 0.05
-        )
-        self._arrived = (
-            math.dist(
-                observation.self_state.position,
-                self.recovery_plan.base_position,
-            )
-            <= arrival_radius
+        self._arrived = self._arrived or (
+            math.dist(observation.self_state.position, self.recovery_plan.base_position)
+            <= self.arrival_tolerance_cells
         )
         return self._arrived
 
@@ -294,6 +307,10 @@ class ReturnToBaseController(HeuristicControllerBase):
             route = _normalise_route(planned)
         except ValueError as exc:
             raise self._fail_recovery(observation, str(exc)) from exc
+        if not _poses_match(route[0], current_pose):
+            raise self._fail_recovery(
+                observation, "replanned route does not start at current observation pose"
+            )
         if route[-1][:2] != tuple(map(float, self.recovery_plan.base_position)):
             raise self._fail_recovery(
                 observation, "replanned route does not end at the reserved base"
@@ -448,6 +465,21 @@ def _normalise_route(path: Sequence[Sequence[float]]) -> tuple[Pose, ...]:
     return route
 
 
+def _poses_match(actual: Sequence[float], expected: Sequence[float]) -> bool:
+    """Match route origins within 1e-6 cells and wrapped radians."""
+    if len(actual) != 3 or len(expected) != 3:
+        return False
+    position_matches = (
+        math.dist(actual[:2], expected[:2])
+        <= ROUTE_ORIGIN_POSITION_TOLERANCE_CELLS
+    )
+    heading_delta = (actual[2] - expected[2] + math.pi) % (2.0 * math.pi) - math.pi
+    return (
+        position_matches
+        and abs(heading_delta) <= ROUTE_ORIGIN_HEADING_TOLERANCE_RAD
+    )
+
+
 def _route_blocked(route: Sequence[Pose], obstacle_mask: object) -> bool:
     if not route:
         return True
@@ -461,6 +493,7 @@ def _route_blocked(route: Sequence[Pose], obstacle_mask: object) -> bool:
 
 
 __all__ = [
+    "DEFAULT_ARRIVAL_TOLERANCE_CELLS",
     "NoSafeRecoveryPath",
     "RecoveryCandidate",
     "RecoveryPlanner",

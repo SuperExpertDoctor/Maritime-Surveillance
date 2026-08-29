@@ -210,10 +210,97 @@ def test_safety_blocks_a_long_diagonal_trajectory_that_cuts_a_blocked_corner(set
     assert "motion_corrected" in {item.kind for item in result.interventions}
 
 
-def test_safety_traverses_a_negative_direction_diagonal_to_its_endpoint_cell():
-    cells = SafetyEnvelope._traversed_cells(10.0, 12.0, 8.0, 13.0)
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        (
+            (0.5, 0.5),
+            (2.0, 2.0),
+            (
+                (0, 0),
+                (1, 0),
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (1, 2),
+                (2, 2),
+            ),
+        ),
+        (
+            (10.0, 12.0),
+            (8.0, 13.0),
+            ((10, 12), (9, 12), (8, 12), (8, 13)),
+        ),
+        (
+            (2.5, 2.5),
+            (0.0, 0.0),
+            (
+                (2, 2),
+                (1, 2),
+                (2, 1),
+                (1, 1),
+                (0, 1),
+                (1, 0),
+                (0, 0),
+            ),
+        ),
+    ],
+    ids=["positive-terminal-corner", "mixed-sign", "negative-terminal-corner"],
+)
+def test_safety_diagonal_supercover_is_complete_and_direction_symmetric(
+    start, end, expected
+):
+    forward = SafetyEnvelope._traversed_cells(*start, *end)
+    reverse = SafetyEnvelope._traversed_cells(*end, *start)
 
-    assert cells == ((10, 12), (9, 12), (8, 12), (8, 13))
+    assert forward == expected
+    assert reverse == tuple(reversed(expected))
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        ((0.0, 1.0), (3.0, 1.0), ((0, 1), (1, 1), (2, 1), (3, 1))),
+        ((1.0, 0.0), (1.0, 3.0), ((1, 0), (1, 1), (1, 2), (1, 3))),
+        ((0.5, 1.5), (2.0, 1.5), ((0, 1), (1, 1), (2, 1))),
+        ((1.5, 0.5), (1.5, 2.0), ((1, 0), (1, 1), (1, 2))),
+    ],
+    ids=["horizontal", "vertical", "horizontal-end-boundary", "vertical-end-boundary"],
+)
+def test_safety_axis_aligned_supercover_respects_exact_boundaries(
+    start, end, expected
+):
+    forward = SafetyEnvelope._traversed_cells(*start, *end)
+    reverse = SafetyEnvelope._traversed_cells(*end, *start)
+
+    assert forward == expected
+    assert reverse == tuple(reversed(expected))
+
+
+@pytest.mark.parametrize(
+    ("start", "heading"),
+    [
+        ((0.5, 0.5), math.pi / 4.0),
+        ((2.0, 2.0), -3.0 * math.pi / 4.0),
+    ],
+    ids=["forward", "reverse"],
+)
+def test_safety_blocks_a_side_cell_touched_at_a_terminal_corner(start, heading):
+    obstacle_mask = np.zeros((4, 4), dtype=bool)
+    obstacle_mask[2, 1] = True
+    observation = make_observation(
+        position=start,
+        heading_rad=heading,
+        obstacle_mask=obstacle_mask,
+    )
+    command = ControlCommand(
+        turn_rate_rad_min=0.0,
+        speed_cells_min=math.hypot(1.5, 1.5),
+        sensor_mode=SensorMode.OFF,
+        operation_mode=OperationMode.TRANSIT,
+    )
+
+    assert SafetyEnvelope._motion_blocked(command, observation, dt_min=1.0)
 
 
 def test_safety_blocks_a_negative_direction_diagonal_at_its_endpoint():

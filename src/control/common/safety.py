@@ -183,11 +183,9 @@ class SafetyEnvelope:
         t_max_row = (next_row - start_row) / delta_row if step_row else infinity
 
         while (col, row) != end_cell:
-            if min(t_max_col, t_max_row) >= 1.0 - 1e-12:
-                if cells[-1] != end_cell:
-                    cells.append(end_cell)
-                break
-            if math.isclose(t_max_col, t_max_row, rel_tol=0.0, abs_tol=1e-12):
+            next_t_col = t_max_col if col != end_cell[0] else infinity
+            next_t_row = t_max_row if row != end_cell[1] else infinity
+            if math.isclose(next_t_col, next_t_row, rel_tol=0.0, abs_tol=1e-12):
                 if step_col:
                     cells.append((col + step_col, row))
                 if step_row:
@@ -196,7 +194,7 @@ class SafetyEnvelope:
                 row += step_row
                 t_max_col += t_delta_col
                 t_max_row += t_delta_row
-            elif t_max_col < t_max_row:
+            elif next_t_col < next_t_row:
                 col += step_col
                 t_max_col += t_delta_col
             else:
