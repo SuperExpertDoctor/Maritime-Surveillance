@@ -787,7 +787,7 @@ engine = SimulationEngine(
 )
 ```
 
-上面示例中的 `PolicySource` 需要导入：
+上面 provider 示例中的 `PolicySource` 需要导入：
 
 ```python
 from src.control.common import PolicySource
