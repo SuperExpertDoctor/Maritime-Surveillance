@@ -98,6 +98,8 @@ class SafetyEnvelope:
             raise InvalidControlCommand("continuous action values must be finite")
         if command.operation_mode not in observation.action_mask.allowed_operation_modes:
             raise InvalidControlCommand("operation mode is absent from action mask")
+        if command.sensor_mode not in observation.action_mask.allowed_sensor_modes:
+            raise InvalidControlCommand("sensor mode is absent from action mask")
         if (
             command.target_contact_id is not None
             and command.target_contact_id not in observation.action_mask.target_contact_ids
@@ -136,8 +138,9 @@ class SafetyEnvelope:
     def _clip(value: float, lower: float, upper: float) -> float:
         return min(max(value, lower), upper)
 
-    @staticmethod
+    @classmethod
     def _motion_blocked(
+        cls,
         command: ControlCommand,
         observation: ControlObservation,
         dt_min: float,
@@ -149,16 +152,65 @@ class SafetyEnvelope:
         end_row = start_row + distance * math.sin(mid_heading)
         mask = observation.planning_obstacle_mask
         return any(
-            SafetyEnvelope._point_blocked(col, row, mask)
-            for col, row in ((start_col, start_row), (end_col, end_row))
+            cls._cell_blocked(col, row, mask)
+            for col, row in cls._traversed_cells(
+                start_col, start_row, end_col, end_row
+            )
         )
 
     @staticmethod
-    def _point_blocked(col: float, row: float, mask: object) -> bool:
+    def _traversed_cells(
+        start_col: float,
+        start_row: float,
+        end_col: float,
+        end_row: float,
+    ) -> tuple[tuple[int, int], ...]:
+        """Return the supercover cells for a segment in planning-grid space."""
+        col = math.floor(start_col)
+        row = math.floor(start_row)
+        end_cell = (math.floor(end_col), math.floor(end_row))
+        cells = [(col, row)]
+        delta_col = end_col - start_col
+        delta_row = end_row - start_row
+        step_col = (delta_col > 0) - (delta_col < 0)
+        step_row = (delta_row > 0) - (delta_row < 0)
+        infinity = math.inf
+        t_delta_col = abs(1.0 / delta_col) if step_col else infinity
+        t_delta_row = abs(1.0 / delta_row) if step_row else infinity
+        next_col = col + (1 if step_col > 0 else 0)
+        next_row = row + (1 if step_row > 0 else 0)
+        t_max_col = (next_col - start_col) / delta_col if step_col else infinity
+        t_max_row = (next_row - start_row) / delta_row if step_row else infinity
+
+        while (col, row) != end_cell:
+            if math.isclose(t_max_col, t_max_row, rel_tol=0.0, abs_tol=1e-12):
+                if step_col:
+                    cells.append((col + step_col, row))
+                if step_row:
+                    cells.append((col, row + step_row))
+                col += step_col
+                row += step_row
+                t_max_col += t_delta_col
+                t_max_row += t_delta_row
+            elif t_max_col < t_max_row:
+                col += step_col
+                t_max_col += t_delta_col
+            else:
+                row += step_row
+                t_max_row += t_delta_row
+            cells.append((col, row))
+        return tuple(cells)
+
+    @staticmethod
+    def _cell_blocked(col: int, row: int, mask: object) -> bool:
         cols, rows = mask.shape
-        if not (0.0 <= col < cols and 0.0 <= row < rows):
+        if not (0 <= col < cols and 0 <= row < rows):
             return True
-        return bool(mask[math.floor(col), math.floor(row)])
+        return bool(mask[col, row])
+
+    @staticmethod
+    def _point_blocked(col: float, row: float, mask: object) -> bool:
+        return SafetyEnvelope._cell_blocked(math.floor(col), math.floor(row), mask)
 
 
 __all__ = [

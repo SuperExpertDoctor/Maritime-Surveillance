@@ -80,6 +80,7 @@ class UAVEntity:
         self._distance_this_step = 0.0
         self.last_requested_command = None
         self.last_applied_command = None
+        self.last_safety_interventions = ()
         self.lgvf = LGVFTracker(R_min=R_min)
         self.sar_sensor = SARSensor()
         self.eo_sensor = EOSensor()

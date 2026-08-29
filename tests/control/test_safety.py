@@ -168,6 +168,48 @@ def test_safety_masks_sar_outside_stable_coverage_leg(setup):
     assert "sensor_mode_masked" in {item.kind for item in result.interventions}
 
 
+def test_safety_rejects_masked_sar_before_stability_masking(setup):
+    envelope, observation = setup
+    observation = make_observation(
+        action_mask=ActionMask(
+            (SensorMode.OFF, SensorMode.EO),
+            (OperationMode.TRANSIT, OperationMode.COVERAGE, OperationMode.TRACK),
+            ("G1",),
+        )
+    )
+    command = ControlCommand(
+        turn_rate_rad_min=0.2,
+        speed_cells_min=0.25,
+        sensor_mode=SensorMode.SAR,
+        operation_mode=OperationMode.TRANSIT,
+    )
+
+    with pytest.raises(InvalidControlCommand, match="sensor mode"):
+        envelope.apply(command, observation, dt_min=1.0)
+
+
+def test_safety_blocks_a_long_diagonal_trajectory_that_cuts_a_blocked_corner(setup):
+    envelope = SafetyEnvelope(ActionSpec(-0.2, 0.2, 0.1, 3.0))
+    obstacle_mask = np.zeros((5, 5), dtype=bool)
+    obstacle_mask[2, 1] = True
+    observation = make_observation(
+        position=(1.5, 1.5),
+        heading_rad=math.pi / 4.0,
+        obstacle_mask=obstacle_mask,
+    )
+    command = ControlCommand(
+        turn_rate_rad_min=0.0,
+        speed_cells_min=math.sqrt(8.0),
+        sensor_mode=SensorMode.OFF,
+        operation_mode=OperationMode.TRANSIT,
+    )
+
+    result = envelope.apply(command, observation, dt_min=1.0)
+
+    assert result.applied_command.speed_cells_min == pytest.approx(0.1)
+    assert "motion_corrected" in {item.kind for item in result.interventions}
+
+
 def test_safety_rejects_masked_operation_or_unknown_target(setup):
     envelope, observation = setup
     operation = ControlCommand(0.0, 0.25, SensorMode.OFF, OperationMode.RETURN)
