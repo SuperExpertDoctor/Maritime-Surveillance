@@ -10,6 +10,17 @@ from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport
 from src.schedule.info_field import InfoField
 
 
+_OPERATION_BY_STATUS = {
+    "idle": "idle",
+    "transit": "transit",
+    "searching": "coverage",
+    "tracking": "track",
+    "returning": "return",
+    "holding": "holding",
+    "refueling": "idle",
+}
+
+
 class StateManager:
     def __init__(self, config: AppConfig):
         self.config = config
@@ -61,7 +72,31 @@ class StateManager:
         return next((uav for uav in self._uavs if uav.id == uav_id), None)
 
     def get_available_uavs(self) -> list[UAVState]:
-        return [uav for uav in self._uavs if uav.status == "idle"]
+        return [
+            uav
+            for uav in self._uavs
+            if uav.control_mode == "heuristic"
+            and uav.control_owner == "system"
+            and uav.operation_mode in {"idle", "holding"}
+        ]
+
+    def update_uav_control(
+        self,
+        uav_id: str,
+        control_mode: str,
+        control_owner: str,
+        operation_mode: str,
+        controller_generation: int,
+        safety_intervened: bool,
+    ) -> None:
+        uav = self.get_uav(uav_id)
+        if uav is None:
+            return
+        uav.control_mode = control_mode
+        uav.control_owner = control_owner
+        uav.operation_mode = operation_mode
+        uav.controller_generation = controller_generation
+        uav.safety_intervened = safety_intervened
 
     def update_uav_status(
         self,
@@ -78,6 +113,8 @@ class StateManager:
         if uav is None:
             return
         uav.status = status
+        if status in _OPERATION_BY_STATUS:
+            uav.operation_mode = _OPERATION_BY_STATUS[status]
         uav.position = position
         if assigned_region_id is not None:
             uav.assigned_region_id = assigned_region_id

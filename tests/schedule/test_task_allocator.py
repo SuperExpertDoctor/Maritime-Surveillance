@@ -1,4 +1,5 @@
 ﻿import pytest
+import src.schedule.task_allocator as task_allocator_module
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.task_allocator import TaskAllocator
 from src.schedule.datatypes import BBox, GridCoord, Region
@@ -131,3 +132,36 @@ def test_light_completion_escalates_when_new_coverage_work_is_available(allocato
 
     assert result["trigger_type"] == "heavy"
     assert calls and calls[0] > 0
+
+
+@pytest.mark.parametrize(
+    ("pairing_path", "control_mode"),
+    [("light", "bc"), ("heavy", "rl")],
+)
+def test_pairing_paths_never_include_idle_learning_airframes(
+    allocator, monkeypatch, pairing_path, control_mode
+):
+    allocator.sm.update_uav_control(
+        "UAV-1", control_mode, "learning", "idle", 1, False
+    )
+    region = Region(
+        id="S-unassigned",
+        bbox=BBox(10, 10, 15, 15),
+        type="search",
+    )
+    allocator.sm.set_search_regions([region])
+    captured_uav_ids = []
+
+    def capture_hungarian(uavs, regions):
+        del regions
+        captured_uav_ids.extend(uav["id"] for uav in uavs)
+        return []
+
+    monkeypatch.setattr(task_allocator_module, "hungarian_pair", capture_hungarian)
+
+    if pairing_path == "light":
+        allocator._handle_light_trigger(10.0, object())
+    else:
+        allocator._pair_available_regions([region])
+
+    assert "UAV-1" not in captured_uav_ids
