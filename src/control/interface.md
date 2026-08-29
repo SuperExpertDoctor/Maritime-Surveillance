@@ -691,8 +691,7 @@ class MyCoverageController(HeuristicControllerBase):
 
 ```
 
-示例中的 `ControllerEventRequest` 需要从
-`src.control.common.contracts` 导入。真实实现还应在自己的航路/覆盖进度达到终点
+真实实现还应在自己的航路/覆盖进度达到终点
 时设置 `_complete`，并确保完成事件只发一次。
 
 ### 7.3 当前启发式工厂边界
