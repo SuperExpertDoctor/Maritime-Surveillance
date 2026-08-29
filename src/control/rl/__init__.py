@@ -1,1 +1,5 @@
-"""Reinforcement learning control strategy package."""
+"""Reinforcement-learning controller template."""
+
+from src.control.rl.base import RLControllerBase
+
+__all__ = ["RLControllerBase"]

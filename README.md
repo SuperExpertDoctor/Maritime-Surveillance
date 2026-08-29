@@ -1,6 +1,6 @@
 # UAV Maritime Surveillance Scheduler
 
-基于 LLM（LongCat）的 UAV 编队海上侦察动态任务调度系统。在 300 km × 300 km 海域中，10 架固定翼 UAV 执行区域覆盖搜索（SAR）与目标跟踪监视（EO/IR），LLM 作为全局决策器动态划分搜索区域，Hungarian 算法负责 UAV 与区域的最优配对。
+基于 LLM（LongCat）的 UAV 编队海上侦察动态任务调度系统。在 300 km × 300 km 海域中，10 架固定翼 UAV 执行区域覆盖搜索（SAR）与目标跟踪监视（EO/IR），LLM 作为全局决策器动态划分搜索区域，Hungarian 算法负责 UAV 与区域的最优配对。所有单 UAV 命令都经过统一的 `ControlCoordinator`，默认使用 heuristic 控制策略。
 
 ---
 
@@ -14,8 +14,8 @@
             ┌──────────────────────┼──────────────────────┐
             ▼                      ▼                      ▼
      ┌─────────────┐     ┌─────────────┐        ┌─────────────┐
-     │  障碍物更新   │     │  舰船机动     │        │  UAV 状态推进 │
-     │ (雷云移动/消散)│     │ (zigzag/编队) │        │ (Dubins+LGVF)│
+     │  障碍物更新   │     │  舰船机动     │        │ 控制运行时推进 │
+     │ (雷云移动/消散)│     │ (zigzag/编队) │        │ (Coordinator) │
      └─────────────┘     └─────────────┘        └──────┬──────┘
                                                        │
                               ┌────────────────────────┘
@@ -45,7 +45,7 @@
         ┌────────────┼────────────┐
         ▼            ▼            ▼
    任务区域划分   UAV↔区域配对   路径规划
-   (5层决策架构)  (Hungarian)   (Dubins)
+   (5层决策架构)  (Hungarian)   (A* + Dubins)
 ```
 
 每仿真步（1 分钟）执行一次上述循环。核心调度器不每步调用 LLM——仅在**事件驱动**（目标发现/丢失/驶离、UAV 返航、雷云变化）或**周期兜底**（30 分钟）时触发重分配。轻量事件（搜索完成、加油完成）仅走 Hungarian 重新配对，不调用 LLM。
@@ -336,11 +336,11 @@ UAV 在分配的搜索矩形区域上执行蛇形（boustrophedon）扫描。SAR
 
 ### 3.3 航路规划 — 避障飞行
 
-UAV 从当前位置飞往目标搜索区或返回基地的途中（不启用传感器），使用 **RRT\* + Dubins** 两步法避障：
+UAV 从当前位置飞往目标搜索区或返回基地的途中（不启用传感器），使用 **Hybrid A* + Dubins** 两步法避障：
 
-1. **RRT\*** 在 2D 空间中搜索几何路径（目标偏置采样 10%）
-2. **Dubins 曲线**平滑几何路径的每个拐角
-3. **Bresenham 光栅化**碰撞检测确保路径安全
+1. **Hybrid A*** 在带航向状态的栅格空间中搜索满足最小转弯半径的路径
+2. **Dubins 曲线**将栅格转场转换为可飞行的连续轨迹
+3. **超覆盖栅格碰撞检测**确认路径不穿越障碍、不切角
 
 ### 3.4 目标跟踪监视 — EO/IR Standoff 盘旋
 
@@ -363,6 +363,12 @@ $$V = \frac{(r^2 - R_d^2)^2}{2}$$
 | 检测概率 | 0.70 |
 
 ---
+
+### 3.5 控制策略架构
+
+控制代码按四个目录组织：`common/` 放置不可变观测、动作、事件、lease 和安全契约，`heuristic/` 提供当前内置策略和 Hybrid A* 导航，`bc/` 与 `rl/` 只提供可扩展的抽象基类。单 UAV 的运行时顺序固定为“取出事件 → 构建观测 → controller 决策 → 安全校验 → executor 执行”，实体和调度器不会绕过这条命令路径直接推进任务。
+
+`control_mode` 表示配置的策略类型，`control_owner` 表示当前控制权。普通工作 lease 由 heuristic 或 learning controller 持有；返航、holding 和安全故障处理使用显式的 SYSTEM lease。任务事件只会一次性消费 heuristic lease，learning lease 只接收事件观测，不会被普通任务事件替换。新的 BC/RL 模式必须通过 `ControlFactory.register()` 注入 provider；未注册的模式会快速失败，不会静默回退到 heuristic 或伪造动作。
 
 ## 四、事件触发机制
 
@@ -509,7 +515,7 @@ npm run test:acceptance
 | 模块 | 文件 | 职责 |
 |------|------|------|
 | 覆盖规划 | `coverage_planner.py` | Dubins 蛇形 SAR 扫描路径生成 |
-| 避障规划 | `obstacle_avoider.py` | RRT\* + Dubins 避障路径规划 |
+| 避障规划 | `control/heuristic/navigation.py` | Hybrid A* + Dubins 避障路径规划 |
 | 跟踪轨道 | `track_orbit.py` | LGVF Standoff 跟踪引导 |
 | 相位协调 | `phase_coordinator.py` | 多 UAV 等相位空速协调 |
 | AIS 判别 | `ais_discriminator.py` | AIS 信号对比 + 军民分类决策 |
@@ -529,6 +535,15 @@ npm run test:acceptance
 | 任务分配 | `task_allocator.py` | **五层决策架构编排器** |
 | 状态管理 | `state_manager.py` | UAV/区域/标记点/事件权威状态 |
 | Reviewer | `llm_reviewer.py` | 长期记忆生成 |
+
+### 控制策略 (`src/control/`)
+
+| 目录 | 职责 |
+|------|------|
+| `common/` | 统一观测、动作、事件、lease、安全 envelope、executor 和 coordinator |
+| `heuristic/` | 覆盖、跟踪、返航、holding 以及 Hybrid A* 控制实现 |
+| `bc/` | `BCControllerBase` 抽象接口，由外部 provider 提供实现 |
+| `rl/` | `RLControllerBase` 抽象接口，由外部 provider 提供实现 |
 
 ### 可视化 (`src/vis/`)
 
@@ -553,3 +568,4 @@ npm run test:acceptance
 | `grid.yaml` | 网格分辨率、信息场衰减参数、候选提取阈值 |
 | `llm.yaml` | LLM 重试策略、触发周期 |
 | `llm_params.yaml` | LLM Provider / Model / API 绑定 |
+| `control.yaml` | 默认控制模式、per-UAV 策略、安全和导航参数 |

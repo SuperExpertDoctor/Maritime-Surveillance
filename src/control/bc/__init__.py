@@ -1,1 +1,5 @@
-"""Behavioral cloning control strategy package."""
+"""Behavioral cloning controller template."""
+
+from src.control.bc.base import BCControllerBase
+
+__all__ = ["BCControllerBase"]
