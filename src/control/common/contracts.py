@@ -49,6 +49,18 @@ class StopReason(str, Enum):
 Pose = tuple[float, float, float]
 
 
+def _immutable_snapshot(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _immutable_snapshot(item) for key, item in value.items()}
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_immutable_snapshot(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_immutable_snapshot(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class ObservationSpec:
     schema_version: str
@@ -69,6 +81,13 @@ class ActionMask:
     allowed_sensor_modes: tuple[SensorMode, ...]
     allowed_operation_modes: tuple[OperationMode, ...]
     target_contact_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "allowed_sensor_modes", tuple(self.allowed_sensor_modes))
+        object.__setattr__(
+            self, "allowed_operation_modes", tuple(self.allowed_operation_modes)
+        )
+        object.__setattr__(self, "target_contact_ids", tuple(self.target_contact_ids))
 
 
 @dataclass(frozen=True)
@@ -130,6 +149,9 @@ class ControllerEventRequest:
     event_type: str
     payload: Mapping[str, object] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "payload", _immutable_snapshot(self.payload))
+
 
 @dataclass(frozen=True)
 class ControlDecision:
@@ -167,7 +189,7 @@ class ControlEvent:
     payload: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
+        object.__setattr__(self, "payload", _immutable_snapshot(self.payload))
 
 
 @dataclass(frozen=True)
@@ -190,14 +212,18 @@ class ControlObservation:
     action_mask: ActionMask
 
     def __post_init__(self) -> None:
-        for array in (
-            self.local_info,
-            self.local_value,
-            self.obstacle_mask,
-            self.searchable_mask,
-            self.planning_obstacle_mask,
+        for field_name in (
+            "local_info",
+            "local_value",
+            "obstacle_mask",
+            "searchable_mask",
+            "planning_obstacle_mask",
         ):
+            array = np.array(getattr(self, field_name), copy=True)
             array.setflags(write=False)
+            object.__setattr__(self, field_name, array)
+        for field_name in ("contacts", "hazards", "bases", "shared_uavs", "events"):
+            object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
 
 
 @dataclass(frozen=True)

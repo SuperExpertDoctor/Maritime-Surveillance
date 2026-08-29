@@ -8,10 +8,13 @@ from src.control.common.contracts import (
     ActionSpec,
     ControlCommand,
     ControlObservation,
+    ControlMode,
+    ControlOwner,
     ControllerContext,
     ObservationSpec,
     OperationMode,
     SensorMode,
+    UAVObservation,
 )
 from src.control.heuristic.base import HeuristicControllerBase
 from src.control.rl.base import RLControllerBase
@@ -94,7 +97,18 @@ def observation():
         schema_version="control-observation/v1",
         timestamp_min=0.0,
         dt_min=1.0,
-        self_state=None,
+        self_state=UAVObservation(
+            uav_id="uav-1",
+            position=(1.0, 2.0),
+            heading_rad=0.0,
+            speed_cells_min=0.25,
+            remaining_range_cells=10.0,
+            control_mode=ControlMode.BC,
+            control_owner=ControlOwner.LEARNING,
+            operation_mode=OperationMode.IDLE,
+            sensor_mode=SensorMode.OFF,
+            safety_intervened=False,
+        ),
         local_info=array.copy(),
         local_value=array.copy(),
         obstacle_mask=array.copy(),
