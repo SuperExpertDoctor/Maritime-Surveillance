@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
 
 import BottomDrawer from "./components/BottomDrawer";
@@ -6,6 +6,7 @@ import CanvasMap from "./components/CanvasMap";
 import PlaybackBar from "./components/PlaybackBar";
 import RightSidebar from "./components/RightSidebar";
 import useReplay from "./hooks/useReplay";
+import useMp4Export from "./hooks/useMp4Export";
 import useWebSocket from "./hooks/useWebSocket";
 
 
@@ -18,8 +19,10 @@ export default function App() {
   const [trailMode, setTrailMode] = useState("tail");
   const [liveEvents, setLiveEvents] = useState([]);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
+  const mapExporterRef = useRef(null);
   const live = useWebSocket(mode === "live");
   const replay = useReplay(mode === "replay");
+  const mp4Export = useMp4Export(replay, mapExporterRef);
   const frame = mode === "live" ? live.frame : replay.frame;
 
   useEffect(() => {
@@ -157,6 +160,7 @@ export default function App() {
       </header>
 
       <CanvasMap
+        ref={mapExporterRef}
         frame={frame}
         selectedUavId={selectedUavId}
         onSelectUav={setSelectedUavId}
@@ -183,12 +187,17 @@ export default function App() {
         isPlaying={replay.isPlaying}
         onPlayPause={() => replay.setIsPlaying((value) => !value)}
         frameIndex={replay.index}
-        totalFrames={replay.frames.length}
+        totalFrames={replay.total || replay.frames.length}
         onSeek={replay.seek}
         playSpeed={replay.speed}
         onSpeedChange={replay.setSpeed}
         frame={frame}
         markers={replay.markers}
+        onExportMp4={mp4Export.exportMp4}
+        exportAvailable={mp4Export.available}
+        exporting={mp4Export.exporting}
+        exportProgress={mp4Export.progress}
+        exportError={mp4Export.error}
       />
     </main>
   );

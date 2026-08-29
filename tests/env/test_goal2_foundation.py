@@ -28,6 +28,26 @@ def test_initial_scheduler_positions_match_alternating_physical_launch_bases():
     ]
 
 
+def test_frame_reports_zero_progress_before_a_transit_uav_leaves_its_base():
+    engine = SimulationEngine(ConfigLoader.load(), seed=19)
+    uav = engine.uavs[0]
+    uav.assign_mission(BBox(8, 8, 10, 10), [(8.0, 11.0, 0.0)], transit_end_index=1)
+    engine.allocator.sm.update_uav_status(uav.id, "transit", uav.position)
+
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    assert frame["uavs"][0]["position"] == list(uav.home_base_grid)
+    assert frame["uavs"][0]["transit_progress"] == 0.0
+
+
 def test_uav_visual_trail_keeps_a_full_eight_hour_mission_history():
     uav = UAVEntity(
         "UAV-test",
@@ -295,6 +315,7 @@ def test_frame_exposes_continuous_sar_and_eo_beam_geometry():
     sar_uav, eo_uav = engine.uavs[:2]
     sar_uav.status = "searching"
     sar_uav.sensor_mode = "sar"
+    sar_uav.sar_look_direction = "right"
     sar_uav.sar_footprint = sar_uav.sar_sensor.compute_swath_footprint(
         sar_uav.float_position,
         sar_uav.heading_rad,
@@ -321,7 +342,8 @@ def test_frame_exposes_continuous_sar_and_eo_beam_geometry():
 
     sar_frame = next(uav for uav in frame["uavs"] if uav["id"] == sar_uav.id)
     eo_frame = next(uav for uav in frame["uavs"] if uav["id"] == eo_uav.id)
-    assert len(sar_frame["sar_beam"]["polygon"]) == 4
+    assert len(sar_frame["sar_beam"]["polygon"]) == 5
+    assert tuple(sar_frame["sar_beam"]["polygon"][0]) == sar_uav.float_position
     assert sar_frame["sar_beam"]["look_direction"] in {"left", "right"}
     assert len(eo_frame["eo_fov"]["polygon"]) == 3
     assert math.isclose(eo_frame["eo_fov"]["half_angle"], math.radians(4.0))

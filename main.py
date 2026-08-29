@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import subprocess
+import sys
 from pathlib import Path
 import shutil
 import threading
@@ -12,9 +16,77 @@ import uvicorn
 
 from src.env.simulation import SimulationEngine
 from src.schedule.config_loader import ConfigLoader
-from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
-from src.vis.backend.server import broadcast_frame_sync, create_app
+from src.vis.backend.frame_publisher import FramePublisher
+from src.vis.backend.server import create_app
+
+
+def _free_port(port: int) -> None:
+    """Kill any process currently bound to *port* so the server can start.
+
+    On Windows the check covers ``python.exe`` only; on POSIX it targets any
+    process that matches the listening socket.
+    """
+    if sys.platform == "win32":
+        try:
+            raw = subprocess.check_output(
+                ["netstat", "-ano"], text=True, timeout=5
+            )
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            return
+        for line in raw.splitlines():
+            if f":{port}" not in line or "LISTENING" not in line:
+                continue
+            parts = line.strip().split()
+            pid = parts[-1]
+            if not pid.isdigit():
+                continue
+            # Only kill python processes — never touch system services
+            try:
+                info = subprocess.check_output(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
+                    text=True, timeout=5,
+                )
+                if "python.exe" not in info.lower() and "python" not in info.lower():
+                    print(
+                        f"Port {port} held by non-Python PID {pid}, refusing to kill"
+                    )
+                    continue
+            except subprocess.CalledProcessError:
+                continue
+            print(f"Port {port} occupied by PID {pid} (python.exe) — killing...")
+            try:
+                subprocess.check_call(
+                    ["taskkill", "/PID", pid, "/F"],
+                    timeout=10,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                print(f"  -> PID {pid} terminated, port {port} released.")
+            except subprocess.CalledProcessError as exc:
+                print(f"  -> Failed to kill PID {pid}: {exc}")
+        return
+
+    # POSIX (Linux / macOS)
+    try:
+        raw = subprocess.check_output(
+            ["lsof", "-ti", f":{port}"], text=True, timeout=5
+        )
+        pids = [pid.strip() for pid in raw.splitlines() if pid.strip().isdigit()]
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        return
+
+    for pid_str in pids:
+        pid = int(pid_str)
+        # Never kill our own process
+        if pid == os.getpid():
+            continue
+        print(f"Port {port} occupied by PID {pid} — killing...")
+        try:
+            os.kill(pid, signal.SIGKILL)
+            print(f"  -> PID {pid} terminated, port {port} released.")
+        except OSError as exc:
+            print(f"  -> Failed to kill PID {pid}: {exc}")
 
 
 def clear_output_cache(output_dir: str = "outputs") -> int:
@@ -68,6 +140,7 @@ def main(
     logger = None
 
     if start_server:
+        _free_port(port)
         app = create_app(config, engine.allocator.sm)
         app.state.total_steps = steps
         def run_server():
@@ -82,13 +155,14 @@ def main(
         print(f"可视化服务已启动: http://localhost:{port}")
     else:
         logger = FrameLogger()
+    frame_publisher = FramePublisher(
+        app.state.frame_logger if app is not None else logger,
+        app=app,
+    )
 
     def publish(current_engine: SimulationEngine, result: dict) -> None:
         sm = current_engine.allocator.sm
-        llm_cycle = (
-            result.get("llm_cycle")
-            or current_engine.allocator.llm_client.last_interaction
-        )
+        llm_cycle = result.get("llm_cycle")
         if app is not None:
             app.state.ships = current_engine.ships
             app.state.uav_entities = current_engine.uavs
@@ -96,23 +170,9 @@ def main(
             app.state.bases = current_engine.bases
             app.state.current_cycle = sm.cycle
             app.state.total_steps = steps
-            app.state.llm_cycle = llm_cycle
-            future = broadcast_frame_sync(app)
-            if future is not None:
-                future.result(timeout=10)
-        else:
-            frame = build_frame(
-                sm,
-                sm.cycle,
-                config,
-                total_steps=steps,
-                llm_cycle=llm_cycle,
-                ships=current_engine.ships,
-                uav_entities=current_engine.uavs,
-                obstacles=current_engine.obstacles,
-                bases=current_engine.bases,
-            )
-            logger.write(frame)
+            if llm_cycle is not None:
+                app.state.llm_cycle = llm_cycle
+        frame_publisher.push_snapshot(current_engine, result, steps)
 
         if result["trigger_type"] != "none":
             print(
@@ -130,6 +190,10 @@ def main(
             time.sleep(step_delay)
 
     summary = engine.run(steps, on_step=publish)
+    if not frame_publisher.flush(timeout=120):
+        frame_publisher.close()
+        raise RuntimeError("timed out while flushing replay frames")
+    frame_publisher.close()
     output_path = app.state.frame_logger.path if app is not None else logger.path
     summary["jsonl_path"] = output_path
     print("仿真结束。")

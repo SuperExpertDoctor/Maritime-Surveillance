@@ -7,7 +7,7 @@ and resolves them by replanning the lower-priority UAV.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+import re
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -33,7 +33,7 @@ def detect_conflicts(
     cell_size_km: float = 10.0,
     time_horizon_steps: int = 30,
     min_separation_cells: float = 0.5,
-    min_prediction_offset: int = 5,
+    min_prediction_offset: int = 1,
 ) -> list[PathConflict]:
     """Detect spatiotemporal conflicts across UAV planned paths.
 
@@ -56,78 +56,108 @@ def detect_conflicts(
     if len(active) < 2:
         return []
 
-    # Build per-step occupancy maps (step_offset → cell → [uav_ids])
-    occupancy: dict[int, dict[tuple[int, int], list[str]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-
-    for uav in active:
-        path = uav["planned_path"]
-        for offset, pose in enumerate(path[:time_horizon_steps]):
-            # Offset zero is the UAV's already-occupied current pose.  A
-            # common base launch or crossing at that instant cannot be
-            # resolved by resetting a route; only future conflicts with
-            # enough lead time are actionable.
-            if offset < min_prediction_offset:
-                continue
-            cell = (int(round(pose[0])), int(round(pose[1])))
-            occupancy[offset][cell].append(uav["id"])
-
     conflicts: list[PathConflict] = []
-    seen_pairs: set[tuple[str, str]] = set()
+    for index, uav_a in enumerate(active):
+        for uav_b in active[index + 1:]:
+            path_a = uav_a["planned_path"][:time_horizon_steps]
+            path_b = uav_b["planned_path"][:time_horizon_steps]
+            horizon = min(len(path_a), len(path_b))
+            for offset in range(min_prediction_offset, horizon):
+                current_a = path_a[offset][:2]
+                current_b = path_b[offset][:2]
+                distance = math.dist(current_a, current_b)
+                closest = (
+                    ((current_a[0] + current_b[0]) / 2.0),
+                    ((current_a[1] + current_b[1]) / 2.0),
+                )
 
-    for offset in sorted(occupancy):
-        for cell, uav_ids in occupancy[offset].items():
-            if len(uav_ids) < 2:
-                continue
-            for i in range(len(uav_ids)):
-                for j in range(i + 1, len(uav_ids)):
-                    pair = tuple(sorted((uav_ids[i], uav_ids[j])))
-                    if pair in seen_pairs:
-                        continue
-                    seen_pairs.add(pair)
+                # A same-tick comparison alone misses two UAVs exchanging
+                # sides between adjacent samples.  Measure the minimum
+                # separation of their simultaneous segments as well so a
+                # crossing in transit or inside a scan region is actionable.
+                if offset > 0:
+                    previous_a = path_a[offset - 1][:2]
+                    previous_b = path_b[offset - 1][:2]
+                    segment_distance, segment_point = _moving_segment_distance(
+                        previous_a, current_a, previous_b, current_b
+                    )
+                    if segment_distance < distance:
+                        distance, closest = segment_distance, segment_point
 
-                    # Compute actual distance at this step
-                    uav_a = next(u for u in active if u["id"] == uav_ids[i])
-                    uav_b = next(u for u in active if u["id"] == uav_ids[j])
-                    pos_a = uav_a["planned_path"][offset][:2] if offset < len(uav_a["planned_path"]) else None
-                    pos_b = uav_b["planned_path"][offset][:2] if offset < len(uav_b["planned_path"]) else None
-                    dist = math.dist(pos_a, pos_b) if pos_a and pos_b else 0.0
-
-                    if dist < min_separation_cells:
-                        conflicts.append(PathConflict(
-                            uav_a=uav_ids[i],
-                            uav_b=uav_ids[j],
-                            cell=cell,
-                            step_offset_a=offset,
-                            step_offset_b=offset,
-                            distance_cells=round(dist, 3),
-                        ))
+                if distance < min_separation_cells:
+                    conflicts.append(PathConflict(
+                        uav_a=uav_a["id"],
+                        uav_b=uav_b["id"],
+                        cell=(int(round(closest[0])), int(round(closest[1]))),
+                        step_offset_a=offset,
+                        step_offset_b=offset,
+                        distance_cells=round(distance, 3),
+                    ))
+                    # One earliest conflict is sufficient to choose a
+                    # deconfliction action for this pair this planning cycle.
+                    break
 
     return conflicts
+
+
+def _moving_segment_distance(
+    start_a: Sequence[float],
+    end_a: Sequence[float],
+    start_b: Sequence[float],
+    end_b: Sequence[float],
+) -> tuple[float, tuple[float, float]]:
+    """Closest separation of two linearly moving UAVs in one time slice."""
+    relative_start = (start_a[0] - start_b[0], start_a[1] - start_b[1])
+    relative_delta = (
+        (end_a[0] - start_a[0]) - (end_b[0] - start_b[0]),
+        (end_a[1] - start_a[1]) - (end_b[1] - start_b[1]),
+    )
+    denominator = relative_delta[0] ** 2 + relative_delta[1] ** 2
+    if denominator <= 1e-12:
+        ratio = 0.0
+    else:
+        ratio = max(0.0, min(1.0, -(
+            relative_start[0] * relative_delta[0]
+            + relative_start[1] * relative_delta[1]
+        ) / denominator))
+    point_a = (
+        start_a[0] + (end_a[0] - start_a[0]) * ratio,
+        start_a[1] + (end_a[1] - start_a[1]) * ratio,
+    )
+    point_b = (
+        start_b[0] + (end_b[0] - start_b[0]) * ratio,
+        start_b[1] + (end_b[1] - start_b[1]) * ratio,
+    )
+    return math.dist(point_a, point_b), (
+        (point_a[0] + point_b[0]) / 2.0,
+        (point_a[1] + point_b[1]) / 2.0,
+    )
 
 
 def resolve_conflicts(
     conflicts: list[PathConflict],
     uav_entities: dict,
-    priority_key: str = "fuel_remaining_pct",
+    priority_key: str = "uav_id",
 ) -> list[str]:
     """Resolve detected conflicts by selecting which UAV to replan.
 
-    Strategy: for each conflicting pair, the UAV with lower priority
-    (lower fuel / later assignment) is flagged for replanning.
-    The other UAV keeps its current path.
+    Strategy: for each conflicting pair, the numerically larger UAV ID has
+    priority.  The lower-ID airframe is flagged to yield and keeps its task
+    assignment while the main thread inserts a continuous detour.
 
     Args:
         conflicts: Detected conflicts from ``detect_conflicts``.
         uav_entities: Dict of uav_id → UAVEntity for priority comparison.
-        priority_key: Attribute to compare for priority (higher = keep path).
+        priority_key: Retained for compatibility; UAV ID priority is always used.
 
     Returns:
         List of uav_ids that should be replanned.
     """
     replan: set[str] = set()
     handled_pairs: set[tuple[str, str]] = set()
+    # This result deliberately ignores mutable aircraft state so every
+    # lockstep tick makes the same priority decision.
+    _ = uav_entities, priority_key
 
     for conflict in conflicts:
         pair = tuple(sorted((conflict.uav_a, conflict.uav_b)))
@@ -135,21 +165,7 @@ def resolve_conflicts(
             continue
         handled_pairs.add(pair)
 
-        entity_a = uav_entities.get(conflict.uav_a)
-        entity_b = uav_entities.get(conflict.uav_b)
-
-        priority_a = getattr(entity_a, priority_key, 0.5) if entity_a else 0.5
-        priority_b = getattr(entity_b, priority_key, 0.5) if entity_b else 0.5
-
-        # Tracking UAVs get priority over searching/transit UAVs
-        status_a = entity_a.status if entity_a else "idle"
-        status_b = entity_b.status if entity_b else "idle"
-        if status_a == "tracking" and status_b != "tracking":
-            priority_a = 2.0  # absolute priority
-        elif status_b == "tracking" and status_a != "tracking":
-            priority_b = 2.0
-
-        if priority_a >= priority_b:
+        if uav_id_priority(conflict.uav_a) >= uav_id_priority(conflict.uav_b):
             replan.add(conflict.uav_b)
         else:
             replan.add(conflict.uav_a)
@@ -157,4 +173,13 @@ def resolve_conflicts(
     return sorted(replan)
 
 
-__all__ = ["ConflictReport", "PathConflict", "detect_conflicts", "resolve_conflicts"]
+def uav_id_priority(uav_id: str) -> tuple[int, str]:
+    """Return a deterministic priority where a larger numeric UAV ID wins."""
+    matches = re.findall(r"\d+", str(uav_id))
+    return (int(matches[-1]) if matches else -1, str(uav_id))
+
+
+__all__ = [
+    "ConflictReport", "PathConflict", "detect_conflicts", "resolve_conflicts",
+    "uav_id_priority",
+]

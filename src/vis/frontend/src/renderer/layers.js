@@ -50,6 +50,31 @@ function groundedUavCenter(uav, baseCenters, cellSize) {
   };
 }
 
+export function resolveUavDisplayCenter(uav, cellSize, ox, oy, baseCenters) {
+  const taskCenter = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
+  const baseCenter = groundedUavCenter(uav, baseCenters, cellSize);
+  if (["idle", "refueling"].includes(uav.status) || !baseCenter) {
+    return baseCenter || taskCenter;
+  }
+
+  const progress = Number(uav.transit_progress);
+  if (uav.status === "transit" && Number.isFinite(progress)) {
+    const departure = clamp(progress, 0, 1);
+    return {
+      x: baseCenter.x + (taskCenter.x - baseCenter.x) * departure,
+      y: baseCenter.y + (taskCenter.y - baseCenter.y) * departure,
+    };
+  }
+
+  // Historical replay files do not carry transit_progress.  Keep their
+  // first assigned frame at the visible base instead of drawing it at the
+  // task-grid coordinate that happens to represent the same base location.
+  const home = uav.home_base_grid;
+  const atHome = home?.length >= 2
+    && Math.hypot(Number(uav.position[0]) - Number(home[0]), Number(uav.position[1]) - Number(home[1])) < 1e-4;
+  return atHome ? baseCenter : taskCenter;
+}
+
 function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
   ctx.font = `${weight} ${size}px ${FONT}`;
   ctx.fillStyle = color;
@@ -297,6 +322,38 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
     const baseGrid = uav.home_base_grid;
     const isSelected = uav.id === selectedId;
 
+    // Departing UAV: the visual base star lives on the mainland (map
+    // coords) while planned_path[0] lives on the ocean grid.  Draw a
+    // departure leg bridging the two coordinate spaces so the route
+    // reads as originating from the visible red-star marker.
+    const departBase = baseCenters?.length
+      ? baseCenters[(Number(String(uav.id || "").match(/\d+/)?.[0] || 1) - 1) % baseCenters.length]
+      : null;
+    const isDeparting = (
+      departBase
+      && planned.length >= 1
+      && uav.status !== "idle"
+      && uav.status !== "refueling"
+      && uav.status !== "returning"
+      && uav.status !== "holding"
+    );
+    // Avoid drawing the departure leg when the UAV has already
+    // travelled well beyond the first few waypoints (the connector
+    // would then bisect the screen).
+    let showDepartLeg = false;
+    let departGridPt = null;
+    if (isDeparting && planned.length > 0) {
+      const firstPose = planned[0];
+      departGridPt = gridCenter(firstPose[0], firstPose[1], cellSize, ox, oy);
+      // The departure leg is meaningful when the UAV's home base
+      // grid is close to planned_path[0] (i.e. a fresh sortie, not
+      // a mid-mission replan).
+      if (baseGrid && baseGrid.length >= 2) {
+        const homePt = gridCenter(baseGrid[0], baseGrid[1], cellSize, ox, oy);
+        showDepartLeg = Math.hypot(homePt.x - departGridPt.x, homePt.y - departGridPt.y) < cellSize * 4;
+      }
+    }
+
     // ── Full mission route (dashed, dim) ──────────────────────────
     if (mission.length >= 2 && uav.status !== "idle" && uav.status !== "refueling") {
       ctx.save();
@@ -304,13 +361,20 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
       ctx.lineWidth = isSelected ? 1.4 : 0.9;
       ctx.setLineDash([4, 5]);
       ctx.beginPath();
-      // mission_route[0] is the UAV position when the route was planned.
-      // For transit this is the base; for return it is the in-flight position.
-      // No unconditional prepend — the route already starts at the right place.
+      // Prepend departure leg from the mainland base star
+      if (showDepartLeg && departGridPt) {
+        ctx.moveTo(departBase.x, departBase.y);
+        ctx.lineTo(departGridPt.x, departGridPt.y);
+      }
       mission.forEach((pose, index) => {
         const pt = gridCenter(pose[0], pose[1], cellSize, ox, oy);
-        if (index === 0) ctx.moveTo(pt.x, pt.y);
-        else ctx.lineTo(pt.x, pt.y);
+        if (index === 0 && showDepartLeg) {
+          // Already connected from base star — skip duplicate moveTo
+        } else if (index === 0) {
+          ctx.moveTo(pt.x, pt.y);
+        } else {
+          ctx.lineTo(pt.x, pt.y);
+        }
       });
       // Returning / holding: draw the final leg back to base
       if (baseGrid && baseGrid.length >= 2
@@ -329,10 +393,19 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
       ctx.lineWidth = isSelected ? 2.2 : 1.3;
       ctx.setLineDash([]);
       ctx.beginPath();
+      if (showDepartLeg && departGridPt) {
+        ctx.moveTo(departBase.x, departBase.y);
+        ctx.lineTo(departGridPt.x, departGridPt.y);
+      }
       planned.forEach((pose, index) => {
         const pt = gridCenter(pose[0], pose[1], cellSize, ox, oy);
-        if (index === 0) ctx.moveTo(pt.x, pt.y);
-        else ctx.lineTo(pt.x, pt.y);
+        if (index === 0 && showDepartLeg) {
+          // connected from base star
+        } else if (index === 0) {
+          ctx.moveTo(pt.x, pt.y);
+        } else {
+          ctx.lineTo(pt.x, pt.y);
+        }
       });
       ctx.stroke();
       ctx.restore();
@@ -496,7 +569,13 @@ function fallbackSarBeam(uav) {
     y + forward[1] * along + side[1] * cross,
   ];
   return {
-    polygon: [point(-2.5, 0.25), point(2.5, 0.25), point(2.5, 2.25), point(-2.5, 2.25)],
+    polygon: [
+      [x, y],                // UAV (beam apex)
+      point(-2.5, 0.25),     // behind-near
+      point(-2.5, 2.25),     // behind-far
+      point(2.5, 2.25),      // ahead-far
+      point(2.5, 0.25),      // ahead-near
+    ],
   };
 }
 
@@ -505,7 +584,7 @@ function sensorPhase(id) {
 }
 
 function drawSarBeam(ctx, uav, cellSize, ox, oy, phase) {
-  const beam = uav.sar_beam?.polygon?.length === 4 ? uav.sar_beam : fallbackSarBeam(uav);
+  const beam = uav.sar_beam?.polygon?.length >= 4 ? uav.sar_beam : fallbackSarBeam(uav);
   if (!beam?.polygon) return;
   const points = beam.polygon.map(([col, row]) => gridCenter(col, row, cellSize, ox, oy));
   const apertureTrack = (uav.sar_aperture_track || [])
@@ -580,23 +659,46 @@ function drawSarBeam(ctx, uav, cellSize, ox, oy, phase) {
     ctx.stroke();
   }
 
-  // This short quadrilateral is the instantaneous side-looking pulse.
+  // Fan-shaped instantaneous side-looking beam.  The polygon fans out
+  // from the UAV (apex) to the near-range edge and outward.  During
+  // U-turn connectors between scan legs the beam stays visible but dims
+  // so the UAV reads as continuously in motion.  During initial transit
+  // to a search area the radar is powered and rendered at medium visibility.
+  const imaging = uav.sar_imaging;
+  const standby = !imaging && uav.sar_standby;
   ctx.beginPath();
   points.forEach((point, index) => {
     if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
   });
   ctx.closePath();
-  ctx.fillStyle = "rgba(8, 145, 178, .18)";
-  ctx.strokeStyle = "rgba(14, 116, 144, .92)";
-  ctx.lineWidth = 1.25;
+  if (imaging) {
+    ctx.fillStyle = "rgba(8, 145, 178, .18)";
+    ctx.strokeStyle = "rgba(14, 116, 144, .92)";
+    ctx.lineWidth = 1.25;
+  } else if (standby) {
+    ctx.fillStyle = "rgba(8, 145, 178, .10)";
+    ctx.strokeStyle = "rgba(14, 116, 144, .58)";
+    ctx.lineWidth = 1.05;
+  } else {
+    ctx.fillStyle = "rgba(8, 145, 178, .05)";
+    ctx.strokeStyle = "rgba(14, 116, 144, .28)";
+    ctx.lineWidth = 0.8;
+  }
   ctx.fill();
   ctx.stroke();
 
-  ctx.strokeStyle = "rgba(14, 116, 144, .6)";
+  // Near-range edge (closest to flight track) — dashed reference line
+  if (imaging) {
+    ctx.strokeStyle = "rgba(14, 116, 144, .6)";
+  } else if (standby) {
+    ctx.strokeStyle = "rgba(14, 116, 144, .36)";
+  } else {
+    ctx.strokeStyle = "rgba(14, 116, 144, .18)";
+  }
   ctx.setLineDash([Math.max(2, cellSize * 0.14), Math.max(2, cellSize * 0.12)]);
   ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  ctx.lineTo(points[1].x, points[1].y);
+  ctx.moveTo(points[1].x, points[1].y);
+  ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
   ctx.stroke();
   ctx.restore();
 }
@@ -647,8 +749,11 @@ function drawEoBeam(ctx, uav, cellSize, ox, oy, phase) {
 
 export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy, phase = 0) {
   for (const uav of uavs || []) {
-    if (uav.sar_imaging || uav.sensor_mode === "sar") {
+    const hasSarBeam = !!(uav.sar_beam || uav.sar_imaging || uav.sensor_mode === "sar");
+    if (hasSarBeam) {
       drawSarBeam(ctx, uav, cellSize, ox, oy, phase);
+    }
+    if (uav.sar_imaging) {
       ctx.fillStyle = "rgba(6, 182, 212, .16)";
       for (const [col, row] of uav.sar_footprint || []) {
         const point = coordToPixel(col, row, cellSize, ox, oy);
@@ -924,10 +1029,7 @@ export function drawBases(ctx, bases, baseCenters, cellSize, phase) {
 
 export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCenters) {
   for (const uav of uavs || []) {
-    const taskCenter = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
-    const center = ["idle", "refueling"].includes(uav.status)
-      ? groundedUavCenter(uav, baseCenters, cellSize) || taskCenter
-      : taskCenter;
+    const center = resolveUavDisplayCenter(uav, cellSize, ox, oy, baseCenters);
     const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";
     const size = Math.max(5, cellSize * (uav.id === selectedId ? 0.42 : 0.32));
     ctx.save();

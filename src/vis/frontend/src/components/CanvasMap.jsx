@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { RadioTower } from "lucide-react";
 
 import { computeLayout, pixelToCoord } from "../renderer/geometry";
@@ -21,20 +21,25 @@ function loadMapAsset(source) {
   });
 }
 
-export default function CanvasMap({
+const CanvasMap = forwardRef(function CanvasMap({
   frame,
   selectedUavId,
   onSelectUav,
   showGrid = false,
   trailMode = "tail",
-}) {
+}, ref) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const layoutRef = useRef({ cellSize: 20, offsetX: 0, offsetY: 0 });
   const hoverRef = useRef(null);
   const [hovered, setHovered] = useState(false);
+  const [hoverVersion, setHoverVersion] = useState(0);
+  const prevFrameRef = useRef(null);
+  const targetFrameRef = useRef(null);
+  const frameReceivedRef = useRef(0);
   const [sizeVersion, setSizeVersion] = useState(0);
   const [mapAssets, setMapAssets] = useState({});
+  const exportingRef = useRef(false);
 
   useEffect(() => {
     let disposed = false;
@@ -72,17 +77,78 @@ export default function CanvasMap({
   }, [updateSize]);
 
   useEffect(() => {
+    if (!frame) return;
+    prevFrameRef.current = targetFrameRef.current;
+    targetFrameRef.current = frame;
+    frameReceivedRef.current = performance.now();
+  }, [frame]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     const context = canvas.getContext("2d");
+    if (!targetFrameRef.current) return undefined;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let animationFrame = null;
     let phase = 0;
+    const INTERP_MS = 180;
+
+    const lerpAngle = (a, b, k) => {
+      if (a == null || b == null) return b ?? a ?? 0;
+      let d = ((b - a) % 360 + 540) % 360 - 180;
+      return a + d * k;
+    };
 
     const render = () => {
+      if (exportingRef.current) return;
+      const prev = prevFrameRef.current;
+      const target = targetFrameRef.current;
+      let displayFrame = target;
+
+      if (prev && target) {
+        const elapsed = performance.now() - frameReceivedRef.current;
+        const raw = Math.min(1, elapsed / INTERP_MS);
+        if (raw < 1) {
+          const t = 1 - (1 - raw) ** 2; // ease-out quad
+
+          const prevUavMap = new Map();
+          for (const u of prev.uavs || []) prevUavMap.set(u.id, u);
+          const prevShipMap = new Map();
+          for (const s of prev.ships || []) prevShipMap.set(s.id, s);
+
+          const uavs = (target.uavs || []).map((u) => {
+            const prevU = prevUavMap.get(u.id);
+            if (!prevU) return u;
+            return {
+              ...u,
+              position: [
+                prevU.position[0] + (u.position[0] - prevU.position[0]) * t,
+                prevU.position[1] + (u.position[1] - prevU.position[1]) * t,
+              ],
+              heading_deg: lerpAngle(prevU.heading_deg, u.heading_deg, t),
+            };
+          });
+
+          const ships = (target.ships || []).map((s) => {
+            const prevS = prevShipMap.get(s.id);
+            if (!prevS) return s;
+            return {
+              ...s,
+              position: [
+                prevS.position[0] + (s.position[0] - prevS.position[0]) * t,
+                prevS.position[1] + (s.position[1] - prevS.position[1]) * t,
+              ],
+              heading_deg: lerpAngle(prevS.heading_deg, s.heading_deg, t),
+            };
+          });
+
+          displayFrame = { ...target, uavs, ships };
+        }
+      }
+
       const { cellSize, offsetX, offsetY, mapBounds, legendBounds } = layoutRef.current;
       context.save();
-      renderFrame(context, frame, {
+      renderFrame(context, displayFrame, {
         cellSize,
         offsetX,
         offsetY,
@@ -97,14 +163,62 @@ export default function CanvasMap({
       });
       context.restore();
       phase += 1;
-      if (!reducedMotion) animationFrame = window.requestAnimationFrame(render);
+      const elapsed = performance.now() - frameReceivedRef.current;
+      if (!reducedMotion && prev && target && elapsed < INTERP_MS) {
+        animationFrame = window.requestAnimationFrame(render);
+      }
     };
 
     render();
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
+  }, [frame, hoverVersion, mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
+
+  useImperativeHandle(ref, () => ({
+    async recordReplay(frames, { fps = 20, onProgress } = {}) {
+      const canvas = canvasRef.current;
+      if (!canvas?.captureStream || !window.MediaRecorder) {
+        throw new Error("This browser cannot record the mission map");
+      }
+      if (!frames?.length) throw new Error("No replay frames available");
+      const mimeType = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
+        .find((candidate) => MediaRecorder.isTypeSupported(candidate));
+      if (!mimeType) throw new Error("This browser does not support WebM recording");
+
+      const context = canvas.getContext("2d");
+      const stream = canvas.captureStream(fps);
+      const chunks = [];
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 7_000_000 });
+      const finished = new Promise((resolve, reject) => {
+        recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+        recorder.onerror = () => reject(new Error("Mission map recording failed"));
+      });
+
+      exportingRef.current = true;
+      recorder.start();
+      try {
+        for (let index = 0; index < frames.length; index += 1) {
+          const { cellSize, offsetX, offsetY, mapBounds, legendBounds } = layoutRef.current;
+          context.save();
+          renderFrame(context, frames[index], {
+            cellSize, offsetX, offsetY, mapBounds, legendBounds,
+            showGrid, trailMode, hoverInfo: null, selectedUavId,
+            frameCount: index, assets: mapAssets,
+          });
+          context.restore();
+          onProgress?.((index + 1) / frames.length);
+          await new Promise((resolve) => window.setTimeout(resolve, 1000 / fps));
+        }
+      } finally {
+        exportingRef.current = false;
+        recorder.stop();
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      return finished;
+    },
+  }), [mapAssets, selectedUavId, showGrid, trailMode]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;
@@ -125,15 +239,18 @@ export default function CanvasMap({
       const category = info >= 0.7 ? "white" : info >= 0.2 ? "gray" : "black";
       hoverRef.current = { col: coord.col, row: coord.row, I: info, V: value, category };
       setHovered(true);
+      setHoverVersion((version) => version + 1);
     } else {
       hoverRef.current = null;
       setHovered(false);
+      setHoverVersion((version) => version + 1);
     }
   }, [frame]);
 
   const handleMouseLeave = useCallback(() => {
     hoverRef.current = null;
     setHovered(false);
+    setHoverVersion((version) => version + 1);
   }, []);
 
   const handleClick = useCallback((event) => {
@@ -175,4 +292,6 @@ export default function CanvasMap({
       <div className="map-scale" aria-hidden="true"><i />20 KM</div>
     </div>
   );
-}
+});
+
+export default CanvasMap;

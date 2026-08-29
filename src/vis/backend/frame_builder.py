@@ -18,12 +18,35 @@ def _heading_from_motion(trail, fallback_deg: float) -> float:
     return float(fallback_deg) % 360.0
 
 
+def _transit_progress(entity) -> float | None:
+    """Return normalized progress through the departure leg of an active route."""
+    if getattr(entity, "status", None) != "transit":
+        return None
+    waypoints = getattr(entity, "waypoints", ())
+    transit_end = min(int(getattr(entity, "_transit_end_index", 0)), len(waypoints) - 1)
+    if transit_end <= 0:
+        return 1.0
+
+    total = sum(math.dist(waypoints[index - 1][:2], waypoints[index][:2]) for index in range(1, transit_end + 1))
+    if total <= 1e-9:
+        return 1.0
+
+    next_index = min(max(1, int(getattr(entity, "_wp_index", 1))), transit_end)
+    completed = sum(math.dist(waypoints[index - 1][:2], waypoints[index][:2]) for index in range(1, next_index))
+    segment_start = waypoints[next_index - 1][:2]
+    segment_end = waypoints[next_index][:2]
+    segment_length = math.dist(segment_start, segment_end)
+    completed += min(math.dist(segment_start, entity.float_position), segment_length)
+    return max(0.0, min(1.0, completed / total))
+
+
 def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 total_steps: int = 480, llm_cycle: dict | None = None,
                 ships: list | None = None,
                 uav_entities: list | None = None,
                 obstacles: list | None = None,
-                bases: list | None = None) -> dict:
+                bases: list | None = None, *, realtime: bool = False,
+                include_matrices: bool = True) -> dict:
     """从 StateManager 当前状态构建一帧完整 JSON。
 
     Args:
@@ -63,7 +86,20 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         # Preserve replay compatibility for historical frames that only
         # supplied sensor_mode.  Live entities expose sar_imaging and only
         # set sensor_mode to SAR during a stable stripmap acquisition.
-        if entity is not None and (entity.sar_imaging or entity.sensor_mode == "sar"):
+        #
+        # Also compute the beam during U-turn connectors between scan legs
+        # (transit + sar_look_direction still set) so the fan-shaped beam
+        # stays visible — the UAV reads as continuously in motion instead
+        # of appearing to pause between swaths.
+        if entity is not None and entity.sar_look_direction is not None:
+            show_beam = (
+                entity.sar_imaging
+                or entity.sensor_mode == "sar"
+                or entity.status in ("transit", "searching")
+            )
+        else:
+            show_beam = entity is not None and (entity.sar_imaging or entity.sensor_mode == "sar")
+        if show_beam and entity is not None and entity.sar_look_direction is not None:
             beam = entity.sar_sensor.compute_swath_beam(
                 entity.float_position,
                 entity.sar_scan_heading_rad or entity.heading_rad,
@@ -79,8 +115,12 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "along_track": beam.along_track,
                 "polygon": [list(point) for point in beam.polygon],
             }
-        # Preserve a complete standard eight-hour sortie for the full trail mode.
-        trail = [list(point) for point in entity.trail[-480:]] if entity else []
+        # Replay keeps the full sortie.  Live frames trade historical detail
+        # for a bounded payload because the client receives frequent updates.
+        trail_limit = 120 if realtime else 480
+        planned_limit = 100 if realtime else 500
+        mission_limit = 200 if realtime else 800
+        trail = [list(point) for point in entity.trail[-trail_limit:]] if entity else []
         fallback_heading = entity.heading_deg if entity is not None else u.heading_deg
         uavs.append({
             "id": u.id,
@@ -93,14 +133,21 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "target_group_id": u.target_group_id,
             "time_to_available_min": u.time_to_available,
             "sensor_mode": entity.sensor_mode if entity is not None else u.sensor_mode,
-            "planned_path": [list(pose) for pose in entity.planned_path[-500:]] if entity else [],
-            "mission_route": [list(pose) for pose in entity.mission_route[-800:]] if entity else [],
+            "planned_path": [list(pose) for pose in entity.planned_path[-planned_limit:]] if entity else [],
+            "mission_route": [list(pose) for pose in entity.mission_route[-mission_limit:]] if entity else [],
             "home_base_grid": list(entity.home_base_grid) if entity else [u.position.col, u.position.row],
+            "transit_progress": _transit_progress(entity) if entity else None,
             "trail": trail,
             "sar_look_direction": entity.sar_look_direction if entity else None,
             "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],
             "sar_beam": sar_beam,
             "sar_imaging": entity.sar_imaging if entity else False,
+            "sar_standby": bool(
+                entity is not None
+                and entity.sar_look_direction is not None
+                and not entity.sar_imaging
+                and entity.status in ("transit", "searching")
+            ),
             "sar_heading_error_deg": entity.sar_heading_error_deg if entity else None,
             "sar_aperture_track": [
                 list(position) for position in entity.sar_aperture_track
@@ -154,9 +201,6 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     # 近期事件（本帧内新事件）
     recent_events = state.get_recent_events(state.current_time - 1.0)
 
-    # 信息矩阵（直接传 numpy 数组的 list 形式）
-    info_mat = state.get_info_matrix()
-    value_mat = state.get_value_matrix()
     coverage = state.get_coverage_stats()
 
     # 船舶列表（从 wm 实体构建）
@@ -246,8 +290,6 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "mode": "live",
         "scenario_seed": getattr(state, "scenario_seed", None),
         "reset_generation": getattr(state, "scenario_generation", 0),
-        "info_matrix": info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat,
-        "value_matrix": value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat,
         "task_area": {
             "width_km": config.grid.resolution[1] * config.grid.cell_size_km,
             "height_km": config.grid.resolution[0] * config.grid.cell_size_km,
@@ -267,6 +309,13 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "bases": base_list,
         "obstacles": obstacle_list,
     }
+    if include_matrices:
+        # Matrix conversion dominates live payload size, so compact live
+        # frames carry it periodically while the client retains the last copy.
+        info_mat = state.get_info_matrix()
+        value_mat = state.get_value_matrix()
+        frame["info_matrix"] = info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat
+        frame["value_matrix"] = value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat
     return frame
 
 

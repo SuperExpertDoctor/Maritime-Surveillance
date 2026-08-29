@@ -4,11 +4,11 @@ from __future__ import annotations
 import math
 import random
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
 from src.env.base_station import BaseStation
-from src.env.dubins import DubinsPath
 from src.env.ais_signal import generate_ais_signal
 from src.env.eo_sensor import EOSensor
 from src.env.obstacle import (
@@ -30,7 +30,16 @@ from src.utils.coverage_planner import CoveragePlanner
 from src.utils.ais_discriminator import AISDiscriminator
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
-from src.utils.conflict_detector import detect_conflicts, resolve_conflicts
+from src.utils.conflict_detector import (
+    detect_conflicts,
+    resolve_conflicts,
+    uav_id_priority,
+)
+from src.utils.search_route_planner import (
+    SearchRoutePlan,
+    SearchRouteRequest,
+    plan_search_route,
+)
 
 
 class SimulationEngine:
@@ -1371,6 +1380,7 @@ class SimulationEngine:
         sm = self.allocator.sm
         region_by_id = {region.id: region for region in sm.get_search_regions()}
         entity_by_id = {uav.id: uav for uav in self.uavs}
+        assignments = []
         for state in sm.get_all_uavs():
             entity = entity_by_id[state.id]
             if state.status != "transit" or not state.assigned_region_id or entity.status != "idle":
@@ -1378,9 +1388,40 @@ class SimulationEngine:
             region = region_by_id.get(state.assigned_region_id)
             if region is None:
                 continue
+            assignments.append((entity, region, self._search_route_request(entity, region)))
+
+        if not assignments:
+            return
+
+        plans: dict[str, SearchRoutePlan] = {}
+        errors: dict[str, Exception] = {}
+        if len(assignments) == 1:
+            entity, _, request = assignments[0]
             try:
-                self._assign_search_route(entity, region)
-            except (RuntimeError, ValueError) as exc:
+                plans[entity.id] = plan_search_route(request)
+            except Exception as exc:
+                errors[entity.id] = exc
+        else:
+            # Workers receive only immutable route-planning snapshots.  The
+            # main process remains the sole owner of UAV/StateManager state.
+            with ProcessPoolExecutor(max_workers=min(4, len(assignments))) as executor:
+                futures = {
+                    executor.submit(plan_search_route, request): entity.id
+                    for entity, _, request in assignments
+                }
+                for future in as_completed(futures):
+                    uav_id = futures[future]
+                    try:
+                        plans[uav_id] = future.result()
+                    except Exception as exc:
+                        errors[uav_id] = exc
+
+        for entity, region, _ in assignments:
+            try:
+                if entity.id in errors:
+                    raise errors[entity.id]
+                self._apply_search_route_plan(entity, region, plans[entity.id])
+            except Exception as exc:
                 region.status = "stale"
                 region.assigned_uav_id = None
                 sm.clear_uav_assignment(entity.id)
@@ -1397,79 +1438,56 @@ class SimulationEngine:
         region,
         *,
         allow_revisit: bool = False,
+        direction: str | None = None,
     ) -> None:
-        swath_width = self.config.sensor.sar.swath_km / self.config.grid.cell_size_km
-        coverage = self.coverage_planner.plan(
-            region.bbox, uav.pose, swath_width, uav.R_min
+        request = self._search_route_request(
+            uav, region, allow_revisit=allow_revisit, direction=direction,
         )
+        self._apply_search_route_plan(uav, region, plan_search_route(request))
+
+    def _search_route_request(
+        self,
+        uav: UAVEntity,
+        region,
+        *,
+        allow_revisit: bool = False,
+        direction: str | None = None,
+    ) -> SearchRouteRequest:
+        swath_width = self.config.sensor.sar.swath_km / self.config.grid.cell_size_km
         scan_times = self.allocator.sm.info_field.last_scan_time
         coverage_pct = self.allocator.sm.get_coverage_stats()["coverage_pct"]
-        if coverage_pct < 80.0 and not allow_revisit:
-            # Before broad area coverage is established, do not spend a scan
-            # leg repeating information that is already available.
-            swaths = [
-                swath
-                for swath in coverage.swaths
-                if any(
-                    not math.isfinite(scan_times[cell.col, cell.row])
-                    for cell in swath.footprint
-                )
-            ]
-        else:
-            # After the first pass, every approved high-value region is a
-            # legitimate revisit task.  Dropping already-seen swaths here
-            # would turn a black/stale cell into an immediate no-op and leave
-            # the fleet idle instead of maintaining information freshness.
-            swaths = coverage.swaths
-        if not swaths:
+        numeric_id = int("".join(char for char in uav.id if char.isdigit()) or 0)
+        return SearchRouteRequest(
+            uav_id=uav.id,
+            start_pose=uav.pose,
+            bbox=tuple(region.bbox),
+            swath_width=swath_width,
+            r_min=uav.R_min,
+            obstacle_mask=np.asarray(self.obstacle_mask, dtype=bool).copy(),
+            unscanned_mask=~np.isfinite(scan_times),
+            allow_revisit=allow_revisit or coverage_pct >= 80.0,
+            direction=direction,
+            seed=self.seed + numeric_id * 997,
+        )
+
+    def _apply_search_route_plan(
+        self,
+        uav: UAVEntity,
+        region,
+        plan: SearchRoutePlan,
+    ) -> None:
+        if not plan.scanned_swath_count:
             region.status = "completed"
             region.completion_pct = 100.0
             region.assigned_uav_id = None
             self.allocator.sm.clear_uav_assignment(uav.id)
             uav.status = "idle"
             return
-        full_path = [uav.pose]
-        scan_ranges = []
-        transit_end_index = 0
-        for index, swath in enumerate(swaths):
-            entry = (swath.start[0], swath.start[1], swath.heading)
-            direct_connector = DubinsPath.compute(
-                full_path[-1],
-                entry,
-                uav.R_min,
-                self.coverage_planner.sample_step,
-            ).waypoints
-            if self.obstacle_avoider.is_path_safe(
-                direct_connector,
-                self.obstacle_mask,
-            ):
-                connector = direct_connector
-            else:
-                try:
-                    connector = self.obstacle_avoider.plan_path(
-                        full_path[-1], entry, self.obstacle_mask, uav.R_min
-                    )
-                except RuntimeError:
-                    connector = ObstacleAvoider(
-                        max_iterations=2400,
-                        seed=31 + index * 101,
-                    ).plan_path(
-                        full_path[-1], entry, self.obstacle_mask, uav.R_min
-                    )
-            full_path.extend(connector[1:])
-            if index == 0:
-                transit_end_index = len(full_path) - 1
-            line = self.coverage_planner.sample_scan_line(swath)
-            if not self.obstacle_avoider.is_path_safe(line, self.obstacle_mask):
-                raise RuntimeError("SAR scan line intersects a no-fly obstacle")
-            scan_start = len(full_path) - 1
-            full_path.extend(line[1:])
-            scan_ranges.append((scan_start, len(full_path) - 1, swath.look_direction))
         uav.assign_mission(
             region.bbox,
-            full_path,
-            transit_end_index=transit_end_index,
-            scan_ranges=scan_ranges,
+            plan.path,
+            transit_end_index=plan.transit_end_index,
+            scan_ranges=plan.scan_ranges,
         )
 
     def _group_center(self, group_id: str | None):
@@ -1521,7 +1539,7 @@ class SimulationEngine:
         return commands
 
     def _detect_and_resolve_path_conflicts(self, current_time: float) -> None:
-        """Detect multi-UAV path conflicts and replan lower-priority airframes."""
+        """Detect conflicts and make the lower numeric UAV ID yield continuously."""
         uav_dicts = [
             {
                 "id": uav.id,
@@ -1552,8 +1570,16 @@ class SimulationEngine:
             uav = entities.get(uav_id)
             if uav is None or uav.status in ("idle", "refueling", "holding", "returning"):
                 continue
+            conflicting_uavs = [
+                c.uav_b if c.uav_a == uav_id else c.uav_a
+                for c in conflicts
+                if uav_id in (c.uav_a, c.uav_b)
+            ]
+            yield_to = max(conflicting_uavs, key=uav_id_priority)
             sm.add_event("path_conflict_resolved", {
                 "uav_id": uav_id,
+                "yield_to": yield_to,
+                "priority_rule": "higher_numeric_uav_id_keeps_trajectory",
                 "conflicts": [
                     {"with": c.uav_b if c.uav_a == uav_id else c.uav_a,
                      "cell": list(c.cell),
@@ -1562,16 +1588,24 @@ class SimulationEngine:
                     if uav_id in (c.uav_a, c.uav_b)
                 ],
             })
-            # Replan: for searching UAVs, re-assign the search route with
-            # a fresh obstacle-avoidance pass; for transit, replan to the
-            # same destination via a different seed.
+            # Replan only the yielding UAV.  Searching airframes switch the
+            # coverage orientation, producing a continuous Dubins/RRT* route
+            # that retains their task without stopping or teleporting.
             state = sm.get_uav(uav_id)
             region = search_regions.get(
                 state.assigned_region_id if state is not None else None
             )
             if uav.mission_kind == "search" and region is not None:
                 try:
-                    self._assign_search_route(uav, region)
+                    width = region.bbox.col_end - region.bbox.col_start
+                    height = region.bbox.row_end - region.bbox.row_start
+                    alternate_direction = "vertical" if width >= height else "horizontal"
+                    self._assign_search_route(
+                        uav,
+                        region,
+                        allow_revisit=True,
+                        direction=alternate_direction,
+                    )
                 except (RuntimeError, ValueError):
                     sm.add_event("conflict_replan_failed", {
                         "uav_id": uav_id,

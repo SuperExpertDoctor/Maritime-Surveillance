@@ -1,4 +1,4 @@
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { Download, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 
 const SPEEDS = [0.5, 1, 2, 5, 10];
 const EVENT_COLORS = {
@@ -9,7 +9,8 @@ const EVENT_COLORS = {
 
 export default function PlaybackBar({
   visible, isPlaying, onPlayPause, frameIndex, totalFrames, onSeek,
-  playSpeed, onSpeedChange, frame, markers = [],
+  playSpeed, onSpeedChange, frame, markers = [], onExportMp4,
+  exportAvailable = false, exporting = false, exportProgress = 0, exportError = "",
 }) {
   if (!visible) return null;
   const disabled = totalFrames === 0;
@@ -38,6 +39,16 @@ export default function PlaybackBar({
       <select className="speed-select" value={playSpeed} onChange={(event) => onSpeedChange(Number(event.target.value))} aria-label="回放速度">
         {SPEEDS.map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
       </select>
+      <button
+        className="export-mp4-btn"
+        onClick={onExportMp4}
+        disabled={disabled || !exportAvailable || exporting}
+        title={exportError || (!exportAvailable ? "MP4 encoder unavailable" : "Export MP4")}
+        aria-label={exporting ? `Exporting MP4 ${exportProgress}%` : "Export MP4"}
+      >
+        <Download size={15} />
+        <span>{exporting ? `${exportProgress}%` : "MP4"}</span>
+      </button>
     </section>
   );
 }

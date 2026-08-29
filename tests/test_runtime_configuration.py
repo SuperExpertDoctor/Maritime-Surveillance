@@ -13,7 +13,8 @@ def test_config_loader_reads_merged_environment_and_llm_parameters():
     assert config.grid.cell_size_km == 10
     assert config.llm.heavy_cycle_min == 30
     assert config.llm.reviewer_cycle_min == 15
-    assert config.common.clear_outputs_before_run is True
+    # Retaining prior runs is required for replay after a new live run starts.
+    assert config.common.clear_outputs_before_run is False
     assert config.environment.base_position == (2, 14)
 
 

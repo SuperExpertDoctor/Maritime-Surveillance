@@ -1006,6 +1006,30 @@ button {
   cursor: default;
 }
 
+.export-mp4-btn {
+  display: inline-flex;
+  height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid #77b9ab;
+  border-radius: 3px;
+  background: #e2f4ef;
+  color: #0f766e;
+  font: 700 10px/1 Consolas, monospace;
+  cursor: pointer;
+}
+
+.export-mp4-btn:hover:not(:disabled) {
+  background: #cbece4;
+}
+
+.export-mp4-btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
 .timeline-control {
   position: relative;
   display: flex;
@@ -1222,6 +1246,17 @@ button {
   .speed-select {
     width: 57px;
     height: 36px;
+  }
+
+  .export-mp4-btn {
+    width: 36px;
+    height: 36px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .export-mp4-btn span {
+    display: none;
   }
 
   .map-scale {
