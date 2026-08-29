@@ -30,6 +30,7 @@ from src.control.heuristic.return_to_base import (
     SystemHoldingController,
 )
 from src.control.heuristic.tracking import TrackingController, TrackingPhase
+from src.control.common.safety import SafetyEnvelope
 from src.control.return_path import return_to_base
 from src.control.track_orbit import generate_orbit_waypoints, update_orbit_center
 from src.schedule.datatypes import GridCoord
@@ -37,8 +38,10 @@ from src.utils.storm_avoider import ThreatAssessment, ThreatLevel
 
 
 class TrackingNavigatorSpy:
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, fail_on_calls=(), paths=()):
         self.fail = fail
+        self.fail_on_calls = set(fail_on_calls)
+        self.paths = list(paths)
         self.plan_arguments = []
 
     @property
@@ -64,21 +67,24 @@ class TrackingNavigatorSpy:
                 planning_map_version,
             )
         )
-        if self.fail:
+        if self.fail or len(self.plan_arguments) in self.fail_on_calls:
             raise PathNotFoundError(
                 tuple(start_pose),
                 "tracking standoff",
                 planning_map_version,
             )
+        if self.paths:
+            return list(self.paths.pop(0))
         goal = (float(target[0]) - radius, float(target[1]))
         heading = math.atan2(goal[1] - start_pose[1], goal[0] - start_pose[0])
         return [tuple(start_pose), (*goal, heading)]
 
 
 class TrackerSpy:
-    def __init__(self, *, turn_rate=0.25, speed=0.75):
+    def __init__(self, *, turn_rate=0.25, speed=0.75, entry_paths=()):
         self.turn_rate = turn_rate
         self.speed = speed
+        self.entry_paths = list(entry_paths)
         self.entry_arguments = []
         self.guidance_arguments = []
 
@@ -86,6 +92,8 @@ class TrackerSpy:
         self.entry_arguments.append(
             (tuple(uav_pose), tuple(target_position), radius)
         )
+        if self.entry_paths:
+            return SimpleNamespace(waypoints=list(self.entry_paths.pop(0)))
         endpoint = (
             float(uav_pose[0]) + 0.1 * math.cos(float(uav_pose[2])),
             float(uav_pose[1]) + 0.1 * math.sin(float(uav_pose[2])),
@@ -399,6 +407,116 @@ def test_tracking_replans_for_only_a_newer_contact_update(
     assert len(controller.navigator.plan_arguments) == 2
 
 
+def test_tracking_replans_an_approach_route_invalidated_by_a_new_map_version(
+    action_spec, observation
+):
+    initial_route = (
+        (2.0, 10.0, 0.0),
+        (6.0, 10.0, 0.0),
+        (9.5, 13.0, 0.0),
+    )
+    replanned_route = (
+        (2.0, 10.0, 0.0),
+        (2.0, 6.0, -math.pi / 2.0),
+        (10.0, 6.0, 0.0),
+        (9.5, 13.0, 0.75),
+    )
+    navigator = TrackingNavigatorSpy(paths=(initial_route, replanned_route))
+    controller = TrackingController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=action_spec,
+        navigator=navigator,
+        tracker=TrackerSpy(),
+        storm_avoider=StormAvoiderSpy(),
+    )
+    _start_tracking(controller, observation)
+    controller.act(observation)
+    blocked = np.array(observation.planning_obstacle_mask, copy=True)
+    blocked[6, 10] = True
+    changed = replace(
+        observation,
+        planning_obstacle_mask=blocked,
+        planning_map_version=2,
+    )
+
+    decision = controller.act(changed)
+
+    assert controller.phase is TrackingPhase.APPROACH_ASTAR
+    assert controller.planning_map_version == 2
+    assert controller.route == replanned_route
+    assert navigator.plan_arguments[-1][0] == (2.0, 10.0, 0.0)
+    assert navigator.plan_arguments[-1][-1] == 2
+    assert decision.command.turn_rate_rad_min < 0.0
+
+
+def test_tracking_loses_task_when_map_change_blocks_approach_and_replanning_fails(
+    action_spec, observation
+):
+    initial_route = (
+        (2.0, 10.0, 0.0),
+        (6.0, 10.0, 0.0),
+        (9.5, 13.0, 0.0),
+    )
+    navigator = TrackingNavigatorSpy(paths=(initial_route,), fail_on_calls=(2,))
+    controller = TrackingController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=action_spec,
+        navigator=navigator,
+        tracker=TrackerSpy(),
+        storm_avoider=StormAvoiderSpy(),
+    )
+    _start_tracking(controller, observation)
+    controller.act(observation)
+    blocked = np.array(observation.planning_obstacle_mask, copy=True)
+    blocked[6, 10] = True
+
+    decision = controller.act(
+        replace(
+            observation,
+            planning_obstacle_mask=blocked,
+            planning_map_version=2,
+        )
+    )
+
+    assert controller.phase is TrackingPhase.LOST
+    assert [event.event_type for event in decision.events] == ["task_failed"]
+    assert len(navigator.plan_arguments) == 2
+
+
+def test_tracking_replans_an_orbit_entry_invalidated_by_a_new_map_version(
+    action_spec, observation
+):
+    initial_route = ((10.0, 13.0, 0.0), (8.0, 13.0, math.pi))
+    replanned_route = ((10.0, 13.0, 0.0), (10.0, 9.0, -math.pi / 2.0))
+    tracker = TrackerSpy(entry_paths=(initial_route, replanned_route))
+    controller = TrackingController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=action_spec,
+        navigator=TrackingNavigatorSpy(),
+        tracker=tracker,
+        storm_avoider=StormAvoiderSpy(),
+    )
+    near_target = _with_pose(observation, (10.0, 13.0, 0.0))
+    _start_tracking(controller, near_target)
+    controller.act(near_target)
+    blocked = np.array(near_target.planning_obstacle_mask, copy=True)
+    blocked[8, 13] = True
+
+    decision = controller.act(
+        replace(
+            near_target,
+            planning_obstacle_mask=blocked,
+            planning_map_version=2,
+        )
+    )
+
+    assert controller.phase is TrackingPhase.ORBIT_ENTRY
+    assert controller.planning_map_version == 2
+    assert controller.route == replanned_route
+    assert len(tracker.entry_arguments) == 2
+    assert decision.command.turn_rate_rad_min < 0.0
+
+
 def test_tracking_converts_hazard_observations_for_storm_safety(
     controller, observation, tracking_components
 ):
@@ -471,6 +589,36 @@ def test_tracking_reports_internal_route_failure(action_spec, observation):
     assert controller.phase is TrackingPhase.LOST
     assert [event.event_type for event in decision.events] == ["task_failed"]
     assert decision.events[0].payload["task_id"] == "T1"
+
+
+def test_tracking_failure_command_respects_a_restricted_action_mask(
+    action_spec, observation
+):
+    controller = TrackingController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=action_spec,
+        navigator=TrackingNavigatorSpy(fail=True),
+        tracker=TrackerSpy(),
+        storm_avoider=StormAvoiderSpy(),
+    )
+    _start_tracking(controller, observation)
+    restricted = replace(
+        observation,
+        action_mask=ActionMask((SensorMode.OFF,), (OperationMode.HOLDING,), ()),
+    )
+
+    decision = controller.act(restricted)
+    repeated = controller.act(restricted)
+    validated = SafetyEnvelope(action_spec).apply(
+        decision.command, restricted, restricted.dt_min
+    )
+
+    assert validated.applied_command == decision.command
+    assert decision.command.operation_mode is OperationMode.HOLDING
+    assert decision.command.sensor_mode is SensorMode.OFF
+    assert decision.command.target_contact_id is None
+    assert [event.event_type for event in decision.events] == ["task_failed"]
+    assert repeated.events == ()
 
 
 def test_tracking_constructor_has_no_ground_truth_input(action_spec):

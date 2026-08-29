@@ -159,6 +159,7 @@ class TrackingController(HeuristicControllerBase):
         self.target_observed_at_min = -math.inf
         self.route: tuple[Pose, ...] = ()
         self.follower: RouteFollower | None = None
+        self.planning_map_version: int | None = None
         self.avoidance_route: tuple[Pose, ...] = ()
         self._avoidance_follower: RouteFollower | None = None
         self._failure_event_emitted = False
@@ -189,6 +190,7 @@ class TrackingController(HeuristicControllerBase):
         self.phase = TrackingPhase.CREATED
         self.route = ()
         self.follower = None
+        self.planning_map_version = None
         self.avoidance_route = ()
         self._avoidance_follower = None
         self._failure_event_emitted = False
@@ -200,6 +202,7 @@ class TrackingController(HeuristicControllerBase):
             return self._failure_decision(observation, "tracking route unavailable")
         self._refresh_contact(observation)
         try:
+            self._refresh_invalidated_route(observation)
             while True:
                 if self.phase is TrackingPhase.CREATED:
                     if self._within_eo_range(observation):
@@ -339,6 +342,7 @@ class TrackingController(HeuristicControllerBase):
             raise TrackingRouteError(f"{label} route intersects planning mask")
         self.route = route
         self.follower = RouteFollower(route)
+        self.planning_map_version = observation.planning_map_version
 
     def _refresh_contact(self, observation: ControlObservation) -> None:
         assert self.task is not None
@@ -358,7 +362,29 @@ class TrackingController(HeuristicControllerBase):
         ):
             self.route = ()
             self.follower = None
+            self.planning_map_version = None
             self.phase = TrackingPhase.CREATED
+
+    def _refresh_invalidated_route(self, observation: ControlObservation) -> None:
+        if self.phase not in (
+            TrackingPhase.APPROACH_ASTAR,
+            TrackingPhase.ORBIT_ENTRY,
+        ):
+            return
+        if observation.planning_map_version == self.planning_map_version:
+            return
+        assert self.follower is not None
+        current_pose = self._current_pose(observation)
+        unflown = self.route[self.follower.index + 1 :]
+        if not self._route_blocked(
+            (current_pose, *unflown), observation.planning_obstacle_mask
+        ):
+            self.planning_map_version = observation.planning_map_version
+            return
+        self.route = ()
+        self.follower = None
+        self.planning_map_version = None
+        self.phase = TrackingPhase.CREATED
 
     def _within_eo_range(self, observation: ControlObservation) -> bool:
         assert self.target_position is not None
@@ -392,13 +418,38 @@ class TrackingController(HeuristicControllerBase):
             ),
             self.action_spec.max_speed_cells_min,
         )
+        sensor_mode = next(
+            (
+                mode
+                for mode in (SensorMode.OFF, SensorMode.EO, SensorMode.SAR)
+                if mode in observation.action_mask.allowed_sensor_modes
+            ),
+            None,
+        )
+        operation_mode = next(
+            (
+                mode
+                for mode in (
+                    OperationMode.HOLDING,
+                    OperationMode.IDLE,
+                    OperationMode.RETURN,
+                    OperationMode.TRANSIT,
+                    OperationMode.COVERAGE,
+                    OperationMode.TRACK,
+                )
+                if mode in observation.action_mask.allowed_operation_modes
+            ),
+            None,
+        )
+        if sensor_mode is None or operation_mode is None:
+            raise InvalidControlCommand("action mask contains no legal failure command")
         command = ControlCommand(
             0.0,
             speed,
-            SensorMode.OFF,
-            OperationMode.TRACK,
-            self.task.target_contact_id,
+            sensor_mode,
+            operation_mode,
         )
+        self._validate_command_modes(command, observation)
         if self._failure_event_emitted:
             return ControlDecision(command)
         self._failure_event_emitted = True
