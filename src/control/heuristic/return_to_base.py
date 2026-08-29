@@ -164,6 +164,7 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.reservation_id: str | None = None
         self._arrived = False
         self._reservation_released = False
+        self._failure: NoSafeRecoveryPath | None = None
 
     @property
     def observation_spec(self) -> ObservationSpec:
@@ -221,10 +222,15 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.reservation_id = plan.reservation_id
         self._arrived = False
         self._reservation_released = False
+        self._failure = None
 
     def act(self, observation: ControlObservation) -> ControlDecision:
-        if self.recovery_plan is None or self.follower is None:
+        if self.recovery_plan is None:
             raise RuntimeError("start_task must be called before act")
+        if self._failure is not None:
+            raise self._failure
+        if self.follower is None:
+            raise RuntimeError("recovery route is unavailable")
         self._refresh_route(observation)
         command = self.follower.next_command(
             observation,
@@ -283,44 +289,44 @@ class ReturnToBaseController(HeuristicControllerBase):
                 observation.planning_map_version,
             )
         except PathNotFoundError as exc:
-            raise NoSafeRecoveryPath(
-                self.recovery_plan.base_id,
-                observation.planning_map_version,
-                str(exc),
-            ) from exc
+            raise self._fail_recovery(observation, str(exc)) from exc
         try:
             route = _normalise_route(planned)
         except ValueError as exc:
-            raise NoSafeRecoveryPath(
-                self.recovery_plan.base_id,
-                observation.planning_map_version,
-                str(exc),
-            ) from exc
+            raise self._fail_recovery(observation, str(exc)) from exc
         if route[-1][:2] != tuple(map(float, self.recovery_plan.base_position)):
-            raise NoSafeRecoveryPath(
-                self.recovery_plan.base_id,
-                observation.planning_map_version,
-                "replanned route does not end at the reserved base",
+            raise self._fail_recovery(
+                observation, "replanned route does not end at the reserved base"
             )
         if _route_blocked(route, observation.planning_obstacle_mask):
-            raise NoSafeRecoveryPath(
-                self.recovery_plan.base_id,
-                observation.planning_map_version,
-                "replanned route intersects planning mask",
+            raise self._fail_recovery(
+                observation, "replanned route intersects planning mask"
             )
         actual_length = path_length_cells(route)
         if (
             actual_length + self.recovery_plan.reserve_cells
             > observation.self_state.remaining_range_cells
         ):
-            raise NoSafeRecoveryPath(
-                self.recovery_plan.base_id,
-                observation.planning_map_version,
-                "replanned route plus reserve exceeds remaining range",
+            raise self._fail_recovery(
+                observation, "replanned route plus reserve exceeds remaining range"
             )
         self.route = route
         self.follower = RouteFollower(route)
         self.planning_map_version = observation.planning_map_version
+
+    def _fail_recovery(
+        self, observation: ControlObservation, reason: str
+    ) -> NoSafeRecoveryPath:
+        assert self.recovery_plan is not None
+        failure = NoSafeRecoveryPath(
+            self.recovery_plan.base_id,
+            observation.planning_map_version,
+            reason,
+        )
+        self.route = ()
+        self.follower = None
+        self._failure = failure
+        return failure
 
     @staticmethod
     def _validate_command_modes(

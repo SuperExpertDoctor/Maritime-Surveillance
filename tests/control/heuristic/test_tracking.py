@@ -388,12 +388,19 @@ def test_tracking_replans_for_only_a_newer_contact_update(
     newer = replace(
         observation.contacts[0],
         estimated_position=(15.0, 14.0),
-        observed_at_min=5.0,
+        observed_at_min=6.0,
+    )
+    changed = replace(
+        _with_pose(observation, (3.0, 10.0, 0.0)),
+        planning_map_version=2,
+        contacts=(newer,),
     )
 
-    controller.act(replace(observation, contacts=(newer,)))
+    controller.act(changed)
 
     assert controller.navigator.last_target == (15.0, 14.0)
+    assert controller.navigator.plan_arguments[-1][0] == (3.0, 10.0, 0.0)
+    assert controller.navigator.plan_arguments[-1][-1] == 2
     assert len(controller.navigator.plan_arguments) == 2
 
     older = replace(
@@ -401,7 +408,7 @@ def test_tracking_replans_for_only_a_newer_contact_update(
         estimated_position=(25.0, 25.0),
         observed_at_min=4.5,
     )
-    controller.act(replace(observation, contacts=(older,)))
+    controller.act(replace(changed, contacts=(older,)))
 
     assert controller.target_position == (15.0, 14.0)
     assert len(controller.navigator.plan_arguments) == 2
@@ -434,7 +441,7 @@ def test_tracking_replans_an_approach_route_invalidated_by_a_new_map_version(
     blocked = np.array(observation.planning_obstacle_mask, copy=True)
     blocked[6, 10] = True
     changed = replace(
-        observation,
+        _with_pose(observation, (3.0, 10.0, 0.0)),
         planning_obstacle_mask=blocked,
         planning_map_version=2,
     )
@@ -444,7 +451,7 @@ def test_tracking_replans_an_approach_route_invalidated_by_a_new_map_version(
     assert controller.phase is TrackingPhase.APPROACH_ASTAR
     assert controller.planning_map_version == 2
     assert controller.route == replanned_route
-    assert navigator.plan_arguments[-1][0] == (2.0, 10.0, 0.0)
+    assert navigator.plan_arguments[-1][0] == (3.0, 10.0, 0.0)
     assert navigator.plan_arguments[-1][-1] == 2
     assert decision.command.turn_rate_rad_min < 0.0
 
@@ -502,18 +509,18 @@ def test_tracking_replans_an_orbit_entry_invalidated_by_a_new_map_version(
     blocked = np.array(near_target.planning_obstacle_mask, copy=True)
     blocked[8, 13] = True
 
-    decision = controller.act(
-        replace(
-            near_target,
-            planning_obstacle_mask=blocked,
-            planning_map_version=2,
-        )
+    changed = replace(
+        _with_pose(near_target, (10.0, 12.0, math.pi)),
+        planning_obstacle_mask=blocked,
+        planning_map_version=2,
     )
+    decision = controller.act(changed)
 
     assert controller.phase is TrackingPhase.ORBIT_ENTRY
     assert controller.planning_map_version == 2
     assert controller.route == replanned_route
     assert len(tracker.entry_arguments) == 2
+    assert tracker.entry_arguments[-1][0] == (10.0, 12.0, math.pi)
     assert decision.command.turn_rate_rad_min < 0.0
 
 
@@ -572,6 +579,55 @@ def test_tracking_delegates_immediate_storm_threat_to_safe_detour(
     assert controller.avoidance_route == detour
     assert decision.command.operation_mode is OperationMode.TRACK
     assert decision.command.sensor_mode is SensorMode.EO
+
+
+def test_tracking_replans_a_blocked_storm_detour_from_current_observation(
+    action_spec, observation
+):
+    initial_pose = (10.0, 13.0, 0.0)
+    initial_detour = (
+        initial_pose,
+        (8.0, 13.0, math.pi),
+        (8.0, 10.0, -math.pi / 2.0),
+    )
+    replanned_detour = (
+        (9.0, 13.0, math.pi),
+        (9.0, 10.0, -math.pi / 2.0),
+        (12.0, 10.0, 0.0),
+    )
+    avoider = StormAvoiderSpy(ThreatLevel.LEVEL_2, initial_detour)
+    controller = TrackingController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=action_spec,
+        navigator=TrackingNavigatorSpy(),
+        tracker=TrackerSpy(),
+        storm_avoider=avoider,
+    )
+    initial_hazard = HazardObservation(
+        "storm-1", "thunderstorm", (11.0, 13.0), 0.5, (0.0, 0.0), 0.8
+    )
+    initial = replace(_with_pose(observation, initial_pose), hazards=(initial_hazard,))
+    _start_tracking(controller, initial)
+    controller.act(initial)
+    avoider.avoidance_path = list(replanned_detour)
+    blocked = np.array(initial.planning_obstacle_mask, copy=True)
+    blocked[8, 13] = True
+    current_hazard = replace(initial_hazard, center=(12.0, 12.0))
+    changed = replace(
+        _with_pose(initial, (9.0, 13.0, math.pi)),
+        planning_obstacle_mask=blocked,
+        planning_map_version=2,
+        hazards=(current_hazard,),
+    )
+
+    decision = controller.act(changed)
+
+    assert len(avoider.avoidance_arguments) == 2
+    assert avoider.avoidance_arguments[-1][0] == (9.0, 13.0, math.pi)
+    assert avoider.avoidance_arguments[-1][1] == (12.0, 13.0)
+    assert avoider.avoidance_arguments[-1][2][0].center == (12.0, 12.0)
+    assert controller.avoidance_route == replanned_detour
+    assert decision.command.operation_mode is OperationMode.TRACK
 
 
 def test_tracking_reports_internal_route_failure(action_spec, observation):
@@ -830,7 +886,7 @@ def test_return_replans_to_only_the_reserved_base_and_retains_reservation(
 
 
 @pytest.mark.parametrize("failure_kind", ["no_path", "range"])
-def test_return_replan_failure_keeps_reservation_and_never_executes_old_path(
+def test_return_replan_failure_clears_the_blocked_route_and_fails_closed(
     action_spec, observation, failure_kind
 ):
     return_observation = _return_observation(
@@ -856,8 +912,6 @@ def test_return_replan_failure_keeps_reservation_and_never_executes_old_path(
         ControlTask("R1", OperationMode.RETURN, recovery_plan=_recovery_plan()),
         return_observation,
     )
-    old_follower = controller.follower
-    old_route = controller.route
     blocked = np.array(return_observation.planning_obstacle_mask, copy=True)
     blocked[4, 5] = True
     changed = replace(
@@ -868,14 +922,17 @@ def test_return_replan_failure_keeps_reservation_and_never_executes_old_path(
 
     with pytest.raises(NoSafeRecoveryPath, match="base-A"):
         controller.act(changed)
+    with pytest.raises(NoSafeRecoveryPath, match="base-A"):
+        controller.act(return_observation)
 
     assert navigator.plan_arguments[-1][1] == frozenset({(8.0, 5.0)})
-    assert controller.follower is old_follower
-    assert controller.follower.index == 0
-    assert controller.route == old_route
-    assert controller.planning_map_version == 1
+    assert len(navigator.plan_arguments) == 1
+    assert controller.follower is None
+    assert controller.route == ()
     assert controller.reservation_id == "reservation-1"
     assert released == []
+    controller.stop_task(StopReason.FAILED)
+    assert released == ["reservation-1"]
 
 
 @pytest.mark.parametrize(
@@ -887,10 +944,15 @@ def test_return_replan_failure_keeps_reservation_and_never_executes_old_path(
             (2.0, 7.0, math.pi / 2.0),
             (6.0, 7.0, 0.0),
         ],
+        [
+            (2.0, 5.0, 0.0),
+            (5.0, 5.0, 0.0),
+            (8.0, 5.0, 0.0),
+        ],
     ],
-    ids=["empty", "different-base"],
+    ids=["empty", "different-base", "blocked"],
 )
-def test_return_rejects_an_invalid_replan_without_replacing_the_old_route(
+def test_return_rejects_an_invalid_replan_and_clears_the_blocked_route(
     action_spec, observation, replanned
 ):
     navigator = RecoveryNavigatorSpy({(8.0, 5.0): replanned})
@@ -900,8 +962,6 @@ def test_return_rejects_an_invalid_replan_without_replacing_the_old_route(
         ControlTask("R1", OperationMode.RETURN, recovery_plan=_recovery_plan()),
         return_observation,
     )
-    old_follower = controller.follower
-    old_route = controller.route
     blocked = np.array(return_observation.planning_obstacle_mask, copy=True)
     blocked[4, 5] = True
     changed = replace(
@@ -912,10 +972,12 @@ def test_return_rejects_an_invalid_replan_without_replacing_the_old_route(
 
     with pytest.raises(NoSafeRecoveryPath, match="base-A"):
         controller.act(changed)
+    with pytest.raises(NoSafeRecoveryPath, match="base-A"):
+        controller.act(return_observation)
 
-    assert controller.follower is old_follower
-    assert controller.route == old_route
-    assert controller.planning_map_version == 1
+    assert len(navigator.plan_arguments) == 1
+    assert controller.follower is None
+    assert controller.route == ()
     assert controller.reservation_id == "reservation-1"
 
 

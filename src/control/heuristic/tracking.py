@@ -162,6 +162,7 @@ class TrackingController(HeuristicControllerBase):
         self.planning_map_version: int | None = None
         self.avoidance_route: tuple[Pose, ...] = ()
         self._avoidance_follower: RouteFollower | None = None
+        self._avoidance_planning_map_version: int | None = None
         self._failure_event_emitted = False
 
     @property
@@ -193,6 +194,7 @@ class TrackingController(HeuristicControllerBase):
         self.planning_map_version = None
         self.avoidance_route = ()
         self._avoidance_follower = None
+        self._avoidance_planning_map_version = None
         self._failure_event_emitted = False
 
     def act(self, observation: ControlObservation) -> ControlDecision:
@@ -290,6 +292,7 @@ class TrackingController(HeuristicControllerBase):
         if threat.level is ThreatLevel.LEVEL_3:
             raise TrackingRouteError("target standoff is obscured by a storm")
         if threat.level is ThreatLevel.LEVEL_2:
+            self._refresh_avoidance_route(observation, pose)
             if self._avoidance_follower is None or self._avoidance_follower.is_complete:
                 path = self.storm_avoider.plan_avoidance(
                     pose,
@@ -305,6 +308,7 @@ class TrackingController(HeuristicControllerBase):
                     raise TrackingRouteError("storm-avoidance route intersects planning mask")
                 self.avoidance_route = route
                 self._avoidance_follower = RouteFollower(route)
+                self._avoidance_planning_map_version = observation.planning_map_version
             command = self._avoidance_follower.next_command(
                 observation,
                 self.action_spec,
@@ -313,6 +317,7 @@ class TrackingController(HeuristicControllerBase):
             )
             return self._with_target(command, observation)
         self._avoidance_follower = None
+        self._avoidance_planning_map_version = None
         turn_rate, speed = self.tracker.compute_guidance(
             pose,
             self.target_position,
@@ -355,6 +360,7 @@ class TrackingController(HeuristicControllerBase):
         self.target_observed_at_min = float(contact.observed_at_min)
         self._avoidance_follower = None
         self.avoidance_route = ()
+        self._avoidance_planning_map_version = None
         if self.phase in (
             TrackingPhase.CREATED,
             TrackingPhase.APPROACH_ASTAR,
@@ -385,6 +391,23 @@ class TrackingController(HeuristicControllerBase):
         self.follower = None
         self.planning_map_version = None
         self.phase = TrackingPhase.CREATED
+
+    def _refresh_avoidance_route(
+        self, observation: ControlObservation, current_pose: Pose
+    ) -> None:
+        if self._avoidance_follower is None:
+            return
+        if observation.planning_map_version == self._avoidance_planning_map_version:
+            return
+        unflown = self.avoidance_route[self._avoidance_follower.index + 1 :]
+        if not self._route_blocked(
+            (current_pose, *unflown), observation.planning_obstacle_mask
+        ):
+            self._avoidance_planning_map_version = observation.planning_map_version
+            return
+        self.avoidance_route = ()
+        self._avoidance_follower = None
+        self._avoidance_planning_map_version = None
 
     def _within_eo_range(self, observation: ControlObservation) -> bool:
         assert self.target_position is not None
