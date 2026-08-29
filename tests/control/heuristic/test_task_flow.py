@@ -192,6 +192,94 @@ def test_target_found_recovers_active_coverage_after_pending_task_is_popped(
 
 
 @pytest.mark.parametrize("event_type", ["search_complete", "task_failed"])
+def test_terminal_event_discards_context_saved_coverage_before_a_later_track_lease(
+    factory, coverage_task, event_type
+):
+    flow, ownership, coverage_lease, controllers, pending_tasks, coverage_controller = (
+        _heuristic_flow(factory, coverage_task)
+    )
+    coverage_controller.reset(
+        ControllerContext(
+            "UAV-1",
+            1.0,
+            coverage_controller.observation_spec,
+            coverage_controller.action_spec,
+            "UAV-1:1",
+            coverage_task,
+        )
+    )
+    pending_tasks.pop("UAV-1")
+
+    tracking = flow.handle(
+        _event("target_found", sequence=1, contact_id="C1"), coverage_lease
+    )
+    flow.handle(_event(event_type, sequence=2), tracking.current_lease)
+
+    later_task = ControlTask(
+        "track:C2", OperationMode.TRACK, target_contact_id="C2"
+    )
+    later_lease = ownership.acquire(
+        "UAV-1", ControlOwner.HEURISTIC, "tracking:track:C2", 3.0
+    )
+    controllers["UAV-1"] = factory.create_heuristic("UAV-1", later_task)
+    pending_tasks["UAV-1"] = later_task
+
+    lost = flow.handle(_event("target_lost", sequence=4), later_lease)
+
+    assert lost.current_lease.owner is ControlOwner.SYSTEM
+    assert isinstance(lost.controller, SystemHoldingController)
+    assert lost.task.task_type is OperationMode.HOLDING
+    assert lost.request_assignment
+
+
+def test_explicit_lifecycle_cleanup_discards_context_saved_coverage_before_revoke(
+    factory, coverage_task
+):
+    flow, ownership, coverage_lease, controllers, pending_tasks, coverage_controller = (
+        _heuristic_flow(factory, coverage_task)
+    )
+    coverage_controller.reset(
+        ControllerContext(
+            "UAV-1",
+            1.0,
+            coverage_controller.observation_spec,
+            coverage_controller.action_spec,
+            "UAV-1:1",
+            coverage_task,
+        )
+    )
+    pending_tasks.pop("UAV-1")
+    tracking = flow.handle(
+        _event("target_found", sequence=1, contact_id="C1"), coverage_lease
+    )
+
+    flow.clear_saved_coverage("UAV-1")
+    flow.clear_saved_coverage("UAV-1")
+    unchanged = flow.handle(
+        _event("work_range_exhausted", sequence=2), tracking.current_lease
+    )
+    assert not unchanged.consumed
+    assert unchanged.current_lease is tracking.current_lease
+
+    ownership.release_to_system(tracking.current_lease, 2.0)
+    later_task = ControlTask(
+        "track:C2", OperationMode.TRACK, target_contact_id="C2"
+    )
+    later_lease = ownership.acquire(
+        "UAV-1", ControlOwner.HEURISTIC, "tracking:track:C2", 3.0
+    )
+    controllers["UAV-1"] = factory.create_heuristic("UAV-1", later_task)
+    pending_tasks["UAV-1"] = later_task
+
+    lost = flow.handle(_event("target_lost", sequence=4), later_lease)
+
+    assert lost.current_lease.owner is ControlOwner.SYSTEM
+    assert isinstance(lost.controller, SystemHoldingController)
+    assert lost.task.task_type is OperationMode.HOLDING
+    assert lost.request_assignment
+
+
+@pytest.mark.parametrize("event_type", ["search_complete", "task_failed"])
 def test_terminal_task_event_releases_to_system_holding(
     factory, coverage_task, event_type
 ):

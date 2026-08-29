@@ -72,6 +72,11 @@ class HeuristicTaskFlow:
         self._lock = RLock()
         self._atomic = atomic or self._under_lock
 
+    def clear_saved_coverage(self, uav_id: str) -> None:
+        """Discard coverage retained for a completed or externally revoked flow."""
+
+        self._atomic(lambda: self._saved_coverage_tasks.pop(uav_id, None))
+
     def handle(
         self,
         event: ControlEvent,
@@ -183,6 +188,8 @@ class HeuristicTaskFlow:
             "target_lost",
             "civilian_released",
             "target_departed",
+            "search_complete",
+            "task_failed",
         }:
             self._saved_coverage_tasks.pop(uav_id, None)
 
