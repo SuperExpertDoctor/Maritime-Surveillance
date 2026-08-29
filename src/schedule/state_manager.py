@@ -10,6 +10,17 @@ from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport
 from src.schedule.info_field import InfoField
 
 
+_OPERATION_BY_STATUS = {
+    "idle": "idle",
+    "transit": "transit",
+    "searching": "coverage",
+    "tracking": "track",
+    "returning": "return",
+    "holding": "holding",
+    "refueling": "idle",
+}
+
+
 class StateManager:
     def __init__(self, config: AppConfig):
         self.config = config
@@ -27,6 +38,7 @@ class StateManager:
         ]
         self._search_regions: list[Region] = []
         self._track_regions: list[Region] = []
+        self._track_region_counter = 0
         self._previous_search_regions: list[Region] = []
         self._markers: list[Marker] = []
         self._marker_counter = 0
@@ -35,6 +47,7 @@ class StateManager:
         self._target_reports: dict[str, TargetReport] = {}
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
+        self.obstacle_version = 0
         self.land_mask = np.zeros(config.grid.resolution, dtype=bool)
         self._base_positions: tuple[tuple[int, int], ...] = (config.environment.base_position,)
 
@@ -60,7 +73,32 @@ class StateManager:
         return next((uav for uav in self._uavs if uav.id == uav_id), None)
 
     def get_available_uavs(self) -> list[UAVState]:
-        return [uav for uav in self._uavs if uav.status == "idle"]
+        return [
+            uav
+            for uav in self._uavs
+            if uav.control_mode == "heuristic"
+            and uav.control_owner == "system"
+            and uav.status in {"idle", "holding"}
+            and uav.operation_mode in {"idle", "holding"}
+        ]
+
+    def update_uav_control(
+        self,
+        uav_id: str,
+        control_mode: str,
+        control_owner: str,
+        operation_mode: str,
+        controller_generation: int,
+        safety_intervened: bool,
+    ) -> None:
+        uav = self.get_uav(uav_id)
+        if uav is None:
+            return
+        uav.control_mode = control_mode
+        uav.control_owner = control_owner
+        uav.operation_mode = operation_mode
+        uav.controller_generation = controller_generation
+        uav.safety_intervened = safety_intervened
 
     def update_uav_status(
         self,
@@ -77,6 +115,8 @@ class StateManager:
         if uav is None:
             return
         uav.status = status
+        if status in _OPERATION_BY_STATUS:
+            uav.operation_mode = _OPERATION_BY_STATUS[status]
         uav.position = position
         if assigned_region_id is not None:
             uav.assigned_region_id = assigned_region_id
@@ -98,7 +138,10 @@ class StateManager:
     # Environment ----------------------------------------------------
     def set_environment_obstacles(self, obstacles: list, mask) -> None:
         self.obstacles = list(obstacles)
-        self.obstacle_mask = np.asarray(mask, dtype=bool)
+        normalized = np.array(mask, dtype=np.bool_, copy=True)
+        if not np.array_equal(self.obstacle_mask, normalized):
+            self.obstacle_version += 1
+        self.obstacle_mask = normalized
 
     def set_land_mask(self, mask) -> None:
         """Publish the reset-specific mainland cells to all schedulers."""
@@ -247,10 +290,11 @@ class StateManager:
         existing = self.get_track_region_for_group(target_group_id)
         if existing is not None:
             return existing
+        self._track_region_counter += 1
         col, row = center
         half = 2
         region = Region(
-            id=f"T{len(self._track_regions) + 1}",
+            id=f"T{self._track_region_counter}",
             bbox=BBox(
                 max(0, col - half),
                 max(0, row - half),

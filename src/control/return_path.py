@@ -1,7 +1,20 @@
-﻿"""返航路径规划：当前位置 → 基地的最短直线路径。"""
+﻿"""Deprecated compatibility wrapper for endpoint-only return paths."""
+
+import warnings
+
+from src.control.heuristic.return_to_base import legacy_return_endpoints
 from src.schedule.datatypes import GridCoord
 
 
 def return_to_base(current: GridCoord, base_position: GridCoord) -> list[GridCoord]:
-    """生成返航航路点。"""
-    return [current, base_position]
+    """Preserve the legacy two-endpoint return shape."""
+    warnings.warn(
+        "return_to_base() is deprecated; use RecoveryPlanner.evaluate()",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    endpoints = legacy_return_endpoints(
+        (current.col, current.row),
+        (base_position.col, base_position.row),
+    )
+    return [GridCoord(int(col), int(row)) for col, row in endpoints]

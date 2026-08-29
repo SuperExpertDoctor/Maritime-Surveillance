@@ -1,27 +1,45 @@
-﻿"""航路点计算：当前位置 → 目标区域的简单直线路径。"""
+"""Deprecated grid waypoint compatibility helpers."""
+
+from __future__ import annotations
+
 import math
-from src.schedule.datatypes import GridCoord, BBox
+import warnings
+
+import numpy as np
+
+from src.control.heuristic.navigation import AStarNavigator
+from src.schedule.datatypes import BBox, GridCoord
 
 
-def navigate_to_region(current: GridCoord, target_bbox: BBox,
-                       cell_size_km: float = 10.0) -> list[GridCoord]:
-    """生成从当前位置到目标区域中心的直线航路点。"""
-    cx = (target_bbox.col_start + target_bbox.col_end) / 2.0
-    cy = (target_bbox.row_start + target_bbox.row_end) / 2.0
-    # 简单直线路径：起点 → 终点
-    waypoints = [current]
-    # 在途中添加中间点（如果需要避开障碍等，此处简化）
-    waypoints.append(GridCoord(int(cx), int(cy)))
-    return waypoints
+def navigate_to_region(
+    current: GridCoord, target_bbox: BBox, cell_size_km: float = 10.0
+) -> list[GridCoord]:
+    """Return legacy grid waypoints through the curvature-safe navigator."""
+    del cell_size_km
+    warnings.warn(
+        "navigate_to_region() is deprecated; use AStarNavigator through a controller",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    path = AStarNavigator().plan_to_region(
+        (float(current.col), float(current.row), 0.0),
+        target_bbox,
+        np.zeros((30, 30), dtype=bool),
+        r_min=1.0,
+    )
+    return [GridCoord(round(pose[0]), round(pose[1])) for pose in path]
 
 
 def grid_distance(a: GridCoord, b: GridCoord) -> float:
-    """网格坐标间的欧氏距离（单位：格）。"""
+    """Return Euclidean distance in grid cells."""
     return math.sqrt((a.col - b.col) ** 2 + (a.row - b.row) ** 2)
 
 
-def travel_time(a: GridCoord, b: GridCoord, cruise_speed_kmh: float,
-                cell_size_km: float = 10.0) -> float:
-    """计算两点间的飞行时间（单位：分钟）。"""
-    dist_km = grid_distance(a, b) * cell_size_km
-    return (dist_km / cruise_speed_kmh) * 60.0
+def travel_time(
+    a: GridCoord,
+    b: GridCoord,
+    cruise_speed_kmh: float,
+    cell_size_km: float = 10.0,
+) -> float:
+    """Return travel time in minutes."""
+    return grid_distance(a, b) * cell_size_km / cruise_speed_kmh * 60.0
