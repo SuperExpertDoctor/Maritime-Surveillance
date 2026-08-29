@@ -20,15 +20,31 @@ class ControlLease:
 class ControlOwnershipError(RuntimeError):
     """Raised when a lease does not describe the current UAV ownership."""
 
-    def __init__(self, uav_id: str, expected_generation: int, actual_generation: int):
+    def __init__(
+        self,
+        uav_id: str,
+        expected_generation: int,
+        actual_generation: int,
+        *,
+        current_owner: ControlOwner | None = None,
+    ):
         self.uav_id = uav_id
         self.expected_generation = expected_generation
         self.actual_generation = actual_generation
-        super().__init__(
-            f"stale control lease for {uav_id}: "
-            f"expected generation {expected_generation}, "
-            f"current generation {actual_generation}"
-        )
+        self.current_generation = actual_generation
+        self.current_owner = current_owner
+        if current_owner is not None:
+            message = (
+                f"cannot acquire control for {uav_id}: SYSTEM ownership required; "
+                f"current owner {current_owner.value}, generation {actual_generation}"
+            )
+        else:
+            message = (
+                f"stale control lease for {uav_id}: "
+                f"expected generation {expected_generation}, "
+                f"current generation {actual_generation}"
+            )
+        super().__init__(message)
 
 
 class ControlOwnership:
@@ -49,7 +65,12 @@ class ControlOwnership:
         with self._lock:
             current = self._get_current(uav_id)
             if current.owner is not ControlOwner.SYSTEM:
-                raise ControlOwnershipError(uav_id, current.generation, current.generation)
+                raise ControlOwnershipError(
+                    uav_id,
+                    current.generation,
+                    current.generation,
+                    current_owner=current.owner,
+                )
             lease = ControlLease(
                 uav_id,
                 owner,
