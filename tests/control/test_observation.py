@@ -146,6 +146,20 @@ def test_observation_action_mask_respects_return_lease(engine):
     )
 
 
+def test_observation_action_mask_respects_holding_recovery_authority(engine):
+    observation = build_observation(
+        engine,
+        control_owner=ControlOwner.SYSTEM,
+        operation_mode=OperationMode.HOLDING,
+    )
+
+    assert observation.action_mask.allowed_sensor_modes == (SensorMode.OFF,)
+    assert observation.action_mask.allowed_operation_modes == (
+        OperationMode.RETURN,
+        OperationMode.HOLDING,
+    )
+
+
 def test_state_manager_versions_only_changed_obstacle_masks(engine):
     sm = engine.allocator.sm
     original_version = sm.obstacle_version

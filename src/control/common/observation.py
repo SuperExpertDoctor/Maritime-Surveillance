@@ -238,7 +238,10 @@ class ObservationProvider:
             if target_contact_ids:
                 sensor_modes.append(SensorMode.EO)
                 operation_modes.append(OperationMode.TRACK)
-        elif control_owner is ControlOwner.SYSTEM and operation_mode is OperationMode.RETURN:
+        elif control_owner is ControlOwner.SYSTEM and operation_mode in (
+            OperationMode.RETURN,
+            OperationMode.HOLDING,
+        ):
             sensor_modes = [SensorMode.OFF]
             operation_modes = [OperationMode.RETURN, OperationMode.HOLDING]
         else:
