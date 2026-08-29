@@ -210,6 +210,30 @@ def test_safety_blocks_a_long_diagonal_trajectory_that_cuts_a_blocked_corner(set
     assert "motion_corrected" in {item.kind for item in result.interventions}
 
 
+def test_safety_traverses_a_negative_direction_diagonal_to_its_endpoint_cell():
+    cells = SafetyEnvelope._traversed_cells(10.0, 12.0, 8.0, 13.0)
+
+    assert cells == ((10, 12), (9, 12), (8, 12), (8, 13))
+
+
+def test_safety_blocks_a_negative_direction_diagonal_at_its_endpoint():
+    obstacle_mask = np.zeros((16, 16), dtype=bool)
+    obstacle_mask[8, 13] = True
+    observation = make_observation(
+        position=(10.0, 12.0),
+        heading_rad=math.atan2(1.0, -2.0),
+        obstacle_mask=obstacle_mask,
+    )
+    command = ControlCommand(
+        turn_rate_rad_min=0.0,
+        speed_cells_min=math.sqrt(5.0),
+        sensor_mode=SensorMode.OFF,
+        operation_mode=OperationMode.TRANSIT,
+    )
+
+    assert SafetyEnvelope._motion_blocked(command, observation, dt_min=1.0)
+
+
 def test_safety_rejects_masked_operation_or_unknown_target(setup):
     envelope, observation = setup
     operation = ControlCommand(0.0, 0.25, SensorMode.OFF, OperationMode.RETURN)

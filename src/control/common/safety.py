@@ -183,6 +183,10 @@ class SafetyEnvelope:
         t_max_row = (next_row - start_row) / delta_row if step_row else infinity
 
         while (col, row) != end_cell:
+            if min(t_max_col, t_max_row) >= 1.0 - 1e-12:
+                if cells[-1] != end_cell:
+                    cells.append(end_cell)
+                break
             if math.isclose(t_max_col, t_max_row, rel_tol=0.0, abs_tol=1e-12):
                 if step_col:
                     cells.append((col + step_col, row))
