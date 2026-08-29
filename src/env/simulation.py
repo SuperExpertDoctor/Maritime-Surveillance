@@ -5,6 +5,7 @@ import math
 import random
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Mapping
 
 import numpy as np
 
@@ -23,8 +24,36 @@ from src.env.sar_sensor import SARSensor
 from src.env.ship import Ship, ShipType, formation_offsets
 from src.env.sim_clock import SimClock
 from src.env.uav_entity import UAVEntity
+from src.control.common.contracts import (
+    ActionSpec,
+    BaseObservation,
+    ControlDecision,
+    ControlEvent,
+    ControlMode,
+    ControlOwner,
+    ControlTask,
+    OperationMode,
+    RecoveryPlan,
+    SensorMode,
+)
+from src.control.common.coordinator import (
+    ControlCoordinator,
+    ControlCoordinatorError,
+    EmergencyRevokeRequired,
+    StaleControlCommand,
+)
+from src.control.common.executor import UAVDynamicsExecutor
+from src.control.common.factory import ControlFactory, ControlProvider
+from src.control.common.observation import ObservationProvider
+from src.control.common.operation_registry import OperationRegistry
+from src.control.common.ownership import ControlOwnership
+from src.control.common.safety import InvalidControlCommand, SafetyEnvelope, UnsafeControlState
+from src.control.heuristic.return_to_base import (
+    NoSafeRecoveryPath,
+    RecoveryPlanner,
+)
 from src.schedule.config_loader import AppConfig
-from src.schedule.datatypes import GridCoord
+from src.schedule.datatypes import GridCoord, Region
 from src.schedule.task_allocator import TaskAllocator
 from src.utils.coverage_planner import CoveragePlanner
 from src.utils.ais_discriminator import AISDiscriminator
@@ -43,9 +72,16 @@ from src.utils.search_route_planner import (
 
 
 class SimulationEngine:
-    def __init__(self, config: AppConfig, seed: int = 42):
+    def __init__(
+        self,
+        config: AppConfig,
+        seed: int = 42,
+        *,
+        control_providers: Mapping[ControlMode | str, ControlProvider] | None = None,
+    ):
         self.config = config
         self.seed = seed
+        self._control_providers = dict(control_providers or {})
         self.reset_generation = 0
         self.rng = random.Random(seed)
         random.seed(seed)
@@ -138,6 +174,56 @@ class SimulationEngine:
                 max_range_cells=config.sensor.eoir.detection_range_km / config.grid.cell_size_km,
             )
             uav.storm_avoider.eo_detection_range_cells = uav.eo_sensor.max_range_cells
+
+        self._control_event_sequence = 1
+        self._return_reservation_sequence = 1
+        self._coordinator_tasks: dict[str, ControlTask] = {}
+        self._next_sortie_number: dict[str, int] = {
+            uav.id: 1 for uav in self.uavs
+        }
+        self._emergency_failures: dict[str, str] = {}
+        self._control_runtime_enabled = True
+        action_spec = self._control_action_spec()
+        self.control_ownership = ControlOwnership(tuple(uav.id for uav in self.uavs))
+        self.observation_provider = ObservationProvider(config)
+        self.safety_envelope = SafetyEnvelope(action_spec)
+        self.dynamics_executor = UAVDynamicsExecutor()
+        self.operation_registry = OperationRegistry(self.allocator.sm)
+        self.control_factory = ControlFactory(
+            config.control,
+            action_spec=action_spec,
+        )
+        for mode, provider in self._control_providers.items():
+            resolved_mode = ControlMode(mode)
+            if resolved_mode is ControlMode.HEURISTIC:
+                raise ValueError("the built-in heuristic provider cannot be replaced")
+            self.control_factory.register(resolved_mode, provider)
+        configured_modes = {
+            uav.id: ControlMode(
+                config.control.per_uav.get(uav.id, config.control.default_mode)
+            )
+            for uav in self.uavs
+        }
+        self.control_coordinator = ControlCoordinator(
+            config=config.control,
+            state_manager=self.allocator.sm,
+            ownership=self.control_ownership,
+            observations=self.observation_provider,
+            safety=self.safety_envelope,
+            executor=self.dynamics_executor,
+            factory=self.control_factory,
+            operation_registry=self.operation_registry,
+            configured_modes=configured_modes,
+            bases=self._control_base_observations,
+        )
+        for uav in self.uavs:
+            if configured_modes[uav.id] is not ControlMode.HEURISTIC:
+                self.control_coordinator.start_work(
+                    uav.id,
+                    sortie_number=self._next_sortie_number[uav.id],
+                    current_time=0.0,
+                    dt_min=self.clock.dt_min,
+                )
         self.ships = self._create_ships()
         self._refresh_ais_signals(0.0)
         self.ais_discriminator = AISDiscriminator(
@@ -299,7 +385,11 @@ class SimulationEngine:
         previous_seed = self.seed
         generation = self.reset_generation + 1
         next_seed = self.seed + 1 if seed is None else int(seed)
-        self.__init__(self.config, next_seed)
+        self.__init__(
+            self.config,
+            next_seed,
+            control_providers=self._control_providers,
+        )
         self.reset_generation = generation
         self.allocator.sm.scenario_generation = generation
         self.allocator.sm.add_event("environment_reset", {
@@ -319,16 +409,8 @@ class SimulationEngine:
         self._update_ships(t)
         self._refresh_ais_signals(t)
 
-        tracking_speeds = self._tracking_speed_commands()
-        storms = [item for item in self.obstacles if isinstance(item, Thunderstorm)]
         for uav in self.uavs:
-            target = self._group_center(uav.target_group_id) if uav.target_group_id else None
-            fuel_low = uav.step(
-                self.clock.dt_min,
-                target,
-                tracking_speed_cells_min=tracking_speeds.get(uav.id),
-                storm_zones=storms,
-            )
+            fuel_low = self._step_controlled_uav(uav, t)
             self._record_storm_avoidance(uav, t)
             # GOAL2: proactive fuel warning at 25% — gives the scheduler time
             # to pre-assign a replacement before the critical 8% return trigger.
@@ -388,7 +470,6 @@ class SimulationEngine:
                 self._begin_return(uav, t)
 
         self._update_sensors_and_detections(t)
-        self._process_search_completions(t)
         self._update_lifecycle_mode(t)
         self._process_refuelling(t)
         self._sync_state_from_entities()
@@ -411,6 +492,407 @@ class SimulationEngine:
         self._detect_and_resolve_path_conflicts(t)
         self._record_statuses()
         return result
+
+    def _step_controlled_uav(self, uav: UAVEntity, current_time: float) -> bool:
+        """Run one coordinator tick and return the low-fuel edge trigger."""
+        if uav.id in self._emergency_failures:
+            return False
+        lease = self.control_coordinator.current_lease(uav.id)
+        if not self.control_coordinator.has_controller(uav.id):
+            return False
+
+        if lease.owner in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+            try:
+                self._maybe_revoke_for_range(uav, current_time)
+            except NoSafeRecoveryPath as exc:
+                self._enter_emergency_failure(uav, "no_safe_recovery_path", exc)
+                return False
+            lease = self.control_coordinator.current_lease(uav.id)
+
+        try:
+            tick = self.control_coordinator.step_uav(
+                uav,
+                current_time=current_time,
+                dt_min=self.clock.dt_min,
+            )
+        except NoSafeRecoveryPath as exc:
+            if (
+                lease.owner is ControlOwner.SYSTEM
+                and self.control_coordinator.operation_mode(uav.id)
+                is OperationMode.RETURN
+            ):
+                self._enter_emergency_failure(uav, "no_safe_recovery_path", exc)
+                return False
+            self._handle_control_fault(uav, current_time, exc, lease)
+            return False
+        except Exception as exc:
+            self._handle_control_fault(uav, current_time, exc, lease)
+            return False
+
+        self._record_control_tick(uav, tick)
+        fuel_low = (
+            uav.fuel_remaining_pct <= 0.08
+            and uav.status not in ("returning", "idle", "refueling")
+            and not getattr(uav, "_fuel_low_reported", False)
+        )
+        if fuel_low:
+            uav._fuel_low_reported = True
+        return fuel_low
+
+    def _record_control_tick(self, uav: UAVEntity, tick) -> None:
+        """Bridge immutable control output into legacy entity diagnostics."""
+        active_task = self.control_coordinator.active_task(uav.id)
+        if active_task is not None:
+            self._coordinator_tasks[uav.id] = active_task
+        command = tick.execution.applied_command
+        if command.operation_mode is OperationMode.TRACK:
+            uav.target_group_id = command.target_contact_id
+            if command.target_contact_id:
+                uav._mission_kind = "track_entry"
+        elif command.operation_mode not in (OperationMode.TRACK,):
+            uav.target_group_id = None
+        if command.sensor_mode is SensorMode.SAR:
+            uav.sar_look_direction = uav.sar_look_direction or "right"
+            uav.sar_scan_heading_rad = uav.heading_rad
+            uav.sar_heading_error_deg = 0.0
+            uav.sar_imaging = True
+        else:
+            uav.sar_imaging = False
+        for event in tick.emitted_events:
+            if event.event_type == "search_complete":
+                self._record_search_completion_event(uav, event)
+            elif event.event_type == "task_failed":
+                self.allocator.sm.add_event("task_failed", {
+                    "uav_id": uav.id,
+                    **dict(event.payload),
+                })
+
+        if (
+            command.operation_mode is OperationMode.RETURN
+            and uav.id in self._return_base_by_uav
+            and math.dist(
+                uav.float_position,
+                (
+                    self._return_base_by_uav[uav.id].position.col,
+                    self._return_base_by_uav[uav.id].position.row,
+                ),
+            ) <= 0.05
+        ):
+            uav.status = "refueling"
+            uav.sensor_mode = "off"
+            self._land_for_refuelling(uav)
+
+    def _record_search_completion_event(
+        self, uav: UAVEntity, event: ControlEvent
+    ) -> None:
+        task = self.control_coordinator.active_task(uav.id)
+        region_id = task.task_id if task and task.task_type is OperationMode.COVERAGE else None
+        if region_id is None:
+            region_id = event.payload.get("task_id")
+        region = next(
+            (
+                item
+                for item in self.allocator.sm.get_search_regions()
+                if item.id == region_id
+            ),
+            None,
+        )
+        if region is not None:
+            region.status = "completed"
+            region.completion_pct = 100.0
+            region.assigned_uav_id = None
+        uav.completed_searches_since_refuel += 1
+        self._sortie_searched[uav.id] = True
+        self.allocator.sm.clear_uav_assignment(uav.id)
+        self.allocator.trigger_manager.notify_event(
+            "search_complete",
+            time=event.timestamp_min,
+            uav_id=uav.id,
+            region_id=region_id,
+        )
+        self.allocator.sm.add_event("search_complete", {
+            "uav_id": uav.id,
+            "region_id": region_id,
+        })
+
+    def _land_for_refuelling(self, uav: UAVEntity) -> None:
+        base = self._return_base_by_uav.get(uav.id)
+        if base is not None and base.land_uav(uav.id):
+            return
+        if base is not None:
+            self._holding_base_by_uav[uav.id] = base
+            uav.start_holding(base.position)
+            if self.control_coordinator.has_controller(uav.id):
+                lease = self.control_coordinator.current_lease(uav.id)
+                if lease.owner is ControlOwner.SYSTEM:
+                    holding_task = ControlTask(
+                        f"holding:{uav.id}:{self.clock.time}",
+                        OperationMode.HOLDING,
+                    )
+                    self.control_coordinator.assign_system_task(
+                        uav.id,
+                        holding_task,
+                        current_time=self.clock.time,
+                    )
+                    self._coordinator_tasks[uav.id] = holding_task
+
+    def _maybe_revoke_for_range(
+        self, uav: UAVEntity, current_time: float, *, force: bool = False
+    ) -> bool:
+        """Reserve a validated base before a work command can run out of range."""
+        lease = self.control_coordinator.current_lease(uav.id)
+        if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+            return False
+        reserve_cells = self.config.control.safety.reserve_range_cells
+        planner = RecoveryPlanner()
+        try:
+            candidates = planner.evaluate(
+                uav.pose,
+                uav.remaining_range_cells,
+                self._control_base_observations(),
+                self.allocator.sm.obstacle_mask,
+                self.allocator.sm.obstacle_version,
+                uav.R_min,
+                reserve_cells,
+            )
+        except (RuntimeError, ValueError) as exc:
+            candidates = ()
+            planning_error = str(exc)
+        else:
+            planning_error = "no candidate satisfies the range and safety contract"
+        if not candidates:
+            error = NoSafeRecoveryPath(
+                "none",
+                self.allocator.sm.obstacle_version,
+                planning_error,
+            )
+            self._emit_no_safe_recovery_path(uav, current_time, error)
+            raise error
+
+        candidate = candidates[0]
+        max_speed = self._control_action_spec().max_speed_cells_min
+        threshold = (
+            candidate.path_length_cells
+            + candidate.reserve_cells
+            + max_speed * self.clock.dt_min
+        )
+        if not force and uav.remaining_range_cells > threshold:
+            return False
+
+        base = next(
+            (item for item in self.bases if item.id == candidate.base.base_id),
+            None,
+        )
+        if base is None or self._base_maintenance_load(base) >= base.capacity:
+            self._emit_no_safe_recovery_path(
+                uav,
+                current_time,
+                NoSafeRecoveryPath(
+                    candidate.base.base_id,
+                    self.allocator.sm.obstacle_version,
+                    "recovery base reservation is no longer available",
+                ),
+            )
+            raise NoSafeRecoveryPath(
+                candidate.base.base_id,
+                self.allocator.sm.obstacle_version,
+                "recovery base reservation is no longer available",
+            )
+
+        reservation_id = f"{uav.id}:return:{self._return_reservation_sequence}"
+        self._return_reservation_sequence += 1
+        plan = RecoveryPlan(
+            base_id=candidate.base.base_id,
+            base_position=candidate.base.position,
+            reservation_id=reservation_id,
+            path=candidate.path,
+            path_length_cells=candidate.path_length_cells,
+            reserve_cells=candidate.reserve_cells,
+            planning_map_version=candidate.planning_map_version,
+        )
+        self._return_base_by_uav[uav.id] = base
+        try:
+            self.control_coordinator.revoke_for_return(
+                uav.id,
+                plan,
+                current_time=current_time,
+            )
+        except Exception:
+            if self._return_base_by_uav.get(uav.id) is base:
+                self._return_base_by_uav.pop(uav.id, None)
+            raise
+        self._coordinator_tasks[uav.id] = ControlTask(
+            reservation_id,
+            OperationMode.RETURN,
+            recovery_plan=plan,
+        )
+        uav.plan_return(plan.path)
+        self._prepare_return_state(uav, current_time)
+        self.allocator.sm.add_event("return_reserved", {
+            "uav_id": uav.id,
+            "base_id": base.id,
+            "reservation_id": reservation_id,
+            "reason": "range_reserve",
+        })
+        return True
+
+    def _emit_no_safe_recovery_path(
+        self,
+        uav: UAVEntity,
+        current_time: float,
+        error: NoSafeRecoveryPath,
+    ) -> None:
+        self.allocator.trigger_manager.notify_event(
+            "no_safe_recovery_path",
+            time=current_time,
+            uav_id=uav.id,
+            base_id=error.base_id,
+            reason=error.reason,
+        )
+        self.allocator.sm.add_event("no_safe_recovery_path", {
+            "uav_id": uav.id,
+            "base_id": error.base_id,
+            "reason": error.reason,
+        })
+
+    def _handle_control_fault(
+        self,
+        uav: UAVEntity,
+        current_time: float,
+        error: Exception,
+        lease,
+    ) -> None:
+        """Recover work-controller faults through the same reservation transaction."""
+        if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+            self._enter_emergency_failure(uav, "controller_fault", error)
+            return
+        reason = (
+            "invalid_command_limit"
+            if isinstance(error, EmergencyRevokeRequired)
+            else "controller_fault"
+        )
+        self.allocator.trigger_manager.notify_event(
+            reason,
+            time=current_time,
+            uav_id=uav.id,
+            error=str(error),
+        )
+        self.allocator.sm.add_event(reason, {
+            "uav_id": uav.id,
+            "error": str(error),
+        })
+        try:
+            self._request_recovery_return(uav, current_time, reason)
+        except NoSafeRecoveryPath as recovery_error:
+            self._enter_emergency_failure(
+                uav,
+                "no_safe_recovery_path",
+                recovery_error,
+            )
+
+    def _request_recovery_return(
+        self,
+        uav: UAVEntity,
+        current_time: float,
+        reason: str,
+    ) -> None:
+        """Create a reserved return plan and then transfer the control lease."""
+        lease = self.control_coordinator.current_lease(uav.id)
+        if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+            raise ControlCoordinatorError(
+                f"{uav.id} does not have a work lease for recovery"
+            )
+        try:
+            self._maybe_revoke_for_range(uav, current_time, force=True)
+        except NoSafeRecoveryPath:
+            raise
+        if self.control_coordinator.current_lease(uav.id).owner is not ControlOwner.SYSTEM:
+            raise ControlCoordinatorError(
+                f"{uav.id} recovery did not install SYSTEM ownership"
+            )
+        self.allocator.sm.add_event("return_triggered", {
+            "uav_id": uav.id,
+            "reason": reason,
+            "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
+        })
+
+    def _prepare_return_state(self, uav: UAVEntity, current_time: float) -> None:
+        sm = self.allocator.sm
+        self._freshness_patrol_uavs.discard(uav.id)
+        self._search_started_at.pop(uav.id, None)
+        self._tracking_started_at.pop(uav.id, None)
+        self._ais_tracking_started_at.pop(uav.id, None)
+        self._ais_measurements.pop(uav.id, None)
+        group_id = uav.target_group_id
+        if group_id:
+            report = sm.get_target_report(group_id)
+            track = sm.get_track_region_for_group(group_id)
+            if track is not None and track.assigned_uav_id == uav.id:
+                sm.release_track_region(track.id, uav.id, create_marker=True)
+                self.allocator.trigger_manager.notify_event(
+                    "target_lost",
+                    time=current_time,
+                    uav_id=uav.id,
+                    group_id=group_id,
+                )
+                sm.add_event("target_lost", {
+                    "uav_id": uav.id,
+                    "group_id": group_id,
+                })
+                if report is not None:
+                    sm.add_event("target_handoff_report", {
+                        "uav_id": uav.id,
+                        "group_id": report.group_id,
+                        "position": report.position,
+                        "observed_at": report.observed_at,
+                    })
+            for member in self.ships:
+                if member.group_id == group_id:
+                    member.set_tracked(False)
+        uav.target_group_id = None
+        for region in sm.get_search_regions():
+            if region.assigned_uav_id == uav.id:
+                region.assigned_uav_id = None
+        sm.clear_uav_assignment(uav.id)
+        uav.status = "returning"
+        uav.sensor_mode = "off"
+
+    def _enter_emergency_failure(
+        self, uav: UAVEntity, reason: str, error: Exception
+    ) -> None:
+        self._emergency_failures[uav.id] = reason
+        uav.sensor_mode = "off"
+        self.allocator.trigger_manager.notify_event(
+            "emergency_failure",
+            time=self.clock.time,
+            uav_id=uav.id,
+            reason=reason,
+            error=str(error),
+        )
+        self.allocator.sm.add_event("emergency_failure", {
+            "uav_id": uav.id,
+            "reason": reason,
+            "error": str(error),
+        })
+
+    def _queue_control_event(
+        self,
+        event_type: str,
+        uav_id: str,
+        current_time: float,
+        payload: Mapping[str, object] | None = None,
+    ) -> ControlEvent:
+        event = ControlEvent(
+            self._control_event_sequence,
+            current_time,
+            event_type,
+            "simulation",
+            uav_id,
+            payload or {},
+        )
+        self._control_event_sequence += 1
+        self.control_coordinator.queue_event(event)
+        return event
 
     def run(self, steps: int = 480, on_step=None) -> dict:
         for _ in range(steps):
@@ -446,6 +928,31 @@ class SimulationEngine:
             "scenario_seed": self.seed,
             "reset_generation": self.reset_generation,
         }
+
+    def _control_action_spec(self) -> ActionSpec:
+        """Build simulation-scale bounds from the configured cruise speed."""
+        nominal_speed = (
+            self.config.uav.cruise_speed_kmh
+            / self.config.grid.cell_size_km
+            / 60.0
+        )
+        min_speed = nominal_speed * self.config.control.safety.min_speed_fraction
+        max_speed = nominal_speed * self.config.control.safety.max_speed_fraction
+        if min_speed <= 0.0 or max_speed < min_speed:
+            raise ValueError("control safety speed fractions produce invalid bounds")
+        max_turn = max_speed / 1.0
+        return ActionSpec(-max_turn, max_turn, min_speed, max_speed)
+
+    def _control_base_observations(self) -> tuple[BaseObservation, ...]:
+        return tuple(
+            BaseObservation(
+                base_id=base.id,
+                position=(float(base.position.col), float(base.position.row)),
+                capacity=base.capacity,
+                reserved_load=self._base_maintenance_load(base),
+            )
+            for base in sorted(self.bases, key=lambda item: item.id)
+        )
 
     def _update_obstacles(self) -> None:
         previous_mask = self.obstacle_mask
@@ -596,6 +1103,19 @@ class SimulationEngine:
             ):
                 continue
 
+            if self.control_coordinator.has_controller(uav.id):
+                self._queue_control_event(
+                    "route_blocked",
+                    uav.id,
+                    sm.current_time,
+                    {"reason": "dynamic_obstacle"},
+                )
+                sm.add_event("route_blocked", {
+                    "uav_id": uav.id,
+                    "reason": "dynamic_obstacle",
+                })
+                continue
+
             if uav.status == "returning":
                 self._set_return_route(uav, sm.current_time)
             elif uav.mission_kind in ("search",):
@@ -671,12 +1191,19 @@ class SimulationEngine:
         for tracker in self.uavs:
             if tracker.target_group_id != group_id:
                 continue
-            tracker.cancel_tracking()
+            tracker.target_group_id = None
             sm.clear_uav_assignment(tracker.id)
             sm.update_uav_status(
                 tracker.id, "idle", tracker.position,
                 fuel_remaining_pct=tracker.fuel_remaining_pct,
             )
+            if self.control_coordinator.has_controller(tracker.id):
+                self._queue_control_event(
+                    "target_lost",
+                    tracker.id,
+                    current_time,
+                    {"group_id": group_id, "contact_id": group_id},
+                )
             self._storm_levels.pop(tracker.id, None)
             self._storm_level3_started_at.pop(tracker.id, None)
         self.allocator.trigger_manager.notify_event(
@@ -802,12 +1329,19 @@ class SimulationEngine:
             self._tracking_started_at.pop(uav.id, None)
             self._ais_tracking_started_at.pop(uav.id, None)
             self._ais_measurements.pop(uav.id, None)
-            uav.cancel_tracking()
+            uav.target_group_id = None
             sm.clear_uav_assignment(uav.id)
-            if not self._resume_search(uav):
+            if not self.control_coordinator.has_controller(uav.id) and not self._resume_search(uav):
                 sm.update_uav_status(
                     uav.id, "idle", uav.position,
                     fuel_remaining_pct=uav.fuel_remaining_pct,
+                )
+            elif self.control_coordinator.has_controller(uav.id):
+                self._queue_control_event(
+                    event_type,
+                    uav.id,
+                    current_time,
+                    {"group_id": group_id, "contact_id": group_id},
                 )
         self.allocator.trigger_manager.notify_event(
             event_type, time=current_time, group_id=group_id,
@@ -867,7 +1401,9 @@ class SimulationEngine:
         )
         self.track_creations += 1
         self._tracking_started_at[uav.id] = current_time
-        uav.start_tracking(ship.group_id, ship.float_position)
+        # Keep the legacy entity/state association for rendering and handoff
+        # bookkeeping; the tracking controller is installed by the queued event.
+        uav.target_group_id = ship.group_id
         for member in self.ships:
             if member.group_id == ship.group_id:
                 member.set_tracked(True)
@@ -885,6 +1421,16 @@ class SimulationEngine:
             uav_id=uav.id,
             group_id=ship.group_id,
             position={"col": ship.position.col, "row": ship.position.row},
+        )
+        self._queue_control_event(
+            "target_found",
+            uav.id,
+            current_time,
+            {
+                "contact_id": ship.group_id,
+                "group_id": ship.group_id,
+                "position": {"col": ship.position.col, "row": ship.position.row},
+            },
         )
         sm.add_event("target_found", {
             "uav_id": uav.id,
@@ -915,6 +1461,15 @@ class SimulationEngine:
                 "idle", "tracking", "returning", "holding", "refueling",
             }:
                 continue
+            if self.control_coordinator.has_controller(entity.id):
+                self._queue_control_event(
+                    "route_blocked",
+                    entity.id,
+                    current_time,
+                    {"reason": "search_region_retired"},
+                )
+                self._begin_return(entity, current_time)
+                continue
             if not self._resume_search(entity):
                 self._begin_return(entity, current_time)
 
@@ -925,6 +1480,22 @@ class SimulationEngine:
         *,
         release_marker: bool = True,
     ) -> None:
+        if self.control_coordinator.has_controller(uav.id):
+            lease = self.control_coordinator.current_lease(uav.id)
+            if lease.owner in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+                try:
+                    self._request_recovery_return(
+                        uav,
+                        current_time,
+                        "lifecycle_or_task_return",
+                    )
+                except NoSafeRecoveryPath as exc:
+                    self._enter_emergency_failure(
+                        uav,
+                        "no_safe_recovery_path",
+                        exc,
+                    )
+                return
         sm = self.allocator.sm
         self._freshness_patrol_uavs.discard(uav.id)
         self._search_started_at.pop(uav.id, None)
@@ -1301,6 +1872,23 @@ class SimulationEngine:
                 uav.base_position = base.position
                 uav.refuel()
                 self._return_base_by_uav.pop(uav.id, None)
+                if self.control_coordinator.has_controller(uav.id):
+                    self.control_coordinator.reset_after_refuel(
+                        uav.id,
+                        current_time=current_time,
+                    )
+                    self._next_sortie_number[uav.id] += 1
+                    if (
+                        self.control_coordinator.configured_mode(uav.id)
+                        is not ControlMode.HEURISTIC
+                    ):
+                        self.control_coordinator.start_work(
+                            uav.id,
+                            sortie_number=self._next_sortie_number[uav.id],
+                            current_time=current_time,
+                            dt_min=self.clock.dt_min,
+                        )
+                    self._coordinator_tasks.pop(uav.id, None)
                 if self._sortie_searched[uav.id]:
                     self.lifecycle_cycles[uav.id] += 1
                 self._sortie_searched[uav.id] = False
@@ -1368,6 +1956,15 @@ class SimulationEngine:
                 heading_deg=entity.heading_deg,
                 sensor_mode=entity.sensor_mode,
             )
+            lease = self.control_coordinator.current_lease(entity.id)
+            sm.update_uav_control(
+                entity.id,
+                self.control_coordinator.configured_mode(entity.id).value,
+                lease.owner.value,
+                self.control_coordinator.operation_mode(entity.id).value,
+                lease.generation,
+                self.control_coordinator.safety_intervened(entity.id),
+            )
         for track in sm.get_track_regions():
             center = self._group_center(track.target_group_id)
             if center:
@@ -1383,7 +1980,16 @@ class SimulationEngine:
         assignments = []
         for state in sm.get_all_uavs():
             entity = entity_by_id[state.id]
-            if state.status != "transit" or not state.assigned_region_id or entity.status != "idle":
+            if (
+                state.status != "transit"
+                or not state.assigned_region_id
+                or entity.status not in ("idle", "holding")
+            ):
+                continue
+            if (
+                self.control_coordinator.configured_mode(entity.id)
+                is not ControlMode.HEURISTIC
+            ):
                 continue
             region = region_by_id.get(state.assigned_region_id)
             if region is None:
@@ -1421,6 +2027,8 @@ class SimulationEngine:
                 if entity.id in errors:
                     raise errors[entity.id]
                 self._apply_search_route_plan(entity, region, plans[entity.id])
+                if entity.mission_kind == "search":
+                    self._install_coverage_task(entity, region, sm.current_time)
             except Exception as exc:
                 region.status = "stale"
                 region.assigned_uav_id = None
@@ -1431,6 +2039,47 @@ class SimulationEngine:
                     "region_id": region.id,
                     "error": str(exc),
                 })
+
+    def _install_coverage_task(
+        self, uav: UAVEntity, region: Region, current_time: float
+    ) -> None:
+        task = ControlTask(
+            region.id,
+            OperationMode.COVERAGE,
+            region_bbox=region.bbox,
+        )
+        lease = self.control_coordinator.current_lease(uav.id)
+        active = self.control_coordinator.active_task(uav.id)
+        if (
+            self.control_coordinator.has_controller(uav.id)
+            and active == task
+            and lease.owner is ControlOwner.HEURISTIC
+        ):
+            self._coordinator_tasks[uav.id] = task
+            return
+        if not self.control_coordinator.has_controller(uav.id):
+            self.control_coordinator.start_work(
+                uav.id,
+                sortie_number=self._next_sortie_number[uav.id],
+                current_time=current_time,
+                dt_min=self.clock.dt_min,
+                task=task,
+            )
+        elif lease.owner is ControlOwner.SYSTEM:
+            self.control_coordinator.assign_task(
+                uav.id,
+                task,
+                current_time=current_time,
+            )
+        elif lease.owner is ControlOwner.HEURISTIC and active != task:
+            self.control_coordinator.assign_task(
+                uav.id,
+                task,
+                current_time=current_time,
+            )
+        else:
+            return
+        self._coordinator_tasks[uav.id] = task
 
     def _assign_search_route(
         self,
@@ -1569,6 +2218,18 @@ class SimulationEngine:
         for uav_id in to_replan:
             uav = entities.get(uav_id)
             if uav is None or uav.status in ("idle", "refueling", "holding", "returning"):
+                continue
+            if self.control_coordinator.has_controller(uav.id):
+                self._queue_control_event(
+                    "route_blocked",
+                    uav.id,
+                    current_time,
+                    {"reason": "path_conflict"},
+                )
+                sm.add_event("route_blocked", {
+                    "uav_id": uav.id,
+                    "reason": "path_conflict",
+                })
                 continue
             conflicting_uavs = [
                 c.uav_b if c.uav_a == uav_id else c.uav_a

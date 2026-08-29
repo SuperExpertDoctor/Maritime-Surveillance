@@ -359,6 +359,111 @@ class ControlCoordinator:
         self._require_uav(uav_id)
         return self.ownership.current(uav_id)
 
+    def has_controller(self, uav_id: str) -> bool:
+        """Return whether a controller has been installed for this UAV."""
+        self._require_uav(uav_id)
+        with self._lock:
+            return uav_id in self._controllers
+
+    def configured_mode(self, uav_id: str) -> ControlMode:
+        """Return the persisted mode selected for this UAV."""
+        self._require_uav(uav_id)
+        return self._configured_modes[uav_id]
+
+    def operation_mode(self, uav_id: str) -> OperationMode:
+        """Return the coordinator's last applied operation mode."""
+        self._require_uav(uav_id)
+        with self._lock:
+            return self._operation_modes[uav_id]
+
+    def safety_intervened(self, uav_id: str) -> bool:
+        """Return whether the last applied command was safety-intervened."""
+        self._require_uav(uav_id)
+        with self._lock:
+            return self._last_safety_intervened[uav_id]
+
+    def active_task(self, uav_id: str) -> ControlTask | None:
+        """Return a task snapshot for lifecycle and compatibility bookkeeping."""
+        self._require_uav(uav_id)
+        with self._lock:
+            controller = self._controllers.get(uav_id)
+            pending = self._pending_tasks.get(uav_id)
+            if controller is None:
+                return pending
+            context = getattr(controller, "context", None)
+            task = getattr(context, "task", None)
+            return task if isinstance(task, ControlTask) else pending
+
+    def controller(self, uav_id: str) -> ControllerBase | None:
+        """Return the installed controller for integration diagnostics."""
+        self._require_uav(uav_id)
+        with self._lock:
+            return self._controllers.get(uav_id)
+
+    def assign_system_task(
+        self,
+        uav_id: str,
+        task: ControlTask,
+        *,
+        current_time: float,
+    ) -> ControlLease:
+        """Install a SYSTEM-owned task without exposing a work lease."""
+        self._require_uav(uav_id)
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        if task.task_type not in (OperationMode.RETURN, OperationMode.HOLDING):
+            raise ControlCoordinatorError(
+                "SYSTEM tasks must be RETURN or HOLDING operations"
+            )
+        controller = self.factory.create_heuristic(uav_id, task)
+        self._validate_controller(controller, ControlMode.HEURISTIC)
+        with self._lock:
+            current = self.ownership.current(uav_id)
+            if current.owner is not ControlOwner.SYSTEM:
+                raise ControlCoordinatorError(
+                    f"SYSTEM task requires SYSTEM ownership for {uav_id}"
+                )
+            lease = self.ownership.replace(
+                current,
+                ControlOwner.SYSTEM,
+                f"{task.task_type.value}:{task.task_id}",
+                current_time,
+            )
+            old_controller = self._controllers.get(uav_id)
+            self._controllers[uav_id] = controller
+            self._pending_tasks[uav_id] = task
+            self._operation_modes[uav_id] = task.task_type
+        if old_controller is not None and old_controller is not controller:
+            self._stop_controller(old_controller, StopReason.PREEMPTED)
+        return lease
+
+    def reset_after_refuel(
+        self, uav_id: str, *, current_time: float
+    ) -> ControlLease:
+        """Clear a consumed SYSTEM return task and expose an idle lease."""
+        self._require_uav(uav_id)
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        with self._lock:
+            current = self.ownership.current(uav_id)
+            if current.owner is not ControlOwner.SYSTEM:
+                raise ControlCoordinatorError(
+                    f"refuel reset requires SYSTEM ownership for {uav_id}"
+                )
+            lease = self.ownership.replace(
+                current,
+                ControlOwner.SYSTEM,
+                "system",
+                current_time,
+            )
+            old_controller = self._controllers.pop(uav_id, None)
+            self._pending_tasks.pop(uav_id, None)
+            self._operation_modes[uav_id] = OperationMode.IDLE
+            self._last_applied_commands[uav_id] = None
+            self._last_safety_intervened[uav_id] = False
+            self._last_tick_times[uav_id] = None
+        if old_controller is not None:
+            self._stop_controller(old_controller, StopReason.COMPLETED)
+        return lease
+
     def step_uav(
         self,
         uav: UAVEntity,
