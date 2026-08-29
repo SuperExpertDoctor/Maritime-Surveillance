@@ -103,6 +103,9 @@ class UAVObservation:
     sensor_mode: SensorMode
     safety_intervened: bool
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "position", tuple(self.position))
+
 
 @dataclass(frozen=True)
 class ContactObservation:
@@ -115,6 +118,10 @@ class ContactObservation:
     age_min: float
     confidence: float
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "estimated_position", tuple(self.estimated_position))
+        object.__setattr__(self, "estimated_velocity", tuple(self.estimated_velocity))
+
 
 @dataclass(frozen=True)
 class HazardObservation:
@@ -125,6 +132,10 @@ class HazardObservation:
     velocity_cells_min: tuple[float, float]
     intensity: float
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "center", tuple(self.center))
+        object.__setattr__(self, "velocity_cells_min", tuple(self.velocity_cells_min))
+
 
 @dataclass(frozen=True)
 class BaseObservation:
@@ -132,6 +143,9 @@ class BaseObservation:
     position: tuple[float, float]
     capacity: int
     reserved_load: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "position", tuple(self.position))
 
 
 @dataclass(frozen=True)
@@ -158,6 +172,9 @@ class ControlDecision:
     command: ControlCommand
     events: tuple[ControllerEventRequest, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", tuple(self.events))
+
 
 @dataclass(frozen=True)
 class RecoveryPlan:
@@ -168,6 +185,10 @@ class RecoveryPlan:
     path_length_cells: float
     reserve_cells: float
     planning_map_version: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "base_position", tuple(self.base_position))
+        object.__setattr__(self, "path", tuple(tuple(pose) for pose in self.path))
 
 
 @dataclass(frozen=True)
@@ -240,3 +261,6 @@ class ControllerContext:
 class PolicySource:
     uri: str
     metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _immutable_snapshot(self.metadata))

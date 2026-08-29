@@ -6,6 +6,7 @@ from src.control.common.contracts import (
     BaseObservation,
     ContactObservation,
     ControlCommand,
+    ControlDecision,
     ControlEvent,
     ControlMode,
     ControlObservation,
@@ -13,6 +14,8 @@ from src.control.common.contracts import (
     ControllerEventRequest,
     HazardObservation,
     OperationMode,
+    PolicySource,
+    RecoveryPlan,
     SensorMode,
     UAVObservation,
 )
@@ -215,3 +218,86 @@ def test_control_observation_normalizes_collection_and_mask_snapshots():
     assert observation.action_mask.allowed_sensor_modes == (SensorMode.OFF,)
     assert observation.action_mask.allowed_operation_modes == (OperationMode.IDLE,)
     assert observation.action_mask.target_contact_ids == ()
+
+
+def test_control_decision_snapshots_event_requests():
+    events = [ControllerEventRequest(event_type="task_started")]
+
+    decision = ControlDecision(
+        command=ControlCommand(0.0, 0.25, SensorMode.SAR, OperationMode.COVERAGE),
+        events=events,
+    )
+    events.append(ControllerEventRequest(event_type="task_completed"))
+
+    assert decision.events == (ControllerEventRequest(event_type="task_started"),)
+
+
+def test_policy_source_deep_freezes_metadata():
+    metadata = {"model": {"revision": "v1"}, "labels": ["baseline"]}
+
+    source = PolicySource(uri="models://controller", metadata=metadata)
+    metadata["model"]["revision"] = "v2"
+    metadata["labels"].append("candidate")
+
+    assert source.metadata == {
+        "model": {"revision": "v1"},
+        "labels": ("baseline",),
+    }
+    with pytest.raises(TypeError):
+        source.metadata["model"]["revision"] = "v3"
+
+
+def test_coordinate_and_path_fields_snapshot_mutable_collections():
+    uav_position = [1.0, 2.0]
+    contact_position = [3.0, 4.0]
+    contact_velocity = [0.1, 0.2]
+    hazard_center = [5.0, 6.0]
+    hazard_velocity = [0.3, 0.4]
+    base_position = [7.0, 8.0]
+    recovery_base_position = [9.0, 10.0]
+    path = [[9.0, 10.0, 0.0], [11.0, 12.0, 0.5]]
+
+    uav = UAVObservation(
+        uav_id="uav-1",
+        position=uav_position,
+        heading_rad=0.0,
+        speed_cells_min=0.25,
+        remaining_range_cells=10.0,
+        control_mode=ControlMode.HEURISTIC,
+        control_owner=ControlOwner.HEURISTIC,
+        operation_mode=OperationMode.IDLE,
+        sensor_mode=SensorMode.OFF,
+        safety_intervened=False,
+    )
+    contact = ContactObservation(
+        "contact-1", None, contact_position, contact_velocity, "sar", 0.0, 0.0, 1.0
+    )
+    hazard = HazardObservation(
+        "hazard-1", "weather", hazard_center, 1.0, hazard_velocity, 0.5
+    )
+    base = BaseObservation("base-1", base_position, 1, 0)
+    recovery_plan = RecoveryPlan(
+        "base-1", recovery_base_position, "reservation-1", path, 2.0, 1.0, 1
+    )
+
+    for collection in (
+        uav_position,
+        contact_position,
+        contact_velocity,
+        hazard_center,
+        hazard_velocity,
+        base_position,
+        recovery_base_position,
+    ):
+        collection.clear()
+    path[0].clear()
+    path.append([13.0, 14.0, 1.0])
+
+    assert uav.position == (1.0, 2.0)
+    assert contact.estimated_position == (3.0, 4.0)
+    assert contact.estimated_velocity == (0.1, 0.2)
+    assert hazard.center == (5.0, 6.0)
+    assert hazard.velocity_cells_min == (0.3, 0.4)
+    assert base.position == (7.0, 8.0)
+    assert recovery_plan.base_position == (9.0, 10.0)
+    assert recovery_plan.path == ((9.0, 10.0, 0.0), (11.0, 12.0, 0.5))

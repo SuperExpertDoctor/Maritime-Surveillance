@@ -93,6 +93,9 @@ class RLControllerDouble(RLControllerBase):
 @pytest.fixture
 def observation():
     array = np.zeros((2, 2), dtype=np.float32)
+    obstacle_mask = np.zeros((2, 2), dtype=bool)
+    searchable_mask = np.ones((2, 2), dtype=bool)
+    planning_obstacle_mask = np.zeros((4, 4), dtype=bool)
     return ControlObservation(
         schema_version="control-observation/v1",
         timestamp_min=0.0,
@@ -111,9 +114,9 @@ def observation():
         ),
         local_info=array.copy(),
         local_value=array.copy(),
-        obstacle_mask=array.copy(),
-        searchable_mask=array.copy(),
-        planning_obstacle_mask=array.copy(),
+        obstacle_mask=obstacle_mask,
+        searchable_mask=searchable_mask,
+        planning_obstacle_mask=planning_obstacle_mask,
         planning_map_version=1,
         contacts=(),
         hazards=(),
@@ -165,6 +168,12 @@ def test_bc_template_method_returns_decoded_command(bc_controller, observation):
 
     assert result.command.operation_mode is OperationMode.COVERAGE
     assert bc_controller.calls == ["encode", "predict", "decode"]
+
+
+def test_base_observation_fixture_uses_boolean_masks(observation):
+    assert observation.obstacle_mask.dtype == bool
+    assert observation.searchable_mask.dtype == bool
+    assert observation.planning_obstacle_mask.dtype == bool
 
 
 def test_rl_reset_initializes_policy_state_and_episode(rl_controller, context):
