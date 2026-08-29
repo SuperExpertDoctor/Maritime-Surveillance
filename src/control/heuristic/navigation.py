@@ -130,7 +130,7 @@ class AStarNavigator:
         target_xy = self._normalise_point(target, "target")
         if not math.isfinite(radius) or radius <= 0.0:
             raise ValueError("radius must be a finite positive number")
-        goals = self._standoff_annulus(target_xy, float(radius), mask)
+        goals = self._standoff_circle(target_xy, float(radius), mask)
         goals.sort(key=lambda goal: (math.dist(start[:2], goal), goal[0], goal[1]))
         summary = (
             f"standoff target={target_xy}, radius={float(radius)}, "
@@ -200,6 +200,9 @@ class AStarNavigator:
                 break
             closed.add(key)
             pose = poses[key]
+
+            if any(math.dist(pose[:2], goal) <= 1e-12 for goal in available_goals):
+                return self._reconstruct(start_key, key, came_from, start)
 
             if len(attempts) < self.candidate_limit:
                 ordered_goals = sorted(
@@ -373,25 +376,32 @@ class AStarNavigator:
         }
         return sorted(boundary)
 
-    @classmethod
-    def _standoff_annulus(
-        cls,
+    def _standoff_circle(
+        self,
         target: tuple[float, float],
         radius: float,
         mask: np.ndarray,
     ) -> list[tuple[float, float]]:
-        col_start = max(0, math.floor(target[0] - radius - 0.5))
-        col_end = min(mask.shape[0] - 1, math.ceil(target[0] + radius + 0.5))
-        row_start = max(0, math.floor(target[1] - radius - 0.5))
-        row_end = min(mask.shape[1] - 1, math.ceil(target[1] + radius + 0.5))
-        candidates = []
-        for col in range(col_start, col_end + 1):
-            for row in range(row_start, row_end + 1):
-                point = (float(col), float(row))
-                if abs(math.dist(point, target) - radius) > 0.5:
-                    continue
-                if not cls._point_blocked(point, mask):
-                    candidates.append(point)
+        quadrant_samples = max(
+            2,
+            math.ceil((math.pi / 2.0) * radius / self.xy_resolution),
+        )
+        sample_count = 4 * quadrant_samples
+        candidates: list[tuple[float, float]] = []
+        for index in range(sample_count):
+            angle = 2.0 * math.pi * index / sample_count
+            unit_col = math.cos(angle)
+            unit_row = math.sin(angle)
+            if abs(unit_col) <= 1e-15:
+                unit_col = 0.0
+            if abs(unit_row) <= 1e-15:
+                unit_row = 0.0
+            point = (
+                target[0] + radius * unit_col,
+                target[1] + radius * unit_row,
+            )
+            if not self._point_blocked(point, mask):
+                candidates.append(point)
         return candidates
 
     @staticmethod

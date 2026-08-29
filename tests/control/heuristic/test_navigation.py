@@ -125,6 +125,25 @@ def test_standoff_path_ends_on_the_requested_annulus():
     assert ObstacleAvoider().is_path_safe(path, mask)
 
 
+def test_standoff_path_preserves_a_non_integer_safe_radius():
+    mask = np.zeros((32, 32), dtype=bool)
+    navigator = AStarNavigator()
+    arguments = (
+        (3.0, 15.0, 0.0),
+        GridCoord(20, 15),
+    )
+    path = navigator.plan_to_standoff(
+        *arguments, radius=1.8, obstacle_mask=mask, r_min=1.0
+    )
+    repeated = navigator.plan_to_standoff(
+        *arguments, radius=1.8, obstacle_mask=mask, r_min=1.0
+    )
+
+    assert path == repeated
+    assert math.dist(path[-1][:2], (20.0, 15.0)) == pytest.approx(1.8)
+    assert ObstacleAvoider().is_path_safe(path, mask)
+
+
 def test_large_turn_radius_can_still_turn_in_open_space():
     mask = np.zeros((80, 80), dtype=bool)
     path = AStarNavigator(heading_bins=72).plan_grid(
@@ -162,4 +181,32 @@ def test_unsafe_dubins_final_connection_is_rejected(monkeypatch):
 
     assert call_count >= 2
     assert path[-1][:2] == pytest.approx((16.0, 6.0))
+    assert ObstacleAvoider().is_path_safe(path, mask)
+
+
+def test_astar_reaches_grid_goal_after_unsafe_analytic_attempt_limit(monkeypatch):
+    mask = np.ones((45, 35), dtype=bool)
+    mask[:, 17] = False
+    navigator = AStarNavigator(heading_bins=144)
+    call_count = 0
+
+    def always_unsafe(cls, start_pose, end_pose, R_min, step_size=None):
+        nonlocal call_count
+        call_count += 1
+        start = tuple(map(float, start_pose))
+        end = tuple(map(float, end_pose))
+        blocked = (0.2, 0.2, 0.0)
+        return DubinsResult(
+            "LSL",
+            math.dist(start[:2], blocked[:2]) + math.dist(blocked[:2], end[:2]),
+            [start, blocked, end],
+            (0.0, 0.0, 0.0),
+        )
+
+    monkeypatch.setattr(DubinsPath, "compute", classmethod(always_unsafe))
+
+    path = navigator.plan_grid((4.0, 17.0, 0.0), {(40.0, 17.0)}, mask, r_min=16.0)
+
+    assert call_count == navigator.candidate_limit == 32
+    assert path[-1][:2] == pytest.approx((40.0, 17.0))
     assert ObstacleAvoider().is_path_safe(path, mask)
