@@ -174,8 +174,13 @@ class ConfigLoader:
         unknown_modes = configured_modes - {"heuristic", "bc", "rl"}
         if unknown_modes:
             raise ValueError(f"unsupported control modes: {sorted(unknown_modes)}")
-        window = int(control_data["observation"]["local_window_cells"])
-        if window <= 0 or window % 2 == 0:
+        raw_window = control_data["observation"]["local_window_cells"]
+        if (
+            isinstance(raw_window, bool)
+            or not isinstance(raw_window, int)
+            or raw_window <= 0
+            or raw_window % 2 == 0
+        ):
             raise ValueError(
                 "control observation local_window_cells must be a positive odd integer"
             )
