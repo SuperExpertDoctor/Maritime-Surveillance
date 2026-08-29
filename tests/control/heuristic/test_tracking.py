@@ -521,7 +521,7 @@ def test_tracking_replans_an_orbit_entry_invalidated_by_a_new_map_version(
     assert controller.route == replanned_route
     assert len(tracker.entry_arguments) == 2
     assert tracker.entry_arguments[-1][0] == (10.0, 12.0, math.pi)
-    assert decision.command.turn_rate_rad_min < 0.0
+    assert decision.command.turn_rate_rad_min == pytest.approx(math.pi / 2.0)
 
 
 def test_tracking_converts_hazard_observations_for_storm_safety(
