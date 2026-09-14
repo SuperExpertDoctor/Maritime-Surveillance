@@ -186,25 +186,29 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
     marker = (probe.phase, probe.phase_started_at_min)
     if probe._phase_marker is not None and probe._phase_marker != marker:
         probe = _reset_phase(probe)
+    watermarks = dict(probe._last_sample_keys)
     for sample in _ordered(new_samples):
         # Only the assigned UAV's visual evidence can advance the watermark.
         if sample.source not in ("eo", "sar") or sample.source_id != probe.uav_id:
             continue
+        stream = (sample.source, sample.source_id)
+        fix = (*stream, sample.observed_at_min)
+        last_key = watermarks.get(stream)
         if (sample.contact_id != probe.contact_id or sample.observed_at_min > now_min
                 or sample.observed_at_min < max(probe.started_at_min, probe.phase_started_at_min)
-                or (probe._last_sample_key is not None and _key(sample) <= probe._last_sample_key)):
+                or (last_key is not None and _key(sample) <= last_key)):
             continue
-        # A later delivery of a retained fix is not new range evidence and
-        # must not change the watermark, phase, or accumulated exposure.
-        if any(sample.sample_id == retained.sample_id or (
-                sample.source == retained.source and sample.source_id == retained.source_id
-                and sample.observed_at_min == retained.observed_at_min)
-               for retained in probe._phase_samples):
+        # Identity outlives phase-local evidence. Re-delivery cannot supply a
+        # new range or consume a watermark, even after completion or a reset.
+        if sample.sample_id in probe._seen_sample_ids or fix in probe._seen_sample_fixes:
             continue
         probe = _timeout(probe, sample.observed_at_min, config)
         if probe.phase == "finished":
             return probe
-        probe = replace(probe, _last_sample_key=_key(sample))
+        watermarks[stream] = _key(sample)
+        probe = replace(probe, _last_sample_keys=tuple(sorted(watermarks.items())),
+                        _seen_sample_ids=probe._seen_sample_ids | {sample.sample_id},
+                        _seen_sample_fixes=probe._seen_sample_fixes | {fix})
         if probe.phase == "awaiting_assessment":
             continue
         if (probe._phase_samples and sample.observed_at_min -

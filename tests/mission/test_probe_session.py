@@ -196,6 +196,71 @@ def test_external_phase_transition_discards_previous_phase_interval():
     assert probe.near_sample_ids == (sample(2).sample_id, sample(3).sample_id)
 
 
+@pytest.mark.parametrize("duplicate_kind", ["source_time", "sample_id"])
+def test_completed_baseline_duplicate_cannot_enter_near(duplicate_kind):
+    probe, baseline = baseline_finished()
+    duplicate = (sample(4, sample_id="zzz:duplicate", distance=1.2)
+                 if duplicate_kind == "source_time" else
+                 sample(5, sample_id=baseline[-1].sample_id, distance=1.2))
+
+    result = advance(probe, (duplicate,))
+
+    assert result == probe
+    following = sample(5, distance=1.2)
+    result = advance(result, (following,))
+    assert result.phase == "near"
+    assert result.baseline_sample_ids == probe.baseline_sample_ids
+    assert result.near_sample_ids == (following.sample_id,)
+    assert result.close_exposure_min == 0.
+
+
+@pytest.mark.parametrize("reset", ["gap", "outside", "external"])
+def test_sample_identity_survives_phase_resets(reset):
+    retained = sample(0)
+    probe = advance(session(), (retained,))
+    if reset == "gap":
+        probe = advance(probe, now=3.)
+    elif reset == "outside":
+        probe = advance(probe, (sample(1, distance=4.),))
+    else:
+        probe = replace(probe, phase_started_at_min=1.)
+        probe = advance(probe, now=1.)
+    duplicate = sample(3, sample_id=retained.sample_id)
+
+    result = advance(probe, (duplicate,))
+
+    assert result == probe
+    following = sample(3)
+    result = advance(result, (following,))
+    assert result.baseline_sample_ids == (following.sample_id,)
+    assert result.baseline_started_at_min == 0.
+
+
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+@pytest.mark.parametrize("first_source", ["sar", "eo"])
+def test_visual_stream_watermarks_preserve_batch_incremental_equivalence(phase, first_source):
+    config = ConfigLoader.load().mission.contact
+    initial = session() if phase == "baseline" else baseline_finished()[0]
+    times = (0, 2, 4) if phase == "baseline" else (5, 7, 9, 10)
+    distance = 1.8 if phase == "baseline" else 1.2
+    first = sample(times[0], source=first_source, sample_id="zzz:first", distance=distance)
+    other_source = "eo" if first_source == "sar" else "sar"
+    others = tuple(sample(t, source=other_source, distance=distance) for t in times)
+    samples = (first, *others)
+    batch = advance(initial, tuple(reversed(samples)))
+    incremental = initial
+    for observation in samples:
+        incremental = advance(incremental, (observation,))
+        assert advance(incremental, (observation,)) == incremental
+
+    assert incremental.phase == ("closing" if phase == "baseline" else "awaiting_assessment")
+    assert incremental == batch
+    assert advance(incremental, samples) == incremental
+    evidence = api().build_features(snapshot(samples), incremental, times[-1], config)
+    assert getattr(evidence, f"{phase}_duration_min") == times[-1] - times[0]
+    assert len(getattr(incremental, f"{phase}_sample_ids")) == len(samples)
+
+
 def test_future_and_delayed_samples_cannot_retroactively_advance_phase():
     probe = advance(session(), (sample(2), sample(10)), now=2.)
     assert probe.baseline_started_at_min == 2.

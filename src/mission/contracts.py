@@ -138,7 +138,13 @@ class ProbeSession:
     # evidence references. Defaults preserve existing construction/call sites.
     _phase_samples: tuple[ObservationSample, ...] = field(default=(), repr=False, kw_only=True)
     _phase_marker: tuple[str, float] | None = field(default=None, repr=False, kw_only=True)
-    _last_sample_key: tuple[float, str] | None = field(default=None, repr=False, kw_only=True)
+    # Session-wide identity and per-(source, source_id) watermarks survive
+    # phase completion and resets without retaining old observation payloads.
+    _seen_sample_ids: frozenset[str] = field(default=frozenset(), repr=False, kw_only=True)
+    _seen_sample_fixes: frozenset[tuple[str, str, float]] = field(
+        default=frozenset(), repr=False, kw_only=True)
+    _last_sample_keys: tuple[tuple[tuple[str, str], tuple[float, str]], ...] = field(
+        default=(), repr=False, kw_only=True)
 
 
 @dataclass(frozen=True)
