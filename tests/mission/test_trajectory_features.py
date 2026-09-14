@@ -188,6 +188,36 @@ def test_near_land_and_other_uav_approach_are_observed_confounders_not_identity(
     assert not hasattr(result, "identity")
 
 
+@pytest.mark.parametrize("source_id", ["U1", "U2"])
+def test_old_close_observation_does_not_confound_fresh_baseline(source_id):
+    old = sample(0, source_id=source_id, distance=1.)
+    withdrawal = sample(1, source_id=source_id, distance=4.)
+    baseline = tuple(sample(t) for t in range(60, 65))
+    near = tuple(sample(t, distance=1.2) for t in range(65, 71))
+    probe = api().advance_probe(session(), baseline + near, 70.,
+                                ConfigLoader.load().mission.contact)
+
+    result = features((old, withdrawal) + baseline + near, probe=probe)
+
+    assert "baseline_confounded" not in result.confounders
+    assert result.sufficient_evidence
+
+
+@pytest.mark.parametrize("close_time", [58, 60, 62, 64])
+def test_approach_during_or_just_before_current_baseline_still_confounds(close_time):
+    baseline = tuple(sample(t) for t in range(60, 65))
+    near = tuple(sample(t, distance=1.2) for t in range(65, 71))
+    other = sample(close_time, source_id="U2", distance=1.)
+    probe = session(baseline_started_at_min=60.,
+                    baseline_sample_ids=tuple(s.sample_id for s in baseline),
+                    near_sample_ids=tuple(s.sample_id for s in near))
+
+    result = features((other,) + baseline + near, probe=probe)
+
+    assert "baseline_confounded" in result.confounders
+    assert not result.sufficient_evidence
+
+
 def test_evidence_ids_are_resolved_against_current_revision_and_future_is_excluded():
     samples = (sample(0), sample(1), sample(5))
     probe = session(baseline_started_at_min=0.,
@@ -211,6 +241,25 @@ def test_keypoints_preserve_events_and_neighbors_in_stable_order():
     assert all(s is samples[int(s.observed_at_min)] for s in result)
 
 
+@pytest.mark.parametrize("source,source_id", [("ais", "M1"), ("eo", "U2")])
+def test_keypoint_event_neighbors_stay_in_the_generating_source_stream(source, source_id):
+    own = tuple(sample(t, distance=(4. if t < 8 else 4. - .1 * (t - 7))
+                       if t != 20 else .2, heading=0. if t < 15 else 60.)
+                for t in range(30))
+    other = tuple(sample(t + .25, source=source, source_id=source_id, distance=None)
+                  for t in range(30))
+    samples = tuple(s for pair in zip(own, other) for s in pair)
+
+    result = api().select_keypoints(tuple(reversed(samples)), 12)
+
+    expected = {own[t].sample_id for t in (0, 6, 7, 8, 14, 15, 16, 19, 20, 21)}
+    assert expected <= {s.sample_id for s in result}
+    assert result[-1] == other[-1]
+    assert len(result) == 12
+    assert result == tuple(sorted(result, key=lambda s: (s.observed_at_min, s.sample_id)))
+    assert result == api().select_keypoints(samples + samples, 12)
+
+
 def test_keypoint_max_turn_uses_three_point_median_smoothing():
     samples = tuple(sample(t, distance=None, heading=heading) for t, heading in enumerate(
         (0., 0., 90., 0., 0., 0., 30., 30., 30., 30.)
@@ -219,6 +268,21 @@ def test_keypoint_max_turn_uses_three_point_median_smoothing():
     result = api().select_keypoints(samples, 5)
 
     assert tuple(s.observed_at_min for s in result) == (0., 5., 6., 7., 9.)
+
+
+@pytest.mark.parametrize("gap,event_index", [(2., 10), (2.01, 6), (11., 6)])
+def test_keypoint_max_turn_respects_default_continuity_gap(gap, event_index):
+    before = tuple(sample(t, distance=None, heading=0. if t < 6 else 1.)
+                   for t in range(10))
+    after = tuple(sample(9 + gap + t, distance=None, heading=91.) for t in range(6))
+    samples = before + after
+
+    result = api().select_keypoints(samples, 5)
+
+    # A large heading change after a gap cannot displace the measured turn
+    # at t=6; a gap at the two-minute continuity boundary is still valid.
+    assert result == tuple(samples[i] for i in (0, event_index - 1, event_index,
+                                                event_index + 1, len(samples) - 1))
 
 
 @pytest.mark.parametrize("limit", [0, 1, 2, 5, 12, 30])

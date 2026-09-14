@@ -135,6 +135,25 @@ def test_unrelated_or_ais_measurements_cannot_advance_probe(changes):
     assert result.near_sample_ids == ()
 
 
+@pytest.mark.parametrize("other", [{"source_id": "U2"}, {"source": "ais"}])
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+def test_unrelated_same_time_later_id_cannot_suppress_assigned_uav_evidence(other, phase):
+    probe = session() if phase == "baseline" else baseline_finished()[0]
+    start = 0 if phase == "baseline" else 5
+    distance = 1.8 if phase == "baseline" else 1.2
+    own = (sample(start, distance=distance), sample(start + 1, distance=distance))
+    unrelated = sample(start + 1, sample_id="zzz:unrelated", distance=distance, **other)
+    probe = advance(probe, own[:1])
+    probe = advance(probe, (unrelated,))
+
+    result = advance(probe, own[1:])
+
+    assert getattr(result, f"{phase}_sample_ids") == tuple(s.sample_id for s in own)
+    if phase == "near":
+        assert result.close_exposure_min == 1.
+    assert advance(result, own + (unrelated,), now=start + 1) == result
+
+
 def test_same_source_intervals_only_and_duplicate_times_do_not_satisfy_counts():
     config = replace(ConfigLoader.load().mission.contact, min_valid_samples_per_phase=4,
                      baseline_duration_min=1.)
@@ -146,6 +165,27 @@ def test_same_source_intervals_only_and_duplicate_times_do_not_satisfy_counts():
     assert probe.phase == "baseline"
     result = api().build_features(snapshot(alternating), probe, 1., config)
     assert result.baseline_duration_min == 0.
+
+
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+@pytest.mark.parametrize("duplicate_distance", [None, 4.])
+def test_retained_same_source_time_duplicate_cannot_reset_phase(phase, duplicate_distance):
+    probe = session() if phase == "baseline" else baseline_finished()[0]
+    start = 0 if phase == "baseline" else 5
+    distance = 1.8 if phase == "baseline" else 1.2
+    retained = (sample(start, distance=distance), sample(start + 1, distance=distance))
+    probe = advance(probe, retained)
+    duplicate = sample(start + 1, sample_id="zzz:duplicate", distance=duplicate_distance)
+
+    result = advance(probe, (duplicate,))
+
+    assert result == probe
+    following = sample(start + 2, distance=distance)
+    result = advance(result, (duplicate, following))
+    assert getattr(result, f"{phase}_sample_ids") == tuple(
+        s.sample_id for s in (*retained, following))
+    if phase == "near":
+        assert result.close_exposure_min == 2.
 
 
 def test_external_phase_transition_discards_previous_phase_interval():

@@ -21,6 +21,8 @@ __all__ = ("build_features", "advance_probe", "select_keypoints")
 
 
 DISTANCE_TOLERANCE_CELLS = .15
+# select_keypoints has no config argument; use the design's default continuity.
+DEFAULT_MAX_SAMPLE_GAP_MIN = 2.
 
 
 def wrap_delta_deg(current: float, previous: float) -> float:
@@ -185,17 +187,25 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
     if probe._phase_marker is not None and probe._phase_marker != marker:
         probe = _reset_phase(probe)
     for sample in _ordered(new_samples):
+        # Only the assigned UAV's visual evidence can advance the watermark.
+        if sample.source not in ("eo", "sar") or sample.source_id != probe.uav_id:
+            continue
         if (sample.contact_id != probe.contact_id or sample.observed_at_min > now_min
                 or sample.observed_at_min < max(probe.started_at_min, probe.phase_started_at_min)
                 or (probe._last_sample_key is not None and _key(sample) <= probe._last_sample_key)):
+            continue
+        # A later delivery of a retained fix is not new range evidence and
+        # must not change the watermark, phase, or accumulated exposure.
+        if any(sample.sample_id == retained.sample_id or (
+                sample.source == retained.source and sample.source_id == retained.source_id
+                and sample.observed_at_min == retained.observed_at_min)
+               for retained in probe._phase_samples):
             continue
         probe = _timeout(probe, sample.observed_at_min, config)
         if probe.phase == "finished":
             return probe
         probe = replace(probe, _last_sample_key=_key(sample))
         if probe.phase == "awaiting_assessment":
-            continue
-        if sample.source not in ("eo", "sar") or sample.source_id != probe.uav_id:
             continue
         if (probe._phase_samples and sample.observed_at_min -
                 probe._phase_samples[-1].observed_at_min > config.max_sample_gap_min):
@@ -268,9 +278,13 @@ def build_features(contact: ContactSnapshot, probe: ProbeSession, now_min: float
         confounders.append("observation_gap")
     if any(sid not in by_id for sid in (*probe.baseline_sample_ids, *probe.near_sample_ids)):
         confounders.append("missing_evidence")
+    # Include immediately preceding approach context, but allow a clean
+    # baseline after withdrawal or a reset of the retained baseline evidence.
+    baseline_start = min((s.observed_at_min for s in baseline), default=probe.phase_started_at_min)
     baseline_end = max((s.observed_at_min for s in baseline), default=probe.phase_started_at_min)
     baseline_confounded = any(
-        s.observed_at_min <= baseline_end and (distance := _visual_range(s)) is not None
+        baseline_start - config.max_sample_gap_min <= s.observed_at_min <= baseline_end
+        and (distance := _visual_range(s)) is not None
         and distance <= config.near_standoff_cells + DISTANCE_TOLERANCE_CELLS
         for s in samples)
     if baseline_confounded:
@@ -310,7 +324,7 @@ def select_keypoints(samples, limit: int) -> tuple[ObservationSample, ...]:
     """Keep endpoints, approach onset, closest fix and largest turn, then fill.
 
     Approach onset is the fix before the first measured range decrease in a
-    visual stream. Event neighbors are retained before stable uniform fill.
+    visual stream. Same-stream event neighbors precede stable uniform fill.
     With a smaller budget, endpoints and event centers take priority.
     """
     samples = _ordered(samples)
@@ -319,12 +333,16 @@ def select_keypoints(samples, limit: int) -> tuple[ObservationSample, ...]:
         return ()
     index = {s.sample_id: i for i, s in enumerate(samples)}
     approaches = []
+    neighbors = {}
     for stream in _streams(samples):
+        for i, sample in enumerate(stream):
+            neighbors[index[sample.sample_id]] = tuple(
+                index[stream[j].sample_id] for j in (i - 1, i + 1) if 0 <= j < len(stream))
         for a, b in zip(stream, stream[1:]):
             da, db = _visual_range(a), _visual_range(b)
             if da is not None and db is not None and db < da:
                 approaches.append(index[a.sample_id])
-    _, _, _, turn_samples = _motion(samples, math.inf)
+    _, _, _, turn_samples = _motion(samples, DEFAULT_MAX_SAMPLE_GAP_MIN)
     turns = [(rate, index[sample.sample_id]) for rate, sample in turn_samples
              if rate > 0.]
     events = []
@@ -337,7 +355,7 @@ def select_keypoints(samples, limit: int) -> tuple[ObservationSample, ...]:
     if turns:
         events.append(max(turns, key=lambda pair: (pair[0], -pair[1]))[1])
     selected = []
-    for i in (0, len(samples) - 1, *events, *(j for i in events for j in (i - 1, i + 1))):
+    for i in (0, len(samples) - 1, *events, *(j for i in events for j in neighbors[i])):
         if 0 <= i < len(samples) and i not in selected and len(selected) < limit:
             selected.append(i)
     remaining = [i for i in range(len(samples)) if i not in selected]
