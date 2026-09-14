@@ -49,9 +49,11 @@ class LLMReviewer:
         )
         user_prompt = json.dumps(payload, ensure_ascii=False, default=str)
         try:
-            memory = self.client.review(system_prompt, user_prompt)
+            memory = self.client.review(
+                system_prompt, user_prompt, snapshot_id=f"review-{current_time}",
+            )
         except Exception as exc:
-            logger.error("LongCat reviewer call failed: %s", exc)
+            logger.error("LongCat reviewer call failed: %s", type(exc).__name__)
             return None
         if not memory:
             return None
