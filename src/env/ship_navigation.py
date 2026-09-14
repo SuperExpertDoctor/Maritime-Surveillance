@@ -89,6 +89,7 @@ class ShipRoute:
     _navigator: ShipNavigator | None = field(default=None, repr=False, compare=False)
     _land_mask: np.ndarray | None = field(default=None, repr=False, compare=False)
     _island_bounds: tuple[tuple[float, float, float, float], ...] = field(default=(), repr=False, compare=False)
+    _generation: int | None = field(default=None, repr=False, compare=False)
 
 
 class ShipNavigator:
@@ -194,6 +195,9 @@ class ShipNavigator:
         return result
 
     def install(self, params: RedMotionParameters | None, now_min: float) -> None:
+        # Installations (including equal commands/normal mode) supersede every
+        # earlier recipe for this vessel, even from another planning navigator.
+        self.ship._navigation_generation += 1
         self._params = params
         self._installed_at_min = now_min
 
@@ -210,6 +214,7 @@ class ShipNavigator:
         self.land_mask = np.asarray(land_mask, dtype=bool)
         if params != self._params:
             self.install(params, now_min)
+        self.ship._navigation_generation += 1
         initial = MotionState(pose, self.ship.speed_kn, self.ship._yaw_rate_rad_per_min)
         state = initial
         states = [state]
@@ -243,7 +248,7 @@ class ShipNavigator:
             deviation = max(min(math.dist(s.pose[:2], p[:2]) for p in reference) for s in states)
         return ShipRoute(tuple(s.pose for s in states), now_min, self.map_version,
                          "ready", None, deviation, tuple(commands), initial, self, mask,
-                         self.island_bounds)
+                         self.island_bounds, self.ship._navigation_generation)
 
     def _normal_guidance(self, pose, index, mask):
         route = self.ship.normal_route
@@ -285,13 +290,21 @@ class ShipNavigator:
             anchor -= 1
         inflated = self._inflated_mask(mask)
         # Only downstream reference points are A* goals, never a snapped safe cell.
+        # A rejoin need not be two turn radii beyond the collision: that distance
+        # can exceed the entire horizon with default yaw inertia. A* accounts for
+        # curvature from the clear approach; physical rollout decides reachability.
         candidates = [j for j in range(collision + 1, len(states))
-                      if self.segment_is_safe(states[j].pose, states[j].pose, inflated)
-                      and math.dist(states[j].pose[:2], states[collision].pose[:2]) >= 2 * radius]
+                      if self.segment_is_safe(states[j].pose, states[j].pose, inflated)]
         if not candidates:
             return None
         # A small deterministic set limits repeat searches in disconnected charts.
-        candidates = sorted(set((candidates[0], candidates[len(candidates) // 2], candidates[-1])))
+        # Prefer the original roomy rejoin when available, without making that
+        # distance a prerequisite. Short horizons try their furthest goal first.
+        roomy = [j for j in candidates if math.dist(
+            states[j].pose[:2], states[collision].pose[:2]) >= 2 * radius]
+        choices = roomy or candidates
+        candidates = sorted(set((choices[0], choices[len(choices) // 2], choices[-1])),
+                            reverse=not bool(roomy))
         for j in candidates:
             try:
                 geometry = self.astar.plan_grid(states[anchor].pose, {states[j].pose[:2]},
@@ -383,7 +396,7 @@ class ShipNavigator:
             elapsed += dt
         return ShipRoute(tuple(s.pose for s in states), now_min, self.map_version,
                          "blocked", reason, 0., tuple(commands), initial, self, mask,
-                         self.island_bounds)
+                         self.island_bounds, self.ship._navigation_generation)
 
 
 __all__ = ["ShipNavigator", "ShipRoute"]

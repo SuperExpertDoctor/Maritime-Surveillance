@@ -126,6 +126,7 @@ class Ship:
             self, navigator, horizon_min=navigation_horizon_min,
             integration_dt_min=integration_dt_min, clearance_cells=navigation_clearance_cells))
         self._motion_time_min = 0.
+        self._navigation_generation = 0
         self.navigation_status = "ready"
         self.blocked_reason: str | None = None
 
@@ -249,15 +250,26 @@ class Ship:
         """Execute timed controls and return the actual start and substep poses."""
         if self.departed or dt_min <= 0:
             return (self.pose,)
+        # A separately constructed planning navigator must not override a chart
+        # or obstacle context subsequently bound to the executing vessel.
+        navigator = self._navigator
+        if navigator is None:
+            navigator = (route._navigator if route._navigator is not None
+                         and route._navigator.ship is self else self.navigator)
+        mask = self._land_mask if self._land_mask is not None else navigator.land_mask
         if (route._initial_state != self._motion_state() or route._navigator is None
+                or route.generated_at_min < self._motion_time_min - 1e-9
+                or route._generation != self._navigation_generation
+                or route._navigator.ship is not self
                 or route.map_version != route._navigator.map_version
                 or route._island_bounds != route._navigator.island_bounds
-                or not np.array_equal(route._land_mask, route._navigator.land_mask)):
-            navigator = route._navigator or self.navigator
-            mask = navigator.land_mask
+                or not np.array_equal(route._land_mask, route._navigator.land_mask)
+                or route.map_version != navigator.map_version
+                or route._island_bounds != navigator.island_bounds
+                or not np.array_equal(route._land_mask, mask)):
             route = navigator.braking_route(self._motion_state(), self._motion_time_min,
                                             mask, "stale or unvalidated route/map", dt_min)
-        self._motion_time_min = route.generated_at_min
+        self._motion_time_min = max(self._motion_time_min, route.generated_at_min)
         self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
         actual = [self.pose]
         remaining = dt_min
@@ -270,8 +282,8 @@ class Ship:
                 if braking:
                     break  # Explicitly blocked: even braking has no safe continuation.
                 reason = route.blocked_reason or "route horizon exhausted"
-                route = route._navigator.braking_route(
-                    self._motion_state(), self._motion_time_min, route._navigator.land_mask,
+                route = navigator.braking_route(
+                    self._motion_state(), self._motion_time_min, mask,
                     reason, remaining)
                 self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
                 commands, braking = iter(route._commands), True
@@ -280,10 +292,19 @@ class Ship:
                   else remaining)
             state = self.motion_dynamics.roll(self._motion_state(), command.heading_rad,
                                               command.speed_kn, dt)
-            if not route._navigator.segment_is_safe(self.pose, state.pose, route._land_mask):
-                self.navigation_status = "blocked"
-                self.blocked_reason = "execution segment blocked"
-                break
+            if not navigator.segment_is_safe(self.pose, state.pose, mask):
+                if braking:
+                    # A fractional braking substep can differ from its planned
+                    # chord. Do not retry an unsafe continuation indefinitely.
+                    self.navigation_status = "blocked"
+                    self.blocked_reason = "insufficient clearance for continued braking"
+                    break
+                route = navigator.braking_route(
+                    self._motion_state(), self._motion_time_min, mask,
+                    "execution segment blocked", remaining)
+                self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
+                commands, braking = iter(route._commands), True
+                continue
             self._col, self._row, self.heading_rad = state.pose
             self.speed_kn = state.speed_kn
             self.speed_cells_per_min = state.speed_kn * 1.852 / 60 / self.cell_size_km
@@ -291,7 +312,7 @@ class Ship:
             actual.append(self.pose)
             remaining -= dt
             self._motion_time_min += dt
-            if route._navigator.has_exited(self.pose, route._land_mask):
+            if navigator.has_exited(self.pose, mask):
                 self.departed = True
         self.normal_tangent_rad()
         self.trail.append(self.float_position)
@@ -363,8 +384,8 @@ def create_ship_population(
     r_min = max(0.1, speed_cells / max(turn_rate, 1e-9))
 
     for ship_index in range(count):
-        route: tuple[Pose, ...] | None = None
-        start: tuple[float, float] | None = None
+        ship_id = f"Ship-{ship_index + 1}"
+        identity = "target" if ship_index in target_slots else "civilian"
         for _attempt in range(200):
             if not spawn_cells or not exits:
                 continue
@@ -382,26 +403,13 @@ def create_ship_population(
                 )
             except PathNotFoundError:
                 continue
-            start = candidate
-            route = tuple(planned)
-            break
-        if route is None or start is None:
-            raise PopulationPlacementError(ship_index, 200)
-
-        ship_id = f"Ship-{ship_index + 1}"
-        identity = "target" if ship_index in target_slots else "civilian"
-        ais_mode: Literal["civilian", "silent"] = "civilian"
-        if identity == "target" and ais_rng.random() >= config.ship.target_ais_on_probability:
-            ais_mode = "silent"
-        ships.append(
-            Ship(
+            ship = Ship(
                 ship_id,
-                GridCoord(int(start[0]), int(start[1])),
+                GridCoord(int(candidate[0]), int(candidate[1])),
                 config.ship.speed_kn,
                 cell_size_km=config.grid.cell_size_km,
                 truth_identity=identity,
-                ais_mode=ais_mode,
-                normal_route=route,
+                normal_route=tuple(planned),
                 ais_position_noise_cells=config.ship.ais_position_noise_cells,
                 max_turn_rate_deg_min=config.ship.max_turn_rate_deg_min,
                 yaw_time_constant_min=config.ship.yaw_time_constant_min,
@@ -414,7 +422,19 @@ def create_ship_population(
                 integration_dt_min=config.ship.integration_dt_min,
                 navigation_clearance_cells=config.ship.navigation_clearance_cells,
             )
-        )
+            # Grid-cell water alone does not guarantee a valid continuous pose.
+            # Use the same clearance and stopping dynamics as actual execution.
+            if (not ship.navigator.segment_is_safe(ship.pose, ship.pose, mask)
+                    or not ship.navigator.can_stop(ship._motion_state(), mask)
+                    or not all(ship.navigator.segment_is_safe(a, b, mask)
+                               for a, b in zip(ship.normal_route, ship.normal_route[1:]))):
+                continue
+            break
+        else:
+            raise PopulationPlacementError(ship_index, 200)
+        if identity == "target" and ais_rng.random() >= config.ship.target_ais_on_probability:
+            ship.ais_mode = "silent"
+        ships.append(ship)
     return ships
 
 

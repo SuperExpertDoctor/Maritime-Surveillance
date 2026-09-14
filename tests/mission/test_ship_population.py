@@ -96,6 +96,29 @@ def test_population_is_reproducible_and_each_ship_has_a_legal_independent_route(
         )
 
 
+@pytest.mark.parametrize("clearance", [.1, 1.2])
+def test_mainland_population_starts_with_clearance_and_stopping_room(clearance):
+    from src.env.obstacle import mainland_land_mask
+    config = _config(8, 3)
+    config = replace(config, ship=replace(config.ship, navigation_clearance_cells=clearance))
+    mask = mainland_land_mask(config.grid.resolution, config.environment.mainland_width_cells)
+    first = _create_ship_population(config, 27, mask, AStarNavigator())
+    repeated = _create_ship_population(config, 27, mask, AStarNavigator())
+    assert _snapshot(first) == _snapshot(repeated)
+    for ship in first:
+        planner = ship.navigator
+        assert planner.segment_is_safe(ship.pose, ship.pose, mask), ship.pose
+        assert planner.can_stop(ship._motion_state(), mask), ship.pose
+        assert all(planner.segment_is_safe(a, b, mask)
+                   for a, b in zip(ship.normal_route, ship.normal_route[1:]))
+        assert planner._exit_gate(mask) is not None
+        start = ship.pose
+        for _ in range(3):
+            ship.step(.1)
+        assert ship.pose != start
+        assert ship._motion_time_min == pytest.approx(.3)
+
+
 def test_hidden_identity_randomness_does_not_change_normal_vessel_state():
     civilian = _create_ship_population(_config(8, 0), 417, _water_mask(), AStarNavigator())
     targets = _create_ship_population(_config(8, 8), 417, _water_mask(), AStarNavigator())

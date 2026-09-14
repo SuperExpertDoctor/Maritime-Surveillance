@@ -214,8 +214,8 @@ def test_geometric_success_that_real_yaw_cannot_follow_is_blocked(monkeypatch):
     # A plausible water-only polyline with turns an inertial vessel cannot execute.
     def impossible(start, goals, *args, **kwargs):
         goal = sorted(goals)[-1]
-        return [start, (start[0], 12., -math.pi / 2),
-                (goal[0], 12., 0.), (*goal, math.pi / 2)]
+        return [start, (start[0], 13.8, -math.pi / 2),
+                (goal[0], 13.8, 0.), (*goal, math.pi / 2)]
     monkeypatch.setattr(planner.astar, "plan_grid", impossible)
     route = planner.plan(ship.pose, parameters(), 0., 0., mask)
     assert route.status == "blocked"
@@ -415,3 +415,114 @@ def test_exit_requires_segment_crossing_inside_gate_not_only_endpoint():
     mask = np.zeros((12, 12), bool)
     assert not planner.segment_is_safe((11.99, 6.6), (12.02, 6.4), mask)
     assert planner.segment_is_safe((11.99, 6.4), (12.02, 6.2), mask)
+
+
+@pytest.mark.parametrize("change", ["replace", "mutate", "island"])
+def test_execution_uses_vessels_current_chart_and_obstacles(change):
+    from src.env.obstacle import Island
+    ship = vessel()
+    planner = navigation().ShipNavigator(ship)
+    mask = np.zeros((40, 32), bool)
+    route = planner.plan(ship.pose, parameters(), 0., 0., mask)
+    assert route.status == "ready"
+    if change == "mutate":
+        ship.land_mask = mask
+        ship.land_mask[9, :] = True
+    elif change == "replace":
+        mask[9, :] = True
+        ship.land_mask = mask
+        # The planning chart is independent of the executing vessel's chart.
+        planner.land_mask = np.zeros_like(mask)
+    else:
+        ship.land_mask = mask
+        ship.navigator.set_islands([Island((9.5, 15.5), 1)])
+    actual = ship.advance(route, 10.)
+    assert ship.navigation_status == "blocked"
+    assert ship.speed_kn == 0
+    assert ship._motion_time_min == pytest.approx(10.)
+    assert all(ship.navigator.segment_is_safe(a, b, ship.land_mask)
+               for a, b in zip(actual, actual[1:]))
+    assert ship.pose[0] < 8.9
+
+
+def test_default_dynamics_repair_reaches_downstream_point_within_horizon(monkeypatch):
+    ship = vessel()
+    planner = navigation().ShipNavigator(ship, horizon_min=30.)
+    mask = np.zeros((70, 40), bool)
+    mask[13, 15] = True
+    reference = planner.plan(ship.pose, parameters(), 0., 0., np.zeros_like(mask))
+    calls = []
+    original = planner.astar.plan_grid
+
+    def record(start, goals, *args, **kwargs):
+        calls.append((start, goals))
+        return original(start, goals, *args, **kwargs)
+
+    monkeypatch.setattr(planner.astar, "plan_grid", record)
+    route = planner.plan(ship.pose, parameters(), 0., 0., mask)
+    assert calls, "default yaw dynamics must not filter out every downstream A* goal"
+    assert all(goal in {p[:2] for p in reference.poses}
+               for _, goals in calls for goal in goals)
+    assert route.status == "ready", route.blocked_reason
+    assert route.reference_deviation_cells > .1
+    assert route.poses[-1][0] > 14.
+    assert all(planner.segment_is_safe(a, b, mask)
+               for a, b in zip(route.poses, route.poses[1:]))
+    actual = ship.advance(route, sum(c.duration_min for c in route._commands))
+    assert actual == route.poses
+    assert planner.can_stop(ship._motion_state(), mask)
+    assert_water_path(actual, mask)
+
+
+def test_old_timestamp_at_current_pose_brakes_without_rewinding_time():
+    ship = vessel()
+    planner = ship.navigator
+    mask = np.zeros((70, 40), bool)
+    route = planner.plan(ship.pose, parameters(), 0., 0., mask)
+    ship.advance(route, 1.)
+    old = planner.plan(ship.pose, parameters(), 0., 0., mask)
+    ship.advance(old, 1.)
+    assert ship.navigation_status == "blocked"
+    assert ship._motion_time_min == pytest.approx(2.)
+    assert ship.speed_kn == pytest.approx(16.)
+
+
+def test_stationary_route_cannot_be_replayed_after_time_advances():
+    ship = vessel()
+    ship.speed_kn = 0.
+    route = ship.navigator.plan(ship.pose, parameters(speed=0), 0., 0., ship.land_mask)
+    ship.advance(route, 1.)
+    assert ship.pose == route.poses[0]
+    ship.advance(route, 1.)
+    assert ship.navigation_status == "blocked"
+    assert ship._motion_time_min == pytest.approx(2.)
+
+
+@pytest.mark.parametrize("supersede", ["opposite", "equal", "normal", "replan", "other_navigator"])
+def test_superseded_route_brakes_and_fresh_replan_remains_executable(supersede):
+    ship = vessel()
+    planner = ship.navigator
+    mask = np.zeros((70, 40), bool)
+    params = parameters(offset=60)
+    old = planner.plan(ship.pose, params, 0., 0., mask)
+    replacement = parameters(offset=-60)
+    if supersede == "equal":
+        replacement = params
+    elif supersede == "normal":
+        replacement = None
+    if supersede == "other_navigator":
+        navigation().ShipNavigator(ship).install(replacement, 0.)
+    elif supersede == "replan":
+        planner.plan(ship.pose, params, 0., 0., mask)
+        replacement = params
+    else:
+        planner.install(replacement, 0.)
+    ship.advance(old, 1.)
+    assert ship.navigation_status == "blocked"
+    assert ship.heading_rad == pytest.approx(0.)
+    assert ship.speed_kn == pytest.approx(16.)
+    assert ship._motion_time_min == pytest.approx(1.)
+    fresh = planner.plan(ship.pose, replacement, 0., 1., mask)
+    actual = ship.advance(fresh, .1)
+    assert ship.navigation_status == "ready"
+    assert actual == fresh.poses[:2]
