@@ -149,6 +149,10 @@ class ProbeSession:
     # independent sensor at the completion time still belongs to that phase.
     _completion_samples: tuple[ObservationSample, ...] = field(
         default=(), repr=False, kw_only=True)
+    # A range reset can be undone by an independent in-band peer at the same
+    # accepted timestamp. Keep only the prior phase, start and local evidence.
+    _pending_reset: tuple[str, float, tuple[ObservationSample, ...]] | None = field(
+        default=None, repr=False, kw_only=True)
 
 
 @dataclass(frozen=True)

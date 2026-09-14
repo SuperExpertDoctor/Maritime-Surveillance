@@ -151,7 +151,8 @@ def _motion(samples, max_gap: float):
 
 
 def _reset_phase(probe: ProbeSession) -> ProbeSession:
-    changes = dict(_phase_samples=(), _completion_samples=(), close_exposure_min=0.)
+    changes = dict(_phase_samples=(), _completion_samples=(), _pending_reset=None,
+                   close_exposure_min=0.)
     if probe.phase == "baseline":
         changes.update(baseline_sample_ids=(), near_sample_ids=())
     elif probe.phase in ("near", "closing"):
@@ -178,6 +179,9 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
     Input may be incremental or a replayed snapshot. Late fixes cannot change
     an already executed phase. Leaving the near band returns to closing and
     discards that near attempt; the first baseline deadline remains fixed.
+    Within one timestamp, in-band evidence takes precedence: an outside-only
+    reset is provisional until the next accepted timestamp, so an independent
+    same-time in-band peer can restore continuity regardless of delivery order.
     """
     if not math.isfinite(now_min):
         raise ValueError("now_min must be finite")
@@ -188,9 +192,10 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
         probe = _reset_phase(probe)
     watermarks = dict(probe._last_sample_keys)
     latest_time = max((key[0] for key in watermarks.values()), default=-math.inf)
-    # A known source/time packet with an unaccepted ID must not win batch
-    # deduplication over a genuinely new packet carrying that same ID.
-    unseen = (s for s in new_samples if s.sample_id not in probe._seen_sample_ids
+    # Stale or known packets must not win batch deduplication over a current
+    # packet carrying that same ID. Independent streams may share latest_time.
+    unseen = (s for s in new_samples if s.observed_at_min >= latest_time
+              and s.sample_id not in probe._seen_sample_ids
               and (s.source, s.source_id, s.observed_at_min) not in probe._seen_sample_fixes)
     for sample in _ordered(unseen):
         # Only the assigned UAV's visual evidence can advance the watermark.
@@ -212,7 +217,7 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
         if probe.phase == "finished":
             return probe
         if sample.observed_at_min > latest_time:
-            probe = replace(probe, _completion_samples=())
+            probe = replace(probe, _completion_samples=(), _pending_reset=None)
         latest_time = sample.observed_at_min
         watermarks[stream] = _key(sample)
         probe = replace(probe, _last_sample_keys=tuple(sorted(watermarks.items())),
@@ -232,6 +237,14 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
             continue
         if probe.phase == "awaiting_assessment":
             continue
+        if probe._pending_reset is not None:
+            phase, started, samples = probe._pending_reset
+            if not _in_phase(sample, probe, phase, config):
+                continue
+            # This peer shares the reset timestamp (a newer timestamp cleared
+            # the checkpoint above). Rebuild IDs/duration with it below.
+            probe = replace(probe, phase=phase, phase_started_at_min=started,
+                            _phase_samples=samples, _pending_reset=None)
         if (probe._phase_samples and sample.observed_at_min -
                 probe._phase_samples[-1].observed_at_min > config.max_sample_gap_min):
             probe = _reset_phase(probe)
@@ -241,7 +254,11 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
             probe = replace(_reset_phase(probe), phase="near",
                             phase_started_at_min=sample.observed_at_min)
         if not _in_phase(sample, probe, probe.phase, config):
-            probe = _reset_phase(probe)
+            if (probe._phase_samples and
+                    probe._phase_samples[-1].observed_at_min == sample.observed_at_min):
+                continue
+            pending = (probe.phase, probe.phase_started_at_min, probe._phase_samples)
+            probe = replace(_reset_phase(probe), _pending_reset=pending)
             if probe.phase == "near":
                 probe = replace(probe, phase="closing", phase_started_at_min=sample.observed_at_min)
             continue

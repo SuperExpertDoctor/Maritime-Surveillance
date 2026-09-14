@@ -344,3 +344,122 @@ def test_known_packet_cannot_suppress_new_timestamp_in_batch(known_by, reverse):
         (retained.sample_id, new.sample_id) if known_by == "source_time"
         else (retained.sample_id,))
     assert advance(batch, packets) == batch
+
+
+@pytest.mark.parametrize("new_time", [2, 3])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_delayed_packet_cannot_suppress_current_same_id_packet(new_time, reverse):
+    retained = (sample(0), sample(2))
+    probe = advance(session(), retained)
+    delayed = sample(1, source="sar", sample_id="reused", distance=4.)
+    current = sample(new_time, source="sar", sample_id="reused")
+    packets = (current, delayed) if reverse else (delayed, current)
+
+    batch = advance(probe, packets)
+    incremental = advance(advance(probe, (delayed,), now=2.), (current,))
+
+    assert batch.baseline_sample_ids == tuple(s.sample_id for s in (*retained, current))
+    assert batch == incremental
+    assert advance(batch, packets) == batch
+    # Once accepted, this ID cannot be reused to reset evidence at a later time.
+    duplicate = replace(current, observed_at_min=new_time + 1., measured_range_cells=4.)
+    assert advance(batch, (duplicate,)) == batch
+
+
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+@pytest.mark.parametrize("in_source", ["eo", "sar"])
+@pytest.mark.parametrize("outside_distance", [None, 4., "other_band"])
+def test_mixed_range_phase_boundary_is_delivery_invariant(phase, in_source, outside_distance):
+    config = ConfigLoader.load().mission.contact
+    initial, baseline = (session(), ()) if phase == "baseline" else baseline_finished()
+    start, end = (0, 4) if phase == "baseline" else (5, 10)
+    distance = 1.8 if phase == "baseline" else 1.2
+    if outside_distance == "other_band":
+        outside_distance = 1.2 if phase == "baseline" else 1.8
+    retained = tuple(sample(t, source=in_source, distance=distance) for t in range(start, end))
+    inside = sample(end, source=in_source, distance=distance)
+    outside = sample(end, source="sar" if in_source == "eo" else "eo",
+                     distance=outside_distance)
+    expected_ids = tuple(s.sample_id for s in (*retained, inside))
+    batch = advance(initial, tuple(reversed((*retained, inside, outside))))
+
+    assert batch.phase == ("closing" if phase == "baseline" else "awaiting_assessment")
+    assert getattr(batch, f"{phase}_sample_ids") == expected_ids
+    for peers in ((inside, outside), (outside, inside)):
+        incremental = advance(initial, retained)
+        for peer in peers:
+            incremental = advance(incremental, (peer,))
+            assert advance(incremental, (peer,)) == incremental
+        assert incremental == batch
+        assert advance(incremental, (*retained, *peers)) == incremental
+
+    evidence = api().build_features(snapshot((*baseline, *retained, inside, outside)),
+                                    batch, end, config)
+    assert getattr(evidence, f"{phase}_duration_min") == end - start
+    if phase == "near":
+        assert batch.close_exposure_min == 5.
+        assert evidence.sufficient_evidence
+    else:
+        following = sample(end + 1, distance=1.2)
+        result = advance(batch, (following,))
+        assert result.baseline_sample_ids == expected_ids
+        assert result.near_sample_ids == (following.sample_id,)
+        assert result.close_exposure_min == 0.
+
+
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+@pytest.mark.parametrize("outside_first", [False, True])
+def test_same_time_in_band_peer_preserves_continuity_but_later_outside_resets(phase, outside_first):
+    initial = session() if phase == "baseline" else baseline_finished()[0]
+    start = 0 if phase == "baseline" else 5
+    distance = 1.8 if phase == "baseline" else 1.2
+    first = sample(start, distance=distance)
+    inside = sample(start + 1, distance=distance)
+    outside = sample(start + 1, source="sar", distance=4.)
+    peers = (outside, inside) if outside_first else (inside, outside)
+    probe = advance(initial, (first,))
+    for peer in peers:
+        probe = advance(probe, (peer,))
+
+    assert probe.phase == phase
+    assert getattr(probe, f"{phase}_sample_ids") == (first.sample_id, inside.sample_id)
+    assert probe == advance(initial, (first, *peers))
+    later_outside = sample(start + 2, source="sar", distance=4.)
+    reset = advance(probe, (later_outside,))
+    assert getattr(reset, f"{phase}_sample_ids") == ()
+    assert reset.close_exposure_min == 0.
+    assert reset.phase == ("baseline" if phase == "baseline" else "closing")
+    # A newer timestamp seals the reset; an older in-band peer cannot undo it.
+    following = sample(start + 3, distance=distance)
+    restarted = advance(reset, (following,))
+    delayed_peer = sample(start + 2, distance=distance)
+    assert advance(restarted, (delayed_peer,), now=start + 3) == restarted
+    assert getattr(restarted, f"{phase}_sample_ids") == (following.sample_id,)
+    assert restarted.close_exposure_min == 0.
+    assert restarted.baseline_started_at_min == probe.baseline_started_at_min
+    observations = (first, *peers, later_outside, following)
+    assert restarted == advance(initial, observations)
+    assert advance(restarted, observations) == restarted
+
+
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+@pytest.mark.parametrize("in_source", ["eo", "sar"])
+def test_same_time_peer_after_gap_cannot_restore_expired_evidence(phase, in_source):
+    initial = session() if phase == "baseline" else baseline_finished()[0]
+    start = 0 if phase == "baseline" else 5
+    distance = 1.8 if phase == "baseline" else 1.2
+    retained = tuple(sample(t, source=in_source, distance=distance)
+                     for t in (start, start + 1))
+    inside = sample(start + 4, source=in_source, distance=distance)
+    outside = sample(start + 4, source="sar" if in_source == "eo" else "eo", distance=4.)
+    probe = advance(initial, retained)
+
+    inside_first = advance(advance(probe, (inside,)), (outside,))
+    outside_first = advance(advance(probe, (outside,)), (inside,))
+
+    assert inside_first == outside_first
+    assert inside_first == advance(initial, (*retained, outside, inside))
+    assert inside_first.phase == phase
+    assert getattr(inside_first, f"{phase}_sample_ids") == (inside.sample_id,)
+    assert inside_first.close_exposure_min == 0.
+    assert advance(inside_first, (*retained, inside, outside)) == inside_first
