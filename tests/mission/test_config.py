@@ -1,0 +1,282 @@
+from dataclasses import fields, replace
+from pathlib import Path
+import shutil
+
+import pytest
+import yaml
+
+from src.mission.config import load_strict_yaml, validate_mission_config
+from src.schedule.config_loader import ConfigLoader
+
+
+CONFIG_NAMES = (
+    "common.yaml",
+    "control.yaml",
+    "environment.yaml",
+    "llm_params.yaml",
+    "mission.yaml",
+    "sensor.yaml",
+    "ship.yaml",
+    "uav.yaml",
+)
+
+
+def _copy_configs(tmp_path: Path) -> Path:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    for config_name in CONFIG_NAMES:
+        shutil.copy(Path("configs") / config_name, config_dir / config_name)
+    return config_dir
+
+
+def test_ship_and_mission_config_fields_match_design():
+    config = ConfigLoader.load()
+
+    assert tuple(field.name for field in fields(config.ship)) == (
+        "initial_ship_count",
+        "target_ship_count",
+        "target_ais_on_probability",
+        "speed_kn",
+        "ais_update_interval_min",
+        "ais_position_noise_cells",
+        "max_turn_rate_deg_min",
+        "yaw_time_constant_min",
+        "heading_control_gain_per_min",
+        "turn_speed_loss_fraction",
+        "max_acceleration_kn_per_min",
+        "detect_uav_radius_cells",
+        "clear_uav_radius_cells",
+        "clear_hold_min",
+        "red_decision_cycle_min",
+        "red_plan_valid_min",
+        "speed_min_kn",
+        "speed_max_kn",
+        "heading_offset_max_deg",
+        "zigzag_heading_max_deg",
+        "zigzag_period_min_min",
+        "zigzag_period_max_min",
+        "min_evasion_heading_deg",
+        "min_evasion_speed_delta_kn",
+        "navigation_horizon_min",
+        "integration_dt_min",
+        "navigation_clearance_cells",
+    )
+    assert tuple(field.name for field in fields(config.mission)) == (
+        "contact",
+        "intent",
+        "scheduling",
+        "evolution",
+    )
+    assert tuple(field.name for field in fields(config.mission.contact)) == (
+        "history_window_min",
+        "history_max_samples",
+        "stale_after_min",
+        "association_gate_cells",
+        "association_margin_cells",
+        "assessment_interval_min",
+        "min_valid_samples_per_phase",
+        "max_sample_gap_min",
+        "baseline_duration_min",
+        "near_duration_min",
+        "baseline_standoff_cells",
+        "near_standoff_cells",
+        "probe_timeout_min",
+        "approach_timeout_min",
+        "probe_retry_cooldown_min",
+        "assessment_confidence_min",
+        "civilian_recheck_cooldown_min",
+        "prompt_contact_limit",
+        "prompt_keypoints_per_contact",
+    )
+    assert tuple(field.name for field in fields(config.mission.intent)) == (
+        "max_active_intents",
+        "default_valid_duration_min",
+        "default_revisit_interval_min",
+        "default_weight",
+        "candidate_limit",
+        "general_candidate_reserve",
+        "freshness_threshold",
+        "mutation_queue_limit",
+    )
+    assert tuple(field.name for field in fields(config.mission.scheduling)) == (
+        "allow_probe_preempt_search",
+        "allow_intent_preempt_search",
+        "reassignment_cooldown_min",
+        "max_tasks_in_prompt",
+    )
+    assert tuple(field.name for field in fields(config.mission.evolution)) == (
+        "enabled",
+        "max_active_memories",
+        "max_memory_chars",
+        "min_support_episodes",
+        "candidate_generation_interval_episodes",
+        "validation_seeds",
+        "holdout_seeds",
+        "repeats_per_seed",
+        "minimum_score_gain",
+        "maximum_component_regression",
+    )
+
+
+def test_zero_initial_ships_is_valid_when_target_count_is_zero():
+    config = ConfigLoader.load()
+    config = replace(
+        config,
+        ship=replace(config.ship, initial_ship_count=0, target_ship_count=0),
+    )
+
+    validate_mission_config(config)
+
+
+def test_target_ship_count_cannot_exceed_initial_ship_count():
+    config = ConfigLoader.load()
+    config = replace(
+        config,
+        ship=replace(config.ship, initial_ship_count=2, target_ship_count=3),
+    )
+
+    with pytest.raises(ValueError, match="target_ship_count"):
+        validate_mission_config(config)
+
+
+def test_boolean_initial_ship_count_is_rejected():
+    config = ConfigLoader.load()
+    config = replace(config, ship=replace(config.ship, initial_ship_count=True))
+
+    with pytest.raises(ValueError, match="initial_ship_count.*integer"):
+        validate_mission_config(config)
+
+
+def test_negative_target_ais_probability_is_rejected():
+    config = ConfigLoader.load()
+    config = replace(
+        config,
+        ship=replace(config.ship, target_ais_on_probability=-0.01),
+    )
+
+    with pytest.raises(ValueError, match="target_ais_on_probability"):
+        validate_mission_config(config)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_non_finite_configuration_values_are_rejected(value):
+    config = ConfigLoader.load()
+    config = replace(config, ship=replace(config.ship, speed_kn=value))
+
+    with pytest.raises(ValueError, match="speed_kn.*finite"):
+        validate_mission_config(config)
+
+
+def test_near_standoff_must_be_below_detection_radius():
+    config = ConfigLoader.load()
+    config = replace(
+        config,
+        mission=replace(
+            config.mission,
+            contact=replace(
+                config.mission.contact,
+                near_standoff_cells=config.ship.detect_uav_radius_cells,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="near_standoff.*detect_uav_radius"):
+        validate_mission_config(config)
+
+
+def test_baseline_standoff_cannot_exceed_eo_clear_sky_range():
+    config = ConfigLoader.load()
+    eo_range_cells = (
+        config.sensor.eoir.detection_range_km / config.grid.cell_size_km
+    )
+    config = replace(
+        config,
+        mission=replace(
+            config.mission,
+            contact=replace(
+                config.mission.contact,
+                baseline_standoff_cells=eo_range_cells + 0.01,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="baseline_standoff.*EO"):
+        validate_mission_config(config)
+
+
+def test_detection_and_clearance_radii_are_ordered():
+    config = ConfigLoader.load()
+    config = replace(
+        config,
+        ship=replace(
+            config.ship,
+            clear_uav_radius_cells=config.ship.detect_uav_radius_cells,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="clear_uav_radius.*detect_uav_radius"):
+        validate_mission_config(config)
+
+
+def test_normal_ship_speed_must_be_within_configured_bounds():
+    config = ConfigLoader.load()
+    config = replace(
+        config,
+        ship=replace(config.ship, speed_kn=config.ship.speed_max_kn + 0.1),
+    )
+
+    with pytest.raises(ValueError, match="speed_kn.*speed_min_kn.*speed_max_kn"):
+        validate_mission_config(config)
+
+
+def test_probe_timeout_must_cover_both_observation_phases_and_main_step():
+    config = ConfigLoader.load()
+    contact = config.mission.contact
+    config = replace(
+        config,
+        mission=replace(
+            config.mission,
+            contact=replace(
+                contact,
+                probe_timeout_min=(
+                    contact.baseline_duration_min + contact.near_duration_min + 1.0
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="probe_timeout_min"):
+        validate_mission_config(config)
+
+
+def test_duplicate_cycles_are_rejected(tmp_path: Path):
+    path = tmp_path / "llm.yaml"
+    path.write_text(
+        "cycles: {max_retries: 2}\ncycles: {max_retries: 3}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        load_strict_yaml(str(path))
+
+
+def test_unknown_nested_mission_field_is_rejected(tmp_path: Path):
+    config_dir = _copy_configs(tmp_path)
+    mission_path = config_dir / "mission.yaml"
+    mission_data = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    mission_data["contact"]["stale_after_minutes"] = 5.0
+    mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mission.contact.*unknown.*stale_after_minutes"):
+        ConfigLoader.load(str(config_dir))
+
+
+def test_legacy_ship_fields_have_an_explicit_migration_error(tmp_path: Path):
+    config_dir = _copy_configs(tmp_path)
+    ship_path = config_dir / "ship.yaml"
+    ship_data = yaml.safe_load(ship_path.read_text(encoding="utf-8"))
+    ship_data["count_min"] = 3
+    ship_path.write_text(yaml.safe_dump(ship_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="legacy ship configuration.*count_min"):
+        ConfigLoader.load(str(config_dir))

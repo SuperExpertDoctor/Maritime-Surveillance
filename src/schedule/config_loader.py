@@ -1,6 +1,16 @@
 import os
-import yaml
 from dataclasses import dataclass
+
+from src.mission.config import (
+    ContactConfig,
+    EvolutionConfig,
+    IntentConfig,
+    MissionConfig,
+    SchedulingConfig,
+    load_strict_yaml,
+    strict_dataclass,
+    validate_mission_config,
+)
 
 from src.sensor.models import (
     SarConfig, EoIrConfig, RadarConfig, GeneralSensorConfig, SensorConfig,
@@ -68,26 +78,33 @@ class UAVConfig:
 
 @dataclass
 class ShipConfig:
-    count_min: int
-    max_groups: int
+    initial_ship_count: int
+    target_ship_count: int
+    target_ais_on_probability: float
     speed_kn: float
-    zigzag_amplitude_km: float
-    zigzag_period_min: float
-    zigzag_phase_random: bool
-    target_min: int = 3
-    target_max: int = 5
-    group_max: int = 3
-    carrier_max: int = 1
-    carrier_speed_kn: float = 14.0
-    destroyer_speed_kn: float = 20.0
-    zigzag_heading_deg: float = 18.0
-    max_turn_rate_deg_min: float = 12.0
-    yaw_time_constant_min: float = 2.5
-    heading_control_gain_per_min: float = 0.35
-    turn_speed_loss_fraction: float = 0.12
-    ais_discrepancy_threshold_cells: float = 2.0
-    ais_update_interval_min: float = 1.0
-    ais_discrimination_delay_min: float = 2.0
+    ais_update_interval_min: float
+    ais_position_noise_cells: float
+    max_turn_rate_deg_min: float
+    yaw_time_constant_min: float
+    heading_control_gain_per_min: float
+    turn_speed_loss_fraction: float
+    max_acceleration_kn_per_min: float
+    detect_uav_radius_cells: float
+    clear_uav_radius_cells: float
+    clear_hold_min: float
+    red_decision_cycle_min: float
+    red_plan_valid_min: float
+    speed_min_kn: float
+    speed_max_kn: float
+    heading_offset_max_deg: float
+    zigzag_heading_max_deg: float
+    zigzag_period_min_min: float
+    zigzag_period_max_min: float
+    min_evasion_heading_deg: float
+    min_evasion_speed_delta_kn: float
+    navigation_horizon_min: float
+    integration_dt_min: float
+    navigation_clearance_cells: float
 
 
 @dataclass
@@ -145,20 +162,18 @@ class AppConfig:
     sensor: SensorConfig
     common: CommonConfig
     control: ControlConfig
+    mission: MissionConfig
 
 
 class ConfigLoader:
     @staticmethod
     def _dict_to_dataclass(d: dict, cls):
-        field_names = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in d.items() if k in field_names}
-        return cls(**filtered)
+        return strict_dataclass(d, cls, cls.__name__)
 
     @staticmethod
     def load(base_path: str = "configs") -> "AppConfig":
         def _read(name):
-            with open(os.path.join(base_path, name), "r", encoding="utf-8") as f:
-                return yaml.safe_load(f)
+            return load_strict_yaml(os.path.join(base_path, name))
 
         env_data = _read("environment.yaml")
         grid_data = env_data.pop("grid")
@@ -166,6 +181,39 @@ class ConfigLoader:
         env_data["base_position"] = tuple(env_data["base_position"])
         grid_data["resolution"] = tuple(grid_data["resolution"])
         llm_params_data = _read("llm_params.yaml")
+        mission_data = _read("mission.yaml")
+        mission_fields = {"contact", "intent", "scheduling", "evolution"}
+        unknown_mission_fields = set(mission_data) - mission_fields
+        if unknown_mission_fields:
+            raise ValueError(
+                f"mission: unknown fields: {sorted(unknown_mission_fields)}"
+            )
+        mission = MissionConfig(
+            contact=strict_dataclass(
+                mission_data.get("contact"), ContactConfig, "mission.contact"
+            ),
+            intent=strict_dataclass(
+                mission_data.get("intent"), IntentConfig, "mission.intent"
+            ),
+            scheduling=strict_dataclass(
+                mission_data.get("scheduling"),
+                SchedulingConfig,
+                "mission.scheduling",
+            ),
+            evolution=strict_dataclass(
+                {
+                    **mission_data.get("evolution", {}),
+                    "validation_seeds": tuple(
+                        mission_data.get("evolution", {}).get("validation_seeds", ())
+                    ),
+                    "holdout_seeds": tuple(
+                        mission_data.get("evolution", {}).get("holdout_seeds", ())
+                    ),
+                },
+                EvolutionConfig,
+                "mission.evolution",
+            ),
+        )
         control_data = _read("control.yaml")
         configured_modes = {
             control_data["default_mode"],
@@ -198,22 +246,48 @@ class ConfigLoader:
             ),
         )
 
-        return AppConfig(
+        ship_data = _read("ship.yaml")
+        legacy_ship_fields = {
+            "count_min",
+            "max_groups",
+            "zigzag_amplitude_km",
+            "zigzag_period_min",
+            "zigzag_phase_random",
+            "target_min",
+            "target_max",
+            "group_max",
+            "carrier_max",
+            "carrier_speed_kn",
+            "destroyer_speed_kn",
+            "zigzag_heading_deg",
+            "ais_discrepancy_threshold_cells",
+            "ais_discrimination_delay_min",
+        } & set(ship_data)
+        if legacy_ship_fields:
+            raise ValueError(
+                "legacy ship configuration fields require migration: "
+                f"{sorted(legacy_ship_fields)}; use initial_ship_count and "
+                "target_ship_count"
+            )
+
+        config = AppConfig(
             environment=ConfigLoader._dict_to_dataclass(env_data, EnvironmentConfig),
             grid=ConfigLoader._dict_to_dataclass(grid_data, GridConfig),
             uav=ConfigLoader._dict_to_dataclass(_read("uav.yaml"), UAVConfig),
-            ship=ConfigLoader._dict_to_dataclass(_read("ship.yaml"), ShipConfig),
+            ship=strict_dataclass(ship_data, ShipConfig, "ship"),
             llm=ConfigLoader._dict_to_dataclass(llm_params_data["cycles"], LLMConfig),
             sensor=ConfigLoader._load_sensor_config(base_path),
             common=ConfigLoader._dict_to_dataclass(_read("common.yaml") or {}, CommonConfig),
             control=control,
+            mission=mission,
         )
+        validate_mission_config(config)
+        return config
 
     @staticmethod
     def _load_sensor_config(base_path: str) -> SensorConfig:
         def _read(name):
-            with open(os.path.join(base_path, name), "r", encoding="utf-8") as f:
-                return yaml.safe_load(f)
+            return load_strict_yaml(os.path.join(base_path, name))
 
         data = _read("sensor.yaml")
         return SensorConfig(

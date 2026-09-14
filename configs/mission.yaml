@@ -1,0 +1,45 @@
+contact:
+  history_window_min: 120.0
+  history_max_samples: 600
+  stale_after_min: 5.0
+  association_gate_cells: 0.5
+  association_margin_cells: 0.2
+  assessment_interval_min: 3.0
+  min_valid_samples_per_phase: 4
+  max_sample_gap_min: 2.0
+  baseline_duration_min: 4.0
+  near_duration_min: 5.0
+  baseline_standoff_cells: 1.8
+  near_standoff_cells: 1.2
+  probe_timeout_min: 20.0
+  approach_timeout_min: 120.0
+  probe_retry_cooldown_min: 10.0
+  assessment_confidence_min: 0.8
+  civilian_recheck_cooldown_min: 60.0
+  prompt_contact_limit: 20
+  prompt_keypoints_per_contact: 12
+intent:
+  max_active_intents: 20
+  default_valid_duration_min: 120.0
+  default_revisit_interval_min: 20.0
+  default_weight: 0.5
+  candidate_limit: 20
+  general_candidate_reserve: 2
+  freshness_threshold: 0.7
+  mutation_queue_limit: 100
+scheduling:
+  allow_probe_preempt_search: true
+  allow_intent_preempt_search: false
+  reassignment_cooldown_min: 5.0
+  max_tasks_in_prompt: 40
+evolution:
+  enabled: true
+  max_active_memories: 5
+  max_memory_chars: 400
+  min_support_episodes: 3
+  candidate_generation_interval_episodes: 5
+  validation_seeds: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
+  holdout_seeds: [201, 202, 203, 204, 205]
+  repeats_per_seed: 3
+  minimum_score_gain: 0.02
+  maximum_component_regression: 0.02
