@@ -266,3 +266,81 @@ def test_future_and_delayed_samples_cannot_retroactively_advance_phase():
     assert probe.baseline_started_at_min == 2.
     result = advance(probe, (sample(0), sample(1)), now=2.)
     assert result == probe
+
+
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+@pytest.mark.parametrize("first_source", ["eo", "sar"])
+@pytest.mark.parametrize("delayed_distance", [None, 4., 1.2, 1.8])
+def test_delayed_cross_stream_evidence_cannot_rewind_chronology(
+        phase, first_source, delayed_distance):
+    initial = session() if phase == "baseline" else baseline_finished()[0]
+    start = 0 if phase == "baseline" else 5
+    distance = 1.8 if phase == "baseline" else 1.2
+    retained = tuple(sample(t, source=first_source, distance=distance)
+                     for t in range(start, start + 3))
+    probe = advance(initial, retained)
+    other_source = "sar" if first_source == "eo" else "eo"
+    delayed = sample(start + 1, source=other_source, distance=delayed_distance)
+
+    assert advance(probe, (delayed,), now=start + 2) == probe
+
+    simultaneous = sample(start + 2, source=other_source, distance=distance)
+    result = advance(probe, (delayed, simultaneous), now=start + 2)
+    assert getattr(result, f"{phase}_sample_ids") == tuple(
+        s.sample_id for s in sorted((*retained, simultaneous),
+                                   key=lambda s: (s.observed_at_min, s.sample_id)))
+    assert advance(result, (delayed, simultaneous), now=start + 2) == result
+
+
+@pytest.mark.parametrize("phase", ["baseline", "near"])
+@pytest.mark.parametrize("first_source", ["eo", "sar"])
+def test_phase_completion_retains_both_streams_at_boundary(phase, first_source):
+    config = ConfigLoader.load().mission.contact
+    initial = session() if phase == "baseline" else baseline_finished()[0]
+    times = (0, 2, 4) if phase == "baseline" else (5, 7, 9, 10)
+    distance = 1.8 if phase == "baseline" else 1.2
+    other_source = "sar" if first_source == "eo" else "eo"
+    observations = tuple(sample(t, source=source, distance=distance)
+                         for t in times for source in (first_source, other_source))
+    batch = advance(initial, tuple(reversed(observations)))
+    incremental = initial
+    for observation in observations:
+        incremental = advance(incremental, (observation,))
+        assert advance(incremental, (observation,)) == incremental
+
+    expected_ids = tuple(s.sample_id for s in sorted(
+        observations, key=lambda s: (s.observed_at_min, s.sample_id)))
+    assert getattr(incremental, f"{phase}_sample_ids") == expected_ids
+    assert incremental == batch
+    assert incremental.phase == ("closing" if phase == "baseline" else "awaiting_assessment")
+    assert advance(incremental, observations) == incremental
+    evidence = api().build_features(snapshot(observations), incremental, times[-1], config)
+    assert getattr(evidence, f"{phase}_duration_min") == times[-1] - times[0]
+    if phase == "near":
+        assert incremental.close_exposure_min == 5.
+    else:
+        following = sample(5, distance=1.2)
+        result = advance(incremental, (following,))
+        assert result.baseline_sample_ids == expected_ids
+        assert result.near_sample_ids == (following.sample_id,)
+        assert result.close_exposure_min == 0.
+
+
+@pytest.mark.parametrize("known_by", ["source_time", "sample_id"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_known_packet_cannot_suppress_new_timestamp_in_batch(known_by, reverse):
+    retained = sample(0)
+    probe = advance(session(), (retained,))
+    reused_id = "reused" if known_by == "source_time" else retained.sample_id
+    old = sample(0, sample_id=reused_id)
+    new = sample(1, sample_id=reused_id)
+    packets = (new, old) if reverse else (old, new)
+
+    batch = advance(probe, packets)
+    incremental = advance(advance(probe, (old,)), (new,))
+
+    assert batch == incremental
+    assert batch.baseline_sample_ids == (
+        (retained.sample_id, new.sample_id) if known_by == "source_time"
+        else (retained.sample_id,))
+    assert advance(batch, packets) == batch

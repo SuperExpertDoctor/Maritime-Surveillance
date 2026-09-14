@@ -145,6 +145,10 @@ class ProbeSession:
         default=frozenset(), repr=False, kw_only=True)
     _last_sample_keys: tuple[tuple[tuple[str, str], tuple[float, str]], ...] = field(
         default=(), repr=False, kw_only=True)
+    # Keep completed evidence only until the next accepted timestamp, so an
+    # independent sensor at the completion time still belongs to that phase.
+    _completion_samples: tuple[ObservationSample, ...] = field(
+        default=(), repr=False, kw_only=True)
 
 
 @dataclass(frozen=True)

@@ -151,7 +151,7 @@ def _motion(samples, max_gap: float):
 
 
 def _reset_phase(probe: ProbeSession) -> ProbeSession:
-    changes = dict(_phase_samples=(), close_exposure_min=0.)
+    changes = dict(_phase_samples=(), _completion_samples=(), close_exposure_min=0.)
     if probe.phase == "baseline":
         changes.update(baseline_sample_ids=(), near_sample_ids=())
     elif probe.phase in ("near", "closing"):
@@ -187,7 +187,12 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
     if probe._phase_marker is not None and probe._phase_marker != marker:
         probe = _reset_phase(probe)
     watermarks = dict(probe._last_sample_keys)
-    for sample in _ordered(new_samples):
+    latest_time = max((key[0] for key in watermarks.values()), default=-math.inf)
+    # A known source/time packet with an unaccepted ID must not win batch
+    # deduplication over a genuinely new packet carrying that same ID.
+    unseen = (s for s in new_samples if s.sample_id not in probe._seen_sample_ids
+              and (s.source, s.source_id, s.observed_at_min) not in probe._seen_sample_fixes)
+    for sample in _ordered(unseen):
         # Only the assigned UAV's visual evidence can advance the watermark.
         if sample.source not in ("eo", "sar") or sample.source_id != probe.uav_id:
             continue
@@ -196,6 +201,7 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
         last_key = watermarks.get(stream)
         if (sample.contact_id != probe.contact_id or sample.observed_at_min > now_min
                 or sample.observed_at_min < max(probe.started_at_min, probe.phase_started_at_min)
+                or sample.observed_at_min < latest_time
                 or (last_key is not None and _key(sample) <= last_key)):
             continue
         # Identity outlives phase-local evidence. Re-delivery cannot supply a
@@ -205,10 +211,25 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
         probe = _timeout(probe, sample.observed_at_min, config)
         if probe.phase == "finished":
             return probe
+        if sample.observed_at_min > latest_time:
+            probe = replace(probe, _completion_samples=())
+        latest_time = sample.observed_at_min
         watermarks[stream] = _key(sample)
         probe = replace(probe, _last_sample_keys=tuple(sorted(watermarks.items())),
                         _seen_sample_ids=probe._seen_sample_ids | {sample.sample_id},
                         _seen_sample_fixes=probe._seen_sample_fixes | {fix})
+        if probe._completion_samples:
+            # Completion is immediate, but all independent evidence at that
+            # timestamp belongs to the phase just completed, across calls too.
+            phase = "baseline" if probe.phase == "closing" else "near"
+            if _in_phase(sample, probe, phase, config):
+                samples = _ordered((*probe._completion_samples, sample))
+                probe = replace(probe, _completion_samples=samples,
+                                **{f"{phase}_sample_ids": tuple(s.sample_id for s in samples)})
+                if phase == "near":
+                    probe = replace(probe, close_exposure_min=_duration(
+                        samples, config.max_sample_gap_min))
+            continue
         if probe.phase == "awaiting_assessment":
             continue
         if (probe._phase_samples and sample.observed_at_min -
@@ -237,7 +258,8 @@ def advance_probe(probe: ProbeSession, new_samples: tuple[ObservationSample, ...
         threshold = config.baseline_duration_min if phase == "baseline" else config.near_duration_min
         if duration >= threshold and len(samples) >= config.min_valid_samples_per_phase:
             probe = replace(probe, phase="closing" if phase == "baseline" else "awaiting_assessment",
-                            phase_started_at_min=sample.observed_at_min, _phase_samples=())
+                            phase_started_at_min=sample.observed_at_min, _phase_samples=(),
+                            _completion_samples=samples)
     probe = _timeout(probe, now_min, config)
     if (probe.phase in ("baseline", "near") and probe._phase_samples
             and now_min - probe._phase_samples[-1].observed_at_min > config.max_sample_gap_min):
