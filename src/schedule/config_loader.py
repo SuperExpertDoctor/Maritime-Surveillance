@@ -17,6 +17,12 @@ from src.sensor.models import (
 )
 
 
+def _seed_sequence(value: object, name: str) -> tuple:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{name}: expected sequence")
+    return tuple(value)
+
+
 @dataclass
 class EnvironmentConfig:
     sea_area_km: tuple
@@ -76,7 +82,7 @@ class UAVConfig:
     freshness_patrol_coverage_threshold_pct: float = 80.0
 
 
-@dataclass
+@dataclass(frozen=True)
 class ShipConfig:
     initial_ship_count: int
     target_ship_count: int
@@ -188,6 +194,16 @@ class ConfigLoader:
             raise ValueError(
                 f"mission: unknown fields: {sorted(unknown_mission_fields)}"
             )
+        evolution_data = mission_data.get("evolution")
+        if not isinstance(evolution_data, dict):
+            raise ValueError("mission.evolution: expected mapping")
+        evolution_data = dict(evolution_data)
+        for seed_field in ("validation_seeds", "holdout_seeds"):
+            if seed_field in evolution_data:
+                evolution_data[seed_field] = _seed_sequence(
+                    evolution_data[seed_field],
+                    f"mission.evolution.{seed_field}",
+                )
         mission = MissionConfig(
             contact=strict_dataclass(
                 mission_data.get("contact"), ContactConfig, "mission.contact"
@@ -201,15 +217,7 @@ class ConfigLoader:
                 "mission.scheduling",
             ),
             evolution=strict_dataclass(
-                {
-                    **mission_data.get("evolution", {}),
-                    "validation_seeds": tuple(
-                        mission_data.get("evolution", {}).get("validation_seeds", ())
-                    ),
-                    "holdout_seeds": tuple(
-                        mission_data.get("evolution", {}).get("holdout_seeds", ())
-                    ),
-                },
+                evolution_data,
                 EvolutionConfig,
                 "mission.evolution",
             ),

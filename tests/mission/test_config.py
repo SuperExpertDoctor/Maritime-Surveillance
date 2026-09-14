@@ -1,4 +1,4 @@
-from dataclasses import fields, replace
+from dataclasses import FrozenInstanceError, fields, replace
 from pathlib import Path
 import shutil
 
@@ -116,6 +116,13 @@ def test_ship_and_mission_config_fields_match_design():
         "minimum_score_gain",
         "maximum_component_regression",
     )
+
+
+def test_loaded_ship_config_is_immutable():
+    config = ConfigLoader.load()
+
+    with pytest.raises(FrozenInstanceError):
+        config.ship.initial_ship_count = 9
 
 
 def test_zero_initial_ships_is_valid_when_target_count_is_zero():
@@ -268,6 +275,37 @@ def test_unknown_nested_mission_field_is_rejected(tmp_path: Path):
     mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
 
     with pytest.raises(ValueError, match="mission.contact.*unknown.*stale_after_minutes"):
+        ConfigLoader.load(str(config_dir))
+
+
+def test_malformed_evolution_section_has_contextual_value_error(tmp_path: Path):
+    config_dir = _copy_configs(tmp_path)
+    mission_path = config_dir / "mission.yaml"
+    mission_data = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    mission_data["evolution"] = []
+    mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"mission\.evolution: expected mapping"):
+        ConfigLoader.load(str(config_dir))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "malformed_value"),
+    [("validation_seeds", 101), ("holdout_seeds", {"seed": 201})],
+)
+def test_malformed_seed_collection_has_contextual_value_error(
+    tmp_path: Path, field_name: str, malformed_value: object
+):
+    config_dir = _copy_configs(tmp_path)
+    mission_path = config_dir / "mission.yaml"
+    mission_data = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    mission_data["evolution"][field_name] = malformed_value
+    mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=rf"mission\.evolution\.{field_name}: expected sequence",
+    ):
         ConfigLoader.load(str(config_dir))
 
 

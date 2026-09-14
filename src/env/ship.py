@@ -1,13 +1,25 @@
 """GOAL2 ship types, coherent formations, island avoidance, and departure."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 import math
 import random
-from typing import Iterable
+from typing import Iterable, Literal
 
+from src.env.dubins import Pose
 from src.env.obstacle import Island
 from src.schedule.datatypes import GridCoord
+
+
+@dataclass(frozen=True)
+class ShipTruth:
+    """Environment/evaluation-only vessel truth."""
+
+    ship_id: str
+    identity: Literal["target", "civilian"]
+    ais_mode: Literal["civilian", "silent"]
+    normal_route: tuple[Pose, ...]
 
 
 def _wrap_pi(angle: float) -> float:

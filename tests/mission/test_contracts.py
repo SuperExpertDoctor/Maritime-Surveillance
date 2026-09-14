@@ -12,7 +12,6 @@ from src.mission.contracts import (
     ProbeSession,
     RedMotionParameters,
     RedPlan,
-    ShipTruth,
     TaskCandidate,
     ship_rng_manifest,
 )
@@ -202,8 +201,13 @@ def test_contact_snapshot_does_not_expose_environment_truth():
         snapshot.identity = "target"
 
 
-def test_ship_truth_is_an_explicit_evaluation_only_contract():
-    truth = ShipTruth(
+def test_ship_truth_is_owned_by_the_environment_not_public_mission_contracts():
+    from src.env import ship as ship_module
+
+    assert not hasattr(contracts, "ShipTruth")
+    assert "ShipTruth" not in contracts.__all__
+
+    truth = ship_module.ShipTruth(
         ship_id="V0001",
         identity="target",
         ais_mode="silent",

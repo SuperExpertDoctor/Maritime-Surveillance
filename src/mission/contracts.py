@@ -7,7 +7,6 @@ from typing import Literal
 
 Vec2 = tuple[float, float]
 Rect = tuple[int, int, int, int]
-Pose = tuple[float, float, float]
 Identity = Literal["unknown", "target", "civilian"]
 ContactState = Literal[
     "pending",
@@ -162,16 +161,6 @@ class RedPlan:
     notes: str
 
 
-@dataclass(frozen=True)
-class ShipTruth:
-    """Environment/evaluation-only vessel truth; never expose to blue snapshots."""
-
-    ship_id: str
-    identity: Literal["target", "civilian"]
-    ais_mode: Literal["civilian", "silent"]
-    normal_route: tuple[Pose, ...]
-
-
 __all__ = [
     "Assessment",
     "ContactSnapshot",
@@ -180,13 +169,11 @@ __all__ = [
     "Intent",
     "MissionSelection",
     "ObservationSample",
-    "Pose",
     "ProbeSession",
     "Rect",
     "RedMotionParameters",
     "RedPlan",
     "SHIP_RNG_STREAMS",
-    "ShipTruth",
     "TaskCandidate",
     "Vec2",
     "ship_rng_manifest",
