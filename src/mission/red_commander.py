@@ -203,8 +203,10 @@ class RedCommander:
         self._installation: RedPlanInstallation | None = None
         self._installation_episode_revision: int | None = None
         self._last_snapshot: RedSnapshot | None = None
+        self._last_snapshot_episode_revision: int | None = None
         self._seen_snapshot_ids: set[str] = set()
         self._delivered_snapshot_id: str | None = None
+        self._delivered_snapshot_episode_revision: int | None = None
         self._last_request_at_min: float | None = None
         self._prompt = (Path(__file__).parent / "prompts" / "red_commander.txt").read_text(encoding="utf-8")
 
@@ -293,8 +295,14 @@ class RedCommander:
             and self._installation_episode_revision != episode_revision
         ):
             self._retire_installation()
+        if self._delivered_snapshot_episode_revision != episode_revision:
             self._delivered_snapshot_id = None
+            self._delivered_snapshot_episode_revision = None
         return episode_revision
+
+    def _mark_delivered(self, snapshot_id: str, episode_revision: int) -> None:
+        self._delivered_snapshot_id = snapshot_id
+        self._delivered_snapshot_episode_revision = episode_revision
 
     def decide(self, snapshot: RedSnapshot) -> RedPlan | None:
         _validate_snapshot(snapshot)
@@ -304,6 +312,8 @@ class RedCommander:
             if snapshot.snapshot_id == previous.snapshot_id:
                 if snapshot != previous:
                     raise RedDecisionBlocked("snapshot ID reused with different content")
+                if self._last_snapshot_episode_revision != episode_revision:
+                    raise RedDecisionBlocked("snapshot belongs to an older gate revision")
                 if self._delivered_snapshot_id == snapshot.snapshot_id:
                     return self._installation.plan if self._installation else None
             elif (
@@ -312,11 +322,12 @@ class RedCommander:
             ):
                 raise RedDecisionBlocked("stale red snapshot")
         self._last_snapshot = snapshot
+        self._last_snapshot_episode_revision = episode_revision
         self._seen_snapshot_ids.add(snapshot.snapshot_id)
         active = set(snapshot.active_ship_ids)
         if not active:
             self._retire_installation()
-            self._delivered_snapshot_id = snapshot.snapshot_id
+            self._mark_delivered(snapshot.snapshot_id, episode_revision)
             return None
         installed = self._installation
         if installed is not None:
@@ -329,7 +340,7 @@ class RedCommander:
                 self._last_request_at_min is not None
                 and snapshot.sim_time_min - self._last_request_at_min < self.config.red_decision_cycle_min
             ):
-                self._delivered_snapshot_id = snapshot.snapshot_id
+                self._mark_delivered(snapshot.snapshot_id, episode_revision)
                 return installed.plan
         self._last_request_at_min = snapshot.sim_time_min
         result = self.gateway.request_json(
@@ -340,7 +351,7 @@ class RedCommander:
         )
         if not result.success:
             if self._installation is not None:
-                self._delivered_snapshot_id = snapshot.snapshot_id
+                self._mark_delivered(snapshot.snapshot_id, episode_revision)
                 return self._installation.plan
             raise RedDecisionBlocked("; ".join(result.errors))
         payload = result.payload
@@ -352,5 +363,5 @@ class RedCommander:
         )
         self._installation = RedPlanInstallation(plan, snapshot.sim_time_min)
         self._installation_episode_revision = episode_revision
-        self._delivered_snapshot_id = snapshot.snapshot_id
+        self._mark_delivered(snapshot.snapshot_id, episode_revision)
         return plan

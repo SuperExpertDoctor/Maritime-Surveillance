@@ -476,29 +476,70 @@ def test_between_frame_clear_and_reentry_cannot_reuse_old_installation(
     gate = red_module().ThreatGate(config)
     commander, gateway, transport = commander_with(
         scripted_transport, config,
-        [plan_payload()] + [TimeoutError("reentry failed")] * 3,
+        [plan_payload(), plan_payload("S2")],
         threat_gate=gate,
     )
     assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
     assert gate.update("V2", "target", 1.0, 0.0) == "evasive"
     first = commander.decide(snapshot())
-    installed = commander.installation
 
     gate.observe_swept_distance("V1", "target", 3.0, 0.1)
     assert gate.update("V1", "target", 3.0, 0.1) == "recovering"
     gate.observe_swept_distance("V1", "target", 3.0, 0.6)
     assert gate.update("V1", "target", 3.0, 0.6) == "normal"
-    assert commander.installation is None
     gate.observe_swept_distance("V1", "target", 1.0, 0.7)
     assert gate.update("V1", "target", 1.0, 0.7) == "evasive"
 
-    assert installed.plan is first
-    assert installed.expires_at_min > 1.0
-    with pytest.raises(red_module().RedDecisionBlocked):
-        commander.decide(snapshot("S2", 1.0))
-    assert commander.installation is None
+    second = commander.decide(snapshot("S2", 1.0))
+    assert second is not first
+    assert second.snapshot_id == "S2"
+    assert commander.installation.plan is second
     assert len(gateway.call_log) == 2
-    assert len(transport.calls) == 4
+    assert len(transport.calls) == 2
+
+
+def test_gate_revision_blocks_replay_of_original_active_snapshot_before_model_call(
+    scripted_transport, ship_config,
+):
+    config = replace(ship_config, clear_hold_min=0.5)
+    gate = red_module().ThreatGate(config)
+    commander, gateway, transport = commander_with(
+        scripted_transport, config,
+        [plan_payload(active=("V1",)), plan_payload(active=("V1",))],
+        threat_gate=gate,
+    )
+    current = snapshot(active=("V1",))
+    assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
+    commander.decide(current)
+
+    gate.observe_swept_distance("V1", "target", 3.0, 0.1)
+    gate.observe_swept_distance("V1", "target", 3.0, 0.6)
+    gate.observe_swept_distance("V1", "target", 1.0, 0.7)
+
+    with pytest.raises(red_module().RedDecisionBlocked, match="gate revision"):
+        commander.decide(current)
+    assert len(gateway.call_log) == len(transport.calls) == 1
+
+
+def test_gate_revision_blocks_replay_of_delivered_empty_snapshot(
+    scripted_transport, ship_config,
+):
+    config = replace(ship_config, clear_hold_min=0.5)
+    gate = red_module().ThreatGate(config)
+    commander, gateway, transport = commander_with(
+        scripted_transport, config, [plan_payload(active=("V1",))], threat_gate=gate,
+    )
+    assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
+    commander.decide(snapshot(active=("V1",)))
+    gate.observe_swept_distance("V1", "target", 3.0, 0.1)
+    gate.observe_swept_distance("V1", "target", 3.0, 0.6)
+    cleared = snapshot("clear", 0.6, ())
+    assert commander.decide(cleared) is None
+
+    gate.observe_swept_distance("V1", "target", 1.0, 0.7)
+    with pytest.raises(red_module().RedDecisionBlocked, match="gate revision"):
+        commander.decide(cleared)
+    assert len(gateway.call_log) == len(transport.calls) == 1
 
 
 def test_clear_one_target_then_reentry_does_not_restore_previous_fleet_plan(scripted_transport, ship_config):
