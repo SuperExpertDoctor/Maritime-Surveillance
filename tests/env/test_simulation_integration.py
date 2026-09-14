@@ -202,11 +202,12 @@ def test_sar_requires_stable_straight_heading_before_writing_information():
 
 def test_simulation_applies_phase_speed_control_to_shared_trackers():
     engine = SimulationEngine(ConfigLoader.load())
-    center = engine._group_center("G1")
+    contact_id = engine.ships[0].group_id
+    center = engine._group_center(contact_id)
     first, second = engine.uavs[:2]
     for uav in (first, second):
         uav.status = "tracking"
-        uav.target_group_id = "G1"
+        uav.target_group_id = contact_id
     first._col, first._row = center[0] + 1.8, center[1]
     second._col = center[0] + 1.8 * math.cos(0.2)
     second._row = center[1] + 1.8 * math.sin(0.2)

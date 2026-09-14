@@ -73,15 +73,11 @@ def test_formation_discriminator_treats_silent_member_as_military(index):
     assert result.reason == "AIS formation member silent"
 
 
-def test_engine_waits_for_delay_then_releases_civilian_tracking():
+def test_engine_records_eo_observations_without_ais_truth_classification():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
     group_id = engine.ships[0].group_id
-    for ship in engine.ships:
-        ship.actual_military = False
-        ship.ais_mode = "civilian"
-        ship.is_military = None
-        ship.discrimination = None
-    engine._refresh_ais_signals(1.0)
+    ship = engine.ships[0]
+    ship.ais_mode = "civilian"
 
     center = engine._group_center(group_id)
     uav = engine.uavs[0]
@@ -98,20 +94,16 @@ def test_engine_waits_for_delay_then_releases_civilian_tracking():
     )
 
     engine._update_sensors_and_detections(0.0)
-    assert engine.allocator.sm.get_track_region_for_group(group_id) is not None
     engine._update_sensors_and_detections(1.0)
-    assert engine.allocator.sm.get_track_region_for_group(group_id) is not None
     engine._update_sensors_and_detections(2.0)
 
-    assert engine.allocator.sm.get_track_region_for_group(group_id) is None
-    tracked_group = [ship for ship in engine.ships if ship.group_id == group_id]
-    assert all(ship.is_military is False for ship in tracked_group)
-    assert all(
-        ship.estimated_position is not None
-        for ship in engine.ships
-        if ship.group_id == group_id
-    )
-    assert engine.civilian_releases == 1
+    assert engine.allocator.sm.get_track_region_for_group(group_id) is not None
+    assert engine.allocator.sm.get_target_report(group_id) is not None
+    assert ship.estimated_position is not None
+    assert ship.is_military is None
+    assert ship.discrimination is None
+    assert engine.ais_discriminations == 0
+    assert engine.civilian_releases == 0
     assert not engine.allocator.sm.get_active_markers()
 
 

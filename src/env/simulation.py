@@ -21,7 +21,7 @@ from src.env.obstacle import (
     obstacle_intersects_mask,
 )
 from src.env.sar_sensor import SARSensor
-from src.env.ship import Ship, ShipType, formation_offsets
+from src.env.ship import Ship, create_ship_population
 from src.env.sim_clock import SimClock
 from src.env.uav_entity import UAVEntity
 from src.control.common.contracts import (
@@ -46,6 +46,7 @@ from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
 from src.control.common.ownership import ControlOwnership
 from src.control.common.safety import SafetyEnvelope
+from src.control.heuristic.navigation import AStarNavigator
 from src.control.heuristic.return_to_base import (
     NoSafeRecoveryPath,
     RecoveryPlanner,
@@ -54,7 +55,6 @@ from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import GridCoord, Region
 from src.schedule.task_allocator import TaskAllocator
 from src.utils.coverage_planner import CoveragePlanner
-from src.utils.ais_discriminator import AISDiscriminator
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
 from src.utils.conflict_detector import (
@@ -125,6 +125,12 @@ class SimulationEngine:
             resolution=config.grid.resolution,
             land_mask=self.land_mask,
         )
+        island_mask = obstacle_grid_mask(
+            [item for item in self.obstacles if isinstance(item, Island)],
+            config.grid.resolution,
+            include_islands=True,
+        )
+        self.ship_land_mask = np.logical_or(self.land_mask, island_mask)
         self._next_storm_id = 1 + sum(
             isinstance(obstacle, Thunderstorm) for obstacle in self.obstacles
         )
@@ -222,11 +228,16 @@ class SimulationEngine:
                     current_time=0.0,
                     dt_min=self.clock.dt_min,
                 )
+        heuristic = config.control.heuristic
+        self.ship_navigator = AStarNavigator(
+            xy_resolution=heuristic.astar_xy_resolution_cells,
+            heading_bins=heuristic.astar_heading_bins,
+            candidate_limit=heuristic.astar_candidate_limit,
+            primitive_length=heuristic.astar_primitive_length_cells,
+            sample_step=heuristic.path_sample_step_cells,
+        )
         self.ships = self._create_ships()
         self._refresh_ais_signals(0.0)
-        self.ais_discriminator = AISDiscriminator(
-            config.ship.ais_discrepancy_threshold_cells
-        )
         self.heavy_triggers = 0
         self.light_triggers = 0
         self.llm_successes = 0
@@ -255,80 +266,16 @@ class SimulationEngine:
         self._freshness_patrol_uavs: set[str] = set()
         self._return_reason_counts: dict[str, int] = defaultdict(int)
         self.departed_ship_count = 0
-        self._departed_groups: set[str] = set()
+        self._departed_contacts: set[str] = set()
         self.last_result: dict = {"trigger_type": "none", "action": None}
 
     def _create_ships(self) -> list[Ship]:
-        cfg = self.config.ship
-        count = self.rng.randint(cfg.target_min, cfg.target_max)
-        group_limit = min(cfg.group_max, cfg.max_groups, max(1, count - 1))
-        group_count = self.rng.randint(1, group_limit)
-        group_sizes = [1] * group_count
-        # A fleet has at least one actual formation rather than only singleton
-        # targets.  Any surplus is spread across groups deterministically.
-        group_sizes[0] += 1
-        for index in range(count - sum(group_sizes)):
-            group_sizes[index % group_count] += 1
-        carrier_group = 0 if cfg.carrier_max > 0 and count >= 3 else None
-        if carrier_group is not None and group_sizes[carrier_group] < 3:
-            for donor in range(1, len(group_sizes)):
-                if group_sizes[donor] > 1:
-                    group_sizes[donor] -= 1
-                    group_sizes[carrier_group] += 1
-                    break
-            if group_sizes[carrier_group] < 3:
-                carrier_group = None
-        ships: list[Ship] = []
-        islands = [item for item in self.obstacles if isinstance(item, Island)]
-        ship_index = 0
-        for group, size in enumerate(group_sizes):
-            center = self._random_ship_group_center(islands)
-            heading = self.rng.uniform(0, 2 * math.pi)
-            military = group == carrier_group or self.rng.choice((True, False))
-            has_carrier = group == carrier_group
-            offsets = formation_offsets(size, has_carrier)
-            cos_h, sin_h = math.cos(heading), math.sin(heading)
-            for member in range(size):
-                ship_type = (
-                    ShipType.AIRCRAFT_CARRIER
-                    if group == carrier_group and member == 0
-                    else ShipType.DESTROYER
-                )
-                # Local (forward, right) → world offset rotated by group heading
-                fwd, right = offsets[member]
-                world_dx = fwd * cos_h - right * sin_h
-                world_dy = fwd * sin_h + right * cos_h
-                position = GridCoord(
-                    int(round(center[0] + world_dx)),
-                    int(round(center[1] + world_dy)),
-                )
-                speed = cfg.carrier_speed_kn if ship_type is ShipType.AIRCRAFT_CARRIER else cfg.destroyer_speed_kn
-                ship = Ship(
-                    f"Ship-{group + 1}-{member + 1}",
-                    position,
-                    speed,
-                    cfg.zigzag_amplitude_km,
-                    cfg.zigzag_period_min,
-                    self.config.grid.cell_size_km,
-                    ship_type=ship_type,
-                    group_id=f"G{group + 1}",
-                    base_heading=heading,
-                    formation_offset=offsets[member],
-                    actual_military=military,
-                    zigzag_heading_deg=cfg.zigzag_heading_deg,
-                    max_turn_rate_deg_min=cfg.max_turn_rate_deg_min,
-                    yaw_time_constant_min=cfg.yaw_time_constant_min,
-                    heading_control_gain_per_min=cfg.heading_control_gain_per_min,
-                    turn_speed_loss_fraction=cfg.turn_speed_loss_fraction,
-                )
-                ship.ais_mode = (
-                    "civilian"
-                    if not military
-                    else ("silent" if (group + member) % 2 == 0 else "deceptive")
-                )
-                ships.append(ship)
-                ship_index += 1
-        return ships
+        return create_ship_population(
+            self.config,
+            self.seed,
+            self.ship_land_mask,
+            self.ship_navigator,
+        )
 
     def _generate_base_positions(self) -> tuple[tuple[int, int], ...]:
         cfg = self.config.environment
@@ -350,18 +297,6 @@ class SimulationEngine:
                 if len(selected) == cfg.base_count:
                     return tuple(selected)
         raise RuntimeError("unable to place the requested separated coastal bases")
-
-    def _random_ship_group_center(self, islands: list[Island]) -> tuple[float, float]:
-        mainland_width = self.config.environment.mainland_width_cells
-        for _ in range(200):
-            center = (self.rng.uniform(mainland_width + 2.0, 25.0), self.rng.uniform(4.0, 25.0))
-            col, row = int(round(center[0])), int(round(center[1]))
-            if (
-                not self.land_mask[col, row]
-                and all(not island.contains(center) and island.distance_to_boundary(center) >= 2.0 for island in islands)
-            ):
-                return center
-        return 15.0, 15.0
 
     def _inward_heading(self, position: GridCoord) -> float:
         if position.col < self.config.environment.mainland_width_cells:
@@ -845,7 +780,7 @@ class SimulationEngine:
                         "observed_at": report.observed_at,
                     })
             for member in self.ships:
-                if member.group_id == group_id:
+                if member.contact_id == group_id:
                     member.set_tracked(False)
         uav.target_group_id = None
         for region in sm.get_search_regions():
@@ -1050,31 +985,13 @@ class SimulationEngine:
 
     def _update_ships(self, current_time: float) -> None:
         islands = [item for item in self.obstacles if isinstance(item, Island)]
-        groups: dict[str, list[Ship]] = defaultdict(list)
         for ship in self.ships:
-            if ship.group_id and not ship.departed:
-                groups[ship.group_id].append(ship)
-        for members in groups.values():
-            # Formation leader (member 0) navigates normally; followers
-            # steer to maintain their assigned station offsets.
-            leader = members[0] if members else None
-            for ship in members:
-                if ship.is_formation_leader or len(members) == 1:
-                    ship.step(self.clock.dt_min, islands)
-                else:
-                    ship.step(self.clock.dt_min, islands, leader=leader)
-        departed_groups = {
-            ship.group_id for ship in self.ships
-            if ship.group_id and ship.departed
-        }
-        for group_id in departed_groups - self._departed_groups:
-            self._departed_groups.add(group_id)
-            members = [ship for ship in self.ships if ship.group_id == group_id]
-            for ship in members:
-                ship.departed = True
+            ship.step(self.clock.dt_min, islands)
+            if ship.departed and ship.contact_id not in self._departed_contacts:
+                self._departed_contacts.add(ship.contact_id)
                 ship.set_tracked(False)
-            self.departed_ship_count += len(members)
-            self._release_departed_group(group_id, current_time)
+                self.departed_ship_count += 1
+                self._release_departed_group(ship.contact_id, current_time)
 
     def _refresh_ais_signals(self, current_time: float) -> None:
         """Publish physical AIS broadcasts at the configured minute cadence."""
@@ -1184,7 +1101,7 @@ class SimulationEngine:
         if track is not None:
             sm.release_track_region(track.id, uav.id, create_marker=True)
         for member in self.ships:
-            if member.group_id == group_id:
+            if member.contact_id == group_id:
                 member.set_tracked(False)
         for tracker in self.uavs:
             if tracker.target_group_id != group_id:
@@ -1252,21 +1169,26 @@ class SimulationEngine:
         target_position: tuple[float, float],
         current_time: float,
     ) -> None:
-        """Accumulate EO fixes, then perform delayed AIS discrimination."""
+        """Accumulate EO fixes without inferring identity from AIS presence."""
         group_id = uav.target_group_id
         if group_id is None:
             return
-        members = [
-            ship for ship in self.ships
-            if ship.group_id == group_id and not ship.departed
-        ]
-        if not members or all(ship.discrimination is not None for ship in members):
+        contact = next(
+            (ship for ship in self.ships
+             if ship.contact_id == group_id and not ship.departed),
+            None,
+        )
+        if contact is None:
             return
         storms = [item for item in self.obstacles if isinstance(item, Thunderstorm)]
         measurement = uav.measure_target(target_position, storms)
         if measurement is None:
             return
-        estimate = self.ais_discriminator.estimate_target_position(uav.pose, measurement)
+        bearing = uav.heading_rad + measurement.relative_bearing_rad
+        estimate = (
+            uav.float_position[0] + measurement.distance_cells * math.cos(bearing),
+            uav.float_position[1] + measurement.distance_cells * math.sin(bearing),
+        )
         samples = self._ais_measurements.setdefault(uav.id, [])
         samples.append(estimate)
         if len(samples) > 12:
@@ -1279,32 +1201,8 @@ class SimulationEngine:
             uav.id,
             current_time,
         )
-        started = self._ais_tracking_started_at.setdefault(uav.id, current_time)
-        if current_time - started < self.config.ship.ais_discrimination_delay_min:
-            return
         estimate_median = tuple(float(np.median([point[index] for point in samples])) for index in (0, 1))
-        result = self.ais_discriminator.discriminate_formation(
-            [member.ais_signal for member in members],
-            estimate_median,
-        )
-        result_data = result.to_dict()
-        for member in members:
-            member.is_military = result.is_military
-            member.discrimination = result_data
-            member.estimated_position = estimate_median
-        self.ais_discriminations += 1
-        self.allocator.sm.add_event("ais_discriminated", {
-            "group_id": group_id,
-            "uav_id": uav.id,
-            **result_data,
-        })
-        if result.is_military:
-            self.allocator.trigger_manager.notify_event(
-                "target_military", time=current_time, uav_id=uav.id, group_id=group_id,
-            )
-            return
-        self.civilian_releases += 1
-        self._release_target_group(group_id, current_time, "civilian_released")
+        contact.estimated_position = estimate_median
 
     def _release_target_group(
         self,
@@ -1316,7 +1214,7 @@ class SimulationEngine:
         sm = self.allocator.sm
         sm.clear_target_report(group_id)
         for member in self.ships:
-            if member.group_id == group_id:
+            if member.contact_id == group_id:
                 member.set_tracked(False)
         track = sm.get_track_region_for_group(group_id)
         if track is not None:
@@ -1374,24 +1272,24 @@ class SimulationEngine:
             ship.mark_detected()
             sm.add_event("ship_detected", {
                 "ship_id": ship.id,
-                "group_id": ship.group_id,
+                "group_id": ship.contact_id,
                 "uav_id": uav.id,
                 "position": ship.position,
             })
         sm.record_target_observation(
-            ship.group_id,
+            ship.contact_id,
             ship.position,
             uav.id,
             current_time,
         )
-        existing = sm.get_track_region_for_group(ship.group_id)
+        existing = sm.get_track_region_for_group(ship.contact_id)
         if existing is not None:
             return
 
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
                 region.assigned_uav_id = None
-        track = sm.create_track_region(ship.group_id, ship.position)
+        track = sm.create_track_region(ship.contact_id, ship.position)
         track.assigned_uav_id = uav.id
         self._resolve_search_track_conflicts(
             current_time,
@@ -1401,23 +1299,21 @@ class SimulationEngine:
         self._tracking_started_at[uav.id] = current_time
         # Keep the legacy entity/state association for rendering and handoff
         # bookkeeping; the tracking controller is installed by the queued event.
-        uav.target_group_id = ship.group_id
-        for member in self.ships:
-            if member.group_id == ship.group_id:
-                member.set_tracked(True)
+        uav.target_group_id = ship.contact_id
+        ship.set_tracked(True)
         sm.update_uav_status(
             uav.id,
             "transit",
             uav.position,
             assigned_region_id=track.id,
-            target_group_id=ship.group_id,
+            target_group_id=ship.contact_id,
             fuel_remaining_pct=uav.fuel_remaining_pct,
         )
         self.allocator.trigger_manager.notify_event(
             "target_found",
             time=current_time,
             uav_id=uav.id,
-            group_id=ship.group_id,
+            group_id=ship.contact_id,
             position={"col": ship.position.col, "row": ship.position.row},
         )
         self._queue_control_event(
@@ -1425,14 +1321,14 @@ class SimulationEngine:
             uav.id,
             current_time,
             {
-                "contact_id": ship.group_id,
-                "group_id": ship.group_id,
+                "contact_id": ship.contact_id,
+                "group_id": ship.contact_id,
                 "position": {"col": ship.position.col, "row": ship.position.row},
             },
         )
         sm.add_event("target_found", {
             "uav_id": uav.id,
-            "group_id": ship.group_id,
+            "group_id": ship.contact_id,
             "position": ship.position,
         })
 
@@ -1521,7 +1417,7 @@ class SimulationEngine:
                         "observed_at": report.observed_at,
                     })
             for member in self.ships:
-                if member.group_id == uav.target_group_id:
+                if member.contact_id == uav.target_group_id:
                     member.set_tracked(False)
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
@@ -2138,15 +2034,11 @@ class SimulationEngine:
         )
 
     def _group_center(self, group_id: str | None):
-        members = [
-            ship for ship in self.ships
-            if ship.group_id == group_id and not ship.departed
-        ]
-        if not members:
-            return None
-        return (
-            sum(ship.float_position[0] for ship in members) / len(members),
-            sum(ship.float_position[1] for ship in members) / len(members),
+        """Legacy call signature for looking up one independent contact."""
+        return next(
+            (ship.float_position for ship in self.ships
+             if ship.contact_id == group_id and not ship.departed),
+            None,
         )
 
     def _tracking_speed_commands(self) -> dict[str, float]:

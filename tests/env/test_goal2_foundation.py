@@ -3,7 +3,6 @@ import math
 from src.env.base_station import BaseStation
 from src.env.obstacle import Island, Thunderstorm, obstacle_intersects_mask
 from src.env.simulation import SimulationEngine
-from src.env.ship import ShipType
 from src.env.uav_entity import MAX_VISUAL_TRAIL_POINTS, UAVEntity
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox, GridCoord, Region
@@ -278,6 +277,7 @@ def test_moving_track_region_retires_newly_overlapping_search(monkeypatch):
 def test_tracker_return_keeps_only_last_observed_contact_for_handoff():
     engine = SimulationEngine(ConfigLoader.load(), seed=41)
     contact = engine.ships[0]
+    contact.position = GridCoord(7, 4)
     uav = engine.uavs[0]
     engine._handle_detection(uav, contact, 1.0)
 
@@ -407,42 +407,30 @@ def test_base_station_rejects_over_capacity_directly():
     assert base.can_accept()
 
 
-def test_carrier_formation_always_has_two_destroyer_escorts():
+def test_ships_are_independent_contacts_with_generic_public_types():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    carriers = [ship for ship in engine.ships if ship.ship_type is ShipType.AIRCRAFT_CARRIER]
 
-    assert len(carriers) <= engine.config.ship.carrier_max
-    if carriers:
-        carrier = carriers[0]
-        escorts = [
-            ship for ship in engine.ships
-            if ship.group_id == carrier.group_id and ship.ship_type is ShipType.DESTROYER
-        ]
-        assert len(escorts) >= 2
-        assert all(ship.base_heading == carrier.base_heading for ship in escorts)
+    assert len(engine.ships) == engine.config.ship.initial_ship_count
+    assert len({ship.group_id for ship in engine.ships}) == len(engine.ships)
+    assert all(ship.group_id == ship.id for ship in engine.ships)
+    assert {ship.ship_type.value for ship in engine.ships} == {"cargo"}
+    assert len({ship.normal_route for ship in engine.ships}) == len(engine.ships)
 
 
-def test_target_ship_changes_course_and_starts_zigzagging_when_tracked():
-    engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    ship = engine.ships[0]
-    ship._phase = 0.0
-    original_heading = ship.base_heading
+def test_civilian_normal_motion_does_not_read_tracking_state():
+    untracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    tracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    untracked = next(ship for ship in untracked_engine.ships if ship.truth_identity == "civilian")
+    tracked = next(ship for ship in tracked_engine.ships if ship.id == untracked.id)
 
-    ship.set_tracked(True)
-
-    assert ship.is_evading
-    assert ship.base_heading == original_heading
-    assert ship.heading_rad == original_heading
-
-    headings = []
+    tracked.set_tracked(True)
     for _ in range(18):
-        previous = ship.heading_rad
-        ship.step(1.0)
-        headings.append(ship.heading_rad)
-        delta = abs((ship.heading_rad - previous + math.pi) % (2 * math.pi) - math.pi)
-        assert math.degrees(delta) <= engine.config.ship.max_turn_rate_deg_min + 1e-6
+        untracked.step(1.0)
+        tracked.step(1.0)
 
-    assert any(abs((heading - original_heading + math.pi) % (2 * math.pi) - math.pi) > math.radians(1) for heading in headings)
+    assert tracked.float_position == untracked.float_position
+    assert tracked.heading_rad == untracked.heading_rad
+    assert not tracked.is_evading
 
 
 def test_target_ship_nomoto_response_has_bounded_yaw_and_turn_speed_loss():
