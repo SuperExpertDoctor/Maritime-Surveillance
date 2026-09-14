@@ -526,3 +526,182 @@ def test_superseded_route_brakes_and_fresh_replan_remains_executable(supersede):
     actual = ship.advance(fresh, .1)
     assert ship.navigation_status == "ready"
     assert actual == fresh.poses[:2]
+
+
+@pytest.mark.parametrize("changed_params", [False, True])
+def test_command_installation_epoch_is_shared_across_navigators(changed_params):
+    ship = vessel()
+    first = ship.navigator
+    second = navigation().ShipNavigator(ship)
+    params = parameters(amplitude=30, phase=20, period=8)
+    first.install(parameters(amplitude=10) if changed_params else params, 1.)
+    second.install(params, 4.)
+    for planner, now in ((first, 5.), (navigation().ShipNavigator(ship), 6.), (second, 7.)):
+        generation = ship._navigation_generation
+        route = planner.plan(ship.pose, params, 0., now, ship.land_mask)
+        expected = math.radians(30) * math.sin(math.radians(20) + 2 * math.pi * (now - 4) / 8)
+        assert route._commands[0].heading_rad == pytest.approx(expected)
+        assert ship._navigation_generation == generation + 1, "equal rolling plans do not reinstall"
+        assert ship.advance(route, .1) == route.poses[:2]
+        assert ship.navigation_status == "ready"
+    # Returning to normal mode still installs once, then rolls normally.
+    ship.step(.1)
+    generation = ship._navigation_generation
+    ship.step(.1)
+    assert ship.navigation_status == "ready"
+    assert ship._navigation_generation == generation + 1
+
+
+@pytest.mark.parametrize("created_before_update", [False, True])
+@pytest.mark.parametrize("owned_navigator_exists", [False, True])
+@pytest.mark.parametrize("pass_old_chart", [False, True])
+def test_external_planner_uses_current_vessel_chart_and_version(
+        created_before_update, owned_navigator_exists, pass_old_chart):
+    ship = vessel()
+    if owned_navigator_exists:
+        ship.navigator
+    old_chart = ship.land_mask
+    planner = navigation().ShipNavigator(ship) if created_before_update else None
+    updated = np.zeros_like(old_chart)
+    updated[20, 20] = True
+    ship.land_mask = updated
+    if planner is None:
+        planner = navigation().ShipNavigator(ship)
+    route = planner.plan(ship.pose, parameters(), 0., 0.,
+                         old_chart if pass_old_chart else ship.land_mask)
+    assert route.status == "ready"
+    assert route.map_version > 0
+    assert route.map_version == ship.navigator.map_version
+    assert np.array_equal(route._land_mask, ship.land_mask)
+    assert ship.advance(route, .1) == route.poses[:2]
+    assert ship.navigation_status == "ready"
+    assert ship.speed_kn == pytest.approx(18.)
+    # Equal chart replacement still invalidates a recipe by version.
+    fresh = planner.plan(ship.pose, parameters(), 0., .1, ship.land_mask)
+    ship.land_mask = ship.land_mask
+    ship.advance(fresh, .1)
+    assert ship.navigation_status == "blocked"
+    assert ship.speed_kn < 18.
+    fresh = planner.plan(ship.pose, parameters(), 0., .2, ship.land_mask)
+    ship.land_mask[20, 21] = True
+    assert fresh.map_version == planner.map_version
+    ship.advance(fresh, .1)
+    assert ship.navigation_status == "blocked"
+
+
+@pytest.mark.parametrize("normal_mode", [False, True])
+@pytest.mark.parametrize("rolling_execution", [False, True])
+def test_actual_defaults_rolling_repair_looks_beyond_horizon(
+        normal_mode, rolling_execution, monkeypatch):
+    ship = Ship("V1", GridCoord(9, 15), 18,
+                normal_route=((9., 15., 0.), (29., 15., 0.)))
+    planner = ship.navigator
+    mask = np.zeros((30, 30), bool)
+    mask[13, 15] = True
+    ship.land_mask = mask
+    params = None if normal_mode else parameters()
+    calls = []
+    original = planner.astar.plan_grid
+
+    def record(start, goals, inflated, *args, **kwargs):
+        assert planner.segment_is_safe(start, start, inflated)
+        assert all(planner.segment_is_safe(goal, goal, inflated) for goal in goals)
+        calls.append((start, goals))
+        return original(start, goals, inflated, *args, **kwargs)
+
+    monkeypatch.setattr(planner.astar, "plan_grid", record)
+    assert ship.cell_size_km == 10.
+    assert planner.horizon_min == 8.
+    assert planner.clearance_cells == .1
+    for _ in range(100):
+        route = planner.plan(ship.pose, params, 0., ship._motion_time_min, mask)
+        if calls or route.status == "blocked":
+            break
+        assert sum(c.duration_min for c in route._commands) == pytest.approx(8.)
+        assert ship.advance(route, 1.) == route.poses[:11]
+    assert calls, "rolling replans must reach A* before losing the turn approach"
+    assert route.status == "ready", route.blocked_reason
+    assert route.poses[-1][0] > 15.
+    assert route.reference_deviation_cells > .1
+    # The approach is retained exactly; only the necessary turn leaves it.
+    assert calls[0][0][0] > route.poses[0][0] + .1
+    np.testing.assert_allclose(route.poses[:20], [
+        (route.poses[0][0] + i * 18 * 1.852 / 60 / 10 * .1, 15., 0.)
+        for i in range(20)], atol=1e-12, rtol=0)
+    for _, goals in calls:
+        for goal in goals:
+            assert goal[1] == 15.
+            reference_steps = (goal[0] - route.poses[0][0]) / (18 * 1.852 / 60 / 10 * .1)
+            assert reference_steps == pytest.approx(round(reference_steps))
+            assert 8. < reference_steps * .1 <= 128.
+    from src.env.obstacle import Island
+    expanded_obstacle = Island((13.5, 15.5), 1.2)
+    state = ship._motion_state()
+    for command, expected_pose in zip(route._commands, route.poses[1:]):
+        rolled = ship.motion_dynamics.roll(state, command.heading_rad, command.speed_kn,
+                                           command.duration_min)
+        assert rolled.pose == expected_pose
+        assert abs(rolled.speed_kn - state.speed_kn) <= 2 * command.duration_min + 1e-10
+        assert abs(rolled.yaw_rate) <= ship.max_turn_rate_rad_per_min
+        assert math.dist(state.pose[:2], rolled.pose[:2]) <= 18 * 1.852 / 60 / 10 * command.duration_min + 1e-12
+        assert not expanded_obstacle.intersects_segment(state.pose, rolled.pose)
+        state = rolled
+    assert planner.can_stop(state, mask)
+    if rolling_execution:
+        for _ in range(150):
+            actual = ship.advance(route, 1.)
+            assert actual == route.poses[:11]
+            assert ship.navigation_status == "ready"
+            assert all(not expanded_obstacle.intersects_segment(a, b)
+                       for a, b in zip(actual, actual[1:]))
+            if ship.pose[0] > 15.5:
+                break
+            route = planner.plan(ship.pose, params, 0., ship._motion_time_min, mask)
+            assert route.status == "ready", route.blocked_reason
+        assert ship.pose[0] > 15.5, "rolling execution must get past the obstacle"
+    else:
+        assert ship.advance(route, sum(c.duration_min for c in route._commands)) == route.poses
+    assert ship.navigation_status == "ready"
+
+
+def test_default_repair_blocks_when_bounded_reference_cannot_rejoin(monkeypatch):
+    ship = Ship("V1", GridCoord(11, 15), 18,
+                normal_route=((11., 15., 0.), (39., 15., 0.)))
+    planner = ship.navigator
+    mask = np.zeros((40, 32), bool)
+    mask[13:30, 15] = True  # Water exists downstream, beyond the repair budget.
+    sampled_times = []
+    original = planner.reference_heading
+
+    def record(params, tangent, now):
+        sampled_times.append(now)
+        return original(params, tangent, now)
+
+    monkeypatch.setattr(planner, "reference_heading", record)
+    route = planner.plan(ship.pose, parameters(), 0., 0., mask)
+    assert route.status == "blocked"
+    assert 8. < max(sampled_times) <= 128.
+    assert len(sampled_times) <= 1281
+    actual = ship.advance(route, 10.)
+    assert ship.speed_kn == 0.
+    assert 11. < ship.pose[0] < 12.9
+    assert_water_path(actual, mask)
+
+
+@pytest.mark.parametrize("normal_mode", [False, True])
+def test_actual_defaults_clear_plan_keeps_configured_horizon(normal_mode, monkeypatch):
+    ship = Ship("V1", GridCoord(9, 15), 18,
+                normal_route=((9., 15., 0.), (29., 15., 0.)))
+    planner = ship.navigator
+    mask = np.zeros((30, 30), bool)
+    mask[13, 20] = True  # A nearby obstacle off the reference must not lengthen it.
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a clear reference does not need A*")
+
+    monkeypatch.setattr(planner.astar, "plan_grid", forbidden)
+    route = planner.plan(ship.pose, None if normal_mode else parameters(amplitude=20),
+                         0., 0., mask)
+    assert route.status == "ready"
+    assert sum(c.duration_min for c in route._commands) == pytest.approx(8.)
+    assert route.reference_deviation_cells == 0.

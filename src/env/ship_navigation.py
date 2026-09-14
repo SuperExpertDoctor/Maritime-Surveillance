@@ -107,11 +107,18 @@ class ShipNavigator:
         self.horizon_min = horizon_min
         self.integration_dt_min = integration_dt_min
         self.clearance_cells = clearance_cells
-        self.map_version = map_version
+        self.map_version = max(ship._map_version, map_version)
         self.land_mask = ship.land_mask
-        self._params: RedMotionParameters | None = None
-        self._installed_at_min = 0.
         self.island_bounds: tuple[tuple[float, float, float, float], ...] = ()
+
+    @property
+    def map_version(self) -> int:
+        return self.ship._map_version
+
+    @map_version.setter
+    def map_version(self, version: int) -> None:
+        # Keep the existing version interface, shared by every vessel planner.
+        self.ship._map_version = version
 
     def set_islands(self, obstacles) -> None:
         self.island_bounds = tuple(item.bounds for item in obstacles if isinstance(item, Island))
@@ -198,8 +205,8 @@ class ShipNavigator:
         # Installations (including equal commands/normal mode) supersede every
         # earlier recipe for this vessel, even from another planning navigator.
         self.ship._navigation_generation += 1
-        self._params = params
-        self._installed_at_min = now_min
+        self.ship._navigation_params = params
+        self.ship._navigation_installed_at_min = now_min
 
     def reference_heading(self, params: RedMotionParameters | None,
                           normal_tangent_rad: float, now_min: float) -> float:
@@ -207,39 +214,31 @@ class ShipNavigator:
             return normal_tangent_rad
         return normal_tangent_rad + math.radians(params.heading_offset_deg) + math.radians(
             params.zigzag_heading_deg) * math.sin(math.radians(params.phase_deg)
-                + 2 * math.pi * (now_min - self._installed_at_min) / params.zigzag_period_min)
+                + 2 * math.pi * (now_min - self.ship._navigation_installed_at_min) / params.zigzag_period_min)
 
     def plan(self, pose: Pose, params: RedMotionParameters | None,
              normal_tangent_rad: float, now_min: float, land_mask: np.ndarray) -> ShipRoute:
+        # Once a chart is bound to the vessel, an external planner's old input
+        # cannot replace it. Unbound legacy callers may still supply a chart.
+        if self.ship._land_mask is not None:
+            land_mask = self.ship.land_mask
         self.land_mask = np.asarray(land_mask, dtype=bool)
-        if params != self._params:
+        if params != self.ship._navigation_params:
             self.install(params, now_min)
         self.ship._navigation_generation += 1
         initial = MotionState(pose, self.ship.speed_kn, self.ship._yaw_rate_rad_per_min)
-        state = initial
-        states = [state]
-        commands = []
-        elapsed = 0.
-        normal_index = self.ship._route_index
-        while elapsed < self.horizon_min - 1e-10:
-            dt = min(self.integration_dt_min, self.horizon_min - elapsed)
-            heading = self.reference_heading(params, normal_tangent_rad, now_min + elapsed)
-            if params is None:
-                heading, normal_index = self._normal_guidance(state.pose, normal_index, land_mask)
-            speed = self.ship.normal_speed_kn if params is None else params.speed_kn
-            command = MotionCommand(dt, heading, speed)
-            state = self.ship.motion_dynamics.roll(state, heading, speed, dt)
-            commands.append(command)
+        states, commands = [initial], []
+        for state, command in self._reference_steps(
+                initial, params, normal_tangent_rad, now_min, land_mask, self.horizon_min):
             states.append(state)
-            elapsed += dt
-            if self.has_exited(state.pose, land_mask):
-                break
+            commands.append(command)
         mask = np.array(land_mask, dtype=bool, copy=True)
         mask.setflags(write=False)
-        reference = tuple(s.pose for s in states)
         repaired = self._repair(states, commands, mask, params, normal_tangent_rad, now_min)
         if repaired is None:
             return self.braking_route(initial, now_min, mask, "no dynamically safe route")
+        # Include any downstream reference extension in the deviation baseline.
+        reference = tuple(s.pose for s in states)
         states, commands = repaired
         if not self.can_stop(states[-1], mask):
             return self.braking_route(initial, now_min, mask, "insufficient stopping reserve")
@@ -249,6 +248,20 @@ class ShipNavigator:
         return ShipRoute(tuple(s.pose for s in states), now_min, self.map_version,
                          "ready", None, deviation, tuple(commands), initial, self, mask,
                          self.island_bounds, self.ship._navigation_generation)
+
+    def _reference_steps(self, state, params, tangent, now_min, mask, duration_min):
+        elapsed = 0.
+        normal_index = self.ship._route_index
+        while elapsed < duration_min - 1e-10 and not self.has_exited(state.pose, mask):
+            dt = min(self.integration_dt_min, duration_min - elapsed)
+            heading = self.reference_heading(params, tangent, now_min + elapsed)
+            if params is None:
+                heading, normal_index = self._normal_guidance(state.pose, normal_index, mask)
+            speed = self.ship.normal_speed_kn if params is None else params.speed_kn
+            command = MotionCommand(dt, heading, speed)
+            state = self.ship.motion_dynamics.roll(state, heading, speed, dt)
+            elapsed += dt
+            yield state, command
 
     def _normal_guidance(self, pose, index, mask):
         route = self.ship.normal_route
@@ -276,14 +289,40 @@ class ShipNavigator:
     def _repair(self, states, commands, mask, params, tangent, now_min, depth=0):
         collision = next((i for i in range(len(commands)) if not self.segment_is_safe(
             states[i].pose, states[i + 1].pose, mask)), None)
-        if collision is None:
-            return states, commands
-        if depth >= 8:
-            return None
         dynamics = self.ship.motion_dynamics
         speed = max(s.speed_kn for s in states) * 1.852 / 60 / dynamics.cell_size_km
         radius = max(.1, speed * (1 / dynamics.max_turn_rate
                                   + dynamics.yaw_time_constant + 1 / dynamics.heading_gain))
+        # One shared extension budget per plan, never renewed by recursive repairs.
+        # At 18 knots / 10 km cells this covers 6.67 downstream cells. Slow,
+        # looping or very long blocked references therefore terminate explicitly.
+        elapsed = sum(c.duration_min for c in commands)
+        extension = iter(()) if depth else self._reference_steps(
+            states[-1], params, tangent, now_min + elapsed, mask, 120.)
+        if collision is None and depth == 0 and (mask.any() or self.island_bounds):
+            # Detect land while a turn can still start outside the inflated A*
+            # cells. A short nominal horizon alone loses that approach on replan.
+            approach_time = (3 * radius + math.ceil(self.clearance_cells)
+                             + self.clearance_cells) / max(speed, 1e-6)
+            preview = []
+            previous = states[-1]
+            while elapsed < approach_time - 1e-10:
+                item = next(extension, None)
+                if item is None:
+                    break
+                state, command = item
+                preview.append(item)
+                elapsed += command.duration_min
+                if not self.segment_is_safe(previous.pose, state.pose, mask):
+                    collision = len(commands) + len(preview) - 1
+                    states.extend(s for s, _ in preview)
+                    commands.extend(c for _, c in preview)
+                    break
+                previous = state
+        if collision is None:
+            return states, commands  # Discard clear preview; preserve nominal horizon.
+        if depth >= 8:
+            return None
         anchor = collision
         # Include the approach needed for inertial yaw, keeping the earlier prefix.
         while anchor > 0 and math.dist(states[anchor].pose[:2], states[collision].pose[:2]) < 3 * radius:
@@ -295,6 +334,14 @@ class ShipNavigator:
         # curvature from the clear approach; physical rollout decides reachability.
         candidates = [j for j in range(collision + 1, len(states))
                       if self.segment_is_safe(states[j].pose, states[j].pose, inflated)]
+        if not candidates:
+            for state, command in extension:
+                states.append(state)
+                commands.append(command)
+                if self.segment_is_safe(state.pose, state.pose, inflated):
+                    candidates.append(len(states) - 1)
+                    if math.dist(state.pose[:2], states[collision].pose[:2]) >= 2 * radius:
+                        break
         if not candidates:
             return None
         # A small deterministic set limits repeat searches in disconnected charts.

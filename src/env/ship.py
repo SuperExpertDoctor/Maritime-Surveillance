@@ -121,6 +121,9 @@ class Ship:
             self.yaw_time_constant_min, self.heading_control_gain_per_min,
             self.turn_speed_loss_fraction, max_acceleration_kn_per_min)
         self._land_mask = None if land_mask is None else np.array(land_mask, dtype=bool, copy=True)
+        self._map_version = 0
+        self._navigation_params = None
+        self._navigation_installed_at_min = 0.
         self._navigation_options = (navigation_horizon_min, integration_dt_min, navigation_clearance_cells)
         self._navigator = (None if navigator is None else ShipNavigator(
             self, navigator, horizon_min=navigation_horizon_min,
@@ -146,9 +149,9 @@ class Ship:
     @land_mask.setter
     def land_mask(self, mask: np.ndarray) -> None:
         self._land_mask = np.array(mask, dtype=bool, copy=True)
+        self._map_version += 1
         if self._navigator is not None:
             self._navigator.land_mask = self._land_mask
-            self._navigator.map_version += 1
 
     @property
     def contact_id(self) -> str:
