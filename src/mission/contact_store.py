@@ -142,13 +142,9 @@ class ContactStore:
             navigation_context=detection.navigation_context)
         if not self._append(sample):
             return cid
-        # A visual report has no persistent vessel ID. Other contacts observed
-        # by this UAV remain possible sources of an out-of-gate/new association.
-        for previous in visual_contacts:
-            if previous.contact_id != cid and any(
-                    s.source != "ais" and s.source_id == detection.source_id
-                    for s in previous.samples):
-                self._confirm(previous.contact_id, None, detection.observed_at_min)
+        # _nearest resets only pairs involved in an ambiguous gate. A unique
+        # visual match can invalidate its own AIS pair below; sharing a UAV
+        # with another contact is not contradictory association evidence.
         if self.snapshot(cid).ais_mmsi is None:
             aid, ais_ambiguous = self._nearest(
                 detection.position_cells, detection.observed_at_min,

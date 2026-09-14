@@ -89,6 +89,29 @@ def test_two_confirmations_merge_alias_histories_and_duplicate_reservations(stor
     assert store.ingest_visual(visual()) == aid
 
 
+def test_alternating_sar_contacts_preserve_independent_confirmation_streaks(store):
+    left = store.ingest_ais(ais(position=(10, 10)), 0)
+    right = store.ingest_ais(ais(position=(13, 10), mmsi="987654321"), 0)
+    left_fix = visual("left-1", 0, (10, 10), source="sar")
+    right_fix = visual("right-1", .1, (13, 10), source="sar")
+    left_visual = store.ingest_visual(left_fix)
+    right_visual = store.ingest_visual(right_fix)
+    assert not store.aliases
+    before = store.list_snapshots(), store.events
+    store.ingest_visual(left_fix)
+    store.ingest_visual(right_fix)
+    assert (store.list_snapshots(), store.events) == before
+
+    assert store.ingest_visual(visual("left-2", 1, (10, 10), source="sar")) == left
+    assert store.ingest_visual(visual("right-2", 1.1, (13, 10), source="sar")) == right
+    assert store.aliases == {left_visual: left, right_visual: right}
+    assert len(store.list_snapshots()) == 2
+    for cid, sample_ids in ((left, {"left-1", "left-2"}), (right, {"right-1", "right-2"})):
+        samples = store.snapshot(cid).samples
+        assert {s.sample_id for s in samples if s.source == "sar"} == sample_ids
+        assert {s.source for s in samples} == {"ais", "sar"}
+
+
 def test_visual_first_then_two_ais_confirmations_merge(store):
     vid = store.ingest_visual(visual())
     aid = store.ingest_ais(ais(), 0)
@@ -97,34 +120,58 @@ def test_visual_first_then_two_ais_confirmations_merge(store):
     assert store.snapshot(vid).contact_id == aid
 
 
-@pytest.mark.parametrize("source", ["ais", "eo", "sar"])
 @pytest.mark.parametrize("other_candidate", [False, True])
-def test_outside_gate_observation_breaks_confirmation_continuity(store, source, other_candidate):
+def test_outside_gate_ais_breaks_confirmation_continuity(store, other_candidate):
     vid = store.ingest_visual(visual())
     if other_candidate:
         store.ingest_visual(visual("other", position=(13, 10)))
     aid = store.ingest_ais(ais(), 0)
-    if source == "ais":
-        interrupted = ais(1, (13, 10))
-        store.ingest_ais(interrupted, 1)
-        store.ingest_ais(ais(2), 2)
-    else:
-        interrupted = visual("outside", 1, (13, 10), source=source)
-        store.ingest_visual(interrupted)
-        store.ingest_visual(visual("back", 2, source=source))
+    interrupted = ais(1, (13, 10))
+    store.ingest_ais(interrupted, 1)
+    store.ingest_ais(ais(2), 2)
     assert store.resolve(vid) == vid
     assert not store.aliases
     # Replaying the contradictory packet is idempotent, including continuity.
     before = store.list_snapshots(), store.events
-    if source == "ais":
-        store.ingest_ais(interrupted, 2)
-        assert (store.list_snapshots(), store.events) == before
-        store.ingest_ais(ais(3), 3)
-    else:
-        store.ingest_visual(interrupted)
-        assert (store.list_snapshots(), store.events) == before
-        store.ingest_visual(visual("confirm", 3, source=source))
+    store.ingest_ais(interrupted, 2)
+    assert (store.list_snapshots(), store.events) == before
+    store.ingest_ais(ais(3), 3)
     assert store.resolve(vid) == aid
+
+
+@pytest.mark.parametrize("source", ["eo", "sar"])
+def test_matched_visual_contradiction_resets_only_its_pair(store, source):
+    aid = store.ingest_ais(ais(), 0)
+    other_aid = store.ingest_ais(ais(position=(13, 10), mmsi="987654321"), 0)
+    vid = store.ingest_visual(visual("first", 0, (10.4, 10), source=source,
+                                     velocity_cells_min=(0, 0)))
+    other_vid = store.ingest_visual(visual("other", .1, (13, 10), source=source))
+    # This still matches the visual contact, but is outside its AIS gate.
+    interrupted = visual("outside-ais", 1, (10.8, 10), source=source,
+                         velocity_cells_min=(0, 0))
+    assert store.ingest_visual(interrupted) == vid
+    assert store.ingest_visual(visual("other-confirm", 1.1, (13, 10), source=source)) == other_aid
+    assert store.resolve(other_vid) == other_aid
+    assert store.ingest_visual(visual("back", 2, (10.4, 10), source=source,
+                                      velocity_cells_min=(0, 0))) == vid
+    before = store.list_snapshots(), store.events
+    store.ingest_visual(interrupted)
+    assert (store.list_snapshots(), store.events) == before
+    assert store.ingest_visual(visual("confirm", 3, (10.4, 10), source=source)) == aid
+
+
+@pytest.mark.parametrize("interruption", ["new", "matched", "ambiguous"])
+def test_unrelated_visual_report_preserves_confirmation(store, interruption):
+    if interruption in ("matched", "ambiguous"):
+        store.ingest_visual(visual("other-left", position=(13, 10)))
+    if interruption == "ambiguous":
+        store.ingest_visual(visual("other-right", position=(13.7, 10)))
+    aid = store.ingest_ais(ais(), 0)
+    vid = store.ingest_visual(visual())
+    x = 13.35 if interruption == "ambiguous" else 13
+    store.ingest_visual(visual("unrelated", 1, (x, 10)))
+    assert store.resolve(vid) == vid
+    assert store.ingest_visual(visual("confirm", 2)) == aid
 
 
 @pytest.mark.parametrize("matching_x", [10.0, 10.7])

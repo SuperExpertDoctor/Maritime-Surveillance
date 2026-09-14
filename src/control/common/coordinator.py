@@ -593,6 +593,14 @@ class ControlCoordinator:
         remaining = []
         for event in events:
             lease = self.ownership.current(uav_id)
+            if event.event_type == "duplicate_task_cancelled":
+                task = self.active_task(uav_id)
+                # A queued merge cancellation belongs to one controller
+                # generation, even when a replacement reuses the task ID.
+                if (task is None or event.payload.get("task_id") != task.task_id
+                        or event.payload.get("lease_generation") != lease.generation
+                        or event.payload.get("controller_id") != lease.controller_id):
+                    continue
             if (
                 lease.owner is not ControlOwner.HEURISTIC
                 or event.event_type not in EVENT_TRANSITIONS

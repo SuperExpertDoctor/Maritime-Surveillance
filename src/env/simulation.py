@@ -818,6 +818,13 @@ class SimulationEngine:
         current_time: float,
         payload: Mapping[str, object] | None = None,
     ) -> ControlEvent:
+        if event_type == "duplicate_task_cancelled":
+            task = self.control_coordinator.active_task(uav_id)
+            lease = self.control_coordinator.current_lease(uav_id)
+            payload = {**(payload or {}),
+                       "task_id": task.task_id if task else None,
+                       "lease_generation": lease.generation,
+                       "controller_id": lease.controller_id}
         event = ControlEvent(
             self._control_event_sequence,
             current_time,

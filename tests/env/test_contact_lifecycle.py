@@ -118,6 +118,42 @@ def test_contact_merge_cancels_duplicate_task_without_releasing_survivor(
     assert any(e["type"] == "contact_merged" for e in events)
 
 
+@pytest.mark.parametrize("reuse_task_id", [False, True])
+@pytest.mark.parametrize("reserve", [False, True])
+def test_queued_duplicate_cancellation_ignores_replacement_canonical_task(
+        engine, reuse_task_id, reserve):
+    sm = engine.allocator.sm
+    coordinator = engine.control_coordinator
+    vid = sm.contacts.ingest_visual(visual())
+    aid = sm.contacts.ingest_ais(ais(), 0)
+    duplicate, survivor = engine.uavs[:2]
+    old_task = start_tracking(engine, duplicate, vid, reserve=reserve, execute=False)
+    start_tracking(engine, survivor, aid, reserve=reserve, execute=False)
+    old_lease = coordinator.current_lease(duplicate.id)
+    sm.contacts.ingest_ais(ais(1), 1)
+    engine._publish_contact_events(1)
+    assert sm.contacts.resolve(vid) == aid
+    assert sm.contacts.snapshot(aid).assigned_uav_id == survivor.id
+
+    # Release the surviving reservation and reassign before the queued event
+    # reaches the duplicate controller's first tick. IDs may be reused.
+    sm.release_contact_reservation(aid, survivor.id, 1.05, "handoff")
+    sm.contacts.reserve(aid, duplicate.id, None)
+    replacement = ControlTask(
+        old_task.task_id if reuse_task_id else f"replacement:{aid}",
+        OperationMode.TRACK, target_contact_id=aid)
+    new_lease = coordinator.assign_task(duplicate.id, replacement, current_time=1.05)
+    assert new_lease.generation > old_lease.generation
+    for t in (1.1, 1.2):
+        tick = coordinator.step_uav(duplicate, current_time=t, dt_min=.1)
+        engine._record_control_tick(duplicate, tick)
+        assert tick.execution.applied_command.operation_mode is OperationMode.TRACK
+        assert coordinator.active_task(duplicate.id) == replacement
+        assert coordinator.current_lease(duplicate.id) == new_lease
+        assert sm.contacts.snapshot(aid).assigned_uav_id == duplicate.id
+        assert sm.get_track_region_for_group(aid).assigned_uav_id == duplicate.id
+
+
 @pytest.mark.parametrize("exit_kind", ["task_failed", "route_failure", "return", "release"])
 @pytest.mark.parametrize("execute", [False, True])
 def test_merged_legacy_reservation_is_released_once_on_task_exit(engine, exit_kind, execute):
