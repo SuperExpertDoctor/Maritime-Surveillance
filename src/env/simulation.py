@@ -784,7 +784,7 @@ class SimulationEngine:
                         "observed_at": report.observed_at,
                     })
             if report is not None:
-                sm.contacts.release(sm.resolve_contact_id(group_id), current_time, "uav_return")
+                sm.release_contact_reservation(group_id, uav.id, current_time, "uav_return")
         uav.target_group_id = None
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
@@ -1011,7 +1011,10 @@ class SimulationEngine:
 
     def _publish_contact_events(self, current_time: float) -> None:
         sm = self.allocator.sm
-        for event in sm.publish_contact_events():
+        events = list(sm.publish_contact_events())
+        cancelled = {(e["contact_id"], e["uav_id"]) for e in events
+                     if e["type"] == "duplicate_task_cancelled"}
+        for event in events:
             if event["type"] == "duplicate_task_cancelled":
                 uav = next(u for u in self.uavs if u.id == event["uav_id"])
                 uav.target_group_id = None
@@ -1025,18 +1028,35 @@ class SimulationEngine:
                 self._release_target_group(event["contact_id"], current_time, "civilian_released")
             elif event["type"] == "contact_merged":
                 cid = sm.resolve_contact_id(event["contact_id"])
+                tasks = [(uav.id, self.control_coordinator.active_task(uav.id))
+                         for uav in self.uavs]
+                tasks = [(uid, task) for uid, task in tasks if task is not None
+                         and task.target_contact_id
+                         and sm.resolve_contact_id(task.target_contact_id) == cid]
+                owner = event["assigned_uav_id"]
+                if owner is None and tasks:
+                    # Pending controllers have no operation binding yet. Prefer
+                    # the canonical task, as the stores do for active tracks.
+                    owner, _ = min(tasks, key=lambda item: (item[1].target_contact_id != cid, item[0]))
+                    sm.contacts.reserve(cid, owner, None)
                 for uav in self.uavs:
                     if uav.target_group_id and sm.resolve_contact_id(uav.target_group_id) == cid:
                         uav.target_group_id = cid
-                    task = self.control_coordinator.active_task(uav.id)
-                    if (task is not None and task.target_contact_id
-                            and task.target_contact_id != cid
-                            and sm.resolve_contact_id(task.target_contact_id) == cid
-                            and (event["assigned_uav_id"] is None
-                                 or event["assigned_uav_id"] == uav.id)):
+                for uid, task in tasks:
+                    if uid != owner:
+                        if (cid, uid) not in cancelled:
+                            cancellation = {"type": "duplicate_task_cancelled",
+                                            "contact_id": cid,
+                                            "alias_contact_id": event["alias_contact_id"],
+                                            "uav_id": uid, "probe_id": None}
+                            events.append(cancellation)
+                            cancelled.add((cid, uid))
+                            sm.add_event(cancellation["type"], {
+                                k: v for k, v in cancellation.items() if k != "type"})
+                    elif task.target_contact_id != cid:
                         task = replace(task, target_contact_id=cid)
-                        self.control_coordinator.assign_task(uav.id, task, current_time=current_time)
-                        self._coordinator_tasks[uav.id] = task
+                        self.control_coordinator.assign_task(uid, task, current_time=current_time)
+                        self._coordinator_tasks[uid] = task
             elif event["type"] == "contact_lost":
                 self._release_target_group(event["contact_id"], current_time, "target_lost")
             if event["type"] in ("contact_created", "contact_merged", "contact_lost"):
@@ -1408,7 +1428,7 @@ class SimulationEngine:
                         "observed_at": report.observed_at,
                     })
             if report is not None:
-                sm.contacts.release(sm.resolve_contact_id(uav.target_group_id), current_time, "uav_return")
+                sm.release_contact_reservation(uav.target_group_id, uav.id, current_time, "uav_return")
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
                 region.assigned_uav_id = None

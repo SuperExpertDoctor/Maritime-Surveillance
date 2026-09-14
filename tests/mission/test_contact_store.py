@@ -97,6 +97,36 @@ def test_visual_first_then_two_ais_confirmations_merge(store):
     assert store.snapshot(vid).contact_id == aid
 
 
+@pytest.mark.parametrize("source", ["ais", "eo", "sar"])
+@pytest.mark.parametrize("other_candidate", [False, True])
+def test_outside_gate_observation_breaks_confirmation_continuity(store, source, other_candidate):
+    vid = store.ingest_visual(visual())
+    if other_candidate:
+        store.ingest_visual(visual("other", position=(13, 10)))
+    aid = store.ingest_ais(ais(), 0)
+    if source == "ais":
+        interrupted = ais(1, (13, 10))
+        store.ingest_ais(interrupted, 1)
+        store.ingest_ais(ais(2), 2)
+    else:
+        interrupted = visual("outside", 1, (13, 10), source=source)
+        store.ingest_visual(interrupted)
+        store.ingest_visual(visual("back", 2, source=source))
+    assert store.resolve(vid) == vid
+    assert not store.aliases
+    # Replaying the contradictory packet is idempotent, including continuity.
+    before = store.list_snapshots(), store.events
+    if source == "ais":
+        store.ingest_ais(interrupted, 2)
+        assert (store.list_snapshots(), store.events) == before
+        store.ingest_ais(ais(3), 3)
+    else:
+        store.ingest_visual(interrupted)
+        assert (store.list_snapshots(), store.events) == before
+        store.ingest_visual(visual("confirm", 3, source=source))
+    assert store.resolve(vid) == aid
+
+
 @pytest.mark.parametrize("matching_x", [10.0, 10.7])
 def test_ambiguous_ais_resets_confirmations_for_every_visual_candidate(store, matching_x):
     left = store.ingest_visual(visual(position=(10, 10)))

@@ -307,6 +307,17 @@ class StateManager:
         if self.get_target_report(contact_id) is not None:
             self.contacts.release(self.resolve_contact_id(contact_id), self.current_time, "released")
 
+    def release_contact_reservation(
+        self, contact_id: str, uav_id: str, now_min: float, reason: str,
+    ) -> None:
+        """Release only this UAV's reservation, including legacy/merged IDs."""
+        try:
+            contact = self.contacts.snapshot(self.resolve_contact_id(contact_id))
+        except KeyError:
+            return  # Legacy operation bindings need not have a contact history.
+        if contact.assigned_uav_id == uav_id:
+            self.contacts.release(contact.contact_id, now_min, reason)
+
     def contact_position(self, contact_id: str, now_min: float) -> tuple[float, float] | None:
         """Finite prediction only; reading never refreshes observation evidence."""
         try:

@@ -102,6 +102,11 @@ class ContactStore:
             # Visual-first reception uses the same two-confirmation rule.
             vid, ambiguous = self._nearest(signal.reported_position, signal.timestamp,
                                            [c for c in self.list_snapshots() if c.ais_mmsi is None])
+            # Every new packet for this MMSI must support the same visual pair.
+            # A miss or a match to another visual contact breaks continuity.
+            for previous_vid, (aid, _, _) in tuple(self._confirmations.items()):
+                if aid == cid and previous_vid != vid:
+                    self._confirm(previous_vid, None, signal.timestamp)
             if vid is not None:
                 # A second nearby AIS identity must also pass the ambiguity gate.
                 candidate, tied = self._nearest(
@@ -137,6 +142,13 @@ class ContactStore:
             navigation_context=detection.navigation_context)
         if not self._append(sample):
             return cid
+        # A visual report has no persistent vessel ID. Other contacts observed
+        # by this UAV remain possible sources of an out-of-gate/new association.
+        for previous in visual_contacts:
+            if previous.contact_id != cid and any(
+                    s.source != "ais" and s.source_id == detection.source_id
+                    for s in previous.samples):
+                self._confirm(previous.contact_id, None, detection.observed_at_min)
         if self.snapshot(cid).ais_mmsi is None:
             aid, ais_ambiguous = self._nearest(
                 detection.position_cells, detection.observed_at_min,

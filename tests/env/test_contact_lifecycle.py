@@ -81,18 +81,24 @@ def test_contact_merge_migrates_active_alias_task_and_track_bindings(engine, leg
         assert sm.get_track_region_for_group("legacy-visual") is track
 
 
-@pytest.mark.parametrize("reserve,execute_survivor", [(False, True), (True, True), (True, False)])
-def test_contact_merge_cancels_duplicate_task_without_releasing_survivor(engine, reserve, execute_survivor):
+@pytest.mark.parametrize("reserve,execute_survivor", [(False, True), (True, True), (True, False), (False, False)])
+@pytest.mark.parametrize("execute_duplicate", [False, True])
+def test_contact_merge_cancels_duplicate_task_without_releasing_survivor(
+        engine, reserve, execute_survivor, execute_duplicate):
     sm = engine.allocator.sm
     vid = sm.contacts.ingest_visual(visual())
     aid = sm.contacts.ingest_ais(ais(), 0)
     duplicate, survivor = engine.uavs[:2]
-    start_tracking(engine, duplicate, vid, reserve=reserve)
+    start_tracking(engine, duplicate, vid, reserve=reserve, execute=execute_duplicate)
     start_tracking(engine, survivor, aid, reserve=reserve, execute=execute_survivor)
     retained_track = sm.get_track_region_for_group(aid)
     sm.contacts.ingest_ais(ais(1), 1)
     engine._publish_contact_events(1)
 
+    # Without reservations, an already executing alias can be the survivor.
+    if not reserve and execute_duplicate and not execute_survivor:
+        duplicate, survivor = survivor, duplicate
+        retained_track = sm.get_track_region_for_group(aid)
     assert sm.get_track_regions() == ([retained_track] if retained_track else [])
     for uav in (duplicate, survivor):
         tick = engine.control_coordinator.step_uav(uav, current_time=1.1, dt_min=.1)
@@ -110,6 +116,71 @@ def test_contact_merge_cancels_duplicate_task_without_releasing_survivor(engine,
     events = sm.get_recent_events(0)
     assert any(e["type"] == "duplicate_task_cancelled" for e in events)
     assert any(e["type"] == "contact_merged" for e in events)
+
+
+@pytest.mark.parametrize("exit_kind", ["task_failed", "route_failure", "return", "release"])
+@pytest.mark.parametrize("execute", [False, True])
+def test_merged_legacy_reservation_is_released_once_on_task_exit(engine, exit_kind, execute):
+    from src.control.common.contracts import RecoveryPlan
+
+    sm = engine.allocator.sm
+    vid = sm.contacts.ingest_visual(visual())
+    aid = sm.contacts.ingest_ais(ais(), 0)
+    uav = engine.uavs[0]
+    start_tracking(engine, uav, vid, reserve=False, execute=execute)
+    sm.contacts.ingest_ais(ais(1), 1)
+    engine._publish_contact_events(1)
+    assert sm.contacts.snapshot(aid).assigned_uav_id == uav.id
+    # A region can already have been retired before the controller exits.
+    track = sm.get_track_region_for_group(aid)
+    if track:
+        sm.release_track_region(track.id, create_marker=False)
+    coordinator = engine.control_coordinator
+    if exit_kind == "task_failed":
+        engine._queue_control_event("task_failed", uav.id, 1.1, {"contact_id": vid})
+    elif exit_kind == "route_failure":
+        # No standoff goal is reachable, but the UAV can still hold safely.
+        uav._col = 18.
+        blocked = np.zeros(engine.config.grid.resolution, dtype=bool)
+        blocked[7:14, 7:14] = True
+        sm.set_environment_obstacles([], blocked)
+    elif exit_kind == "return":
+        start = uav.pose
+        end = (start[0], start[1] + 1, start[2])
+        coordinator.revoke_for_return(uav.id, RecoveryPlan(
+            base_id="B1", base_position=end[:2], reservation_id="return-test",
+            path=(start, end), path_length_cells=1, reserve_cells=.5,
+            planning_map_version=sm.obstacle_version), current_time=1.1)
+        engine._prepare_return_state(uav, 1.1)
+    else:
+        engine._release_target_group(vid, 1.1, "target_lost")
+    for t in (1.2, 1.3):
+        tick = coordinator.step_uav(uav, current_time=t, dt_min=.1)
+        engine._record_control_tick(uav, tick)
+        assert tick.execution.applied_command.operation_mode is not OperationMode.TRACK
+        if exit_kind == "route_failure" and t == 1.2:
+            assert [e.event_type for e in tick.emitted_events] == ["task_failed"]
+    assert sm.contacts.snapshot(aid).assigned_uav_id is None
+    releases = [e for e in sm.contacts.events
+                if e["type"] == "contact_released" and e["contact_id"] == aid]
+    assert len(releases) == 1
+    other = sm.contacts.ingest_ais(ais(2, (20, 20), mmsi="987654321"), 2)
+    sm.contacts.reserve(other, uav.id, None)
+    assert sm.contacts.snapshot(other).assigned_uav_id == uav.id
+
+
+def test_return_cleanup_of_duplicate_alias_preserves_canonical_owner(engine):
+    sm = engine.allocator.sm
+    vid = sm.contacts.ingest_visual(visual())
+    aid = sm.contacts.ingest_ais(ais(), 0)
+    duplicate, survivor = engine.uavs[:2]
+    start_tracking(engine, duplicate, vid)
+    start_tracking(engine, survivor, aid)
+    sm.contacts.ingest_ais(ais(1), 1)
+    # The returning entity still carries an alias when the store has merged.
+    engine._prepare_return_state(duplicate, 1.1)
+    assert sm.contacts.snapshot(aid).assigned_uav_id == survivor.id
+    assert not any(e["type"] == "contact_released" for e in sm.contacts.events)
 
 
 def test_retained_alias_command_records_canonical_entity_target(engine):
