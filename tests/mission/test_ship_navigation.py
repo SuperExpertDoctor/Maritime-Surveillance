@@ -664,15 +664,87 @@ def test_actual_defaults_rolling_repair_looks_beyond_horizon(
     assert ship.navigation_status == "ready"
 
 
-@pytest.mark.parametrize("horizon", [8., 20.])
-def test_bending_normal_route_preserves_progress_through_obstacle_repair(horizon, monkeypatch):
-    ship = Ship(
+def bending_vessel(horizon=20.):
+    return Ship(
         "V1", GridCoord(5, 5), 18, cell_size_km=1,
         normal_route=tuple((x, y, 0.) for x, y in
                            ((5, 5), (6, 5), (6, 6), (5, 6), (5, 9), (20, 9))),
         max_turn_rate_deg_min=90, yaw_time_constant_min=.1,
         heading_control_gain_per_min=5, turn_speed_loss_fraction=0,
         navigation_horizon_min=horizon, navigation_clearance_cells=0)
+
+
+@pytest.mark.parametrize("obstacle", [False, True])
+def test_bending_normal_route_execution_retains_progress_on_replan(obstacle):
+    ship = bending_vessel()
+    mask = np.zeros((30, 30), bool)
+    if obstacle:
+        mask[4, 7] = True
+    ship.land_mask = mask
+    ship.step(20.)
+    assert ship.navigation_status == "ready"
+    assert ship.pose[0] > 8. and ship.pose[1] > 8.
+    assert ship._route_index == 5, "execution must retain progress onto the final eastbound leg"
+    for _ in range(3):
+        tangent = ship.normal_tangent_rad()
+        assert tangent == pytest.approx(0.)
+        route = ship.navigator.plan(ship.pose, None, tangent, ship._motion_time_min, mask)
+        assert route.status == "ready", route.blocked_reason
+        assert abs(route._commands[0].heading_rad) < .2, "must not target passed waypoint (5, 6)"
+        x = ship.pose[0]
+        ship.advance(route, 1.)
+        assert ship.pose[0] > x
+        assert ship._route_index == 5
+
+
+@pytest.mark.parametrize("duration", [.05, 1., 20.])
+def test_normal_progress_only_commits_executed_route_prefix(duration):
+    ship = bending_vessel()
+    route = ship.navigator.plan(ship.pose, None, ship.normal_tangent_rad(), 0., ship.land_mask)
+    assert ship._route_index == 1, "prediction must not commit future progress"
+    ship.advance(route, duration)
+    assert ship._route_index == (5 if duration == 20. else 1)
+
+
+@pytest.mark.parametrize("finish_rejoin", [False, True])
+def test_detour_progress_waits_for_executed_rejoin(finish_rejoin):
+    ship = bending_vessel(8.)
+    mask = np.zeros((30, 30), bool)
+    mask[4, 7] = True
+    ship.land_mask = mask
+    route = ship.navigator.plan(ship.pose, None, ship.normal_tangent_rad(), 0., mask)
+    assert route.status == "ready", route.blocked_reason
+    duration = sum(c.duration_min for c in route._commands)
+    ship.advance(route, duration if finish_rejoin else duration - .15)
+    # Just before the rejoin, the fractional substep is still east of the
+    # westbound waypoint's crossing plane; it cannot claim downstream progress.
+    assert ship._route_index == (4 if finish_rejoin else 3)
+    assert (ship.pose[0] < 5.) == finish_rejoin
+
+
+def test_rejected_normal_route_does_not_commit_its_future_progress():
+    ship = bending_vessel()
+    route = ship.navigator.plan(ship.pose, None, ship.normal_tangent_rad(), 0., ship.land_mask)
+    ship.navigator.install(parameters(), 0.)
+    ship.advance(route, 1.)
+    assert ship.navigation_status == "blocked"
+    assert ship._route_index == 1
+
+
+def test_parameter_route_keeps_geometric_normal_cursor_semantics():
+    ship = bending_vessel()
+    route = ship.navigator.plan(ship.pose, parameters(), 0., 0., ship.land_mask)
+    assert not route._normal_indices
+    ship.advance(route, 20.)
+    # Eastbound red motion passes (6, 5), but never follows the normal bends.
+    assert ship.pose[0] > 16. and ship.pose[1] == pytest.approx(5.)
+    assert ship._route_index == 2
+    assert ship.normal_tangent_rad() == pytest.approx(math.pi / 2)
+
+
+@pytest.mark.parametrize("horizon", [8., 20.])
+def test_bending_normal_route_preserves_progress_through_obstacle_repair(horizon, monkeypatch):
+    ship = bending_vessel(horizon)
     planner = ship.navigator
     mask = np.zeros((30, 30), bool)
     mask[4, 7] = True
@@ -712,6 +784,10 @@ def test_bending_normal_route_preserves_progress_through_obstacle_repair(horizon
     assert actual == route.poses
     assert ship.navigation_status == "ready"
     assert_water_path(actual, mask)
+    assert ship._route_index >= 4, "the executed rejoin must persist its downstream cursor"
+    next_route = planner.plan(ship.pose, None, ship.normal_tangent_rad(), ship._motion_time_min, mask)
+    assert next_route.status == "ready", next_route.blocked_reason
+    assert abs(next_route._commands[0].heading_rad) < math.pi / 2
 
 
 def test_default_repair_blocks_when_bounded_reference_cannot_rejoin(monkeypatch):

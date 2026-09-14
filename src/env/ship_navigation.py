@@ -90,6 +90,9 @@ class ShipRoute:
     _land_mask: np.ndarray | None = field(default=None, repr=False, compare=False)
     _island_bounds: tuple[tuple[float, float, float, float], ...] = field(default=(), repr=False, compare=False)
     _generation: int | None = field(default=None, repr=False, compare=False)
+    # Cursor at each validated pose; detours commit downstream progress only
+    # at their rejoin. Parameter routes and braking carry no normal progress.
+    _normal_indices: tuple[int, ...] = field(default=(), repr=False, compare=False)
 
 
 class ShipNavigator:
@@ -243,7 +246,7 @@ class ShipNavigator:
             return self.braking_route(initial, now_min, mask, "no dynamically safe route")
         # Include any downstream reference extension in the deviation baseline.
         reference = tuple(s.pose for s in states)
-        states, commands = repaired
+        states, commands, normal_indices = repaired
         if not self.can_stop(states[-1], mask):
             return self.braking_route(initial, now_min, mask, "insufficient stopping reserve")
         deviation = 0.
@@ -251,7 +254,8 @@ class ShipNavigator:
             deviation = max(min(math.dist(s.pose[:2], p[:2]) for p in reference) for s in states)
         return ShipRoute(tuple(s.pose for s in states), now_min, self.map_version,
                          "ready", None, deviation, tuple(commands), initial, self, mask,
-                         self.island_bounds, self.ship._navigation_generation)
+                         self.island_bounds, self.ship._navigation_generation,
+                         tuple(normal_indices) if params is None else ())
 
     def _reference_steps(self, state, params, tangent, now_min, mask, duration_min,
                          normal_index):
@@ -325,7 +329,8 @@ class ShipNavigator:
                     break
                 previous = state
         if collision is None:
-            return states, commands  # Discard clear preview; preserve nominal horizon.
+            # Discard clear preview; preserve nominal horizon and its progress.
+            return states, commands, normal_indices
         if depth >= 8:
             return None
         anchor = collision

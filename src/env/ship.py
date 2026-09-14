@@ -276,11 +276,11 @@ class Ship:
         self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
         actual = [self.pose]
         remaining = dt_min
-        commands = iter(route._commands)
+        commands = enumerate(route._commands, start=1)
         braking = False
         while remaining > 1e-10 and not self.departed:
             try:
-                command = next(commands)
+                pose_index, command = next(commands)
             except StopIteration:
                 if braking:
                     break  # Explicitly blocked: even braking has no safe continuation.
@@ -289,7 +289,7 @@ class Ship:
                     self._motion_state(), self._motion_time_min, mask,
                     reason, remaining)
                 self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
-                commands, braking = iter(route._commands), True
+                commands, braking = enumerate(route._commands, start=1), True
                 continue
             dt = (command.duration_min if remaining >= command.duration_min - 1e-10
                   else remaining)
@@ -306,12 +306,17 @@ class Ship:
                     self._motion_state(), self._motion_time_min, mask,
                     "execution segment blocked", remaining)
                 self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
-                commands, braking = iter(route._commands), True
+                commands, braking = enumerate(route._commands, start=1), True
                 continue
             self._col, self._row, self.heading_rad = state.pose
             self.speed_kn = state.speed_kn
             self.speed_cells_per_min = state.speed_kn * 1.852 / 60 / self.cell_size_km
             self._yaw_rate_rad_per_min = state.yaw_rate
+            # Only a fully executed, collision-checked command reaches the
+            # pose whose cursor was validated. A partial step cannot claim a
+            # downstream rejoin, and replacement braking has no such metadata.
+            if route._normal_indices and dt == command.duration_min:
+                self._route_index = max(self._route_index, route._normal_indices[pose_index])
             actual.append(self.pose)
             remaining -= dt
             self._motion_time_min += dt
