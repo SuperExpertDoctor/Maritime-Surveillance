@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import hashlib
+import math
 from typing import Literal
 
 
@@ -33,6 +34,39 @@ def ship_rng_manifest(episode_seed: int) -> dict[str, int]:
         )
         for stream in SHIP_RNG_STREAMS
     }
+
+
+@dataclass(frozen=True)
+class VisualDetection:
+    """A sensor fix before association; physical vessel IDs never cross here."""
+
+    sample_id: str
+    observed_at_min: float
+    source: Literal["sar", "eo"]
+    source_id: str
+    position_cells: Vec2
+    velocity_cells_min: Vec2 | None
+    position_uncertainty_cells: float
+    observer_position_cells: Vec2
+    measured_range_cells: float
+    navigation_context: Literal["open_water", "near_land", "unknown"]
+
+    def __post_init__(self) -> None:
+        if not self.sample_id or not self.source_id or self.source not in ("sar", "eo"):
+            raise ValueError("visual detection requires sample/source IDs and SAR or EO")
+        for name in ("position_cells", "observer_position_cells", "velocity_cells_min"):
+            value = getattr(self, name)
+            if value is None and name == "velocity_cells_min":
+                continue
+            if value is None or len(value) != 2 or not all(math.isfinite(v) for v in value):
+                raise ValueError(f"{name}: expected a finite position/velocity pair")
+            object.__setattr__(self, name, tuple(value))
+        for name in ("observed_at_min", "position_uncertainty_cells", "measured_range_cells"):
+            value = getattr(self, name)
+            if value is None or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name}: expected a finite nonnegative number")
+        if self.navigation_context not in ("open_water", "near_land", "unknown"):
+            raise ValueError("invalid navigation context")
 
 
 @dataclass(frozen=True)
@@ -176,5 +210,6 @@ __all__ = [
     "SHIP_RNG_STREAMS",
     "TaskCandidate",
     "Vec2",
+    "VisualDetection",
     "ship_rng_manifest",
 ]

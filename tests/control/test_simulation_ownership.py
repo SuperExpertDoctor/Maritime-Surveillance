@@ -42,7 +42,12 @@ def _install_deterministic_llm(engine: SimulationEngine) -> None:
 
 
 def test_default_simulation_starts_heuristic_leases_after_real_scheduler_tick():
-    engine = SimulationEngine(ConfigLoader.load(), seed=9)
+    from dataclasses import replace
+    config = ConfigLoader.load()
+    # Isolate fleet search ownership from T06's initial global AIS candidates.
+    config.ship = replace(config.ship, target_ship_count=config.ship.initial_ship_count,
+                          target_ais_on_probability=0.0)
+    engine = SimulationEngine(config, seed=9)
     _install_deterministic_llm(engine)
 
     result = engine.step()
@@ -56,7 +61,7 @@ def test_default_simulation_starts_heuristic_leases_after_real_scheduler_tick():
     )
 
 
-def test_detection_replaces_heuristic_task_without_system_command():
+def test_detection_preserves_heuristic_lease_until_explicit_assignment():
     engine = SimulationEngine(ConfigLoader.load(), seed=9)
     _install_deterministic_llm(engine)
     engine.step()
@@ -69,8 +74,9 @@ def test_detection_replaces_heuristic_task_without_system_command():
 
     assert old.owner is ControlOwner.HEURISTIC
     assert new.owner is ControlOwner.HEURISTIC
-    assert new.generation == old.generation + 1
-    assert new.controller_id.startswith("tracking:")
+    assert new.generation == old.generation
+    assert new.controller_id == old.controller_id
+    assert not new.controller_id.startswith("tracking:")
 
 
 class _LearningProbe(ControllerBase):

@@ -82,8 +82,8 @@ def test_lgvf_storm_guidance_preserves_fixed_wing_turn_limit():
 
 def test_persistent_level_three_creates_marker_and_releases_track():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    group_id = engine.ships[0].group_id
-    center = engine._group_center(group_id)
+    group_id = engine.allocator.sm.contacts.list_snapshots()[0].contact_id
+    center = engine._contact_center(group_id)
     uav = engine.uavs[0]
     uav.status = "tracking"
     uav.target_group_id = group_id

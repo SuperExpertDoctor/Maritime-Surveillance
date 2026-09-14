@@ -202,8 +202,8 @@ def test_sar_requires_stable_straight_heading_before_writing_information():
 
 def test_simulation_applies_phase_speed_control_to_shared_trackers():
     engine = SimulationEngine(ConfigLoader.load())
-    contact_id = engine.ships[0].group_id
-    center = engine._group_center(contact_id)
+    contact_id = engine.allocator.sm.contacts.list_snapshots()[0].contact_id
+    center = engine._contact_center(contact_id)
     first, second = engine.uavs[:2]
     for uav in (first, second):
         uav.status = "tracking"
@@ -241,7 +241,7 @@ def test_completed_search_starts_a_real_return_during_lifecycle_rotation():
     assert uav.mission_kind == "return"
 
 
-def test_tracking_dwell_starts_return_without_waiting_for_low_fuel():
+def test_tracking_dwell_starts_return_without_waiting_for_low_fuel(monkeypatch):
     engine = SimulationEngine(ConfigLoader.load())
     engine._lifecycle_mode = True
     engine.allocator.sm.lifecycle_mode = True
@@ -250,6 +250,8 @@ def test_tracking_dwell_starts_return_without_waiting_for_low_fuel():
     uav.target_group_id = "G1"
     engine._sortie_searched[uav.id] = True
     engine._tracking_started_at[uav.id] = -engine.config.uav.lifecycle_search_dwell_min
+    from src.schedule.trigger_manager import TriggerDecision
+    monkeypatch.setattr(engine.allocator.trigger_manager, "check", lambda _t: TriggerDecision("none"))
 
     engine.step()
 

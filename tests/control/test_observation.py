@@ -18,8 +18,14 @@ from src.schedule.datatypes import GridCoord
 
 
 @pytest.fixture
-def engine():
-    return SimulationEngine(ConfigLoader.load(), seed=17)
+def engine(monkeypatch):
+    monkeypatch.setenv("LONGCAT_API_KEY", "t06-offline-fixture")
+    config = ConfigLoader.load()
+    # Keep the original no-broadcast fixture; global AIS is tested separately.
+    from dataclasses import replace
+    config.ship = replace(config.ship, target_ship_count=config.ship.initial_ship_count,
+                          target_ais_on_probability=0.0)
+    return SimulationEngine(config, seed=17)
 
 
 def make_provider(engine):
@@ -104,12 +110,12 @@ def test_observation_exposes_only_target_reports_and_published_hazards(engine):
     observation = build_observation(
         engine,
         control_owner=ControlOwner.HEURISTIC,
-        current_time=10.0,
+        current_time=5.0,
     )
 
     assert [contact.contact_id for contact in observation.contacts] == ["contact-a", "contact-b"]
     assert observation.contacts[0].estimated_position == (6.0, 8.0)
-    assert observation.contacts[0].age_min == 6.0
+    assert observation.contacts[0].age_min == 1.0
     assert [hazard.hazard_id for hazard in observation.hazards] == sorted(
         hazard.hazard_id for hazard in observation.hazards
     )
@@ -176,3 +182,18 @@ def test_state_manager_versions_only_changed_obstacle_masks(engine):
     observation = build_observation(engine)
     assert observation.planning_map_version == sm.obstacle_version
     assert np.array_equal(observation.planning_obstacle_mask, changed_mask)
+
+
+def test_observed_contact_can_be_applied_by_existing_control_registry(engine):
+    from src.control.common.contracts import ControlCommand
+    from src.control.common.operation_registry import OperationRegistry
+    from src.env.ais_signal import AISSignal
+
+    sm = engine.allocator.sm
+    cid = sm.contacts.ingest_ais(AISSignal("123456789", (10., 10.), 0., 0., "MV", "Cargo", 0.), 0.)
+    observation = build_observation(engine, control_owner=ControlOwner.HEURISTIC)
+    registry = OperationRegistry(sm)
+    registry.reconcile(engine.uavs[0].id, None,
+                       ControlCommand(0., .2, SensorMode.EO, OperationMode.TRACK, cid),
+                       observation)
+    assert sm.get_track_regions()[0].target_group_id == cid

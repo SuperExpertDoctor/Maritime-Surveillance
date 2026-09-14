@@ -147,14 +147,15 @@ class ObservationProvider:
     def _contacts(
         state_manager: StateManager, current_time: float
     ) -> tuple[ContactObservation, ...]:
-        return tuple(
-            ContactObservation(
-                contact_id=report.group_id,
-                group_id=report.group_id,
-                estimated_position=(
-                    float(report.position.col),
-                    float(report.position.row),
-                ),
+        contacts = []
+        for report in state_manager.get_target_reports():
+            position = state_manager.contact_position(report.contact_id, current_time)
+            if position is None:
+                continue
+            contacts.append(ContactObservation(
+                contact_id=report.contact_id,
+                group_id=report.contact_id,  # legacy registry slot, observation ID only
+                estimated_position=position,
                 estimated_velocity=tuple(
                     float(value) for value in report.velocity_cells_per_min
                 ),
@@ -162,11 +163,8 @@ class ObservationProvider:
                 observed_at_min=float(report.observed_at),
                 age_min=max(0.0, float(current_time) - report.observed_at),
                 confidence=1.0,
-            )
-            for report in sorted(
-                state_manager.get_target_reports(), key=lambda report: report.group_id
-            )
-        )
+            ))
+        return tuple(contacts)
 
     @staticmethod
     def _hazards(obstacles: Iterable[object]) -> tuple[HazardObservation, ...]:

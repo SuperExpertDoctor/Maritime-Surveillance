@@ -201,6 +201,10 @@ def test_engine_uses_actual_land_and_islands_for_population(monkeypatch):
     assert np.array_equal(captured["land_mask"], expected_mask)
     assert np.array_equal(captured["land_mask"], engine.ship_land_mask)
     for ship in engine.ships:
-        assert engine._group_center(ship.contact_id) == ship.float_position
         for pose in ship.normal_route:
             assert not captured["land_mask"][math.floor(pose[0]), math.floor(pose[1])]
+    # T06: population truth is no longer a scheduling position provider.
+    assert not hasattr(engine, "_group_center")
+    assert {c.ais_mmsi for c in engine.allocator.sm.contacts.list_snapshots()} == {
+        ship.ais_signal.mmsi for ship in engine.ships if ship.ais_signal is not None
+    }

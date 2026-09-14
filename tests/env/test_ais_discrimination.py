@@ -75,11 +75,10 @@ def test_formation_discriminator_treats_silent_member_as_military(index):
 
 def test_engine_records_eo_observations_without_ais_truth_classification():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    group_id = engine.ships[0].group_id
     ship = engine.ships[0]
     ship.ais_mode = "civilian"
-
-    center = engine._group_center(group_id)
+    group_id = engine.allocator.sm.contacts.ingest_ais(generate_ais_signal(ship, 0), 0)
+    center = ship.float_position  # sensor fixture geometry, never a blue lookup
     uav = engine.uavs[0]
     uav.position = GridCoord(int(round(center[0] - 1)), int(round(center[1])))
     uav._col, uav._row = center[0] - 1.8, center[1]
@@ -99,7 +98,7 @@ def test_engine_records_eo_observations_without_ais_truth_classification():
 
     assert engine.allocator.sm.get_track_region_for_group(group_id) is not None
     assert engine.allocator.sm.get_target_report(group_id) is not None
-    assert ship.estimated_position is not None
+    assert any(s.source == "eo" for s in engine.allocator.sm.contacts.snapshot(group_id).samples)
     assert ship.is_military is None
     assert ship.discrimination is None
     assert engine.ais_discriminations == 0
@@ -109,9 +108,9 @@ def test_engine_records_eo_observations_without_ais_truth_classification():
 
 def test_departed_target_releases_track_without_marker():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    group_id = engine.ships[0].group_id
+    group_id = engine.allocator.sm.contacts.list_snapshots()[0].contact_id
     uav = engine.uavs[0]
-    center = engine._group_center(group_id)
+    center = engine._contact_center(group_id)
     uav.status = "tracking"
     uav.target_group_id = group_id
     track = engine.allocator.sm.create_track_region(group_id, GridCoord(int(center[0]), int(center[1])))

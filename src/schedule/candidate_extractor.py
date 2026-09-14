@@ -75,7 +75,7 @@ class CandidateExtractor:
         # refueled airframes can launch immediately instead of waiting for
         # the next 30-minute planning window.
         has_handoff_report = any(
-            sm.get_track_region_for_group(report.group_id) is None
+            sm.get_track_region_for_group(report.contact_id) is None
             for report in sm.get_target_reports()
         )
         K = 10 if sm.lifecycle_mode else min(max(available * 2, int(has_handoff_report)), 10)
@@ -258,14 +258,12 @@ class CandidateExtractor:
         candidates = []
 
         for report in sm.get_target_reports():
-            if report.group_id in active_groups:
+            if report.contact_id in active_groups:
                 continue
             elapsed = max(0.0, sm.current_time - report.observed_at)
-            horizon = min(12.0, elapsed + 5.0)
-            predicted = (
-                report.position.col + report.velocity_cells_per_min[0] * horizon,
-                report.position.row + report.velocity_cells_per_min[1] * horizon,
-            )
+            predicted = sm.contact_position(report.contact_id, sm.current_time)
+            if predicted is None:
+                continue
             seed_col, seed_row = int(round(predicted[0])), int(round(predicted[1]))
             # Try a nearby deterministic ring when the direct projection
             # intersects land, an island, or a thunderstorm safety area.
@@ -304,7 +302,7 @@ class CandidateExtractor:
                     "total_value": float(patch_value.sum()) + 1000.0,
                     "avg_info": float(patch_info.mean()),
                     "unseen_count": int((~seen[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]).sum()),
-                    "target_group_id": report.group_id,
+                    "target_group_id": report.contact_id,
                     "observed_position": [report.position.col, report.position.row],
                     "observed_at": report.observed_at,
                 })

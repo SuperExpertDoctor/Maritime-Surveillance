@@ -123,9 +123,11 @@ def test_reset_generates_a_fresh_two_base_coastal_scenario():
     assert any(event["type"] == "environment_reset" for event in engine.allocator.sm.get_recent_events(0))
 
 
-def test_explicit_reset_seed_rebuilds_the_same_clean_scenario():
+def test_explicit_reset_seed_rebuilds_the_same_clean_scenario(monkeypatch):
     config = ConfigLoader.load()
     engine = SimulationEngine(config, seed=5)
+    from src.schedule.trigger_manager import TriggerDecision
+    monkeypatch.setattr(engine.allocator.trigger_manager, "check", lambda _t: TriggerDecision("none"))
     engine.step()
     engine.reset(seed=31)
     fresh = SimulationEngine(config, seed=31)
@@ -182,9 +184,10 @@ def test_unobserved_ships_are_not_exported_to_the_visualization_or_llm_state():
         bases=engine.bases,
     )
     assert initial_frame["ships"] == []
-    assert engine.allocator.sm.get_target_reports() == []
+    assert len(engine.allocator.sm.get_target_reports()) == sum(
+        ship.ais_signal is not None for ship in engine.ships)
 
-    engine._handle_detection(engine.uavs[0], contact, 1.0)
+    contact_id = engine._handle_detection(engine.uavs[0], contact, 1.0)
     discovered_frame = build_frame(
         engine.allocator.sm,
         cycle=0,
@@ -196,12 +199,12 @@ def test_unobserved_ships_are_not_exported_to_the_visualization_or_llm_state():
     )
 
     assert [ship["id"] for ship in discovered_frame["ships"]] == [contact.id]
-    report = engine.allocator.sm.get_target_report(contact.group_id)
+    report = engine.allocator.sm.get_target_report(contact_id)
     assert report is not None
     assert report.position == contact.position
 
 
-def test_target_detection_retires_overlapping_search_and_redirects_uav(monkeypatch):
+def test_target_detection_preserves_search_until_a_scheduling_decision(monkeypatch):
     engine = SimulationEngine(ConfigLoader.load(), seed=41)
     contact = engine.ships[0]
     observer, searcher = engine.uavs[:2]
@@ -233,13 +236,13 @@ def test_target_detection_retires_overlapping_search_and_redirects_uav(monkeypat
         lambda entity, current_time: redirected.append((entity.id, current_time)),
     )
 
-    engine._handle_detection(observer, contact, 1.0)
+    contact_id = engine._handle_detection(observer, contact, 1.0)
 
-    track = engine.allocator.sm.get_track_region_for_group(contact.group_id)
-    assert track is not None
-    assert engine.allocator.sm.get_search_regions() == []
-    assert engine.allocator.sm.get_uav(searcher.id).assigned_region_id is None
-    assert redirected == [(searcher.id, 1.0)]
+    assert engine.allocator.sm.get_target_report(contact_id) is not None
+    assert engine.allocator.sm.get_track_regions() == []
+    assert engine.allocator.sm.get_search_regions() == [conflict]
+    assert engine.allocator.sm.get_uav(searcher.id).assigned_region_id == conflict.id
+    assert redirected == []
 
 
 def test_moving_track_region_retires_newly_overlapping_search(monkeypatch):
@@ -281,16 +284,20 @@ def test_tracker_return_keeps_only_last_observed_contact_for_handoff():
     contact = engine.ships[0]
     contact.position = GridCoord(7, 4)
     uav = engine.uavs[0]
-    engine._handle_detection(uav, contact, 1.0)
+    contact_id = engine._handle_detection(uav, contact, 1.0)
+    # T06: install an explicit test assignment; detection no longer creates one.
+    track = engine.allocator.sm.create_track_region(contact_id, contact.position)
+    track.assigned_uav_id = uav.id
+    uav.target_group_id = contact_id
 
     engine._begin_return(uav, 2.0)
 
     assert uav.status == "returning"
-    assert engine.allocator.sm.get_track_region_for_group(contact.group_id) is None
-    report = engine.allocator.sm.get_target_report(contact.group_id)
+    assert engine.allocator.sm.get_track_region_for_group(contact_id) is None
+    report = engine.allocator.sm.get_target_report(contact_id)
     assert report is not None
     candidates = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions
-    handoffs = [item for item in candidates if item.get("target_group_id") == contact.group_id]
+    handoffs = [item for item in candidates if item.get("target_group_id") == contact_id]
     assert handoffs
 
 

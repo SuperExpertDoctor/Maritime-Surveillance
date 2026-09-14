@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from typing import Optional
+import math
 
 import numpy as np
 
 from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
 from src.schedule.info_field import InfoField
+from src.mission.contact_store import ContactStore
+from src.mission.contracts import VisualDetection
 
 
 _OPERATION_BY_STATUS = {
@@ -44,7 +47,15 @@ class StateManager:
         self._marker_counter = 0
         self._events: list[dict] = []
         self._known_target_groups: set[str] = set()
-        self._target_reports: dict[str, TargetReport] = {}
+        self.contacts = ContactStore(
+            config.mission.contact, cell_size_km=config.grid.cell_size_km,
+            ais_uncertainty_cells=config.ship.ais_position_noise_cells,
+        )
+        # Older controller tests inject named observations. Production sensors
+        # ingest typed measurements directly and always use generated contact IDs.
+        self._legacy_contact_ids: dict[str, str] = {}
+        self._legacy_sample_counter = 0
+        self._contact_event_cursor = 0
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
         self.obstacle_version = 0
@@ -243,48 +254,64 @@ class StateManager:
         source_uav_id: str,
         observed_at: Optional[float] = None,
     ) -> TargetReport:
-        """Store a sensor-derived fix without exposing any ship truth state."""
+        """Compatibility adapter for callers with an already named sensor fix."""
         timestamp = self.current_time if observed_at is None else float(observed_at)
-        normalized = GridCoord(int(round(position.col)), int(round(position.row)))
-        previous = self._target_reports.get(group_id)
-        velocity = (0.0, 0.0)
-        observations = 1
-        if previous is not None:
-            elapsed = timestamp - previous.observed_at
-            if elapsed > 1e-6:
-                raw_velocity = (
-                    (normalized.col - previous.position.col) / elapsed,
-                    (normalized.row - previous.position.row) / elapsed,
-                )
-                # EO fixes may be noisy.  Keep a useful uncertainty growth
-                # rate without allowing a one-cell quantization jump to make
-                # the successor search area leap across the map.
-                speed = float(np.hypot(*raw_velocity))
-                scale = min(1.0, 0.20 / speed) if speed else 1.0
-                velocity = (raw_velocity[0] * scale, raw_velocity[1] * scale)
-            else:
-                velocity = previous.velocity_cells_per_min
-            observations = previous.observation_count + 1
-        report = TargetReport(
-            group_id=group_id,
-            position=normalized,
-            observed_at=timestamp,
-            source_uav_id=source_uav_id,
-            velocity_cells_per_min=velocity,
-            observation_count=observations,
-        )
-        self._target_reports[group_id] = report
+        uav = self.get_uav(source_uav_id)
+        observer = tuple(uav.position) if uav else tuple(position)
+        self._legacy_sample_counter += 1
+        cid = self.contacts.ingest_visual(VisualDetection(
+            f"legacy:{self._legacy_sample_counter}", timestamp, "eo", source_uav_id,
+            tuple(position), None, 0.05, observer, math.dist(observer, position), "unknown"))
+        self._legacy_contact_ids[group_id] = cid
         self._known_target_groups.add(group_id)
-        return report
+        return self.get_target_report(group_id)
 
-    def get_target_report(self, group_id: str) -> Optional[TargetReport]:
-        return self._target_reports.get(group_id)
+    def resolve_contact_id(self, contact_id: str) -> str:
+        return self.contacts.resolve(self._legacy_contact_ids.get(contact_id, contact_id))
+
+    def get_target_report(self, contact_id: str) -> Optional[TargetReport]:
+        try:
+            contact = self.contacts.snapshot(self.resolve_contact_id(contact_id))
+        except KeyError:
+            return None
+        if not contact.samples:
+            return None
+        latest = contact.samples[-1]
+        return TargetReport(
+            contact_id=contact_id if contact_id in self._legacy_contact_ids else contact.contact_id,
+            position=GridCoord(*(int(round(v)) for v in contact.estimated_position_cells)),
+            observed_at=contact.last_seen_min, source_uav_id=latest.source_id,
+            velocity_cells_per_min=contact.estimated_velocity_cells_min or (0.0, 0.0),
+            observation_count=len(contact.samples))
 
     def get_target_reports(self) -> list[TargetReport]:
-        return sorted(self._target_reports.values(), key=lambda item: item.group_id)
+        legacy_names = {self.resolve_contact_id(name): name for name in self._legacy_contact_ids}
+        reports = [self.get_target_report(legacy_names.get(c.contact_id, c.contact_id))
+                   for c in self.contacts.list_snapshots()]
+        return sorted((r for r in reports if r is not None), key=lambda r: r.contact_id)
 
-    def clear_target_report(self, group_id: str) -> None:
-        self._target_reports.pop(group_id, None)
+    def clear_target_report(self, contact_id: str) -> None:
+        if self.get_target_report(contact_id) is not None:
+            self.contacts.release(self.resolve_contact_id(contact_id), self.current_time, "released")
+
+    def contact_position(self, contact_id: str, now_min: float) -> tuple[float, float] | None:
+        """Finite prediction only; reading never refreshes observation evidence."""
+        try:
+            c = self.contacts.snapshot(self.resolve_contact_id(contact_id))
+        except KeyError:
+            return None
+        elapsed = max(0.0, now_min - c.last_seen_min)
+        if c.state in ("lost", "departed") or elapsed > self.config.mission.contact.stale_after_min:
+            return None
+        velocity = c.estimated_velocity_cells_min or (0.0, 0.0)
+        return tuple(p + v * elapsed for p, v in zip(c.estimated_position_cells, velocity))
+
+    def publish_contact_events(self) -> tuple[dict, ...]:
+        events = self.contacts.events[self._contact_event_cursor:]
+        self._contact_event_cursor += len(events)
+        for event in events:
+            self.add_event(event["type"], {k: v for k, v in event.items() if k != "type"})
+        return events
 
     def create_track_region(self, target_group_id: str, center: GridCoord) -> Region:
         existing = self.get_track_region_for_group(target_group_id)
