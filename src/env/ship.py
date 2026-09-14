@@ -12,6 +12,7 @@ import numpy as np
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.env.dubins import Pose
 from src.env.obstacle import Island
+from src.env.ship_navigation import MotionDynamics, MotionState, ShipNavigator, ShipRoute
 from src.mission.contracts import ship_rng_manifest
 from src.schedule.datatypes import GridCoord
 
@@ -74,6 +75,12 @@ class Ship:
         yaw_time_constant_min: float = 2.5,
         heading_control_gain_per_min: float = 0.35,
         turn_speed_loss_fraction: float = 0.12,
+        max_acceleration_kn_per_min: float = 2.0,
+        land_mask: np.ndarray | None = None,
+        navigator: AStarNavigator | None = None,
+        navigation_horizon_min: float = 8.0,
+        integration_dt_min: float = .1,
+        navigation_clearance_cells: float = .1,
     ) -> None:
         route = tuple(normal_route)
         heading = (
@@ -88,6 +95,8 @@ class Ship:
         self.ship_id = ship_id
         self._col, self._row = float(route[0][0]), float(route[0][1])
         self.speed_kn = float(speed_kn)
+        self.normal_speed_kn = self.speed_kn
+        self.cell_size_km = float(cell_size_km)
         self.speed_cells_per_min = self.speed_kn * 1.852 / 60.0 / cell_size_km
         self.ais_position_noise_cells = float(ais_position_noise_cells)
         self.ship_type = ShipType.CARGO
@@ -107,6 +116,38 @@ class Ship:
         self._detected = False
         self._being_tracked = False
         self.trail: list[tuple[float, float]] = []
+        self.motion_dynamics = MotionDynamics(
+            self.cell_size_km, self.max_turn_rate_rad_per_min,
+            self.yaw_time_constant_min, self.heading_control_gain_per_min,
+            self.turn_speed_loss_fraction, max_acceleration_kn_per_min)
+        self._land_mask = None if land_mask is None else np.array(land_mask, dtype=bool, copy=True)
+        self._navigation_options = (navigation_horizon_min, integration_dt_min, navigation_clearance_cells)
+        self._navigator = (None if navigator is None else ShipNavigator(
+            self, navigator, horizon_min=navigation_horizon_min,
+            integration_dt_min=integration_dt_min, clearance_cells=navigation_clearance_cells))
+        self._motion_time_min = 0.
+        self.navigation_status = "ready"
+        self.blocked_reason: str | None = None
+
+    @property
+    def navigator(self) -> ShipNavigator:
+        if self._navigator is None:
+            horizon, dt, clearance = self._navigation_options
+            self._navigator = ShipNavigator(self, horizon_min=horizon,
+                                            integration_dt_min=dt, clearance_cells=clearance)
+        return self._navigator
+
+    @property
+    def land_mask(self) -> np.ndarray:
+        # Standalone legacy vessels have an empty default chart until bound.
+        return np.zeros((30, 30), bool) if self._land_mask is None else self._land_mask
+
+    @land_mask.setter
+    def land_mask(self, mask: np.ndarray) -> None:
+        self._land_mask = np.array(mask, dtype=bool, copy=True)
+        if self._navigator is not None:
+            self._navigator.land_mask = self._land_mask
+            self._navigator.map_version += 1
 
     @property
     def contact_id(self) -> str:
@@ -181,27 +222,81 @@ class Ship:
 
     def _integrate_yaw(self, desired_heading: float, dt_min: float) -> float:
         old_heading = self.heading_rad
-        old_rate = self._yaw_rate_rad_per_min
-        error = _wrap_pi(desired_heading - old_heading)
-        commanded_rate = _clamp(
-            self.heading_control_gain_per_min * error,
-            -self.max_turn_rate_rad_per_min,
-            self.max_turn_rate_rad_per_min,
-        )
-        response = 1.0 - math.exp(-dt_min / self.yaw_time_constant_min)
-        new_rate = old_rate + response * (commanded_rate - old_rate)
-        new_rate = _clamp(
-            new_rate,
-            -self.max_turn_rate_rad_per_min,
-            self.max_turn_rate_rad_per_min,
-        )
-        delta = 0.5 * (old_rate + new_rate) * dt_min
-        if delta * error > 0.0 and abs(delta) > abs(error):
-            delta = error
-            new_rate = 0.0
-        self.heading_rad = _wrap_pi(old_heading + delta)
-        self._yaw_rate_rad_per_min = new_rate
-        return _wrap_pi(old_heading + delta / 2.0)
+        state = self.motion_dynamics.roll(self._motion_state(), desired_heading,
+                                          self.speed_kn, dt_min)
+        self.heading_rad = state.pose[2]
+        self._yaw_rate_rad_per_min = state.yaw_rate
+        return _wrap_pi(old_heading + _wrap_pi(self.heading_rad - old_heading) / 2)
+
+    def _motion_state(self) -> MotionState:
+        return MotionState(self.pose, self.speed_kn, self._yaw_rate_rad_per_min)
+
+    def normal_tangent_rad(self) -> float:
+        """Direction of the current normal-route segment, never current yaw."""
+        route = self.normal_route
+        while self._route_index < len(route) - 1:
+            a, b = route[self._route_index - 1], route[self._route_index]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            if (self._col - b[0]) * dx + (self._row - b[1]) * dy < 0:
+                break
+            self._route_index += 1
+        if len(route) < 2:
+            return route[0][2]
+        a, b = route[self._route_index - 1], route[self._route_index]
+        return math.atan2(b[1] - a[1], b[0] - a[0])
+
+    def advance(self, route: ShipRoute, dt_min: float) -> tuple[Pose, ...]:
+        """Execute timed controls and return the actual start and substep poses."""
+        if self.departed or dt_min <= 0:
+            return (self.pose,)
+        if (route._initial_state != self._motion_state() or route._navigator is None
+                or route.map_version != route._navigator.map_version
+                or route._island_bounds != route._navigator.island_bounds
+                or not np.array_equal(route._land_mask, route._navigator.land_mask)):
+            navigator = route._navigator or self.navigator
+            mask = navigator.land_mask
+            route = navigator.braking_route(self._motion_state(), self._motion_time_min,
+                                            mask, "stale or unvalidated route/map", dt_min)
+        self._motion_time_min = route.generated_at_min
+        self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
+        actual = [self.pose]
+        remaining = dt_min
+        commands = iter(route._commands)
+        braking = False
+        while remaining > 1e-10 and not self.departed:
+            try:
+                command = next(commands)
+            except StopIteration:
+                if braking:
+                    break  # Explicitly blocked: even braking has no safe continuation.
+                reason = route.blocked_reason or "route horizon exhausted"
+                route = route._navigator.braking_route(
+                    self._motion_state(), self._motion_time_min, route._navigator.land_mask,
+                    reason, remaining)
+                self.navigation_status, self.blocked_reason = route.status, route.blocked_reason
+                commands, braking = iter(route._commands), True
+                continue
+            dt = (command.duration_min if remaining >= command.duration_min - 1e-10
+                  else remaining)
+            state = self.motion_dynamics.roll(self._motion_state(), command.heading_rad,
+                                              command.speed_kn, dt)
+            if not route._navigator.segment_is_safe(self.pose, state.pose, route._land_mask):
+                self.navigation_status = "blocked"
+                self.blocked_reason = "execution segment blocked"
+                break
+            self._col, self._row, self.heading_rad = state.pose
+            self.speed_kn = state.speed_kn
+            self.speed_cells_per_min = state.speed_kn * 1.852 / 60 / self.cell_size_km
+            self._yaw_rate_rad_per_min = state.yaw_rate
+            actual.append(self.pose)
+            remaining -= dt
+            self._motion_time_min += dt
+            if route._navigator.has_exited(self.pose, route._land_mask):
+                self.departed = True
+        self.normal_tangent_rad()
+        self.trail.append(self.float_position)
+        self.trail[:] = self.trail[-120:]
+        return tuple(actual)
 
     @staticmethod
     def _is_safe_segment(start, end, islands: Iterable[Island]) -> bool:
@@ -211,41 +306,14 @@ class Ship:
         self,
         dt_min: float,
         islands: Iterable[Island] = (),
-    ) -> None:
+    ) -> tuple[Pose, ...]:
         """Advance along this vessel's own normal route."""
         if self.departed or dt_min <= 0.0:
-            return
-        route = self.normal_route
-        distance_budget = self.speed_cells_per_min * dt_min
-        while self._route_index < len(route):
-            target = route[self._route_index]
-            distance = math.dist(self.float_position, target[:2])
-            if distance > max(distance_budget, 1e-6):
-                break
-            self._col, self._row = target[:2]
-            distance_budget = max(0.0, distance_budget - distance)
-            self._route_index += 1
-        if self._route_index >= len(route):
-            self.departed = True
-        elif distance_budget > 0.0:
-            target = route[self._route_index]
-            desired_heading = math.atan2(target[1] - self._row, target[0] - self._col)
-            motion_heading = self._integrate_yaw(desired_heading, dt_min)
-            turn_fraction = abs(self._yaw_rate_rad_per_min) / max(
-                self.max_turn_rate_rad_per_min, 1e-9
-            )
-            distance = distance_budget * (
-                1.0 - self.turn_speed_loss_fraction * turn_fraction
-            )
-            candidate = (
-                self._col + distance * math.cos(motion_heading),
-                self._row + distance * math.sin(motion_heading),
-            )
-            if self._is_safe_segment(self.float_position, candidate, islands):
-                self._col, self._row = candidate
-        self.trail.append(self.float_position)
-        if len(self.trail) > 120:
-            self.trail.pop(0)
+            return (self.pose,)
+        self.navigator.set_islands(islands)
+        route = self.navigator.plan(self.pose, None, self.normal_tangent_rad(),
+                                    self._motion_time_min, self.land_mask)
+        return self.advance(route, dt_min)
 
 
 def _boundary_water_cells(mask: np.ndarray) -> list[tuple[float, float]]:
@@ -339,6 +407,12 @@ def create_ship_population(
                 yaw_time_constant_min=config.ship.yaw_time_constant_min,
                 heading_control_gain_per_min=config.ship.heading_control_gain_per_min,
                 turn_speed_loss_fraction=config.ship.turn_speed_loss_fraction,
+                max_acceleration_kn_per_min=config.ship.max_acceleration_kn_per_min,
+                land_mask=mask,
+                navigator=navigator,
+                navigation_horizon_min=config.ship.navigation_horizon_min,
+                integration_dt_min=config.ship.integration_dt_min,
+                navigation_clearance_cells=config.ship.navigation_clearance_cells,
             )
         )
     return ships
