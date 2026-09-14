@@ -258,6 +258,10 @@ class CandidateExtractor:
         candidates = []
 
         for report in sm.get_target_reports():
+            contact = sm.contacts.snapshot(sm.resolve_contact_id(report.contact_id))
+            if (contact.identity == "civilian" or contact.state == "cleared"
+                    or sm.current_time < contact.next_probe_not_before_min):
+                continue
             if report.contact_id in active_groups:
                 continue
             elapsed = max(0.0, sm.current_time - report.observed_at)

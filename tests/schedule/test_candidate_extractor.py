@@ -25,6 +25,30 @@ def test_extract_returns_candidate_result(sm):
     assert isinstance(result, CandidateResult)
 
 
+@pytest.mark.parametrize("release_reason", ["civilian", "timeout"])
+def test_handoff_candidates_respect_contact_clearance_and_recheck_cooldown(sm, release_reason):
+    from src.mission.contracts import Assessment
+    from tests.mission.test_contact_store import ais, visual
+
+    cid = sm.contacts.ingest_visual(visual(t=50, position=(15, 15)))
+    sm.contacts.reserve(cid, "UAV-1", "P1")
+    if release_reason == "civilian":
+        sm.contacts.apply_assessment(Assessment(
+            "A1", cid, "P1", 1, 50, "civilian", .9,
+            ("EO-1",), ("validated visual evidence",), (), "call1"))
+    else:
+        sm.contacts.release(cid, 50, "timeout")
+    shape = sm.config.grid.resolution
+    args = (sm, np.zeros(shape, dtype=bool), sm.get_value_matrix(),
+            sm.get_info_matrix(), np.zeros(shape, dtype=bool))
+    assert CandidateExtractor()._handoff_candidates(*args) == []
+    # Fresh AIS must not bypass clearance/cooldown, including after aliasing.
+    sm.contacts.ingest_ais(ais(51, (15, 15)), 51)
+    sm.contacts.ingest_ais(ais(52, (15, 15)), 52)
+    sm.current_time = 52
+    assert CandidateExtractor()._handoff_candidates(*args) == []
+
+
 def test_black_cells_become_candidates(sm):
     """黑态势 cell 应形成候选区域。"""
     extractor = CandidateExtractor()

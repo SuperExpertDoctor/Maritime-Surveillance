@@ -24,6 +24,7 @@ from src.control.heuristic.base import HeuristicControllerBase
 EVENT_TRANSITIONS = {
     "target_found": OperationMode.TRACK,
     "target_lost": OperationMode.COVERAGE,
+    "duplicate_task_cancelled": OperationMode.COVERAGE,
     "civilian_released": OperationMode.COVERAGE,
     "target_departed": OperationMode.COVERAGE,
     "search_complete": OperationMode.HOLDING,
@@ -158,6 +159,7 @@ class HeuristicTaskFlow:
             )
         if event.event_type in {
             "target_lost",
+            "duplicate_task_cancelled",
             "civilian_released",
             "target_departed",
         }:
@@ -186,6 +188,7 @@ class HeuristicTaskFlow:
             self._saved_coverage_tasks[uav_id] = previous_task
         elif event.event_type in {
             "target_lost",
+            "duplicate_task_cancelled",
             "civilian_released",
             "target_departed",
             "search_complete",

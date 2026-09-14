@@ -97,6 +97,42 @@ def test_visual_first_then_two_ais_confirmations_merge(store):
     assert store.snapshot(vid).contact_id == aid
 
 
+@pytest.mark.parametrize("matching_x", [10.0, 10.7])
+def test_ambiguous_ais_resets_confirmations_for_every_visual_candidate(store, matching_x):
+    left = store.ingest_visual(visual(position=(10, 10)))
+    right = store.ingest_visual(visual("EO-right", position=(10.7, 10)))
+    aid = store.ingest_ais(ais(position=(matching_x, 10)), 0)
+    store.ingest_ais(ais(1, (10.35, 10)), 1)
+    store.ingest_ais(ais(2, (matching_x, 10)), 2)
+    assert not store.aliases
+    assert store.snapshot(left).ais_mmsi is None
+    assert store.snapshot(right).ais_mmsi is None
+    store.ingest_ais(ais(3, (matching_x, 10)), 3)
+    assert store.resolve(left if matching_x == 10 else right) == aid
+
+
+@pytest.mark.parametrize("matching_x", [10.0, 10.7])
+def test_ambiguous_visual_gate_resets_existing_candidate_confirmations(store, matching_x):
+    left = store.ingest_visual(visual(position=(10, 10)))
+    right = store.ingest_visual(visual("EO-right", position=(10.7, 10)))
+    store.ingest_ais(ais(position=(matching_x, 10)), 0)
+    store.ingest_visual(visual("EO-ambiguous", 1, (10.35, 10)))
+    store.ingest_visual(visual("EO-match", 2, (matching_x, 10)))
+    assert not store.aliases
+    assert store.snapshot(left).ais_mmsi is None
+    assert store.snapshot(right).ais_mmsi is None
+
+
+def test_reverse_ais_association_predicts_moving_visual_to_packet_time(store):
+    vid = store.ingest_visual(visual(velocity_cells_min=(.3, 0)))
+    speed_kn = .3 * 120 / 1.852
+    aid = store.ingest_ais(ais(1, (10.3, 10), speed=speed_kn), 1)
+    assert store.resolve(vid) == vid
+    store.ingest_ais(ais(2, (10.6, 10), speed=speed_kn), 2)
+    assert store.resolve(vid) == aid
+    assert {s.source for s in store.snapshot(aid).samples} == {"ais", "eo"}
+
+
 def test_ambiguity_and_contradiction_do_not_merge_crossing_contacts(store):
     a = store.ingest_ais(ais(position=(9.8, 10)), 0)
     b = store.ingest_ais(ais(position=(10.2, 10), mmsi="987654321"), 0)

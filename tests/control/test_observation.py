@@ -197,3 +197,33 @@ def test_observed_contact_can_be_applied_by_existing_control_registry(engine):
                        ControlCommand(0., .2, SensorMode.EO, OperationMode.TRACK, cid),
                        observation)
     assert sm.get_track_regions()[0].target_group_id == cid
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_merged_alias_command_stays_valid_and_binds_the_canonical_contact(engine, legacy):
+    from src.control.common.contracts import ControlCommand
+    from src.control.common.operation_registry import OperationRegistry
+    from tests.mission.test_contact_store import ais, visual
+
+    sm = engine.allocator.sm
+    if legacy:
+        sm.record_target_observation("legacy-visual", GridCoord(10, 10), "UAV-1", 0)
+        alias = "legacy-visual"
+    else:
+        alias = sm.contacts.ingest_visual(visual())
+    aid = sm.contacts.ingest_ais(ais(), 0)
+    registry = OperationRegistry(sm)
+    command = ControlCommand(0., .2, SensorMode.EO, OperationMode.TRACK, alias)
+    before = build_observation(engine, control_owner=ControlOwner.HEURISTIC)
+    registry.reconcile(engine.uavs[0].id, None, command, before)
+    sm.contacts.ingest_ais(ais(1), 1)
+    sm.publish_contact_events()
+    observation = build_observation(engine, control_owner=ControlOwner.HEURISTIC, current_time=1)
+
+    assert {alias, aid} <= set(observation.action_mask.target_contact_ids)
+    alias_observation = next(c for c in observation.contacts if c.contact_id == alias)
+    assert alias_observation.group_id == aid
+    registry.reconcile(engine.uavs[0].id, command, command, observation)
+    assert len(sm.get_track_regions()) == 1
+    assert sm.get_track_regions()[0].target_group_id == aid
+    assert sm.get_uav(engine.uavs[0].id).target_group_id == aid

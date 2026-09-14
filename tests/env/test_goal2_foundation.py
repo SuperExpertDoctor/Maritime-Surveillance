@@ -290,6 +290,7 @@ def test_tracker_return_keeps_only_last_observed_contact_for_handoff():
     track.assigned_uav_id = uav.id
     uav.target_group_id = contact_id
 
+    engine.allocator.sm.current_time = 2.0
     engine._begin_return(uav, 2.0)
 
     assert uav.status == "returning"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 
 import numpy as np
 
@@ -164,7 +165,13 @@ class ObservationProvider:
                 age_min=max(0.0, float(current_time) - report.observed_at),
                 confidence=1.0,
             ))
-        return tuple(contacts)
+        # Retained commands may still reference an alias. Publish the same
+        # measured estimate under that ID, with canonical registry ownership.
+        canonical = {contact.contact_id: contact for contact in contacts}
+        for alias, cid in state_manager.merged_contact_aliases.items():
+            if cid in canonical and alias not in canonical:
+                contacts.append(replace(canonical[cid], contact_id=alias, group_id=cid))
+        return tuple(sorted(contacts, key=lambda contact: contact.contact_id))
 
     @staticmethod
     def _hazards(obstacles: Iterable[object]) -> tuple[HazardObservation, ...]:

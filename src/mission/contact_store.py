@@ -105,7 +105,7 @@ class ContactStore:
             if vid is not None:
                 # A second nearby AIS identity must also pass the ambiguity gate.
                 candidate, tied = self._nearest(
-                    self.snapshot(vid).estimated_position_cells, signal.timestamp,
+                    self._predicted_position(self.snapshot(vid), signal.timestamp), signal.timestamp,
                     [c for c in self.list_snapshots() if c.ais_mmsi is not None])
                 self._confirm(vid, cid if candidate == cid and not tied else None,
                               signal.timestamp)
@@ -148,19 +148,31 @@ class ContactStore:
                         sample_id=detection.sample_id)
         return self.resolve(cid)
 
+    @staticmethod
+    def _predicted_position(contact: ContactSnapshot, timestamp: float) -> tuple[float, float]:
+        velocity = contact.estimated_velocity_cells_min or (0.0, 0.0)
+        dt = timestamp - contact.last_seen_min
+        return tuple(p + v * dt for p, v in zip(contact.estimated_position_cells, velocity))
+
     def _nearest(self, position, timestamp, candidates) -> tuple[str | None, bool]:
         distances = []
         for c in candidates:
             if c.state == "departed" or abs(timestamp - c.last_seen_min) > self.config.stale_after_min:
                 continue
-            velocity = c.estimated_velocity_cells_min or (0.0, 0.0)
-            dt = timestamp - c.last_seen_min
-            predicted = tuple(p + v * dt for p, v in zip(c.estimated_position_cells, velocity))
+            predicted = self._predicted_position(c, timestamp)
             distances.append((math.dist(position, predicted), c.contact_id))
         distances.sort()
         if not distances or distances[0][0] > self.config.association_gate_cells:
             return None, False
         if len(distances) > 1 and distances[1][0] - distances[0][0] <= self.config.association_margin_cells:
+            # An ambiguous observation interrupts every involved pair, whether
+            # this gate is searching visual candidates or AIS candidates.
+            limit = max(self.config.association_gate_cells,
+                        distances[0][0] + self.config.association_margin_cells)
+            involved = {cid for distance, cid in distances if distance <= limit}
+            for vid, (aid, _, _) in tuple(self._confirmations.items()):
+                if vid in involved or aid in involved:
+                    self._confirmations.pop(vid)
             return None, True
         return distances[0][1], False
 

@@ -239,8 +239,11 @@ class StateManager:
         )
 
     def get_track_region_for_group(self, target_group_id: str) -> Optional[Region]:
+        canonical = self.resolve_contact_id(target_group_id)
         return next(
-            (region for region in self._track_regions if region.target_group_id == target_group_id),
+            (region for region in self._track_regions
+             if region.target_group_id is not None
+             and self.resolve_contact_id(region.target_group_id) == canonical),
             None,
         )
 
@@ -269,6 +272,14 @@ class StateManager:
     def resolve_contact_id(self, contact_id: str) -> str:
         return self.contacts.resolve(self._legacy_contact_ids.get(contact_id, contact_id))
 
+    @property
+    def merged_contact_aliases(self) -> dict[str, str]:
+        aliases = self.contacts.aliases
+        merged_ids = set(aliases.values())
+        aliases.update((name, self.resolve_contact_id(name)) for name in self._legacy_contact_ids
+                       if self.resolve_contact_id(name) in merged_ids)
+        return aliases
+
     def get_target_report(self, contact_id: str) -> Optional[TargetReport]:
         try:
             contact = self.contacts.snapshot(self.resolve_contact_id(contact_id))
@@ -285,7 +296,9 @@ class StateManager:
             observation_count=len(contact.samples))
 
     def get_target_reports(self) -> list[TargetReport]:
-        legacy_names = {self.resolve_contact_id(name): name for name in self._legacy_contact_ids}
+        merged_ids = set(self.contacts.aliases.values())
+        legacy_names = {self.resolve_contact_id(name): name for name in self._legacy_contact_ids
+                        if self.resolve_contact_id(name) not in merged_ids}
         reports = [self.get_target_report(legacy_names.get(c.contact_id, c.contact_id))
                    for c in self.contacts.list_snapshots()]
         return sorted((r for r in reports if r is not None), key=lambda r: r.contact_id)
@@ -309,9 +322,64 @@ class StateManager:
     def publish_contact_events(self) -> tuple[dict, ...]:
         events = self.contacts.events[self._contact_event_cursor:]
         self._contact_event_cursor += len(events)
+        published = []
+        cancelled = {(e["contact_id"], e["uav_id"]) for e in events
+                     if e["type"] == "duplicate_task_cancelled"}
         for event in events:
+            if event["type"] == "contact_merged":
+                for cancellation in self._merge_contact_bindings(event):
+                    key = (cancellation["contact_id"], cancellation["uav_id"])
+                    if key not in cancelled:
+                        published.append(cancellation)
+                        cancelled.add(key)
+            published.append(event)
+        for event in published:
             self.add_event(event["type"], {k: v for k, v in event.items() if k != "type"})
-        return events
+        return tuple(published)
+
+    def _merge_contact_bindings(self, event: dict) -> list[dict]:
+        """Keep the surviving track geometry and canonicalize scheduler IDs."""
+        cid = self.resolve_contact_id(event["contact_id"])
+        if self.contacts.snapshot(cid).state == "cleared":
+            # The engine will release all bindings through civilian_released.
+            return []
+        owner = event["assigned_uav_id"]
+        tracks = [region for region in self._track_regions
+                  if region.target_group_id is not None
+                  and self.resolve_contact_id(region.target_group_id) == cid]
+        # Legacy operation bindings can predate ContactStore reservations.
+        # Prefer the AIS track just as ContactStore prefers the AIS owner.
+        if owner is None:
+            assigned = sorted((region for region in tracks if region.assigned_uav_id),
+                              key=lambda region: region.target_group_id != cid)
+            if assigned:
+                owner = assigned[0].assigned_uav_id
+                self.contacts.reserve(cid, owner, None)
+                event["assigned_uav_id"] = owner
+        retained = next((region for region in tracks if region.assigned_uav_id == owner), None)
+        cancellations = []
+        for region in tracks:
+            if region is retained:
+                region.target_group_id = cid
+            else:
+                self.release_track_region(region.id, create_marker=False)
+        for uav in self._uavs:
+            if uav.target_group_id and self.resolve_contact_id(uav.target_group_id) == cid:
+                if owner is not None and uav.id != owner:
+                    cancellations.append({
+                        "type": "duplicate_task_cancelled", "contact_id": cid,
+                        "alias_contact_id": event["alias_contact_id"],
+                        "uav_id": uav.id, "probe_id": None,
+                    })
+                    self.clear_uav_assignment(uav.id)
+                else:
+                    uav.target_group_id = cid
+                    if retained is not None:
+                        uav.assigned_region_id = retained.id
+        for name in self._legacy_contact_ids:
+            self._legacy_contact_ids[name] = self.resolve_contact_id(name)
+        self._known_target_groups.add(cid)
+        return cancellations
 
     def create_track_region(self, target_group_id: str, center: GridCoord) -> Region:
         existing = self.get_track_region_for_group(target_group_id)

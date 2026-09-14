@@ -75,6 +75,7 @@ def test_event_transitions_are_exact_and_exclude_work_range_exhausted():
     assert EVENT_TRANSITIONS == {
         "target_found": OperationMode.TRACK,
         "target_lost": OperationMode.COVERAGE,
+        "duplicate_task_cancelled": OperationMode.COVERAGE,
         "civilian_released": OperationMode.COVERAGE,
         "target_departed": OperationMode.COVERAGE,
         "search_complete": OperationMode.HOLDING,
@@ -134,7 +135,7 @@ def test_target_found_atomically_replaces_coverage_with_unstarted_tracking(
 
 
 @pytest.mark.parametrize(
-    "event_type", ["target_lost", "civilian_released", "target_departed"]
+    "event_type", ["target_lost", "civilian_released", "target_departed", "duplicate_task_cancelled"]
 )
 def test_tracking_exit_restores_the_saved_coverage_task(
     factory, coverage_task, event_type

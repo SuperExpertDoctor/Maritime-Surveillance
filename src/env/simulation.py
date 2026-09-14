@@ -6,6 +6,7 @@ import random
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections.abc import Mapping
+from dataclasses import replace
 
 import numpy as np
 
@@ -342,6 +343,7 @@ class SimulationEngine:
         self._update_obstacles()
         self._update_ships(t)
         self._refresh_ais_signals(t)
+        self._expire_contacts(t)
 
         for uav in self.uavs:
             fuel_low = self._step_controlled_uav(uav, t)
@@ -480,7 +482,8 @@ class SimulationEngine:
             self._coordinator_tasks[uav.id] = active_task
         command = tick.execution.applied_command
         if command.operation_mode is OperationMode.TRACK:
-            uav.target_group_id = command.target_contact_id
+            uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
+                command.target_contact_id, command.target_contact_id)
             if command.target_contact_id:
                 uav._mission_kind = "track_entry"
         elif command.operation_mode not in (OperationMode.TRACK,):
@@ -1007,10 +1010,42 @@ class SimulationEngine:
         self._publish_contact_events(current_time)
 
     def _publish_contact_events(self, current_time: float) -> None:
-        for event in self.allocator.sm.publish_contact_events():
+        sm = self.allocator.sm
+        for event in sm.publish_contact_events():
+            if event["type"] == "duplicate_task_cancelled":
+                uav = next(u for u in self.uavs if u.id == event["uav_id"])
+                uav.target_group_id = None
+                sm.clear_uav_assignment(uav.id)
+                self._tracking_started_at.pop(uav.id, None)
+                self._coordinator_tasks.pop(uav.id, None)
+                if self.control_coordinator.has_controller(uav.id):
+                    self._queue_control_event("duplicate_task_cancelled", uav.id, current_time, event)
+            elif (event["type"] == "contact_merged"
+                  and sm.contacts.snapshot(event["contact_id"]).state == "cleared"):
+                self._release_target_group(event["contact_id"], current_time, "civilian_released")
+            elif event["type"] == "contact_merged":
+                cid = sm.resolve_contact_id(event["contact_id"])
+                for uav in self.uavs:
+                    if uav.target_group_id and sm.resolve_contact_id(uav.target_group_id) == cid:
+                        uav.target_group_id = cid
+                    task = self.control_coordinator.active_task(uav.id)
+                    if (task is not None and task.target_contact_id
+                            and task.target_contact_id != cid
+                            and sm.resolve_contact_id(task.target_contact_id) == cid
+                            and (event["assigned_uav_id"] is None
+                                 or event["assigned_uav_id"] == uav.id)):
+                        task = replace(task, target_contact_id=cid)
+                        self.control_coordinator.assign_task(uav.id, task, current_time=current_time)
+                        self._coordinator_tasks[uav.id] = task
+            elif event["type"] == "contact_lost":
+                self._release_target_group(event["contact_id"], current_time, "target_lost")
             if event["type"] in ("contact_created", "contact_merged", "contact_lost"):
                 self.allocator.trigger_manager.notify_event(
                     event["type"], time=current_time, contact_id=event["contact_id"])
+
+    def _expire_contacts(self, current_time: float) -> None:
+        self.allocator.sm.contacts.expire(current_time)
+        self._publish_contact_events(current_time)
 
     def _release_departed_group(self, group_id: str, current_time: float) -> None:
         self._release_target_group(group_id, current_time, "target_departed")
@@ -1224,14 +1259,17 @@ class SimulationEngine:
         current_time: float,
         event_type: str,
     ) -> None:
-        """Release a civilian or departed target without creating a loss marker."""
+        """Release contact bindings and queue the ordinary lifecycle transition."""
         sm = self.allocator.sm
+        group_id = sm.resolve_contact_id(group_id)
         sm.clear_target_report(group_id)
         track = sm.get_track_region_for_group(group_id)
         if track is not None:
-            sm.release_track_region(track.id, create_marker=False)
+            sm.release_track_region(track.id, create_marker=event_type == "target_lost")
         for uav in self.uavs:
-            if uav.target_group_id != group_id:
+            task = self.control_coordinator.active_task(uav.id)
+            targets = (uav.target_group_id, task.target_contact_id if task else None)
+            if not any(target and sm.resolve_contact_id(target) == group_id for target in targets):
                 continue
             self._tracking_started_at.pop(uav.id, None)
             self._ais_tracking_started_at.pop(uav.id, None)
@@ -1811,7 +1849,7 @@ class SimulationEngine:
                 lease.generation,
                 self.control_coordinator.safety_intervened(entity.id),
             )
-        sm.contacts.expire(sm.current_time)
+        self._expire_contacts(sm.current_time)
         for track in list(sm.get_track_regions()):
             center = self._contact_center(track.target_group_id)
             if center:
