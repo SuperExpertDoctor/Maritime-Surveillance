@@ -146,18 +146,38 @@ def test_recorded_rng_manifest_replays_identity_and_target_ais_selection():
 
 def test_engine_uses_actual_land_and_islands_for_population(monkeypatch):
     from src.env.obstacle import Island, obstacle_grid_mask
+    from src.env import simulation as simulation_module
     from src.env.simulation import SimulationEngine
 
     # Initialization checks credentials but does not call the LLM.
     monkeypatch.setenv("LONGCAT_API_KEY", "t02-offline-test")
+
+    captured = {}
+    original_create_ship_population = simulation_module.create_ship_population
+
+    def capture_population(config, seed, land_mask, navigator):
+        captured["config"] = config
+        captured["seed"] = seed
+        captured["land_mask"] = np.asarray(land_mask, dtype=bool).copy()
+        captured["navigator"] = navigator
+        return original_create_ship_population(config, seed, land_mask, navigator)
+
+    monkeypatch.setattr(
+        simulation_module,
+        "create_ship_population",
+        capture_population,
+    )
     engine = SimulationEngine(_config(8, 3), seed=417)
     expected_mask = engine.land_mask | obstacle_grid_mask(
         [obstacle for obstacle in engine.obstacles if isinstance(obstacle, Island)],
         engine.config.grid.resolution, include_islands=True,
     )
-    repeated = _create_ship_population(engine.config, engine.seed, expected_mask, engine.ship_navigator)
-    assert _snapshot(engine.ships) == _snapshot(repeated)
+    assert captured["config"] is engine.config
+    assert captured["seed"] == engine.seed
+    assert captured["navigator"] is engine.ship_navigator
+    assert np.array_equal(captured["land_mask"], expected_mask)
+    assert np.array_equal(captured["land_mask"], engine.ship_land_mask)
     for ship in engine.ships:
         assert engine._group_center(ship.contact_id) == ship.float_position
         for pose in ship.normal_route:
-            assert not expected_mask[math.floor(pose[0]), math.floor(pose[1])]
+            assert not captured["land_mask"][math.floor(pose[0]), math.floor(pose[1])]

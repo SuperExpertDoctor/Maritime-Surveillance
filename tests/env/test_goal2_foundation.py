@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from src.env.base_station import BaseStation
 from src.env.obstacle import Island, Thunderstorm, obstacle_intersects_mask
 from src.env.simulation import SimulationEngine
@@ -417,10 +419,11 @@ def test_ships_are_independent_contacts_with_generic_public_types():
     assert len({ship.normal_route for ship in engine.ships}) == len(engine.ships)
 
 
-def test_civilian_normal_motion_does_not_read_tracking_state():
+@pytest.mark.parametrize("identity", ("civilian", "target"))
+def test_normal_motion_does_not_read_tracking_state(identity):
     untracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
     tracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    untracked = next(ship for ship in untracked_engine.ships if ship.truth_identity == "civilian")
+    untracked = next(ship for ship in untracked_engine.ships if ship.truth_identity == identity)
     tracked = next(ship for ship in tracked_engine.ships if ship.id == untracked.id)
 
     tracked.set_tracked(True)
