@@ -148,12 +148,17 @@ def plan_payload(snapshot_id="S1", active=("V1", "V2"), **changes):
     }
 
 
-def commander_with(scripted_transport, ship_config, responses):
+def commander_with(scripted_transport, ship_config, responses, threat_gate=None):
     transport = scripted_transport({
         "red_commander": [json.dumps(r) if isinstance(r, dict) else r for r in responses],
     })
     gateway = LLMGateway(transport=transport)
-    commander = red_module().RedCommander(gateway, ship_config)
+    if threat_gate is None:
+        commander = red_module().RedCommander(gateway, ship_config)
+    else:
+        commander = red_module().RedCommander(
+            gateway, ship_config, threat_gate=threat_gate,
+        )
     return commander, gateway, transport
 
 
@@ -462,6 +467,38 @@ def test_clear_and_reentry_require_fresh_snapshot_plan(scripted_transport, ship_
     with pytest.raises(red_module().RedDecisionBlocked):
         commander.decide(snapshot("reentry", 2.0))
     assert commander.installation is None
+
+
+def test_between_frame_clear_and_reentry_cannot_reuse_old_installation(
+    scripted_transport, ship_config,
+):
+    config = replace(ship_config, clear_hold_min=0.5)
+    gate = red_module().ThreatGate(config)
+    commander, gateway, transport = commander_with(
+        scripted_transport, config,
+        [plan_payload()] + [TimeoutError("reentry failed")] * 3,
+        threat_gate=gate,
+    )
+    assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
+    assert gate.update("V2", "target", 1.0, 0.0) == "evasive"
+    first = commander.decide(snapshot())
+    installed = commander.installation
+
+    gate.observe_swept_distance("V1", "target", 3.0, 0.1)
+    assert gate.update("V1", "target", 3.0, 0.1) == "recovering"
+    gate.observe_swept_distance("V1", "target", 3.0, 0.6)
+    assert gate.update("V1", "target", 3.0, 0.6) == "normal"
+    assert commander.installation is None
+    gate.observe_swept_distance("V1", "target", 1.0, 0.7)
+    assert gate.update("V1", "target", 1.0, 0.7) == "evasive"
+
+    assert installed.plan is first
+    assert installed.expires_at_min > 1.0
+    with pytest.raises(red_module().RedDecisionBlocked):
+        commander.decide(snapshot("S2", 1.0))
+    assert commander.installation is None
+    assert len(gateway.call_log) == 2
+    assert len(transport.calls) == 4
 
 
 def test_clear_one_target_then_reentry_does_not_restore_previous_fleet_plan(scripted_transport, ship_config):

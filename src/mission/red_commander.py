@@ -43,11 +43,18 @@ class ThreatGate:
     def __init__(self, config: ShipConfig):
         self.config = config
         self._ships: dict[str, _GateState] = {}
+        self._episode_revision = 0
+
+    @property
+    def episode_revision(self) -> int:
+        """Monotonic handoff for episode boundaries between commander frames."""
+        return self._episode_revision
 
     def update(
         self, ship_id: str, identity: str, min_distance_cells: float, now_min: float,
     ) -> str:
         gate = self._ships.setdefault(ship_id, _GateState())
+        previous_state = gate.state
         if identity != "target":
             gate.state, gate.clear_since_min = "normal", None
         elif gate.state == "normal":
@@ -61,6 +68,11 @@ class ThreatGate:
                 gate.state, gate.clear_since_min = "normal", None
         else:
             gate.state, gate.clear_since_min = "evasive", None
+        if (
+            (previous_state == "normal" and gate.state == "evasive")
+            or (previous_state == "recovering" and gate.state == "normal")
+        ):
+            self._episode_revision += 1
         return gate.state
 
     def observe_swept_distance(
@@ -175,15 +187,21 @@ class RedCommander:
 
     This service installs parameters only. Navigation, motion and delivery of
     substep gate observations belong to the simulation owner (T05/T12).
+    Feed those observations through this commander's bound ``threat_gate``.
     Call even with an empty active set to retire cleared gate episodes. Snapshot
     IDs are unique per episode; an identical blocked snapshot may be retried
     after resume, but successful duplicate delivery never reinstalls a plan.
     """
 
-    def __init__(self, gateway: LLMGateway, config: ShipConfig):
+    def __init__(
+        self, gateway: LLMGateway, config: ShipConfig,
+        threat_gate: ThreatGate | None = None,
+    ):
         self.gateway = gateway
         self.config = config
+        self.threat_gate = threat_gate or ThreatGate(config)
         self._installation: RedPlanInstallation | None = None
+        self._installation_episode_revision: int | None = None
         self._last_snapshot: RedSnapshot | None = None
         self._seen_snapshot_ids: set[str] = set()
         self._delivered_snapshot_id: str | None = None
@@ -261,10 +279,26 @@ class RedCommander:
 
     @property
     def installation(self) -> RedPlanInstallation | None:
+        self._sync_gate_revision()
         return self._installation
+
+    def _retire_installation(self) -> None:
+        self._installation = None
+        self._installation_episode_revision = None
+
+    def _sync_gate_revision(self) -> int:
+        episode_revision = self.threat_gate.episode_revision
+        if (
+            self._installation is not None
+            and self._installation_episode_revision != episode_revision
+        ):
+            self._retire_installation()
+            self._delivered_snapshot_id = None
+        return episode_revision
 
     def decide(self, snapshot: RedSnapshot) -> RedPlan | None:
         _validate_snapshot(snapshot)
+        episode_revision = self._sync_gate_revision()
         previous = self._last_snapshot
         if previous is not None:
             if snapshot.snapshot_id == previous.snapshot_id:
@@ -281,7 +315,7 @@ class RedCommander:
         self._seen_snapshot_ids.add(snapshot.snapshot_id)
         active = set(snapshot.active_ship_ids)
         if not active:
-            self._installation = None
+            self._retire_installation()
             self._delivered_snapshot_id = snapshot.snapshot_id
             return None
         installed = self._installation
@@ -290,7 +324,7 @@ class RedCommander:
                 {command.ship_id for command in installed.plan.commands} != active
                 or snapshot.sim_time_min >= installed.expires_at_min
             ):
-                self._installation = None
+                self._retire_installation()
             elif (
                 self._last_request_at_min is not None
                 and snapshot.sim_time_min - self._last_request_at_min < self.config.red_decision_cycle_min
@@ -317,5 +351,6 @@ class RedCommander:
             notes=payload["notes"],
         )
         self._installation = RedPlanInstallation(plan, snapshot.sim_time_min)
+        self._installation_episode_revision = episode_revision
         self._delivered_snapshot_id = snapshot.snapshot_id
         return plan
