@@ -1,6 +1,6 @@
 """Strict configuration contracts and validation for the mission domain."""
 
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 import math
 from typing import TYPE_CHECKING, TypeVar
 
@@ -31,6 +31,9 @@ class ContactConfig:
     civilian_recheck_cooldown_min: float
     prompt_contact_limit: int
     prompt_keypoints_per_contact: int
+    # Filled from grid configuration by ConfigLoader. Standalone callers may
+    # omit the scale; physical speed features must then remain null.
+    cell_size_km: float | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -296,6 +299,8 @@ def validate_mission_config(config: "AppConfig") -> None:
             "mission.contact.baseline_standoff_cells"
         )
     cell_size_km = _positive(config.grid.cell_size_km, "grid.cell_size_km")
+    if contact.cell_size_km is not None:
+        _positive(contact.cell_size_km, "mission.contact.cell_size_km")
     eo_range_cells = _positive(
         config.sensor.eoir.detection_range_km,
         "sensor.eoir.detection_range_km",

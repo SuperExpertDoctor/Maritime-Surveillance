@@ -87,6 +87,7 @@ def test_ship_and_mission_config_fields_match_design():
         "civilian_recheck_cooldown_min",
         "prompt_contact_limit",
         "prompt_keypoints_per_contact",
+        "cell_size_km",
     )
     assert tuple(field.name for field in fields(config.mission.intent)) == (
         "max_active_intents",

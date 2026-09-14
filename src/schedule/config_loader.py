@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from src.mission.config import (
     ContactConfig,
@@ -205,8 +205,9 @@ class ConfigLoader:
                     f"mission.evolution.{seed_field}",
                 )
         mission = MissionConfig(
-            contact=strict_dataclass(
-                mission_data.get("contact"), ContactConfig, "mission.contact"
+            contact=replace(
+                strict_dataclass(mission_data.get("contact"), ContactConfig, "mission.contact"),
+                cell_size_km=grid_data["cell_size_km"],
             ),
             intent=strict_dataclass(
                 mission_data.get("intent"), IntentConfig, "mission.intent"

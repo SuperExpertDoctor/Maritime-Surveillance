@@ -1,6 +1,6 @@
 """Immutable public contracts for the mixed maritime mission domain."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import math
 from typing import Literal
@@ -134,6 +134,35 @@ class ProbeSession:
     near_sample_ids: tuple[str, ...]
     close_exposure_min: float
     completed_reason: str | None
+    # Immutable bookkeeping for incremental updates; public IDs remain the
+    # evidence references. Defaults preserve existing construction/call sites.
+    _phase_samples: tuple[ObservationSample, ...] = field(default=(), repr=False, kw_only=True)
+    _phase_marker: tuple[str, float] | None = field(default=None, repr=False, kw_only=True)
+    _last_sample_key: tuple[float, str] | None = field(default=None, repr=False, kw_only=True)
+
+
+@dataclass(frozen=True)
+class TrajectoryFeatures:
+    """Observed trajectory evidence (D §7.3), never an identity decision."""
+
+    contact_id: str
+    history_revision: int
+    probe_id: str
+    baseline_sample_ids: tuple[str, ...]
+    near_sample_ids: tuple[str, ...]
+    baseline_duration_min: float
+    near_duration_min: float
+    baseline_speed_mean_kn: float | None
+    near_speed_mean_kn: float | None
+    baseline_abs_turn_rate_deg_min: float | None
+    near_abs_turn_rate_deg_min: float | None
+    heading_change_deg: float | None
+    min_observed_uav_distance_cells: float | None
+    close_exposure_min: float
+    near_land_fraction: float
+    max_observation_gap_min: float
+    sufficient_evidence: bool
+    confounders: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -209,6 +238,7 @@ __all__ = [
     "RedPlan",
     "SHIP_RNG_STREAMS",
     "TaskCandidate",
+    "TrajectoryFeatures",
     "Vec2",
     "VisualDetection",
     "ship_rng_manifest",

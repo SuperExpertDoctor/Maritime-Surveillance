@@ -150,7 +150,8 @@ from src.mission.contracts import (
     ],
 )
 def test_design_contract_fields_are_frozen(contract, expected_fields):
-    assert tuple(field.name for field in fields(contract)) == expected_fields
+    assert tuple(field.name for field in fields(contract)
+                 if not field.name.startswith("_")) == expected_fields
     assert contract.__dataclass_params__.frozen is True
 
 
