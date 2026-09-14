@@ -664,6 +664,56 @@ def test_actual_defaults_rolling_repair_looks_beyond_horizon(
     assert ship.navigation_status == "ready"
 
 
+@pytest.mark.parametrize("horizon", [8., 20.])
+def test_bending_normal_route_preserves_progress_through_obstacle_repair(horizon, monkeypatch):
+    ship = Ship(
+        "V1", GridCoord(5, 5), 18, cell_size_km=1,
+        normal_route=tuple((x, y, 0.) for x, y in
+                           ((5, 5), (6, 5), (6, 6), (5, 6), (5, 9), (20, 9))),
+        max_turn_rate_deg_min=90, yaw_time_constant_min=.1,
+        heading_control_gain_per_min=5, turn_speed_loss_fraction=0,
+        navigation_horizon_min=horizon, navigation_clearance_cells=0)
+    planner = ship.navigator
+    mask = np.zeros((30, 30), bool)
+    mask[4, 7] = True
+    ship.land_mask = mask
+    goals_seen = []
+    original = planner.astar.plan_grid
+
+    def record(start, goals, *args, **kwargs):
+        goals_seen.extend(goals)
+        return original(start, goals, *args, **kwargs)
+
+    monkeypatch.setattr(planner.astar, "plan_grid", record)
+    route = planner.plan(ship.pose, None, ship.normal_tangent_rad(), 0., mask)
+    assert ship._route_index == 1, "prediction must not advance the physical vessel's cursor"
+    assert goals_seen, "the obstacle must exercise reference repair"
+    # The 8-minute horizon ends inside the obstacle, so goals require extension.
+    # All rejoins must be north of it, never back toward the earlier (6, 5) leg.
+    assert all(y > 8. for x, y in goals_seen), goals_seen
+    assert route.status == "ready", route.blocked_reason
+    assert route.poses[-1][1] > 7.8
+    if horizon == 20.:
+        # This horizon also regenerates a suffix after the detour. It must
+        # continue east toward (20, 9), rather than turn back toward (5, 6).
+        assert route.poses[-1][0] > 8.
+        assert abs(route._commands[-1].heading_rad) < .2
+    state = ship._motion_state()
+    for command, expected in zip(route._commands, route.poses[1:]):
+        rolled = ship.motion_dynamics.roll(
+            state, command.heading_rad, command.speed_kn, command.duration_min)
+        assert rolled.pose == expected
+        assert math.dist(state.pose[:2], rolled.pose[:2]) <= (
+            18 * 1.852 / 60 * command.duration_min + 1e-12)
+        assert abs(rolled.yaw_rate) <= ship.max_turn_rate_rad_per_min
+        state = rolled
+    assert planner.can_stop(state, mask)
+    actual = ship.advance(route, sum(c.duration_min for c in route._commands))
+    assert actual == route.poses
+    assert ship.navigation_status == "ready"
+    assert_water_path(actual, mask)
+
+
 def test_default_repair_blocks_when_bounded_reference_cannot_rejoin(monkeypatch):
     ship = Ship("V1", GridCoord(11, 15), 18,
                 normal_route=((11., 15., 0.), (39., 15., 0.)))

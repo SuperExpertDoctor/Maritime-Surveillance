@@ -228,13 +228,17 @@ class ShipNavigator:
         self.ship._navigation_generation += 1
         initial = MotionState(pose, self.ship.speed_kn, self.ship._yaw_rate_rad_per_min)
         states, commands = [initial], []
-        for state, command in self._reference_steps(
-                initial, params, normal_tangent_rad, now_min, land_mask, self.horizon_min):
+        normal_indices = [self.ship._route_index]
+        for state, command, normal_index in self._reference_steps(
+                initial, params, normal_tangent_rad, now_min, land_mask, self.horizon_min,
+                normal_indices[-1]):
             states.append(state)
             commands.append(command)
+            normal_indices.append(normal_index)
         mask = np.array(land_mask, dtype=bool, copy=True)
         mask.setflags(write=False)
-        repaired = self._repair(states, commands, mask, params, normal_tangent_rad, now_min)
+        repaired = self._repair(states, commands, normal_indices, mask, params,
+                                normal_tangent_rad, now_min)
         if repaired is None:
             return self.braking_route(initial, now_min, mask, "no dynamically safe route")
         # Include any downstream reference extension in the deviation baseline.
@@ -249,9 +253,9 @@ class ShipNavigator:
                          "ready", None, deviation, tuple(commands), initial, self, mask,
                          self.island_bounds, self.ship._navigation_generation)
 
-    def _reference_steps(self, state, params, tangent, now_min, mask, duration_min):
+    def _reference_steps(self, state, params, tangent, now_min, mask, duration_min,
+                         normal_index):
         elapsed = 0.
-        normal_index = self.ship._route_index
         while elapsed < duration_min - 1e-10 and not self.has_exited(state.pose, mask):
             dt = min(self.integration_dt_min, duration_min - elapsed)
             heading = self.reference_heading(params, tangent, now_min + elapsed)
@@ -261,7 +265,7 @@ class ShipNavigator:
             command = MotionCommand(dt, heading, speed)
             state = self.ship.motion_dynamics.roll(state, heading, speed, dt)
             elapsed += dt
-            yield state, command
+            yield state, command, normal_index
 
     def _normal_guidance(self, pose, index, mask):
         route = self.ship.normal_route
@@ -286,7 +290,7 @@ class ShipNavigator:
             target = (boundary + sign, cross) if axis == 0 else (cross, boundary + sign)
         return math.atan2(target[1] - pose[1], target[0] - pose[0]), index
 
-    def _repair(self, states, commands, mask, params, tangent, now_min, depth=0):
+    def _repair(self, states, commands, normal_indices, mask, params, tangent, now_min, depth=0):
         collision = next((i for i in range(len(commands)) if not self.segment_is_safe(
             states[i].pose, states[i + 1].pose, mask)), None)
         dynamics = self.ship.motion_dynamics
@@ -298,7 +302,7 @@ class ShipNavigator:
         # looping or very long blocked references therefore terminate explicitly.
         elapsed = sum(c.duration_min for c in commands)
         extension = iter(()) if depth else self._reference_steps(
-            states[-1], params, tangent, now_min + elapsed, mask, 120.)
+            states[-1], params, tangent, now_min + elapsed, mask, 120., normal_indices[-1])
         if collision is None and depth == 0 and (mask.any() or self.island_bounds):
             # Detect land while a turn can still start outside the inflated A*
             # cells. A short nominal horizon alone loses that approach on replan.
@@ -310,13 +314,14 @@ class ShipNavigator:
                 item = next(extension, None)
                 if item is None:
                     break
-                state, command = item
+                state, command, normal_index = item
                 preview.append(item)
                 elapsed += command.duration_min
                 if not self.segment_is_safe(previous.pose, state.pose, mask):
                     collision = len(commands) + len(preview) - 1
-                    states.extend(s for s, _ in preview)
-                    commands.extend(c for _, c in preview)
+                    states.extend(s for s, _, _ in preview)
+                    commands.extend(c for _, c, _ in preview)
+                    normal_indices.extend(index for _, _, index in preview)
                     break
                 previous = state
         if collision is None:
@@ -335,9 +340,10 @@ class ShipNavigator:
         candidates = [j for j in range(collision + 1, len(states))
                       if self.segment_is_safe(states[j].pose, states[j].pose, inflated)]
         if not candidates:
-            for state, command in extension:
+            for state, command, normal_index in extension:
                 states.append(state)
                 commands.append(command)
+                normal_indices.append(normal_index)
                 if self.segment_is_safe(state.pose, state.pose, inflated):
                     candidates.append(len(states) - 1)
                     if math.dist(state.pose[:2], states[collision].pose[:2]) >= 2 * radius:
@@ -365,9 +371,14 @@ class ShipNavigator:
             detour_states, detour_commands = detour
             stitched_states = states[:anchor] + detour_states
             stitched_commands = commands[:anchor] + detour_commands
+            # Prediction owns its cursor. Keep the approach's progress during
+            # the detour, then resume from the selected downstream reference.
+            normal_index = normal_indices[j]
+            stitched_indices = (normal_indices[:anchor]
+                                + [normal_indices[anchor]] * (len(detour_states) - 1)
+                                + [normal_index])
             state = stitched_states[-1]
             elapsed = sum(c.duration_min for c in stitched_commands)
-            normal_index = self.ship._route_index
             for command in commands[j:]:
                 heading = self.reference_heading(params, tangent, now_min + elapsed)
                 if params is None:
@@ -376,8 +387,10 @@ class ShipNavigator:
                 state = dynamics.roll(state, command.heading_rad, command.speed_kn, command.duration_min)
                 stitched_states.append(state)
                 stitched_commands.append(command)
+                stitched_indices.append(normal_index)
                 elapsed += command.duration_min
-            repaired = self._repair(stitched_states, stitched_commands, mask, params, tangent, now_min, depth + 1)
+            repaired = self._repair(stitched_states, stitched_commands, stitched_indices,
+                                    mask, params, tangent, now_min, depth + 1)
             if repaired is not None:
                 return repaired
         return None
