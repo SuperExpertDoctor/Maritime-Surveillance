@@ -276,28 +276,47 @@ class LLMGateway:
             user_payload=user_payload, validate=None,
         )
 
+    def request_probe(
+        self,
+        *,
+        role: str,
+        snapshot_id: str,
+        system_prompt: str,
+        user_prompt: str,
+        timeout_seconds: float,
+    ) -> ModelResult:
+        """Issue one audited short-text request for connectivity checks."""
+        return self._request(
+            role=role, snapshot_id=snapshot_id, system_prompt=system_prompt,
+            user_payload=None, user_content=user_prompt, validate=None,
+            attempt_limit=1, max_tokens=8, timeout_seconds=timeout_seconds,
+        )
+
     def _request(
         self,
         *,
         role: str,
         snapshot_id: str,
         system_prompt: str,
-        user_payload: dict,
+        user_payload: dict | None,
         validate: Callable[[dict], tuple[str, ...]] | None,
+        user_content: str | None = None,
+        attempt_limit: int | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelResult:
         if role not in _ROLE_TOKEN_LIMITS:
             raise LLMConfigurationError(f"unsupported model role: {role}")
         call_id = uuid4().hex
+        if user_content is None:
+            user_content = json.dumps(
+                user_payload,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
         messages = [
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    user_payload,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ),
-            },
+            {"role": "user", "content": user_content},
         ]
         binding = self._binding(role)
         call = {
@@ -315,7 +334,12 @@ class LLMGateway:
 
         last_errors: tuple[str, ...] = ()
         failure_category = "transport"
-        for attempt_number in range(1, self._max_correction_retries + 2):
+        total_attempts = (
+            attempt_limit
+            if attempt_limit is not None
+            else self._max_correction_retries + 1
+        )
+        for attempt_number in range(1, total_attempts + 1):
             attempt = {
                 "attempt": attempt_number,
                 "messages": self.redact_log(messages),
@@ -329,13 +353,15 @@ class LLMGateway:
                     model=binding["model"],
                     messages=deepcopy(messages),
                     temperature=binding["temperature"],
-                    max_tokens=binding["max_tokens"],
+                    max_tokens=(
+                        max_tokens if max_tokens is not None else binding["max_tokens"]
+                    ),
                     thinking=binding["thinking"],
                     json_mode=validate is not None,
                     api_base=binding["api_base"],
                     api_key_env=binding["api_key_env"],
                     supports_json_mode=binding["supports_json_mode"],
-                    timeout_seconds=None,
+                    timeout_seconds=timeout_seconds,
                 )
             except AssertionError:
                 raise

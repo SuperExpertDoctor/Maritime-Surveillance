@@ -32,17 +32,19 @@ class LLMClient:
     def probe(self, timeout_seconds: float = 20.0) -> str:
         """Verify the configured LongCat route with a bounded live request."""
         self.assert_ready()
-        response = self._call_api(
-            "You are a connectivity probe. Reply with OK only.",
-            "Reply with OK.",
+        result = self.gateway.request_probe(
             role="decision_maker",
-            json_mode=False,
-            max_tokens=8,
+            snapshot_id="connectivity-probe",
+            system_prompt="You are a connectivity probe. Reply with OK only.",
+            user_prompt="Reply with OK.",
             timeout_seconds=timeout_seconds,
-        ).strip()
-        if not response:
-            raise LLMConfigurationError("LongCat probe returned an empty response")
-        return response
+        )
+        if not result.success:
+            if result.failure_category == "validation":
+                raise LLMConfigurationError("LongCat probe returned an empty response")
+            detail = result.errors[0] if result.errors else result.failure_category
+            raise LLMConfigurationError(f"LongCat probe failed: {detail}")
+        return result.payload["text"].strip()
 
     def set_reviewer_memory(self, memory: str) -> None:
         self._reviewer_memory = memory
@@ -151,31 +153,6 @@ class LLMClient:
             "validation": {"is_valid": result.success, "errors": list(result.errors)},
         }))
         return interaction
-
-    def _call_api(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        role: str = "decision_maker",
-        json_mode: bool = True,
-        max_tokens: int | None = None,
-        timeout_seconds: float | None = None,
-    ) -> str:
-        """Single transport call for the legacy bounded connectivity probe."""
-        binding = self.resolve_binding(role)
-        return self.gateway.transport.complete(
-            role=role, model=binding["model"],
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=binding["temperature"],
-            max_tokens=max_tokens if max_tokens is not None else binding["max_tokens"],
-            thinking=binding["thinking"], json_mode=json_mode,
-            api_base=binding["api_base"], api_key_env=binding["api_key_env"],
-            supports_json_mode=binding["supports_json_mode"],
-            timeout_seconds=timeout_seconds,
-        )
 
     @staticmethod
     def _parse_json(raw: str) -> dict | None:

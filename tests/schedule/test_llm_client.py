@@ -46,24 +46,30 @@ def test_full_retained_capacity_accepts_empty_real_model_plan():
 
 def test_probe_uses_a_short_bounded_longcat_request(monkeypatch):
     monkeypatch.setenv("LONGCAT_API_KEY", "offline-probe-key")
-    client = LLMClient(ConfigLoader.load())
-    captured = {}
+    transport = ScriptedTransport({"decision_maker": ["OK"]})
+    client = LLMClient(ConfigLoader.load(), transport=transport)
 
-    def fake_call(system_prompt, user_prompt, **kwargs):
-        captured.update(kwargs)
-        assert "connectivity probe" in system_prompt
-        assert user_prompt == "Reply with OK."
-        return "OK"
+    result = client.probe(timeout_seconds=7.5)
 
-    monkeypatch.setattr(client, "_call_api", fake_call)
-
-    assert client.probe(timeout_seconds=7.5) == "OK"
-    assert captured == {
-        "role": "decision_maker",
-        "json_mode": False,
-        "max_tokens": 8,
-        "timeout_seconds": 7.5,
-    }
+    assert result == "OK"
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["max_tokens"] == 8
+    assert transport.calls[0]["timeout_seconds"] == 7.5
+    assert transport.calls[0]["json_mode"] is False
+    assert transport.calls[0]["messages"] == [
+        {
+            "role": "system",
+            "content": "You are a connectivity probe. Reply with OK only.",
+        },
+        {"role": "user", "content": "Reply with OK."},
+    ]
+    audit = client.gateway.call_log[-1]
+    assert audit["call_id"]
+    assert audit["role"] == "decision_maker"
+    assert audit["snapshot_id"] == "connectivity-probe"
+    assert audit["success"] is True
+    assert len(audit["attempts"]) == 1
+    assert audit["attempts"][0]["raw_output"] == "OK"
 
 
 def test_decision_retries_when_parallel_allocation_is_incomplete():
