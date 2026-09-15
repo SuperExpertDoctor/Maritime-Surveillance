@@ -292,6 +292,14 @@ class ShipNavigator:
         if target_index == len(route) - 1 and gate is not None and math.dist(pose[:2], target) < lookahead:
             axis, sign, boundary, cross = gate
             target = (boundary + sign, cross) if axis == 0 else (cross, boundary + sign)
+        elif target_index == len(route) - 1 and gate is not None:
+            axis, sign, boundary, cross = gate
+            along_gate = (boundary - pose[axis]) * sign
+            # Inertial rollout can pass the boundary waypoint by less than a
+            # cell before the next replan. Keep steering through the same
+            # legal gate instead of turning back toward the route endpoint.
+            if 0.0 <= along_gate <= max(1.0, lookahead) and abs(pose[1 - axis] - cross) < .5:
+                target = (boundary + sign, cross) if axis == 0 else (cross, boundary + sign)
         return math.atan2(target[1] - pose[1], target[0] - pose[0]), index
 
     def _repair(self, states, commands, normal_indices, mask, params, tangent, now_min, depth=0):

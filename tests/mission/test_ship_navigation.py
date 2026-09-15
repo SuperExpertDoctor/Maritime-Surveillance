@@ -111,6 +111,27 @@ def test_normal_tangent_follows_route_progress_without_snapping():
     assert not ship.departed
 
 
+def test_normal_route_eventually_crosses_a_boundary_exit_gate_with_inertia():
+    nav = navigation()
+    mask = np.zeros((30, 30), dtype=bool)
+    ship = Ship(
+        "V1",
+        GridCoord(28, 15),
+        18,
+        cell_size_km=10,
+        normal_route=((28.0, 15.0, 0.0), (29.0, 15.0, 0.0)),
+        land_mask=mask,
+        navigator=nav.AStarNavigator(),
+    )
+
+    for _ in range(300):
+        ship.step(1.0)
+        if ship.departed:
+            break
+
+    assert ship.departed
+
+
 def assert_water_path(poses, mask, clearance=0.):
     # Independent exact rectangle/segment check, including grid-corner grazing.
     from src.env.obstacle import Island
