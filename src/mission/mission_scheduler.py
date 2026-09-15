@@ -1,0 +1,666 @@
+"""Strict mission selection validation and exact feasible-task matching."""
+from __future__ import annotations
+
+import math
+import os
+from dataclasses import asdict, is_dataclass
+
+from src.mission.contracts import (
+    Assignment,
+    AssignmentBatch,
+    FeasibleEdge,
+    MissionSelection,
+    MissionSnapshot,
+    TaskCandidate,
+    TaskRecord,
+    UavResource,
+)
+
+
+SELECTION_SCHEMA = "mission-selection/v1"
+DEFAULT_REASSIGNMENT_COOLDOWN_MIN = 5.0
+_SELECTION_FIELDS = {
+    "schema_version",
+    "snapshot_id",
+    "selected_task_ids",
+    "preempt_uav_ids",
+    "defer_reason",
+    "notes",
+}
+_PROTECTED_OPERATIONS = {
+    "return",
+    "returning",
+    "refuel",
+    "refueling",
+    "probe",
+    "track",
+    "tracking",
+    "safety",
+    "safety_takeover",
+}
+_ORDINARY_SEARCH_OPERATIONS = {
+    "coverage",
+    "search",
+    "searching",
+    "transit",
+}
+_ACTIVE_RECORD_STATUSES = {"approved", "executing"}
+
+
+def _jsonable(value):
+    if is_dataclass(value):
+        return {key: _jsonable(item) for key, item in asdict(value).items()}
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, set | frozenset):
+        return sorted(_jsonable(item) for item in value)
+    return value
+
+
+def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
+    if isinstance(payload, MissionSelection):
+        return payload, []
+    if not isinstance(payload, dict):
+        return None, ["selection must be an object"]
+    errors: list[str] = []
+    unknown = set(payload) - _SELECTION_FIELDS
+    missing = _SELECTION_FIELDS - set(payload)
+    if unknown:
+        errors.append(f"unknown_selection_fields: {sorted(unknown)}")
+    if missing:
+        errors.append(f"missing_selection_fields: {sorted(missing)}")
+    if errors:
+        return None, errors
+
+    schema_version = payload["schema_version"]
+    if schema_version != SELECTION_SCHEMA:
+        errors.append("invalid_schema_version")
+    snapshot_id = payload["snapshot_id"]
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        errors.append("invalid_snapshot_id")
+    selected = payload["selected_task_ids"]
+    preempt = payload["preempt_uav_ids"]
+    for name, value in (("selected_task_ids", selected), ("preempt_uav_ids", preempt)):
+        if not isinstance(value, (list, tuple)):
+            errors.append(f"{name}_must_be_array")
+        elif any(not isinstance(item, str) or not item for item in value):
+            errors.append(f"{name}_must_contain_nonempty_strings")
+    defer_reason = payload["defer_reason"]
+    if defer_reason is not None and (
+        not isinstance(defer_reason, str) or not defer_reason.strip()
+    ):
+        errors.append("invalid_defer_reason")
+    if not isinstance(payload["notes"], str):
+        errors.append("notes_must_be_string")
+    if errors:
+        return None, errors
+    return MissionSelection(
+        schema_version,
+        snapshot_id,
+        tuple(selected),
+        tuple(preempt),
+        defer_reason,
+        payload["notes"],
+    ), []
+
+
+def _task_maps(snapshot: MissionSnapshot):
+    candidates = {task.task_id: task for task in snapshot.candidates}
+    active = {task.task_id: task for task in snapshot.active_tasks}
+    return candidates, active
+
+
+def _resource_maps(snapshot: MissionSnapshot):
+    return {resource.uav_id: resource for resource in snapshot.resources}
+
+
+def _operation(resource: UavResource) -> str:
+    return str(resource.operation).lower()
+
+
+def _protected(resource: UavResource) -> bool:
+    return _operation(resource) in _PROTECTED_OPERATIONS
+
+
+def _ordinary_search(resource: UavResource, active_tasks: dict[str, TaskRecord]) -> bool:
+    operation = _operation(resource)
+    if operation not in _ORDINARY_SEARCH_OPERATIONS:
+        return False
+    if not resource.current_task_id:
+        return False
+    record = active_tasks.get(resource.current_task_id)
+    return record is None or (
+        record.kind == "search" and record.status in _ACTIVE_RECORD_STATUSES
+    )
+
+
+def _cooldown_error(resource: UavResource, snapshot: MissionSnapshot, cooldown: float) -> bool:
+    elapsed = snapshot.sim_time_min - resource.last_reassigned_at_min
+    return elapsed < cooldown - 1e-9
+
+
+def _is_available(resource: UavResource, snapshot: MissionSnapshot) -> bool:
+    if resource.uav_id not in snapshot.available_uav_ids:
+        return False
+    if _protected(resource):
+        return False
+    # A malformed snapshot must not turn an already assigned ordinary sortie
+    # into an idle resource merely because its ID appears in the list.
+    return resource.current_task_id is None or _operation(resource) in {"idle", "holding"}
+
+
+def _is_preemptible(
+    resource: UavResource,
+    snapshot: MissionSnapshot,
+    selection: MissionSelection,
+    active_tasks: dict[str, TaskRecord],
+    cooldown: float,
+) -> bool:
+    return (
+        resource.uav_id in snapshot.preemptible_uav_ids
+        and resource.uav_id in selection.preempt_uav_ids
+        and not _protected(resource)
+        and _ordinary_search(resource, active_tasks)
+        and not _cooldown_error(resource, snapshot, cooldown)
+    )
+
+
+def _task_kind(task_id: str, candidates: dict[str, TaskCandidate], active: dict[str, TaskRecord]):
+    task = candidates.get(task_id) or active.get(task_id)
+    return task.kind if task is not None else None
+
+
+def _edge_usable(
+    edge: FeasibleEdge,
+    task_id: str,
+    candidates: dict[str, TaskCandidate],
+    active: dict[str, TaskRecord],
+    resources: dict[str, UavResource],
+    snapshot: MissionSnapshot,
+    selection: MissionSelection,
+    cooldown: float,
+) -> bool:
+    resource = resources.get(edge.uav_id)
+    if resource is None:
+        return False
+    task = candidates.get(task_id) or active.get(task_id)
+    if task is None:
+        return False
+    if task.feasible_uav_ids and edge.uav_id not in task.feasible_uav_ids:
+        return False
+    values = (
+        edge.transit_time_min,
+        edge.mission_range_cells,
+        edge.return_range_cells,
+        edge.reserve_range_cells,
+        resource.remaining_range_cells,
+    )
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) for value in values):
+        return False
+    if any(value < 0 for value in values):
+        return False
+    if edge.mission_range_cells + edge.return_range_cells + edge.reserve_range_cells > (
+        resource.remaining_range_cells + 1e-9
+    ):
+        return False
+    active_tasks = {record.task_id: record for record in snapshot.active_tasks}
+    is_available = _is_available(resource, snapshot)
+    is_preemptible = _is_preemptible(
+        resource, snapshot, selection, active_tasks, cooldown,
+    )
+    if not (is_available or is_preemptible):
+        return False
+    kind = task.kind
+    if resource.uav_id in selection.preempt_uav_ids:
+        # A declared preemption must actually launch a new contact task.
+        if kind not in {"probe", "track"}:
+            return False
+        if not is_preemptible:
+            return False
+    elif is_preemptible:
+        # Busy ordinary search is only interrupted when explicitly declared.
+        return False
+    return True
+
+
+def _edge_options(
+    selection: MissionSelection,
+    snapshot: MissionSnapshot,
+    cooldown: float,
+) -> dict[str, tuple[FeasibleEdge, ...]]:
+    candidates, active = _task_maps(snapshot)
+    resources = _resource_maps(snapshot)
+    by_task: dict[str, list[FeasibleEdge]] = {
+        task_id: [] for task_id in selection.selected_task_ids
+    }
+    for edge in snapshot.feasible_edges:
+        if edge.task_id not in by_task:
+            continue
+        if _edge_usable(
+            edge, edge.task_id, candidates, active, resources,
+            snapshot, selection, cooldown,
+        ):
+            by_task[edge.task_id].append(edge)
+    return {
+        task_id: tuple(sorted(options, key=lambda edge: (edge.transit_time_min, edge.uav_id)))
+        for task_id, options in by_task.items()
+    }
+
+
+def _maximum_matching(
+    task_ids: tuple[str, ...], options: dict[str, tuple[FeasibleEdge, ...]]
+) -> dict[str, FeasibleEdge]:
+    """Return a maximum-cardinality matching using augmenting paths."""
+    assigned_uav: dict[str, tuple[str, FeasibleEdge]] = {}
+
+    def visit(task_id: str, seen: set[str]) -> bool:
+        for edge in options.get(task_id, ()):
+            if edge.uav_id in seen:
+                continue
+            seen.add(edge.uav_id)
+            current = assigned_uav.get(edge.uav_id)
+            if current is None or visit(current[0], seen):
+                assigned_uav[edge.uav_id] = (task_id, edge)
+                return True
+        return False
+
+    for task_id in task_ids:
+        visit(task_id, set())
+    return {task_id: edge for task_id, edge in assigned_uav.values()}
+
+
+def _minimum_cost_matching(
+    task_ids: tuple[str, ...], options: dict[str, tuple[FeasibleEdge, ...]],
+    resources: dict[str, UavResource],
+    required_preempt_uav_ids: frozenset[str] = frozenset(),
+) -> dict[str, FeasibleEdge] | None:
+    """Find an exact minimum-cost matching without relying on greedy fallback."""
+    if not task_ids:
+        return {}
+    if len(task_ids) > len(resources):
+        return None
+    # Branch on the most constrained task first.  The result is projected back
+    # into model selection order so task priority remains visible to callers.
+    order = tuple(sorted(
+        task_ids,
+        key=lambda task_id: (len(options.get(task_id, ())), task_ids.index(task_id)),
+    ))
+    best_cost = math.inf
+    best: dict[str, FeasibleEdge] | None = None
+
+    def search(index: int, used: set[str], cost: float, chosen: dict[str, FeasibleEdge]):
+        nonlocal best_cost, best
+        if cost >= best_cost - 1e-12:
+            return
+        if index == len(order):
+            if not required_preempt_uav_ids <= used:
+                return
+            best_cost = cost
+            best = dict(chosen)
+            return
+        task_id = order[index]
+        for edge in options.get(task_id, ()):
+            if edge.uav_id in used:
+                continue
+            chosen[task_id] = edge
+            search(index + 1, {*used, edge.uav_id}, cost + edge.transit_time_min, chosen)
+            chosen.pop(task_id, None)
+
+    search(0, set(), 0.0, {})
+    return best
+
+
+def _actual_preempted(
+    matching: dict[str, FeasibleEdge],
+    selection: MissionSelection,
+    snapshot: MissionSnapshot,
+) -> set[str]:
+    candidates, active = _task_maps(snapshot)
+    resources = _resource_maps(snapshot)
+    active_tasks = {record.task_id: record for record in snapshot.active_tasks}
+    actual = set()
+    for task_id, edge in matching.items():
+        resource = resources[edge.uav_id]
+        task = candidates.get(task_id) or active.get(task_id)
+        if (
+            task is not None
+            and task.kind in {"probe", "track"}
+            and resource.uav_id in snapshot.preemptible_uav_ids
+            and _ordinary_search(resource, active_tasks)
+        ):
+            actual.add(resource.uav_id)
+    return actual
+
+
+def _validate_selection(
+    payload,
+    snapshot: MissionSnapshot,
+    *,
+    reassignment_cooldown_min: float = DEFAULT_REASSIGNMENT_COOLDOWN_MIN,
+) -> tuple[str, ...]:
+    selection, errors = _selection_object(payload)
+    if selection is None:
+        return tuple(errors)
+    if selection.schema_version != SELECTION_SCHEMA:
+        errors.append("invalid_schema_version")
+    if selection.snapshot_id != snapshot.snapshot_id:
+        errors.append("stale_snapshot")
+    if not isinstance(selection.selected_task_ids, (tuple, list)):
+        errors.append("selected_task_ids_must_be_array")
+        selected_task_ids = ()
+    else:
+        selected_task_ids = tuple(selection.selected_task_ids)
+        if any(not isinstance(item, str) or not item for item in selected_task_ids):
+            errors.append("selected_task_ids_must_contain_nonempty_strings")
+    if not isinstance(selection.preempt_uav_ids, (tuple, list)):
+        errors.append("preempt_uav_ids_must_be_array")
+        preempt_uav_ids = ()
+    else:
+        preempt_uav_ids = tuple(selection.preempt_uav_ids)
+        if any(not isinstance(item, str) or not item for item in preempt_uav_ids):
+            errors.append("preempt_uav_ids_must_contain_nonempty_strings")
+    if not isinstance(selection.defer_reason, (str, type(None))) or (
+        isinstance(selection.defer_reason, str) and not selection.defer_reason.strip()
+    ):
+        errors.append("invalid_defer_reason")
+    if not isinstance(selection.notes, str):
+        errors.append("notes_must_be_string")
+    if all(isinstance(item, str) for item in selected_task_ids) and len(set(selected_task_ids)) != len(selected_task_ids):
+        errors.append("duplicate_task_id")
+    if all(isinstance(item, str) for item in preempt_uav_ids) and len(set(preempt_uav_ids)) != len(preempt_uav_ids):
+        errors.append("duplicate_preempt_uav_id")
+
+    candidates, active = _task_maps(snapshot)
+    resources = _resource_maps(snapshot)
+    if len(resources) != len(snapshot.resources):
+        errors.append("duplicate_resource_id")
+    known_tasks = set(candidates) | set(active)
+    for task_id in selected_task_ids:
+        if task_id not in known_tasks:
+            errors.append(f"unknown_task_id: {task_id}")
+    for task_id, task in (*candidates.items(), *active.items()):
+        if task.kind == "search" and task.bbox is None:
+            errors.append(f"search_task_missing_bbox: {task_id}")
+        if task.kind in {"probe", "track"} and task.contact_id is None:
+            errors.append(f"contact_task_missing_contact: {task_id}")
+
+    selected_tasks = [
+        candidates.get(task_id) or active.get(task_id)
+        for task_id in selected_task_ids
+        if task_id in known_tasks
+    ]
+    selected_contacts = [task.contact_id for task in selected_tasks if task.contact_id]
+    if len(set(selected_contacts)) != len(selected_contacts):
+        errors.append("duplicate_contact")
+    active_contact_ids = {
+        task.contact_id
+        for task in snapshot.active_tasks
+        if task.status in _ACTIVE_RECORD_STATUSES and task.contact_id
+    }
+    if active_contact_ids & set(selected_contacts):
+        errors.append("duplicate_contact_with_active_task")
+
+    searches = [task for task in selected_tasks if task.kind == "search" and task.bbox]
+    for left_index, left in enumerate(searches):
+        for right in searches[left_index + 1:]:
+            if _overlap(left.bbox, right.bbox):
+                errors.append(f"overlapping_search: {left.task_id}/{right.task_id}")
+    active_searches = [
+        task for task in snapshot.active_tasks
+        if task.status in _ACTIVE_RECORD_STATUSES and task.kind == "search" and task.bbox
+    ]
+    for candidate in searches:
+        if any(_overlap(candidate.bbox, active_task.bbox) for active_task in active_searches):
+            errors.append(f"overlapping_active_search: {candidate.task_id}")
+
+    available = set(snapshot.available_uav_ids)
+    preemptible = set(snapshot.preemptible_uav_ids)
+    if available & preemptible:
+        errors.append("resource_in_both_available_and_preemptible")
+    for uav_id in preempt_uav_ids:
+        if uav_id not in resources:
+            errors.append(f"unknown_preempt_uav: {uav_id}")
+        elif uav_id not in preemptible:
+            errors.append(f"not_preemptible_uav: {uav_id}")
+        elif _cooldown_error(resources[uav_id], snapshot, reassignment_cooldown_min):
+            errors.append(f"reassignment_cooldown: {uav_id}")
+
+    options = _edge_options(selection, snapshot, reassignment_cooldown_min)
+    matching = None
+    if selected_task_ids:
+        maximum = _maximum_matching(selected_task_ids, options)
+        if len(maximum) < len(selected_task_ids):
+            errors.append("infeasible_assignment")
+        else:
+            matching = _minimum_cost_matching(
+                selected_task_ids,
+                options,
+                resources,
+                frozenset(preempt_uav_ids),
+            )
+            if matching is None:
+                # Keep a local exact matching only to report unused declared
+                # preemptions when the unconstrained assignment is legal.
+                matching = _minimum_cost_matching(
+                    selected_task_ids, options, resources,
+                )
+                if matching is None:
+                    errors.append("infeasible_assignment")
+    if matching is not None:
+        actual_preempted = _actual_preempted(matching, selection, snapshot)
+        declared_preempted = set(preempt_uav_ids)
+        for uav_id in sorted(declared_preempted - actual_preempted):
+            errors.append(f"unused_preempt_uav: {uav_id}")
+        for uav_id in sorted(actual_preempted - declared_preempted):
+            errors.append(f"missing_preempt_uav: {uav_id}")
+
+    has_legal_work = False
+    for candidate in snapshot.candidates:
+        probe_selection = MissionSelection(
+            SELECTION_SCHEMA,
+            snapshot.snapshot_id,
+            (candidate.task_id,),
+            tuple(snapshot.preemptible_uav_ids),
+            None,
+            "",
+        )
+        if _edge_options(probe_selection, snapshot, reassignment_cooldown_min).get(
+            candidate.task_id
+        ):
+            has_legal_work = True
+            break
+    if not selected_task_ids and has_legal_work and not selection.defer_reason:
+        errors.append("empty_selection_requires_defer_reason")
+    return tuple(dict.fromkeys(errors))
+
+
+def validate_selection(payload, snapshot: MissionSnapshot) -> tuple[str, ...]:
+    """Validate a model response against one immutable mission snapshot."""
+    return _validate_selection(payload, snapshot)
+
+
+def pair_selected_tasks(
+    selection: MissionSelection | dict,
+    snapshot: MissionSnapshot,
+) -> tuple[Assignment, ...]:
+    """Pair selected work on legal edges at minimum total transit cost."""
+    errors = validate_selection(selection, snapshot)
+    if errors:
+        raise ValueError("; ".join(errors))
+    selection, parse_errors = _selection_object(selection)
+    if selection is None or parse_errors:
+        raise ValueError("; ".join(parse_errors))
+    options = _edge_options(selection, snapshot, DEFAULT_REASSIGNMENT_COOLDOWN_MIN)
+    matching = _minimum_cost_matching(
+        selection.selected_task_ids,
+        options,
+        _resource_maps(snapshot),
+        frozenset(selection.preempt_uav_ids),
+    )
+    if matching is None:
+        raise ValueError("infeasible_assignment")
+    resources = _resource_maps(snapshot)
+    return tuple(
+        Assignment(
+            task_id,
+            matching[task_id].uav_id,
+            resources[matching[task_id].uav_id].generation,
+            resources[matching[task_id].uav_id].current_task_id,
+        )
+        for task_id in selection.selected_task_ids
+    )
+
+
+def _overlap(left, right) -> bool:
+    return not (
+        left[2] <= right[0]
+        or right[2] <= left[0]
+        or left[3] <= right[1]
+        or right[3] <= left[1]
+    )
+
+
+class MissionScheduler:
+    """LLM-backed selection facade with deterministic local pairing."""
+
+    def __init__(
+        self,
+        gateway=None,
+        *,
+        llm_gateway=None,
+        reassignment_cooldown_min: float = DEFAULT_REASSIGNMENT_COOLDOWN_MIN,
+        max_tasks_in_prompt: int = 40,
+        system_prompt_path: str | None = None,
+        selection_provider=None,
+    ):
+        if gateway is not None and llm_gateway is not None:
+            raise ValueError("pass gateway or llm_gateway, not both")
+        self.gateway = gateway if gateway is not None else llm_gateway
+        self.reassignment_cooldown_min = float(reassignment_cooldown_min)
+        self.max_tasks_in_prompt = int(max_tasks_in_prompt)
+        if self.reassignment_cooldown_min < 0 or not math.isfinite(self.reassignment_cooldown_min):
+            raise ValueError("reassignment_cooldown_min must be finite and non-negative")
+        if self.max_tasks_in_prompt <= 0:
+            raise ValueError("max_tasks_in_prompt must be positive")
+        if system_prompt_path is None:
+            system_prompt_path = os.path.join(
+                os.path.dirname(__file__), "prompts", "mission_scheduler.txt"
+            )
+        with open(system_prompt_path, "r", encoding="utf-8") as stream:
+            self.system_prompt = stream.read()
+        self.selection_provider = selection_provider
+        self.last_selection_payload: dict | None = None
+
+    def validate_selection(self, payload, snapshot: MissionSnapshot) -> tuple[str, ...]:
+        return _validate_selection(
+            payload,
+            snapshot,
+            reassignment_cooldown_min=self.reassignment_cooldown_min,
+        )
+
+    def pair_selected_tasks(
+        self, selection: MissionSelection | dict, snapshot: MissionSnapshot
+    ) -> tuple[Assignment, ...]:
+        errors = self.validate_selection(selection, snapshot)
+        if errors:
+            raise ValueError("; ".join(errors))
+        parsed, parse_errors = _selection_object(selection)
+        if parsed is None or parse_errors:
+            raise ValueError("; ".join(parse_errors))
+        options = _edge_options(parsed, snapshot, self.reassignment_cooldown_min)
+        matching = _minimum_cost_matching(
+            parsed.selected_task_ids,
+            options,
+            _resource_maps(snapshot),
+            frozenset(parsed.preempt_uav_ids),
+        )
+        if matching is None:
+            raise ValueError("infeasible_assignment")
+        resources = _resource_maps(snapshot)
+        return tuple(
+            Assignment(
+                task_id,
+                matching[task_id].uav_id,
+                resources[matching[task_id].uav_id].generation,
+                resources[matching[task_id].uav_id].current_task_id,
+            )
+            for task_id in parsed.selected_task_ids
+        )
+
+    def decide(self, snapshot: MissionSnapshot) -> AssignmentBatch | None:
+        """Ask the decision-maker to select work, then pair it atomically."""
+        payload = self._prompt_payload(snapshot)
+        self.last_selection_payload = payload
+        if self.selection_provider is not None:
+            raw = self.selection_provider(snapshot, payload)
+            call_id = "selection-provider"
+            success = True
+            response = raw
+        elif self.gateway is not None:
+            result = self.gateway.request_json(
+                role="decision_maker",
+                snapshot_id=snapshot.snapshot_id,
+                system_prompt=self.system_prompt,
+                user_payload=payload,
+                validate=lambda candidate: self.validate_selection(candidate, snapshot),
+            )
+            call_id = result.call_id
+            success = result.success
+            response = result.payload
+        else:
+            return None
+        if not success or response is None:
+            return None
+        errors = self.validate_selection(response, snapshot)
+        if errors:
+            return None
+        parsed, parse_errors = _selection_object(response)
+        if parsed is None or parse_errors:
+            return None
+        try:
+            assignments = self.pair_selected_tasks(parsed, snapshot)
+        except ValueError:
+            return None
+        return AssignmentBatch(snapshot.snapshot_id, assignments, call_id)
+
+    def _prompt_payload(self, snapshot: MissionSnapshot) -> dict:
+        full = _jsonable(snapshot)
+        candidates = list(full["candidates"])
+        if len(candidates) > self.max_tasks_in_prompt:
+            candidate_objects = list(snapshot.candidates)
+            ordered = sorted(
+                candidate_objects,
+                key=lambda task: (
+                    0 if task.kind == "probe" else 1 if task.kind == "track" else 2,
+                    -min(max(snapshot.sim_time_min - task.eligible_since_min, 0.0), 30.0),
+                    task.task_id,
+                ),
+            )[: self.max_tasks_in_prompt]
+            full["candidates"] = [_jsonable(task) for task in ordered]
+            full["candidates_truncated"] = True
+            full["candidate_count"] = len(candidates)
+        else:
+            full["candidates_truncated"] = False
+            full["candidate_count"] = len(candidates)
+        return {
+            "schema_version": SELECTION_SCHEMA,
+            "instructions": self.system_prompt,
+            "snapshot": full,
+        }
+
+
+__all__ = [
+    "Assignment",
+    "AssignmentBatch",
+    "FeasibleEdge",
+    "MissionScheduler",
+    "MissionSelection",
+    "MissionSnapshot",
+    "TaskRecord",
+    "UavResource",
+    "pair_selected_tasks",
+    "validate_selection",
+]

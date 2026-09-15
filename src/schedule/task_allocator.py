@@ -7,6 +7,21 @@ from src.schedule.llm_reviewer import LLMReviewer
 from src.schedule.hungarian import hungarian_pair
 from src.schedule.trigger_manager import TriggerManager
 from src.schedule.datatypes import Region, BBox
+import math
+from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
+
+from src.mission.contracts import (
+    ContactSnapshot,
+    FeasibleEdge,
+    Intent,
+    IntentStatus,
+    MissionSnapshot,
+    TaskCandidate,
+    TaskRecord,
+    UavResource,
+)
+from src.mission.mission_scheduler import MissionScheduler
+from src.mission.task_catalog import TaskCatalog
 
 
 class TaskAllocator:
@@ -20,6 +35,264 @@ class TaskAllocator:
         self.llm_client = LLMClient(config, gateway=llm_gateway)
         self.reviewer = LLMReviewer(config, self.llm_client)
         self.trigger_manager = TriggerManager(self.sm)
+        self.task_catalog = TaskCatalog()
+        self.mission_scheduler = MissionScheduler(
+            llm_gateway=self.llm_client.gateway,
+            reassignment_cooldown_min=config.mission.scheduling.reassignment_cooldown_min,
+            max_tasks_in_prompt=config.mission.scheduling.max_tasks_in_prompt,
+        )
+        self._mission_snapshot_counter = 0
+        heuristic = config.control.heuristic
+        self._mission_navigator = AStarNavigator(
+            xy_resolution=heuristic.astar_xy_resolution_cells,
+            heading_bins=heuristic.astar_heading_bins,
+            candidate_limit=heuristic.astar_candidate_limit,
+            primitive_length=heuristic.astar_primitive_length_cells,
+            sample_step=heuristic.path_sample_step_cells,
+        )
+        self._mission_route_cache: dict[tuple, float | None] = {}
+
+    def build_mission_snapshot(
+        self,
+        now_min: float | None = None,
+        *,
+        contacts: tuple[ContactSnapshot, ...] | None = None,
+        intents: tuple[Intent, ...] = (),
+        intent_statuses: tuple[IntentStatus, ...] = (),
+        active_tasks: tuple[TaskRecord, ...] = (),
+        memory_version: str = "baseline",
+        reviewer_summary: str | None = None,
+    ) -> MissionSnapshot:
+        """Publish a complete scheduler snapshot without applying a decision."""
+        now = self.sm.current_time if now_min is None else float(now_min)
+        if not math.isfinite(now) or now < 0:
+            raise ValueError("now_min must be finite and non-negative")
+        published_contacts = tuple(
+            self.sm.contacts.list_snapshots() if contacts is None else contacts
+        )
+        published_intents = tuple(intents)
+        candidates = self.task_catalog.build(
+            self.sm, published_contacts, published_intents, now,
+        )
+        resources = self._mission_resources()
+        available = tuple(sorted(uav.id for uav in self.sm.get_available_uavs()))
+        preemptible = tuple(sorted(
+            resource.uav_id
+            for resource in resources
+            if self._ordinary_search_resource(resource)
+        ))
+        planning_map_version = int(self.sm.obstacle_version)
+        edges = self._mission_edges(
+            candidates, resources, published_contacts, planning_map_version,
+        )
+        self._mission_snapshot_counter += 1
+        snapshot_id = f"mission:{now:g}:{self._mission_snapshot_counter}"
+        return MissionSnapshot(
+            snapshot_id=snapshot_id,
+            sim_time_min=now,
+            candidates=tuple(candidates),
+            available_uav_ids=available,
+            preemptible_uav_ids=preemptible,
+            uav_generations=tuple(
+                (resource.uav_id, resource.generation) for resource in resources
+            ),
+            resources=resources,
+            feasible_edges=edges,
+            active_tasks=tuple(active_tasks),
+            contacts=published_contacts,
+            intents=published_intents,
+            intent_statuses=tuple(intent_statuses),
+            memory_version=memory_version,
+            planning_map_version=planning_map_version,
+            reviewer_summary=(
+                self.llm_client._reviewer_memory
+                if reviewer_summary is None else reviewer_summary
+            ),
+        )
+
+    def decide_mission(self, now_min: float | None = None, **kwargs):
+        """Run T11 selection on a fresh snapshot; T12 owns application."""
+        snapshot = self.build_mission_snapshot(now_min, **kwargs)
+        return self.mission_scheduler.decide(snapshot)
+
+    def _mission_resources(self) -> tuple[UavResource, ...]:
+        speed = (
+            self.config.uav.cruise_speed_kmh
+            / self.config.grid.cell_size_km
+            / 60.0
+        )
+        total_range = (
+            self.config.uav.sortie_endurance_h
+            * self.config.uav.cruise_speed_kmh
+            / self.config.grid.cell_size_km
+        )
+        resources = []
+        for uav in self.sm.get_all_uavs():
+            resources.append(UavResource(
+                uav_id=uav.id,
+                position_cells=(float(uav.position.col), float(uav.position.row)),
+                heading_rad=math.radians(float(uav.heading_deg)),
+                speed_cells_min=speed,
+                remaining_range_cells=max(
+                    0.0, total_range * float(uav.fuel_remaining_pct)
+                ),
+                operation=str(uav.operation_mode or uav.status),
+                current_task_id=uav.assigned_region_id,
+                generation=int(uav.controller_generation),
+                last_reassigned_at_min=float(
+                    getattr(uav, "last_reassigned_at_min", 0.0)
+                ),
+            ))
+        return tuple(sorted(resources, key=lambda resource: resource.uav_id))
+
+    @staticmethod
+    def _ordinary_search_resource(resource: UavResource) -> bool:
+        return (
+            resource.current_task_id is not None
+            and str(resource.operation).lower() in {
+                "coverage", "search", "searching", "transit",
+            }
+        )
+
+    def _mission_edges(
+        self,
+        candidates: tuple[TaskCandidate, ...],
+        resources: tuple[UavResource, ...],
+        contacts: tuple[ContactSnapshot, ...],
+        planning_map_version: int,
+    ) -> tuple[FeasibleEdge, ...]:
+        contact_positions = {
+            contact.contact_id: contact.estimated_position_cells
+            for contact in contacts
+        }
+        bases = self.sm.get_base_positions()
+        reserve = float(self.config.control.safety.reserve_range_cells)
+        edges = []
+        for task in candidates:
+            if task.contact_id is not None:
+                target = contact_positions.get(task.contact_id)
+            elif task.bbox is not None:
+                target = (
+                    (task.bbox[0] + task.bbox[2]) / 2.0,
+                    (task.bbox[1] + task.bbox[3]) / 2.0,
+                )
+            else:
+                target = None
+            if target is None:
+                continue
+            for resource in resources:
+                if task.feasible_uav_ids and resource.uav_id not in task.feasible_uav_ids:
+                    continue
+                transit_distance = self._mission_route_distance(
+                    resource, task, target, planning_map_version,
+                )
+                if transit_distance is None:
+                    continue
+                transit = transit_distance / max(resource.speed_cells_min, 1e-6)
+                mission_range = task.estimated_duration_min * resource.speed_cells_min
+                return_range = min(
+                    (self._return_route_distance(
+                        target, resource, tuple(map(float, base)), planning_map_version,
+                    )
+                     for base in bases),
+                    default=None,
+                )
+                if return_range is None or (
+                    transit_distance + mission_range + return_range + reserve
+                    > resource.remaining_range_cells + 1e-9
+                ):
+                    continue
+                route_cache_key = (
+                    f"{planning_map_version}:{resource.uav_id}:{resource.generation}:"
+                    f"{resource.position_cells[0]:.3f},{resource.position_cells[1]:.3f}:"
+                    f"{target[0]:.3f},{target[1]:.3f}:{task.task_id}"
+                )
+                edges.append(FeasibleEdge(
+                    task_id=task.task_id,
+                    uav_id=resource.uav_id,
+                    transit_time_min=transit,
+                    mission_range_cells=mission_range,
+                    return_range_cells=return_range,
+                    reserve_range_cells=reserve,
+                    route_cache_key=route_cache_key,
+                ))
+        return tuple(sorted(
+            edges,
+            key=lambda edge: (edge.task_id, edge.transit_time_min, edge.uav_id),
+        ))
+
+    def _mission_route_distance(
+        self,
+        resource: UavResource,
+        task: TaskCandidate,
+        target: tuple[float, float],
+        planning_map_version: int,
+    ) -> float | None:
+        key = (
+            "mission", planning_map_version, resource.uav_id, resource.generation,
+            tuple(round(value, 6) for value in resource.position_cells),
+            round(float(resource.heading_rad), 6), task.kind, task.task_id,
+            tuple(task.bbox) if task.bbox is not None else tuple(round(value, 6) for value in target),
+        )
+        if key in self._mission_route_cache:
+            return self._mission_route_cache[key]
+        start = (*resource.position_cells, float(resource.heading_rad))
+        try:
+            if task.kind == "search":
+                path = self._mission_navigator.plan_to_region(
+                    start, BBox(*task.bbox), self.sm.obstacle_mask, 1.0,
+                    planning_map_version,
+                )
+            else:
+                radius = (
+                    self.config.mission.contact.baseline_standoff_cells
+                    if task.kind == "probe"
+                    else self.config.mission.contact.near_standoff_cells
+                )
+                path = self._mission_navigator.plan_to_standoff(
+                    start, target, radius, self.sm.obstacle_mask, 1.0,
+                    planning_map_version,
+                )
+        except (PathNotFoundError, TypeError, ValueError):
+            distance = None
+        else:
+            distance = self._path_length(path)
+        self._mission_route_cache[key] = distance
+        return distance
+
+    def _return_route_distance(
+        self,
+        target: tuple[float, float],
+        resource: UavResource,
+        base: tuple[float, float],
+        planning_map_version: int,
+    ) -> float | None:
+        key = (
+            "return", planning_map_version, resource.uav_id, resource.generation,
+            tuple(round(value, 6) for value in target),
+            tuple(round(value, 6) for value in base),
+        )
+        if key in self._mission_route_cache:
+            return self._mission_route_cache[key]
+        heading = math.atan2(base[1] - target[1], base[0] - target[0])
+        try:
+            path = self._mission_navigator.plan_grid(
+                (*target, heading), {base}, self.sm.obstacle_mask, 1.0,
+                planning_map_version,
+            )
+        except (PathNotFoundError, TypeError, ValueError):
+            distance = None
+        else:
+            distance = self._path_length(path)
+        self._mission_route_cache[key] = distance
+        return distance
+
+    @staticmethod
+    def _path_length(path) -> float:
+        return sum(
+            math.dist(start[:2], end[:2])
+            for start, end in zip(path, path[1:])
+        )
 
     def retire_search_track_conflicts(
         self,

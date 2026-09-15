@@ -226,6 +226,103 @@ class TaskCandidate:
 
 
 @dataclass(frozen=True)
+class UavResource:
+    uav_id: str
+    position_cells: Vec2
+    heading_rad: float
+    speed_cells_min: float
+    remaining_range_cells: float
+    operation: str
+    current_task_id: str | None
+    generation: int
+    last_reassigned_at_min: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "position_cells", tuple(self.position_cells))
+
+
+@dataclass(frozen=True)
+class FeasibleEdge:
+    task_id: str
+    uav_id: str
+    transit_time_min: float
+    mission_range_cells: float
+    return_range_cells: float
+    reserve_range_cells: float
+    route_cache_key: str
+
+
+@dataclass(frozen=True)
+class TaskRecord:
+    task_id: str
+    kind: Literal["search", "probe", "track"]
+    status: Literal[
+        "candidate", "approved", "executing", "completed", "cancelled", "blocked"
+    ]
+    bbox: Rect | None
+    contact_id: str | None
+    intent_ids: tuple[str, ...]
+    assigned_uav_id: str | None
+    approved_call_id: str | None
+    created_at_min: float
+    started_at_min: float | None
+    finished_at_min: float | None
+    release_reason: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "intent_ids", tuple(self.intent_ids))
+
+
+@dataclass(frozen=True)
+class MissionSnapshot:
+    snapshot_id: str
+    sim_time_min: float
+    candidates: tuple[TaskCandidate, ...]
+    available_uav_ids: tuple[str, ...]
+    preemptible_uav_ids: tuple[str, ...]
+    uav_generations: tuple[tuple[str, int], ...]
+    resources: tuple[UavResource, ...]
+    feasible_edges: tuple[FeasibleEdge, ...]
+    active_tasks: tuple[TaskRecord, ...]
+    contacts: tuple[ContactSnapshot, ...]
+    intents: tuple[Intent, ...]
+    intent_statuses: tuple[IntentStatus, ...]
+    memory_version: str
+    planning_map_version: int
+    reviewer_summary: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+        object.__setattr__(self, "available_uav_ids", tuple(self.available_uav_ids))
+        object.__setattr__(self, "preemptible_uav_ids", tuple(self.preemptible_uav_ids))
+        object.__setattr__(self, "uav_generations", tuple(tuple(item) for item in self.uav_generations))
+        object.__setattr__(self, "resources", tuple(self.resources))
+        object.__setattr__(self, "feasible_edges", tuple(self.feasible_edges))
+        object.__setattr__(self, "active_tasks", tuple(self.active_tasks))
+        object.__setattr__(self, "contacts", tuple(self.contacts))
+        object.__setattr__(self, "intents", tuple(self.intents))
+        object.__setattr__(self, "intent_statuses", tuple(self.intent_statuses))
+
+
+@dataclass(frozen=True)
+class Assignment:
+    task_id: str
+    uav_id: str
+    expected_generation: int
+    previous_task_id: str | None
+
+
+@dataclass(frozen=True)
+class AssignmentBatch:
+    snapshot_id: str
+    assignments: tuple[Assignment, ...]
+    selection_call_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "assignments", tuple(self.assignments))
+
+
+@dataclass(frozen=True)
 class MissionSelection:
     schema_version: str
     snapshot_id: str
@@ -256,12 +353,16 @@ class RedPlan:
 
 __all__ = [
     "Assessment",
+    "Assignment",
+    "AssignmentBatch",
     "ContactSnapshot",
     "ContactState",
+    "FeasibleEdge",
     "Identity",
     "Intent",
     "IntentStatus",
     "MissionSelection",
+    "MissionSnapshot",
     "ObservationSample",
     "ProbeSession",
     "Rect",
@@ -269,7 +370,9 @@ __all__ = [
     "RedPlan",
     "SHIP_RNG_STREAMS",
     "TaskCandidate",
+    "TaskRecord",
     "TrajectoryFeatures",
+    "UavResource",
     "Vec2",
     "VisualDetection",
     "ship_rng_manifest",

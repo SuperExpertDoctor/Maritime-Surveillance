@@ -49,3 +49,16 @@ def test_uav_returned_heavy_trigger(sm):
                     position={"col": 18, "row": 8}, marker_position={"col": 18, "row": 8})
     d = tm.check(15.0)
     assert d.trigger_type == "heavy"
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["assessment_changed", "resource_available", "intent_changed", "intent_expired"],
+)
+def test_mission_state_changes_trigger_heavy_replanning(sm, event_type):
+    tm = TriggerManager(sm)
+    tm.notify_event(event_type, time=5.0, event_id="same-frame")
+
+    decision = tm.check(5.0)
+
+    assert decision.trigger_type == "heavy"
