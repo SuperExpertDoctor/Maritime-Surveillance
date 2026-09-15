@@ -97,7 +97,42 @@ def test_status_uses_static_water_denominator_and_reports_unseen_without_infinit
     assert status.max_scan_age_min is None
     assert status.coverage_ratio == pytest.approx(2 / 12)
     assert status.freshness_ratio == pytest.approx(1 / 12)
-    assert status.unmet_reason is not None
+    assert status.unmet_reason == "no_legal_candidate"
+
+
+def test_status_ignores_temporary_weather_mask_for_coverage_and_freshness(store, searchable_mask):
+    intent = store.create(freshness_data(), 0.0)
+    info = np.ones((6, 6), dtype=float)
+    last_scan = np.full((6, 6), -np.inf)
+    last_scan[1, 1] = 8.0
+    last_scan[1, 2] = 1.0
+    weather_mask = searchable_mask.copy()
+    weather_mask[1:5, 1:5] = False
+    weather_mask[1, 1] = True
+    weather_mask[1, 2] = True
+
+    status = store.evaluate(info, last_scan, weather_mask, (), 10.0)[0]
+
+    assert status.searchable_cells == 12
+    assert status.scanned_cells == 2
+    assert status.unseen_cells == 10
+    assert status.coverage_ratio == pytest.approx(2 / 12)
+    assert status.freshness_ratio == pytest.approx(1 / 12)
+
+
+def test_status_reports_no_legal_candidate_for_an_unmet_intent(store, searchable_mask):
+    intent = store.create(freshness_data(), 0.0)
+    info = np.ones((6, 6), dtype=float)
+    last_scan = np.full((6, 6), -np.inf)
+    blocked_candidate = {
+        "task_id": "T1",
+        "intent_ids": (intent.intent_id,),
+        "status": "blocked",
+    }
+
+    status = store.evaluate(info, last_scan, searchable_mask, (blocked_candidate,), 10.0)[0]
+
+    assert status.unmet_reason == "no_legal_candidate"
 
 
 def test_scheduling_value_uses_maximum_demand_and_never_mutates_base():
@@ -115,6 +150,25 @@ def test_scheduling_value_uses_maximum_demand_and_never_mutates_base():
     assert result[1, 1] == pytest.approx(2.25)
     # At the overlap max(1 * 2, .5 * 3) is 2, rather than 3.5.
     assert result[2, 2] == pytest.approx(2.25)
+
+
+def test_scheduling_value_does_not_weight_partial_land_intent_cells():
+    base = np.full((4, 4), 0.25)
+    last_scan = np.full((4, 4), -np.inf)
+    searchable_mask = np.ones((4, 4), dtype=bool)
+    searchable_mask[:2, :2] = False
+    intent = _intent("I0001", (0, 0, 3, 3), "search_priority", "high", 1.0)
+
+    result = build_scheduling_value(
+        base,
+        (intent,),
+        last_scan,
+        now_min=20.0,
+        searchable_mask=searchable_mask,
+    )
+
+    assert np.array_equal(result[:2, :2], base[:2, :2])
+    assert result[2, 2] == pytest.approx(3.25)
 
 
 def test_freshness_weight_uses_age_and_treats_never_scanned_as_one():

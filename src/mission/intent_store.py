@@ -127,12 +127,20 @@ class IntentStore:
         now_min: float,
     ) -> tuple[IntentStatus, ...]:
         now = _finite_nonnegative(now_min, "now_min")
-        info_array, scans, static_mask = _metric_inputs(info, last_scan, searchable_mask)
+        info_array, scans = _metric_inputs(
+            info,
+            last_scan,
+            searchable_mask,
+            self._shape,
+        )
         task_list = tuple(tasks)
         statuses = []
         for intent in self.intents():
             c0, r0, c1, r1 = intent.bbox
-            mask = static_mask[c0:c1, r0:r1]
+            # The supplied mask represents current feasibility (for example,
+            # a weather closure). Intent metrics always retain the water mask
+            # captured at store construction as their denominator.
+            mask = self._searchable_mask[c0:c1, r0:r1]
             scan_patch = scans[c0:c1, r0:r1]
             info_patch = info_array[c0:c1, r0:r1]
             scanned = np.isfinite(scan_patch) & mask
@@ -169,7 +177,7 @@ class IntentStore:
                 freshness_ratio=freshness,
                 max_scan_age_min=max_age,
                 assigned_task_ids=_assigned_task_ids(intent.intent_id, task_list),
-                unmet_reason=_unmet_reason(intent, coverage, freshness),
+                unmet_reason=_unmet_reason(intent, coverage, freshness, task_list),
             ))
         return tuple(statuses)
 
@@ -234,6 +242,7 @@ def build_scheduling_value(
     intents: Iterable[Intent],
     last_scan: np.ndarray,
     now_min: float,
+    searchable_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return a weighted copy without stacking overlapping intent demand."""
     now = _finite_nonnegative(now_min, "now_min")
@@ -243,6 +252,12 @@ def build_scheduling_value(
         raise ValueError("base_value and last_scan must be same-shape 2D arrays")
     if not np.isfinite(base).all():
         raise ValueError("base_value: expected finite values")
+    if searchable_mask is None:
+        water = np.ones(base.shape, dtype=bool)
+    else:
+        water = np.asarray(searchable_mask, dtype=bool)
+        if water.shape != base.shape:
+            raise ValueError("searchable_mask must be a grid-sized matrix")
     result = np.array(base, dtype=float, copy=True)
     demand = np.zeros(base.shape, dtype=float)
     for intent in intents:
@@ -262,7 +277,11 @@ def build_scheduling_value(
                 1.0,
             )
         contribution = intent.weight * _PRIORITY_MULTIPLIERS[intent.priority] * local_demand
-        demand[c0:c1, r0:r1] = np.maximum(demand[c0:c1, r0:r1], contribution)
+        local_water = water[c0:c1, r0:r1]
+        demand_patch = demand[c0:c1, r0:r1]
+        demand_patch[local_water] = np.maximum(
+            demand_patch[local_water], contribution[local_water]
+        )
     return result + demand
 
 
@@ -278,23 +297,61 @@ def _assigned_task_ids(intent_id: str, tasks: tuple[Any, ...]) -> tuple[str, ...
     return tuple(sorted(set(task_ids)))
 
 
-def _unmet_reason(intent: Intent, coverage: float, freshness: float) -> str | None:
+def _unmet_reason(
+    intent: Intent,
+    coverage: float,
+    freshness: float,
+    tasks: tuple[Any, ...],
+) -> str | None:
     if intent.lifecycle != "active":
         return intent.lifecycle
-    if intent.mode == "search_priority" and coverage < 0.9:
+    unmet = (
+        coverage < 0.9
+        if intent.mode == "search_priority"
+        else freshness < 0.9
+    )
+    if not unmet:
+        return None
+    if not any(_is_legal_intent_candidate(intent.intent_id, task) for task in tasks):
+        return "no_legal_candidate"
+    if intent.mode == "search_priority":
         return "coverage_below_target"
-    if intent.mode == "maintain_freshness" and freshness < 0.9:
+    if intent.mode == "maintain_freshness":
         return "freshness_below_target"
     return None
 
 
-def _metric_inputs(info: np.ndarray, last_scan: np.ndarray, searchable_mask: np.ndarray):
+def _is_legal_intent_candidate(intent_id: str, task: Any) -> bool:
+    getter = (
+        task.get
+        if isinstance(task, dict)
+        else lambda name, default=None: getattr(task, name, default)
+    )
+    if intent_id not in getter("intent_ids", ()):
+        return False
+    if getter("kind", "search") != "search":
+        return False
+    return getter("status", "candidate") not in {
+        "blocked", "cancelled", "completed", "failed", "infeasible",
+    }
+
+
+def _metric_inputs(
+    info: np.ndarray,
+    last_scan: np.ndarray,
+    searchable_mask: np.ndarray,
+    expected_shape: tuple[int, int],
+):
     arrays = tuple(np.asarray(value) for value in (info, last_scan, searchable_mask))
-    if any(array.ndim != 2 for array in arrays) or len({array.shape for array in arrays}) != 1:
-        raise ValueError("info, last_scan, and searchable_mask must be same-shape 2D arrays")
+    if (
+        any(array.ndim != 2 for array in arrays)
+        or len({array.shape for array in arrays}) != 1
+        or arrays[0].shape != expected_shape
+    ):
+        raise ValueError("info, last_scan, and searchable_mask must be same-shape grid arrays")
     if not np.isfinite(arrays[0]).all():
         raise ValueError("info: expected finite values")
-    return arrays[0], arrays[1], np.asarray(arrays[2], dtype=bool)
+    return arrays[0], arrays[1]
 
 
 def _reject_unknown(data: dict, allowed: set[str], context: str) -> None:
