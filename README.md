@@ -2,11 +2,31 @@
 
 基于 LLM（LongCat）的 UAV 编队海上侦察动态任务调度系统。在 300 km × 300 km 海域中，10 架固定翼 UAV 执行区域覆盖搜索（SAR）与目标跟踪监视（EO/IR），LLM 作为全局决策器动态划分搜索区域，Hungarian 算法负责 UAV 与区域的最优配对。所有单 UAV 命令都经过统一的 `ControlCoordinator`，默认使用 heuristic 控制策略。
 
-当前 `feature/mixed-maritime-llm` 还包含混杂海上目标、全局卫星 AIS、递进式 EO
-核查、人工重点区和受验证策略记忆。当前实现和测试状态见
-[混合海上验证记录](docs/MIXED_MARITIME_VALIDATION.md)；设计契约见
-`docs/superpowers/specs/2026-09-14-mixed-maritime-llm-design.md`。本文后面的 GOAL/GOAL2
-章节是历史能力说明，不替代新方案的接触身份和 live 验证口径。
+当前对齐实现还包含混合海上目标、全局卫星 AIS、递进式 EO 核查、被动辐射探测、
+人工重点区和受验证策略记忆。当前实现和测试状态见
+[混合海上验证记录](docs/MIXED_MARITIME_VALIDATION.md)；参数口径见
+[系统参数手册](docs/SYSTEM_PARAMS.md)。本文后面的 GOAL/GOAL2 章节是历史能力说明，
+不替代当前方案的 `vessel_class/activity`、观测证据和 live 验证口径。
+
+## 2026-09-15 需求对齐
+
+- 船舶类别与活动状态分离：`unknown/civilian/research` 和
+  `unknown/normal/suspected_violation/confirmed_violation`。
+- 被动接收器只向蓝方发布含噪方位；只有同一 `sample/source/burst` 中至少两架不同
+  UAV 成功探测时，环境边界才释放真实 `PassivePosition`。硬探测范围外不产生观测。
+- 中央信息策略以 `EvidenceRecord` 更新 `I/S/A/V`，每个事务只递增一个
+  `information_version`，并把 dirty bbox、原因和证据 ID 传给候选池及调度审计。
+- 调度使用完整可行候选池和公平 Prompt 窗口；LLM 选择任务 ID，确定性匹配器选择 UAV。
+- fixture 评估不会冒充真实模型达标；使用 `--transport live` 的报告才属于真实 API 验证。
+
+快速 fixture 验证：
+
+```bash
+LONGCAT_API_KEY=offline-test PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  python scripts/evaluate_mixed_maritime.py --config configs \
+  --seeds 101,102,103,104,105 --repeat 3 \
+  --output /tmp/maritime-alignment-fixture.json --transport fixture
+```
 
 ---
 

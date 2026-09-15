@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.mission.contracts import Intent
+from src.mission.prompt_window import CandidatePool, PoolCandidate
 from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.state_manager import StateManager
 from src.utils.coverage_planner import CoveragePlanner
@@ -19,6 +20,126 @@ class CandidateResult:
 class CandidateExtractor:
     def __init__(self):
         self.coverage_planner = CoveragePlanner(sample_step=0.25)
+        self._pool_geometry_cache: dict[tuple[int, tuple[int, int, int, int]], bool] = {}
+
+    def extract_pool(
+        self,
+        sm: StateManager,
+        scheduling_value: np.ndarray | None = None,
+    ) -> CandidatePool:
+        """Enumerate the complete legal rectangle pool for one frozen field.
+
+        The legacy ``extract`` method remains capped for old API consumers;
+        the allocator uses this version when it needs completeness and lets
+        the prompt window impose the model input bound.
+        """
+        gc = sm.config.grid
+        cols, rows = gc.resolution
+        snapshot = sm.freeze_information_snapshot(sm.current_time)
+        V = np.asarray(scheduling_value, dtype=float) if scheduling_value is not None \
+            else np.asarray(snapshot.value, dtype=float)
+        if V.shape != (cols, rows) or not np.isfinite(V).all():
+            raise ValueError("scheduling_value must be a finite grid-sized matrix")
+        seen = np.isfinite(sm.info_field.last_scan_time)
+        searchable = sm.get_searchable_mask()
+        occupied = np.zeros((cols, rows), dtype=bool)
+        occupied |= np.asarray(getattr(sm, "obstacle_mask", occupied), dtype=bool)
+        occupied |= np.asarray(getattr(sm, "land_mask", occupied), dtype=bool)
+        for col, row in sm.get_base_positions():
+            if 0 <= col < cols and 0 <= row < rows:
+                occupied[col, row] = True
+        occupied[0, :] = True
+        occupied[-1, :] = True
+        occupied[:, 0] = True
+        occupied[:, -1] = True
+        for region in (*sm.get_track_regions(), *sm.get_active_search_regions()):
+            bbox = region.bbox
+            occupied[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end] = True
+
+        value_prefix = self._summed_area(V)
+        seen_prefix = self._summed_area((~seen).astype(float))
+        occupied_prefix = self._summed_area(occupied.astype(float))
+        candidates: list[PoolCandidate] = []
+        covered = np.zeros((cols, rows), dtype=bool)
+        candidate_number = 0
+        for width in range(1, min(cols, gc.search_max_cells) + 1):
+            for height in range(1, min(rows, gc.search_max_cells) + 1):
+                area = width * height
+                if not gc.search_min_cells <= area <= gc.search_max_cells:
+                    continue
+                if max(width, height) / min(width, height) > gc.aspect_ratio_max:
+                    continue
+                for col in range(1, cols - width):
+                    for row in range(1, rows - height):
+                        bbox = BBox(col, row, col + width, row + height)
+                        if self._rect_sum(occupied_prefix, bbox) > 0:
+                            continue
+                        key = (int(getattr(sm, "obstacle_version", 0)), tuple(bbox))
+                        feasible = self._pool_geometry_cache.get(key)
+                        if feasible is None:
+                            # The clearance envelope is a conservative,
+                            # constant-time certificate for this pool. Full
+                            # Dubins sampling remains in the final edge and
+                            # assignment validators, so enumeration does not
+                            # run the same geometry planner thousands of times.
+                            feasible = self._has_turning_clearance(
+                                bbox, sm.obstacle_mask,
+                            )
+                            self._pool_geometry_cache[key] = feasible
+                        if not feasible:
+                            continue
+                        total = self._rect_sum(value_prefix, bbox)
+                        unseen_count = self._rect_sum(seen_prefix, bbox)
+                        cells = tuple(
+                            (c, r)
+                            for c in range(bbox.col_start, bbox.col_end)
+                            for r in range(bbox.row_start, bbox.row_end)
+                        )
+                        candidate_number += 1
+                        candidates.append(PoolCandidate(
+                            task_id=f"search-{candidate_number:06d}-{col}-{row}-{width}-{height}",
+                            kind="search",
+                            bbox=tuple(bbox),
+                            cells=cells,
+                            total_value=float(total),
+                            mean_value=float(total / area),
+                            max_value=float(V[bbox.col_start:bbox.col_end,
+                                              bbox.row_start:bbox.row_end].max()),
+                            unseen_fraction=float(unseen_count / area),
+                            utility=float(
+                                0.5 * (total / area)
+                                + 0.3 * V[bbox.col_start:bbox.col_end,
+                                         bbox.row_start:bbox.row_end].max()
+                                + 0.2 * (unseen_count / area)
+                            ),
+                            information_version=snapshot.version,
+                        ))
+                        covered[bbox.col_start:bbox.col_end,
+                                bbox.row_start:bbox.row_end] = True
+        high_value = (V >= gc.candidate_value_threshold) & searchable & ~occupied
+        unschedulable = tuple(
+            (int(col), int(row))
+            for col, row in zip(*np.where(high_value & ~covered))
+        )
+        return CandidatePool(
+            candidates=tuple(candidates),
+            unschedulable_cells=unschedulable,
+            geometry_version=int(getattr(sm, "obstacle_version", 0)),
+            information_version=snapshot.version,
+        )
+
+    @staticmethod
+    def _summed_area(matrix: np.ndarray) -> np.ndarray:
+        return np.pad(np.cumsum(np.cumsum(matrix, axis=0), axis=1), ((1, 0), (1, 0)))
+
+    @staticmethod
+    def _rect_sum(prefix: np.ndarray, bbox: BBox) -> float:
+        return float(
+            prefix[bbox.col_end, bbox.row_end]
+            - prefix[bbox.col_start, bbox.row_end]
+            - prefix[bbox.col_end, bbox.row_start]
+            + prefix[bbox.col_start, bbox.row_start]
+        )
 
     def extract(
         self,
@@ -36,7 +157,7 @@ class CandidateExtractor:
                 raise ValueError("scheduling_value must be a finite grid-sized matrix")
             V = V.copy()
         active_intents = tuple(intent for intent in intents if intent.lifecycle == "active")
-        I = sm.get_info_matrix()
+        info = sm.get_info_matrix()
         seen = np.isfinite(sm.info_field.last_scan_time)
         searchable = sm.get_searchable_mask()
         searchable_cells = int(searchable.sum())
@@ -73,7 +194,7 @@ class CandidateExtractor:
         # Step 2: high-value cell clustering (connected components)
         threshold = gc.candidate_value_threshold
         high_value_mask = (V >= threshold) & ~occupied
-        clusters = self._connected_components(high_value_mask, V, I)
+        clusters = self._connected_components(high_value_mask, V, info)
 
         # Step 3: sort by total value descending
         clusters.sort(key=lambda c: c["total_value"], reverse=True)
@@ -136,7 +257,7 @@ class CandidateExtractor:
                     continue
                 patch_V = V[bbox.col_start:bbox.col_end,
                             bbox.row_start:bbox.row_end]
-                patch_I = I[bbox.col_start:bbox.col_end,
+                patch_I = info[bbox.col_start:bbox.col_end,
                             bbox.row_start:bbox.row_end]
                 fitted["total_value"] = float(np.sum(patch_V))
                 fitted["avg_info"] = float(np.mean(patch_I))
@@ -158,7 +279,7 @@ class CandidateExtractor:
             sm,
             occupied,
             V,
-            I,
+            info,
             seen,
             K,
             exploration_mode,
@@ -167,7 +288,7 @@ class CandidateExtractor:
         # A returning tracker leaves a sensor-derived report, not a live ship
         # position.  Offer a compact high-priority search box around its
         # short-horizon projection so the LLM can explicitly plan hand-off.
-        candidates.extend(self._handoff_candidates(sm, occupied, V, I, seen))
+        candidates.extend(self._handoff_candidates(sm, occupied, V, info, seen))
 
         # Cap final candidates at K and keep them mutually disjoint so a model
         # can safely copy the supplied candidate list as its additions.
@@ -335,7 +456,6 @@ class CandidateExtractor:
                 continue
             if report.contact_id in active_groups:
                 continue
-            elapsed = max(0.0, sm.current_time - report.observed_at)
             predicted = sm.contact_position(report.contact_id, sm.current_time)
             if predicted is None:
                 continue
@@ -566,7 +686,7 @@ class CandidateExtractor:
     # ------------------------------------------------------------------
 
     def _connected_components(
-        self, mask: np.ndarray, V: np.ndarray, I: np.ndarray
+        self, mask: np.ndarray, V: np.ndarray, info: np.ndarray
     ) -> list[dict]:
         """Flood-fill connected-component extraction on the high-value mask."""
         cols, rows = mask.shape
@@ -577,7 +697,7 @@ class CandidateExtractor:
             for r in range(rows):
                 if mask[c, r] and not visited[c, r]:
                     cells, total_value, total_info = self._flood_fill(
-                        mask, V, I, visited, c, r, cols, rows
+                        mask, V, info, visited, c, r, cols, rows
                     )
                     avg_info = total_info / len(cells) if cells else 0.0
                     clusters.append(
@@ -594,7 +714,7 @@ class CandidateExtractor:
         self,
         mask: np.ndarray,
         V: np.ndarray,
-        I: np.ndarray,
+        info: np.ndarray,
         visited: np.ndarray,
         start_c: int,
         start_r: int,
@@ -612,7 +732,7 @@ class CandidateExtractor:
             c, r = q.popleft()
             cells.append(GridCoord(c, r))
             total_value += float(V[c, r])
-            total_info += float(I[c, r])
+            total_info += float(info[c, r])
             for dc, dr in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
                 nc, nr = c + dc, r + dr
                 if 0 <= nc < cols and 0 <= nr < rows:

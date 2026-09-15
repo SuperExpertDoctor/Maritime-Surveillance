@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-function frameFixture(mode = "live") {
+function frameFixture(mode = "live", overrides = {}) {
   const matrix = Array.from({ length: 30 }, () => Array(30).fill(0));
   return {
     schema_version: "mission-frame/v2",
@@ -91,6 +91,7 @@ function frameFixture(mode = "live") {
     events: [],
     llm_cycle: null,
     task_area: { width_km: 300, height_km: 300, cell_size_km: 10 },
+    ...overrides,
   };
 }
 
@@ -205,4 +206,77 @@ test("replay renders intent controls as read-only", async ({ page }) => {
   await expect(page.locator(".intent-panel")).toContainText("回放只读");
   await expect(page.locator(".intent-panel .intent-form")).toHaveCount(0);
   await expect(page.locator('[aria-label="框选重点区"]')).toBeDisabled();
+});
+
+test("operator places a research vessel by click and deletes the selected scenario vessel", async ({ page }) => {
+  const fixture = frameFixture("live", {
+    editing_allowed: true,
+    configured_vessel_count: 8,
+    actual_vessel_count: 8,
+    scenario_vessels: [{
+      scenario_entity_id: "scenario-vessel-9",
+      revision: 0,
+      position: [12, 8],
+      vessel_class: "research",
+    }],
+  });
+  await installFrameSocket(page, fixture);
+  const posted = [];
+  const deleted = [];
+  await page.route("**/api/vessels", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    posted.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ command_id: posted.at(-1).command_id, status: "queued" }),
+    });
+  });
+  await page.route("**/api/vessels/*", async (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    deleted.push(route.request().url().split("/").at(-1));
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ command_id: "delete-command", status: "queued" }),
+    });
+  });
+  await page.route("**/api/vessel-commands/*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ command_id: route.request().url().split("/").at(-1), status: "applied", error_code: null }),
+    });
+  });
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: "科考船舶" })).toBeEnabled();
+  await page.getByRole("button", { name: "科考船舶" }).click();
+  const canvas = page.locator(".canvas-area canvas");
+  const geometry = await page.evaluate(async () => {
+    const { computeLayout } = await import("/src/renderer/geometry.js");
+    const canvasElement = document.querySelector(".canvas-area canvas");
+    const rect = canvasElement.getBoundingClientRect();
+    return { rect, layout: computeLayout(rect.width, rect.height) };
+  });
+  await canvas.click({
+    position: {
+      x: geometry.layout.offsetX + geometry.layout.cellSize * 12.5,
+      y: geometry.layout.offsetY + geometry.layout.cellSize * 8.5,
+    },
+  });
+  await expect.poll(() => posted).toHaveLength(1);
+  expect(posted[0].vessel_class).toBe("research");
+  expect(posted[0].position_cells).toEqual([12.5, 8.5]);
+
+  await page.getByRole("button", { name: /scenario-vessel-9/ }).click();
+  await page.getByRole("button", { name: "删除选中船舶" }).click();
+  await expect.poll(() => deleted).toContain("scenario-vessel-9");
+});
+
+test("vessel editing is disabled outside the initialization window", async ({ page }) => {
+  await installFrameSocket(page, frameFixture("live", { editing_allowed: false }));
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "科考船舶" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "民用船舶" })).toBeDisabled();
 });

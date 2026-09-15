@@ -20,7 +20,6 @@ class InfoField:
         return math.log(2) / half_life
 
     def update_decay(self, current_time: float) -> None:
-        gc = self.config.grid
         # 只对已被扫描过的 cell 做衰减
         scanned_mask = np.isfinite(self.last_scan_time)
         if not np.any(scanned_mask):
@@ -50,8 +49,10 @@ class InfoField:
 
     def scan_bbox(self, bbox: BBox, current_time: float, is_track: bool = False) -> None:
         c0, r0, c1, r1 = bbox
-        c0 = max(0, c0); r0 = max(0, r0)
-        c1 = min(self.cols, c1); r1 = min(self.rows, r1)
+        c0 = max(0, c0)
+        r0 = max(0, r0)
+        c1 = min(self.cols, c1)
+        r1 = min(self.rows, r1)
         self.info[c0:c1, r0:r1] = 1.0
         self.last_scan_time[c0:c1, r0:r1] = current_time
         self.is_track_scan[c0:c1, r0:r1] = is_track

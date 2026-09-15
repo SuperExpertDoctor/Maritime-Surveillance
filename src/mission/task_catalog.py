@@ -29,6 +29,7 @@ _ORDINARY_SEARCH_OPERATIONS = {
     "searching",
     "transit",
 }
+_SEARCH_TASK_KINDS = {"search", "direction_search", "investigation"}
 _PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
@@ -99,7 +100,11 @@ class TaskCatalog:
     @staticmethod
     def _is_track_candidate(contact: ContactSnapshot) -> bool:
         return (
-            contact.identity == "target"
+            (
+                contact.identity == "target"
+                or getattr(contact, "activity", "unknown")
+                in {"suspected_violation", "confirmed_violation"}
+            )
             and contact.state not in {"cleared", "lost", "departed"}
             and contact.assigned_uav_id is None
             and contact.active_probe_id is None
@@ -142,6 +147,7 @@ class TaskCatalog:
             estimated_duration_min=task_duration,
             utility=wait + 1.0,
             expected_information_gain=1.0 if kind == "probe" else 0.0,
+            _information_version=int(getattr(state, "information_version", 0)),
         )
 
     def _search_task(
@@ -156,7 +162,11 @@ class TaskCatalog:
         if bbox is None:
             return None
         key = ("search", bbox)
-        task_id = self._task_id(key)
+        supplied_task_id = candidate.get("task_id")
+        if isinstance(supplied_task_id, str) and supplied_task_id:
+            task_id = supplied_task_id
+        else:
+            task_id = self._task_id(key)
         supplied_age = candidate.get("eligible_since_min", now)
         eligible_since = self._remember_age(key, supplied_age, now)
         intent_ids = self._intent_ids(candidate, bbox, intents)
@@ -182,9 +192,12 @@ class TaskCatalog:
                 self._return_distance(state, target),
             )
         )
+        kind = candidate.get("kind", "search")
+        if kind not in _SEARCH_TASK_KINDS:
+            kind = "search"
         return TaskCandidate(
             task_id=task_id,
-            kind="search",
+            kind=kind,
             bbox=bbox,
             contact_id=None,
             intent_ids=intent_ids,
@@ -194,7 +207,80 @@ class TaskCatalog:
             estimated_duration_min=duration,
             utility=utility,
             expected_information_gain=max(0.0, min(1.0, 1.0 - avg_info)),
+            _information_version=int(getattr(state, "information_version", 0)),
         )
+
+    @staticmethod
+    def _passive_investigation_candidates(state, now: float) -> tuple[dict, ...]:
+        getter = getattr(state, "get_passive_positions", None)
+        if not callable(getter):
+            return ()
+        grid = getattr(state.config, "grid", None)
+        resolution = tuple(getattr(grid, "resolution", (0, 0)))
+        if len(resolution) != 2:
+            return ()
+        width = max(1, int(math.ceil(math.sqrt(
+            max(1, int(getattr(grid, "search_min_cells", 1)))
+        ))))
+        result = []
+        for position in getter(now):
+            x, y = position.position_cells
+            col = int(math.floor(x - width / 2.0))
+            row = int(math.floor(y - width / 2.0))
+            col = max(1, min(col, resolution[0] - width - 1))
+            row = max(1, min(row, resolution[1] - width - 1))
+            bbox = (col, row, col + width, row + width)
+            result.append({
+                "task_id": f"investigation:{position.emitter_track_id}",
+                "kind": "investigation",
+                "bbox": bbox,
+                "cell_count": width * width,
+                "avg_info": 0.0,
+                "total_value": 1.0,
+                "eligible_since_min": min(now, position.observed_at_min),
+                "priority": "high",
+            })
+        return tuple(result)
+
+    @staticmethod
+    def _passive_direction_candidates(state, now: float) -> tuple[dict, ...]:
+        getter = getattr(state, "get_passive_observations", None)
+        if not callable(getter):
+            return ()
+        grid = state.config.grid
+        resolution = tuple(grid.resolution)
+        width = max(1, int(math.ceil(math.sqrt(max(1, grid.search_min_cells)))))
+        position_getter = getattr(state, "get_passive_positions", None)
+        positions = position_getter(now) if callable(position_getter) else ()
+        point_observations = {
+            observation_id
+            for position in positions
+            for observation_id in position.source_observation_ids
+        }
+        result = []
+        for observation in getter(now):
+            if observation.observation_id in point_observations:
+                continue
+            angle = math.radians(observation.bearing_deg)
+            center = (
+                observation.observer_position_cells[0] + 3.0 * math.cos(angle),
+                observation.observer_position_cells[1] + 3.0 * math.sin(angle),
+            )
+            col = int(math.floor(center[0] - width / 2.0))
+            row = int(math.floor(center[1] - width / 2.0))
+            col = max(1, min(col, resolution[0] - width - 1))
+            row = max(1, min(row, resolution[1] - width - 1))
+            result.append({
+                "task_id": f"direction:{observation.observation_id}",
+                "kind": "direction_search",
+                "bbox": (col, row, col + width, row + width),
+                "cell_count": width * width,
+                "avg_info": 0.0,
+                "total_value": 0.6,
+                "eligible_since_min": min(now, observation.observed_at_min),
+                "priority": "high",
+            })
+        return tuple(result)
 
     def _search_candidates(
         self, state, intents: tuple[Intent, ...], now: float,
@@ -221,27 +307,46 @@ class TaskCatalog:
                     )
                 except (AttributeError, TypeError, ValueError):
                     scheduling_value = None
-            supplied = self.extractor.extract(
-                state,
-                scheduling_value=scheduling_value,
-                intents=intents,
-            )
+            extract_pool = getattr(self.extractor, "extract_pool", None)
+            if callable(extract_pool):
+                supplied = extract_pool(state, scheduling_value=scheduling_value)
+            else:
+                supplied = self.extractor.extract(
+                    state,
+                    scheduling_value=scheduling_value,
+                    intents=intents,
+                )
 
         raw_candidates = (
             supplied.candidate_regions
             if hasattr(supplied, "candidate_regions")
-            else supplied
+            else getattr(supplied, "candidates", supplied)
         )
         merged: dict[tuple[int, int, int, int], dict] = {}
-        for raw in raw_candidates or ():
-            if not isinstance(raw, dict):
+        candidates = [
+            *self._passive_investigation_candidates(state, now),
+            *self._passive_direction_candidates(state, now),
+        ]
+        candidates.extend(raw_candidates or ())
+        for raw in candidates:
+            if isinstance(raw, dict):
+                item = dict(raw)
+            elif hasattr(raw, "bbox"):
+                item = {
+                    "task_id": getattr(raw, "task_id", None),
+                    "bbox": getattr(raw, "bbox", None),
+                    "cell_count": len(getattr(raw, "cells", ())),
+                    "avg_info": getattr(raw, "mean_value", 0.0),
+                    "total_value": getattr(raw, "total_value", 0.0),
+                    "eligible_since_min": getattr(raw, "eligible_since_min", now),
+                }
+            else:
                 continue
-            bbox = self._bbox(raw.get("bbox"))
+            bbox = self._bbox(item.get("bbox"))
             if bbox is None:
                 continue
-            item = dict(raw)
             item["bbox"] = bbox
-            item["intent_ids"] = tuple(raw.get("intent_ids", ()))
+            item["intent_ids"] = tuple(item.get("intent_ids", ()))
             previous = merged.get(bbox)
             if previous is None:
                 merged[bbox] = item

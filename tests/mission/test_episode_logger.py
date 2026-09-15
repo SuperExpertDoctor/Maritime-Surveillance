@@ -52,3 +52,45 @@ def test_episode_logger_never_reuses_an_existing_episode_directory(tmp_path):
     second = EpisodeLogger(tmp_path)
     with pytest.raises(FileExistsError):
         second.start({"episode_id": "episode-fixed"})
+
+
+def test_episode_logger_writes_trace_and_handoff_ledgers(tmp_path):
+    logger = EpisodeLogger(tmp_path)
+    logger.start({"episode_id": "episode-ledger"})
+
+    logger.append_trace({
+        "observation_id": "obs-1",
+        "evidence_id": "ev-1",
+        "information_version": 3,
+        "task_id": "task-1",
+        "decision_id": "decision-1",
+        "assignment_id": "assignment-1",
+    })
+    logger.append_handoff({
+        "interruption_id": "interrupt-1",
+        "status": "success",
+        "assignment_id": "assignment-1",
+    })
+
+    logger.finish("completed")
+
+    manifest = logger.read_manifest()
+    assert manifest["record_counts"]["blue/decisions"] == 1
+    assert manifest["record_counts"]["evaluation/handoffs"] == 1
+    assert "assignment-1" in (
+        tmp_path / "episode-ledger" / "blue" / "decisions.jsonl"
+    ).read_text()
+
+
+def test_episode_logger_rejects_incomplete_success_trace(tmp_path):
+    logger = EpisodeLogger(tmp_path)
+    logger.start({"episode_id": "episode-ledger-invalid"})
+
+    with pytest.raises(ValueError, match="trace requires"):
+        logger.append_trace({
+            "observation_id": "obs-1",
+            "evidence_id": "ev-1",
+            "information_version": 1,
+            "task_id": "task-1",
+            "decision_id": "decision-1",
+        })

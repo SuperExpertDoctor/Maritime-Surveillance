@@ -1,4 +1,5 @@
 ﻿from dataclasses import dataclass, field
+from src.mission.contracts import InfoFieldDelta
 from src.schedule.state_manager import StateManager
 
 
@@ -7,6 +8,7 @@ class TriggerDecision:
     trigger_type: str  # "light" | "heavy" | "none"
     reason: str = ""
     affected_uavs: list[str] = field(default_factory=list)
+    information_version: int = 0
 
 
 class TriggerManager:
@@ -33,6 +35,29 @@ class TriggerManager:
             "type": event_type,
             "time": time,
             **kwargs,
+        })
+
+    def notify_information_delta(self, delta: InfoFieldDelta, *, time: float | None = None) -> None:
+        if not isinstance(delta, InfoFieldDelta):
+            raise TypeError("delta must be InfoFieldDelta")
+        event_time = self._sm.current_time if time is None else float(time)
+        cause_ids = tuple(delta.cause_evidence_ids)
+        if any(
+            event["type"] == "information_delta"
+            and event.get("cause_evidence_ids") == cause_ids
+            for event in self._pending_events
+        ):
+            return
+        self._pending_events.append({
+            "type": "information_delta",
+            "time": event_time,
+            "information_version": delta.version,
+            "urgent": delta.urgent,
+            "value_changed": delta.value_changed,
+            "max_abs_value_delta": delta.max_abs_value_delta,
+            "crossed_candidate_threshold": delta.crossed_candidate_threshold,
+            "reason_codes": tuple(delta.reason_codes),
+            "cause_evidence_ids": cause_ids,
         })
 
     def check(self, current_time: float) -> TriggerDecision:
@@ -97,6 +122,7 @@ class TriggerManager:
             # GOAL2: dynamic environment — storms may open/block searchable area
             "storm_spawned",
             "storm_dissipated",
+            "handoff_required",
         }
         # Light: incremental adjustments handled by Hungarian pairing only
         light_types = {
@@ -108,7 +134,19 @@ class TriggerManager:
             "uav_fuel_low_warning",
         }
 
-        heavy_count = sum(1 for e in recent if e["type"] in heavy_types)
+        info_heavy = [
+            event for event in recent
+            if event["type"] == "information_delta"
+            and (
+                event.get("urgent")
+                or event.get("value_changed")
+                and (
+                    event.get("max_abs_value_delta", 0.0) >= 0.05
+                    or event.get("crossed_candidate_threshold")
+                )
+            )
+        ]
+        heavy_count = sum(1 for e in recent if e["type"] in heavy_types) + len(info_heavy)
         light_count = sum(1 for e in recent if e["type"] in light_types)
 
         # 重量触发条件：任一 heavy 事件，或 5min 内 >=3 个事件
@@ -121,6 +159,10 @@ class TriggerManager:
                 trigger_type="heavy",
                 reason=f"{heavy_count} heavy + {light_count} light events",
                 affected_uavs=affected,
+                information_version=max(
+                    (int(event.get("information_version", 0)) for event in recent),
+                    default=0,
+                ),
             )
 
         # 轻量触发

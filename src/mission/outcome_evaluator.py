@@ -1,7 +1,7 @@
 """Evaluation-only truth snapshots and reproducible mission outcomes."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Literal
 
@@ -83,6 +83,16 @@ class EpisodeOutcome:
     observed_vessels: int = 0
     unknown_contacts: int = 0
     terminal_classification_coverage: float | None = None
+    classification_confusion: dict = field(default_factory=dict)
+    civilian_recall: float | None = None
+    research_recall: float | None = None
+    balanced_accuracy: float | None = None
+    discovery_tracking_rate: float | None = None
+    handoff_success_rate: float | None = None
+    continuous_observation_rate: float | None = None
+    decision_latency_seconds: dict = field(default_factory=dict)
+    metric_denominators: dict = field(default_factory=dict)
+    operational_failures: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.episode_id, str) or not self.episode_id:
@@ -108,6 +118,8 @@ class EpisodeOutcome:
                 raise ValueError(f"{name} must be finite or None")
         if isinstance(self.task_switch_count, bool) or self.task_switch_count < 0:
             raise ValueError("task_switch_count must be nonnegative")
+        if isinstance(self.operational_failures, bool) or self.operational_failures < 0:
+            raise ValueError("operational_failures must be nonnegative")
 
     @property
     def civilian_probe_cost(self) -> float:
@@ -143,12 +155,293 @@ class OutcomeEvaluator:
         self._invalid_reasons: list[str] = []
         self._ticks = 0
         self._finalized: EpisodeOutcome | None = None
+        self._classification_matrix = {
+            "civilian": {"civilian": 0, "research": 0, "unknown": 0},
+            "research": {"civilian": 0, "research": 0, "unknown": 0},
+        }
+        self._classification_recorded: set[str] = set()
+        self._discovery_required: set[str] = set()
+        self._discovery_success: set[str] = set()
+        self._handoff_events: dict[str, dict] = {}
+        self._survey_intervals: dict[str, list[tuple[float, float]]] = {}
+        self._eo_lock_intervals: dict[str, list[tuple[float, float]]] = {}
+        self._decision_latencies: list[dict] = []
+        self._operational_failures = 0
 
     def invalidate(self, reason: str) -> None:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("invalid reason must be non-empty")
         if reason.strip() not in self._invalid_reasons:
             self._invalid_reasons.append(reason.strip())
+
+    @staticmethod
+    def _classification_label(value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized == "target":
+            return "research"
+        if normalized in {"civilian", "research", "unknown"}:
+            return normalized
+        raise ValueError("classification labels must be civilian, research, or unknown")
+
+    def add_classification(self, *, truth: str, predicted: str, eligible: bool = True) -> None:
+        """Record one eligible vessel classification, including unknown as an error."""
+        if not isinstance(eligible, bool):
+            raise TypeError("eligible must be bool")
+        if not eligible:
+            return
+        truth_label = self._classification_label(truth)
+        predicted_label = self._classification_label(predicted)
+        if truth_label == "unknown":
+            raise ValueError("classification truth cannot be unknown")
+        self._classification_matrix[truth_label][predicted_label] += 1
+
+    def register_discovery_target(self, vessel_id: str) -> None:
+        if not isinstance(vessel_id, str) or not vessel_id:
+            raise ValueError("vessel_id is required")
+        self._discovery_required.add(vessel_id)
+
+    def record_discovery_tracking(self, vessel_id: str, *, success: bool = True) -> None:
+        self.register_discovery_target(vessel_id)
+        if not isinstance(success, bool):
+            raise TypeError("success must be bool")
+        if success:
+            self._discovery_success.add(vessel_id)
+
+    def register_handoff(
+        self,
+        interruption_id: str,
+        *,
+        at_min: float,
+        successor_uav_ids=(),
+    ) -> dict:
+        """Register one interruption; retries update the same ledger row."""
+        if not isinstance(interruption_id, str) or not interruption_id:
+            raise ValueError("interruption_id is required")
+        _nonnegative_finite(at_min, "at_min")
+        successors = tuple(sorted({str(item) for item in successor_uav_ids if item}))
+        existing = self._handoff_events.get(interruption_id)
+        if existing is not None:
+            return dict(existing)
+        event = {
+            "interruption_id": interruption_id,
+            "at_min": float(at_min),
+            "successors": successors,
+            "eligible": bool(successors),
+            "status": "pending" if successors else "excluded_no_successor",
+            "assignment_at_min": None,
+            "lock_at_min": None,
+            "failure_reason": None if successors else "no_feasible_successor",
+        }
+        self._handoff_events[interruption_id] = event
+        return dict(event)
+
+    def record_handoff_assignment(self, interruption_id: str, *, at_min: float) -> dict:
+        event = self._handoff_events.get(interruption_id)
+        if event is None:
+            raise KeyError(interruption_id)
+        _nonnegative_finite(at_min, "at_min")
+        if not event["eligible"] or event["status"] == "success":
+            return dict(event)
+        if float(at_min) > event["at_min"] + 5.0:
+            event["status"] = "failed"
+            event["failure_reason"] = "assignment_deadline"
+        else:
+            event["assignment_at_min"] = float(at_min)
+            event["status"] = "assigned"
+        return dict(event)
+
+    def record_handoff_lock(self, interruption_id: str, *, at_min: float) -> dict:
+        event = self._handoff_events.get(interruption_id)
+        if event is None:
+            raise KeyError(interruption_id)
+        _nonnegative_finite(at_min, "at_min")
+        if event["status"] == "success":
+            return dict(event)
+        if event["status"] != "assigned":
+            return dict(event)
+        if float(at_min) > event["at_min"] + 10.0:
+            event["status"] = "failed"
+            event["failure_reason"] = "lock_deadline"
+        else:
+            event["lock_at_min"] = float(at_min)
+            event["status"] = "success"
+        return dict(event)
+
+    def add_survey_interval(self, vessel_id: str, start_min: float, end_min: float) -> None:
+        self._add_interval(self._survey_intervals, vessel_id, start_min, end_min)
+
+    def add_eo_lock_interval(self, vessel_id: str, start_min: float, end_min: float) -> None:
+        self._add_interval(self._eo_lock_intervals, vessel_id, start_min, end_min)
+
+    @staticmethod
+    def _add_interval(store: dict, vessel_id: str, start_min: float, end_min: float) -> None:
+        if not isinstance(vessel_id, str) or not vessel_id:
+            raise ValueError("vessel_id is required")
+        _nonnegative_finite(start_min, "start_min")
+        _nonnegative_finite(end_min, "end_min")
+        if end_min <= start_min:
+            raise ValueError("interval end must be after start")
+        store.setdefault(vessel_id, []).append((float(start_min), float(end_min)))
+
+    @staticmethod
+    def _merge_intervals(intervals) -> list[tuple[float, float]]:
+        merged: list[list[float]] = []
+        for start, end in sorted(intervals):
+            if not merged or start > merged[-1][1]:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        return [(start, end) for start, end in merged]
+
+    @classmethod
+    def _interval_duration(cls, intervals) -> float:
+        return sum(end - start for start, end in cls._merge_intervals(intervals))
+
+    @classmethod
+    def _intersection_duration(cls, left, right) -> float:
+        left_merged = cls._merge_intervals(left)
+        right_merged = cls._merge_intervals(right)
+        total = 0.0
+        right_index = 0
+        for left_start, left_end in left_merged:
+            while right_index < len(right_merged) and right_merged[right_index][1] <= left_start:
+                right_index += 1
+            index = right_index
+            while index < len(right_merged) and right_merged[index][0] < left_end:
+                total += max(0.0, min(left_end, right_merged[index][1]) - max(left_start, right_merged[index][0]))
+                index += 1
+        return total
+
+    def record_decision_latency(
+        self,
+        *,
+        snapshot_frozen_wall: float,
+        decision_finished_wall: float,
+        llm_seconds: float = 0.0,
+        validation_seconds: float = 0.0,
+        matching_seconds: float = 0.0,
+        success: bool = True,
+        failure_reason: str | None = None,
+    ) -> dict:
+        values = {
+            "snapshot_frozen_wall": snapshot_frozen_wall,
+            "decision_finished_wall": decision_finished_wall,
+            "llm_seconds": llm_seconds,
+            "validation_seconds": validation_seconds,
+            "matching_seconds": matching_seconds,
+        }
+        for name, value in values.items():
+            if name.endswith("wall"):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    raise ValueError(f"{name} must be finite")
+            else:
+                _nonnegative_finite(value, name)
+        total = float(decision_finished_wall) - float(snapshot_frozen_wall)
+        if total < 0:
+            raise ValueError("decision_finished_wall must not precede snapshot_frozen_wall")
+        if not isinstance(success, bool):
+            raise TypeError("success must be bool")
+        sample = {
+            "total_seconds": total,
+            "llm_seconds": float(llm_seconds),
+            "validation_seconds": float(validation_seconds),
+            "matching_seconds": float(matching_seconds),
+            "success": success,
+            "failure_reason": failure_reason,
+        }
+        self._decision_latencies.append(sample)
+        if not success:
+            self._operational_failures += 1
+        return dict(sample)
+
+    def _metric_summary(self) -> dict:
+        denominators = {
+            label: sum(row.values()) for label, row in self._classification_matrix.items()
+        }
+        recalls = {
+            label: (
+                self._classification_matrix[label][label] / denominators[label]
+                if denominators[label] else None
+            )
+            for label in ("civilian", "research")
+        }
+        balanced = (
+            (recalls["civilian"] + recalls["research"]) / 2
+            if recalls["civilian"] is not None and recalls["research"] is not None else None
+        )
+        eligible_handoffs = [item for item in self._handoff_events.values() if item["eligible"]]
+        handoff_success = (
+            sum(item["status"] == "success" for item in eligible_handoffs) / len(eligible_handoffs)
+            if eligible_handoffs else None
+        )
+        survey_denominator = sum(
+            self._interval_duration(intervals) for intervals in self._survey_intervals.values()
+        )
+        survey_numerator = sum(
+            self._intersection_duration(
+                self._survey_intervals.get(vessel_id, ()),
+                self._eo_lock_intervals.get(vessel_id, ()),
+            )
+            for vessel_id in self._survey_intervals
+        )
+        continuous_rate = survey_numerator / survey_denominator if survey_denominator else None
+        latencies = [item["total_seconds"] for item in self._decision_latencies]
+        latency_summary = {
+            "count": len(latencies),
+            "failures": sum(not item["success"] for item in self._decision_latencies),
+            "p50": _percentile(latencies, 0.50),
+            "p95": _percentile(latencies, 0.95),
+            "max": max(latencies) if latencies else None,
+            "llm_seconds": sum(item["llm_seconds"] for item in self._decision_latencies),
+            "validation_seconds": sum(item["validation_seconds"] for item in self._decision_latencies),
+            "matching_seconds": sum(item["matching_seconds"] for item in self._decision_latencies),
+        }
+        return {
+            "confusion_matrix": self._classification_matrix,
+            "classification_denominators": denominators,
+            "civilian_recall": recalls["civilian"],
+            "research_recall": recalls["research"],
+            "balanced_accuracy": balanced,
+            "discovery_tracking_rate": (
+                len(self._discovery_success & self._discovery_required) / len(self._discovery_required)
+                if self._discovery_required else None
+            ),
+            "discovery_tracking_numerator": len(
+                self._discovery_success & self._discovery_required
+            ),
+            "discovery_tracking_denominator": len(self._discovery_required),
+            "handoff_success_rate": handoff_success,
+            "handoff_success_numerator": sum(
+                item["status"] == "success" for item in eligible_handoffs
+            ),
+            "handoff_denominator": len(eligible_handoffs),
+            "handoff_excluded_no_successor": sum(
+                not item["eligible"] for item in self._handoff_events.values()
+            ),
+            "continuous_observation_rate": continuous_rate,
+            "continuous_observation_numerator_min": survey_numerator,
+            "continuous_observation_denominator_min": survey_denominator,
+            "decision_latency_seconds": latency_summary,
+            "operational_failures": self._operational_failures,
+            "na_reasons": {
+                "civilian_recall": "no_eligible_civilian" if not denominators["civilian"] else None,
+                "research_recall": "no_eligible_research" if not denominators["research"] else None,
+                "balanced_accuracy": "missing_class_denominator" if balanced is None else None,
+                "discovery_tracking_rate": "no_required_research_vessels" if not self._discovery_required else None,
+                "handoff_success_rate": "no_eligible_handoff_interruptions" if not eligible_handoffs else None,
+                "continuous_observation_rate": "no_survey_minutes" if not survey_denominator else None,
+            },
+            "handoff_ledger": tuple(dict(item) for item in self._handoff_events.values()),
+        }
+
+    def summary(self) -> dict:
+        """Return the explicit acceptance metrics without finalizing the episode."""
+        return self._metric_summary()
+
+    @property
+    def decision_latency_samples(self) -> tuple[dict, ...]:
+        """Return defensive copies of raw planning latency samples."""
+        return tuple(dict(sample) for sample in self._decision_latencies)
 
     def observe(self, tick: EvaluationTick) -> None:
         if self._finalized is not None:
@@ -169,6 +462,8 @@ class OutcomeEvaluator:
                 self._target_present_min.setdefault(vessel.ship_id, 0.0)
                 if vessel.identity == "target":
                     self._target_present_min[vessel.ship_id] += dt
+                    if vessel.gate_state == "survey":
+                        self.add_survey_interval(vessel.ship_id, start, end)
 
         contact_by_id = {contact.contact_id: contact for contact in tick.contacts}
         for contact in tick.contacts:
@@ -192,6 +487,7 @@ class OutcomeEvaluator:
             vessel = truth_by_id.get(physical_ship_id)
             if vessel is not None and not vessel.departed and operations.get(uav_id, "") in self._TRACKING_OPERATIONS:
                 good_tracking.add(physical_ship_id)
+                self.add_eo_lock_interval(physical_ship_id, start, end)
             contact = contact_by_id.get(contact_id)
             if contact is not None:
                 assessment = contact.last_assessment
@@ -289,6 +585,7 @@ class OutcomeEvaluator:
         reasons = tuple(self._invalid_reasons)
         if self._ticks == 0:
             reasons = (*reasons, "no_evaluation_ticks")
+        metrics = self._metric_summary()
         return EpisodeOutcome(
             self.episode_id,
             not reasons,
@@ -308,6 +605,26 @@ class OutcomeEvaluator:
             observed_count,
             unknown_contacts,
             terminal_coverage,
+            classification_confusion=metrics["confusion_matrix"],
+            civilian_recall=metrics["civilian_recall"],
+            research_recall=metrics["research_recall"],
+            balanced_accuracy=metrics["balanced_accuracy"],
+            discovery_tracking_rate=metrics["discovery_tracking_rate"],
+            handoff_success_rate=metrics["handoff_success_rate"],
+            continuous_observation_rate=metrics["continuous_observation_rate"],
+            decision_latency_seconds=metrics["decision_latency_seconds"],
+            metric_denominators={
+                **metrics["classification_denominators"],
+                "discovery_tracking_numerator": metrics["discovery_tracking_numerator"],
+                "discovery_tracking_denominator": metrics["discovery_tracking_denominator"],
+                "handoff_success_numerator": metrics["handoff_success_numerator"],
+                "handoff": metrics["handoff_denominator"],
+                "continuous_observation_numerator_min": metrics[
+                    "continuous_observation_numerator_min"
+                ],
+                "continuous_observation_min": metrics["continuous_observation_denominator_min"],
+            },
+            operational_failures=metrics["operational_failures"],
         )
 
     def _record_terminal_label(self, physical_ship_id: str, identity: str, time: float) -> None:
@@ -315,6 +632,13 @@ class OutcomeEvaluator:
         if previous_time is None or time >= previous_time:
             self._terminal_labels[physical_ship_id] = identity
             self._terminal_label_times[physical_ship_id] = time
+        if physical_ship_id not in self._classification_recorded and physical_ship_id in self._truth_identity:
+            self.add_classification(
+                truth=self._truth_identity[physical_ship_id],
+                predicted=identity,
+                eligible=True,
+            )
+            self._classification_recorded.add(physical_ship_id)
 
 
 def _nonnegative_finite(value: float, name: str) -> None:
@@ -322,6 +646,19 @@ def _nonnegative_finite(value: float, name: str) -> None:
         raise TypeError(f"{name} must be numeric")
     if not math.isfinite(float(value)) or value < 0:
         raise ValueError(f"{name} must be finite and nonnegative")
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    index = (len(ordered) - 1) * fraction
+    lower = math.floor(index)
+    upper = math.ceil(index)
+    if lower == upper:
+        return ordered[lower]
+    weight = index - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
 
 
 __all__ = [

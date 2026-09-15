@@ -178,9 +178,19 @@ function ParamsTab({ config, error }) {
   if (!config) return <div className="loading-state"><span />加载参数</div>;
   return <div className="params-grid">{Object.entries(config).map(([section, values]) => (
     <section key={section}><h3>{section}</h3>{Object.entries(values).map(([key, value]) => (
-      <div key={key}><span>{key}</span><b>{Array.isArray(value) ? value.join(" × ") : String(value)}</b></div>
+      <div key={key}><span>{key}</span><b>{formatParamValue(value)}</b></div>
     ))}</section>
   ))}</div>;
+}
+
+function formatParamValue(value) {
+  if (Array.isArray(value)) return value.join(" × ");
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, child]) => `${key}: ${formatParamValue(child)}`)
+      .join("; ");
+  }
+  return String(value);
 }
 
 function EmptyState({ text }) {

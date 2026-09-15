@@ -1,5 +1,7 @@
-initial_ship_count: 8
-target_ship_count: 3
+population:
+  total_count: 8
+  civilian_ratio: 0.625
+  research_ratio: 0.375
 target_ais_on_probability: 0.5
 speed_kn: 18.0
 ais_update_interval_min: 1.0

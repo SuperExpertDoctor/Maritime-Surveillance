@@ -1,4 +1,4 @@
-import { Bot, CircleX, Crosshair, Plane, Radar, Ship, Waypoints } from "lucide-react";
+import { Bot, CircleX, Crosshair, MousePointer2, Plane, Radar, Ship, Trash2, Waypoints } from "lucide-react";
 import { UAV_STATUS_COLORS } from "../renderer/colors";
 import ContactPanel from "./ContactPanel";
 import IntentPanel from "./IntentPanel";
@@ -12,7 +12,27 @@ const STATUS_LABELS = {
   refueling: "加油",
 };
 
-export default function RightSidebar({ frame, onSelectUav, selectedUavId, open, onClose, lastLlmCycle, readOnly, selection, onClearSelection, selectedContactId, onSelectContact }) {
+export default function RightSidebar({
+  frame,
+  onSelectUav,
+  selectedUavId,
+  open,
+  onClose,
+  lastLlmCycle,
+  readOnly,
+  selection,
+  onClearSelection,
+  selectedContactId,
+  onSelectContact,
+  editingAllowed,
+  vesselPlacement,
+  onSelectVesselType,
+  onCancelVesselPlacement,
+  selectedScenarioVesselId,
+  onSelectScenarioVessel,
+  onDeleteVessel,
+  vesselCommandStatus,
+}) {
   const uavs = frame?.uavs || [];
   const ships = frame?.ships || [];
   const contacts = frame?.contacts || [];
@@ -33,6 +53,10 @@ export default function RightSidebar({ frame, onSelectUav, selectedUavId, open, 
     ? frame.coverage_pct
     : (total ? scanned / total * 100 : 0);
   const selected = uavs.find((uav) => uav.id === selectedUavId);
+  const scenarioVessels = frame?.scenario_vessels || [];
+  const selectedScenarioVessel = scenarioVessels.find(
+    (vessel) => vessel.scenario_entity_id === selectedScenarioVesselId,
+  );
 
   return (
     <aside className={`sidebar ${open ? "open" : ""}`} aria-label="编队状态">
@@ -49,6 +73,84 @@ export default function RightSidebar({ frame, onSelectUav, selectedUavId, open, 
             <Metric label="决策周期" value={`#${frame.cycle ?? 0}`} />
             <Metric label="海域覆盖" value={`${coverage.toFixed(1)}%`} emphasized />
             <Metric label="观测接触" value={contacts.length || ships.filter((ship) => ship.is_detected).length} />
+          </section>
+
+          <section className="sidebar-section vessel-editor" aria-label="初始化船舶编辑">
+            <div className="section-heading">
+              <span><Ship size={15} />初始化船舶</span>
+              <small>{frame.actual_vessel_count ?? ships.length}/{frame.configured_vessel_count ?? ships.length}</small>
+            </div>
+            <div className="vessel-palette" role="group" aria-label="船舶组件库">
+              <button
+                type="button"
+                className={vesselPlacement === "civilian" ? "vessel-tool active" : "vessel-tool"}
+                aria-pressed={vesselPlacement === "civilian"}
+                aria-label="民用船舶"
+                draggable={editingAllowed}
+                disabled={!editingAllowed}
+                onClick={() => onSelectVesselType?.(vesselPlacement === "civilian" ? null : "civilian")}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData("application/x-vessel-class", "civilian");
+                  onSelectVesselType?.("civilian");
+                }}
+                title="选择后点击地图放置民用船舶"
+              >
+                <Ship size={17} /><span>民用船舶</span>
+              </button>
+              <button
+                type="button"
+                className={vesselPlacement === "research" ? "vessel-tool active" : "vessel-tool"}
+                aria-pressed={vesselPlacement === "research"}
+                aria-label="科考船舶"
+                draggable={editingAllowed}
+                disabled={!editingAllowed}
+                onClick={() => onSelectVesselType?.(vesselPlacement === "research" ? null : "research")}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData("application/x-vessel-class", "research");
+                  onSelectVesselType?.("research");
+                }}
+                title="选择后点击地图放置科考船舶"
+              >
+                <Radar size={17} /><span>科考船舶</span>
+              </button>
+            </div>
+            {vesselPlacement && editingAllowed && (
+              <div className="placement-status">
+                <MousePointer2 size={14} />
+                <span>地图上选择位置</span>
+                <button type="button" className="compact-icon icon-btn" onClick={onCancelVesselPlacement} aria-label="取消放置船舶" title="取消放置船舶"><CircleX size={14} /></button>
+              </div>
+            )}
+            {scenarioVessels.length > 0 && (
+              <div className="scenario-vessel-list" aria-label="场景船舶列表">
+                {scenarioVessels.map((vessel) => (
+                  <button
+                    type="button"
+                    key={vessel.scenario_entity_id}
+                    className={selectedScenarioVesselId === vessel.scenario_entity_id ? "scenario-vessel-row selected" : "scenario-vessel-row"}
+                    aria-pressed={selectedScenarioVesselId === vessel.scenario_entity_id}
+                    onClick={() => onSelectScenarioVessel?.(
+                      selectedScenarioVesselId === vessel.scenario_entity_id ? null : vessel.scenario_entity_id,
+                    )}
+                  >
+                    <span><Ship size={13} />{vessel.scenario_entity_id}</span>
+                    <small>{vessel.vessel_class === "research" ? "科考" : "民用"}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+            {selectedScenarioVessel && editingAllowed && (
+              <button type="button" className="delete-vessel-action" onClick={onDeleteVessel} aria-label="删除选中船舶">
+                <Trash2 size={14} />删除选中船舶
+              </button>
+            )}
+            {!editingAllowed && <p className="editor-note">首个仿真步后锁定；回放只读</p>}
+            {vesselCommandStatus && (
+              <div className={`vessel-command-status ${vesselCommandStatus.status}`} role="status">
+                <span>{vesselCommandStatus.message}</span>
+                {vesselCommandStatus.errorCode && <small>{vesselCommandStatus.errorCode}</small>}
+              </div>
+            )}
           </section>
 
           <section className="sidebar-section">

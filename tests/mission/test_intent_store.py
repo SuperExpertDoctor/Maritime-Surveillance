@@ -81,7 +81,7 @@ def test_create_allows_partial_land_but_rejects_all_land(store):
 
 
 def test_status_uses_static_water_denominator_and_reports_unseen_without_infinity(store, searchable_mask):
-    intent = store.create(freshness_data(), 0.0)
+    store.create(freshness_data(), 0.0)
     info = np.ones((6, 6), dtype=float)
     last_scan = np.full((6, 6), -np.inf)
     last_scan[1, 1] = 8.0
@@ -101,7 +101,7 @@ def test_status_uses_static_water_denominator_and_reports_unseen_without_infinit
 
 
 def test_status_ignores_temporary_weather_mask_for_coverage_and_freshness(store, searchable_mask):
-    intent = store.create(freshness_data(), 0.0)
+    store.create(freshness_data(), 0.0)
     info = np.ones((6, 6), dtype=float)
     last_scan = np.full((6, 6), -np.inf)
     last_scan[1, 1] = 8.0

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 
 import pytest
 
@@ -9,13 +8,11 @@ from src.control.common.contracts import (
     ControlEvent,
     ControlOwner,
     ControlTask,
-    ControllerContext,
     ObservationSpec,
     OperationMode,
 )
 from src.control.common.factory import ControlFactory
 from src.control.common.ownership import ControlOwnership
-from src.control.heuristic.coverage import CoverageController
 from src.control.heuristic.return_to_base import SystemHoldingController
 from src.control.heuristic.task_flow import EVENT_TRANSITIONS, HeuristicTaskFlow
 from src.control.heuristic.tracking import TrackingController

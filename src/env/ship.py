@@ -1,8 +1,9 @@
 """Independent maritime vessels and deterministic population generation."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
+import hashlib
 import math
 import random
 from typing import TYPE_CHECKING, Iterable, Literal
@@ -13,14 +14,16 @@ from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.env.dubins import Pose
 from src.env.obstacle import Island
 from src.env.ship_navigation import MotionDynamics, MotionState, ShipNavigator, ShipRoute
+from src.env.emitter import RadarEmitter
 from src.mission.contracts import ship_rng_manifest
+from src.schedule.config_loader import allocate_population
 from src.schedule.datatypes import GridCoord
 
 if TYPE_CHECKING:
     from src.schedule.config_loader import AppConfig
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ShipTruth:
     """Environment/evaluation-only vessel truth."""
 
@@ -28,6 +31,35 @@ class ShipTruth:
     identity: Literal["target", "civilian"]
     ais_mode: Literal["civilian", "silent"]
     normal_route: tuple[Pose, ...]
+    def __init__(
+        self,
+        ship_id: str,
+        identity: Literal["target", "civilian"],
+        ais_mode: Literal["civilian", "silent"],
+        normal_route: tuple[Pose, ...],
+        vessel_class: Literal["unknown", "civilian", "research"] = "unknown",
+        activity_schedule: tuple[tuple[float, float], ...] = (),
+    ) -> None:
+        object.__setattr__(self, "ship_id", ship_id)
+        object.__setattr__(self, "identity", identity)
+        object.__setattr__(self, "ais_mode", ais_mode)
+        object.__setattr__(self, "normal_route", normal_route)
+        # Runtime-only alignment fields are adapters on the environment truth;
+        # dataclasses.asdict intentionally keeps the historical four-field
+        # evaluator contract stable.
+        object.__setattr__(self, "vessel_class", vessel_class)
+        object.__setattr__(self, "activity_schedule", tuple(activity_schedule))
+
+
+def _replace_truth(truth: ShipTruth, **changes) -> ShipTruth:
+    return ShipTruth(
+        changes.get("ship_id", truth.ship_id),
+        changes.get("identity", truth.identity),
+        changes.get("ais_mode", truth.ais_mode),
+        changes.get("normal_route", truth.normal_route),
+        changes.get("vessel_class", truth.vessel_class),
+        changes.get("activity_schedule", truth.activity_schedule),
+    )
 
 
 class PopulationPlacementError(RuntimeError):
@@ -81,6 +113,10 @@ class Ship:
         navigation_horizon_min: float = 8.0,
         integration_dt_min: float = .1,
         navigation_clearance_cells: float = .1,
+        radar_emitter=None,
+        vessel_class: Literal["unknown", "civilian", "research"] | None = None,
+        activity_schedule: tuple[tuple[float, float], ...] = (),
+        patrol_route: tuple[Pose, ...] = (),
     ) -> None:
         route = tuple(normal_route)
         heading = (
@@ -90,7 +126,13 @@ class Ship:
         )
         if not route:
             route = ((float(initial_position.col), float(initial_position.row), heading),)
-        self.truth = ShipTruth(ship_id, truth_identity, ais_mode, route)
+        resolved_vessel_class = vessel_class or (
+            "research" if truth_identity == "target" else "civilian"
+        )
+        self.truth = ShipTruth(
+            ship_id, truth_identity, ais_mode, route,
+            resolved_vessel_class, tuple(activity_schedule),
+        )
         self.id = ship_id
         self.ship_id = ship_id
         self._col, self._row = float(route[0][0]), float(route[0][1])
@@ -108,7 +150,12 @@ class Ship:
         self.heading_rad = heading
         self._yaw_rate_rad_per_min = 0.0
         self._route_index = 1 if len(route) > 1 else len(route)
+        self.patrol_route = tuple(patrol_route) if patrol_route else route
+        self.closed_route = bool(patrol_route)
+        self.survey_route: tuple[Pose, ...] = ()
+        self._active_activity = "transit"
         self.ais_signal = None
+        self.radar_emitter = radar_emitter
         self.is_military: bool | None = None
         self.discrimination = None
         self.estimated_position: tuple[float, float] | None = None
@@ -167,12 +214,43 @@ class Ship:
         return self.truth.identity
 
     @property
+    def vessel_class(self) -> Literal["unknown", "civilian", "research"]:
+        return self.truth.vessel_class
+
+    @property
+    def activity(self) -> Literal["unknown"]:
+        # Activity is an environment truth and is deliberately not serialized
+        # into blue-side observations. Runtime activity state is added later.
+        return "unknown"
+
+    def activity_state_at(self, at_min: float) -> Literal["transit", "survey"]:
+        """Return hidden environment activity for evaluator-side use only."""
+        if self.vessel_class != "research":
+            return "transit"
+        for start_min, duration_min in self.truth.activity_schedule:
+            if float(start_min) <= float(at_min) < float(start_min) + float(duration_min):
+                return "survey"
+        return "transit"
+
+    def _set_activity_for_time(self, at_min: float) -> None:
+        activity = self.activity_state_at(at_min)
+        if activity == self._active_activity:
+            return
+        self._active_activity = activity
+        self._route_index = 1
+
+    def active_route(self) -> tuple[Pose, ...]:
+        if self._active_activity == "survey" and self.survey_route:
+            return self.survey_route
+        return self.patrol_route if self.closed_route else self.normal_route
+
+    @property
     def ais_mode(self) -> Literal["civilian", "silent"]:
         return self.truth.ais_mode
 
     @ais_mode.setter
     def ais_mode(self, value: Literal["civilian", "silent"]) -> None:
-        self.truth = replace(self.truth, ais_mode=value)
+        self.truth = _replace_truth(self.truth, ais_mode=value)
 
     @property
     def normal_route(self) -> tuple[Pose, ...]:
@@ -237,13 +315,17 @@ class Ship:
 
     def normal_tangent_rad(self) -> float:
         """Direction of the current normal-route segment, never current yaw."""
-        route = self.normal_route
+        route = self.active_route()
+        if self.closed_route and self._route_index >= len(route) - 1:
+            self._route_index = 1
         while self._route_index < len(route) - 1:
             a, b = route[self._route_index - 1], route[self._route_index]
             dx, dy = b[0] - a[0], b[1] - a[1]
             if (self._col - b[0]) * dx + (self._row - b[1]) * dy < 0:
                 break
             self._route_index += 1
+        if self.closed_route and self._route_index >= len(route) - 1:
+            self._route_index = 1
         if len(route) < 2:
             return route[0][2]
         a, b = route[self._route_index - 1], route[self._route_index]
@@ -335,10 +417,14 @@ class Ship:
         self,
         dt_min: float,
         islands: Iterable[Island] = (),
+        *,
+        current_time: float | None = None,
     ) -> tuple[Pose, ...]:
         """Advance along this vessel's own normal route."""
         if self.departed or dt_min <= 0.0:
             return (self.pose,)
+        if current_time is not None:
+            self._set_activity_for_time(float(current_time))
         self.navigator.set_islands(islands)
         route = self.navigator.plan(self.pose, self._navigation_params, self.normal_tangent_rad(),
                                     self._motion_time_min, self.land_mask)
@@ -366,8 +452,15 @@ def create_ship_population(
     mask = np.asarray(land_mask, dtype=bool)
     if mask.ndim != 2:
         raise ValueError("land_mask must be a two-dimensional grid")
-    count = config.ship.initial_ship_count
-    target_count = config.ship.target_ship_count
+    population = config.ship.population
+    count = population.total_count
+    target_count = allocate_population(
+        count,
+        {
+            "civilian": population.civilian_ratio,
+            "research": population.research_ratio,
+        },
+    )["research"]
 
     manifest = ship_rng_manifest(seed)
     slots = list(range(count))
@@ -375,6 +468,11 @@ def create_ship_population(
     identity_rng.shuffle(slots)
     target_slots = set(slots[:target_count])
     ais_rng = random.Random(manifest["ship_ais_mode"])
+    activity_seed = int.from_bytes(
+        hashlib.sha256(f"{int(seed)}:ship_activity".encode("ascii")).digest()[:8],
+        "big",
+    )
+    activity_rng = random.Random(activity_seed)
     placement_rng = random.Random(f"{int(seed)}:ship-placement")
     motion_rng = random.Random(f"{int(seed)}:ship-motion")
 
@@ -394,6 +492,7 @@ def create_ship_population(
     for ship_index in range(count):
         ship_id = f"Ship-{ship_index + 1}"
         identity = "target" if ship_index in target_slots else "civilian"
+        vessel_class = "research" if identity == "target" else "civilian"
         for _attempt in range(200):
             if not spawn_cells or not exits:
                 continue
@@ -429,13 +528,38 @@ def create_ship_population(
                 navigation_horizon_min=config.ship.navigation_horizon_min,
                 integration_dt_min=config.ship.integration_dt_min,
                 navigation_clearance_cells=config.ship.navigation_clearance_cells,
+                vessel_class=vessel_class,
+                patrol_route=tuple(planned) + tuple(reversed(planned[:-1])),
             )
+            if vessel_class == "research":
+                start_low, start_high = config.mission.activity.schedule_start_min
+                duration_low, duration_high = config.mission.activity.schedule_duration_min
+                schedule = (
+                    (
+                        activity_rng.uniform(start_low, start_high),
+                        activity_rng.uniform(duration_low, duration_high),
+                    ),
+                )
+                ship.truth = _replace_truth(ship.truth, activity_schedule=schedule)
+                regulated = config.mission.activity.regulated_bboxes
+                if regulated:
+                    ship.survey_route = ship.navigator.plan_survey_lawnmower(
+                        tuple(regulated[0]),
+                        config.mission.activity.survey_track_spacing_cells,
+                    )
+                ship.radar_emitter = RadarEmitter(
+                    ship.id,
+                    seed=activity_seed ^ (ship_index + 1),
+                    config=config.sensor.emitter,
+                )
             # Grid-cell water alone does not guarantee a valid continuous pose.
             # Use the same clearance and stopping dynamics as actual execution.
             if (not ship.navigator.segment_is_safe(ship.pose, ship.pose, mask)
                     or not ship.navigator.can_stop(ship._motion_state(), mask)
                     or not all(ship.navigator.segment_is_safe(a, b, mask)
-                               for a, b in zip(ship.normal_route, ship.normal_route[1:]))):
+                               for a, b in zip(ship.normal_route, ship.normal_route[1:]))
+                    or not all(ship.navigator.segment_is_safe(a, b, mask)
+                               for a, b in zip(ship.patrol_route, ship.patrol_route[1:]))):
                 continue
             break
         else:

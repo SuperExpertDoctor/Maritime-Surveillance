@@ -24,7 +24,7 @@ class SensitiveLogError(ValueError):
 _DOMAIN_STREAMS = {
     "blue": {"observations", "decisions"},
     "red": {"decisions"},
-    "evaluation": {"truth", "outcomes"},
+    "evaluation": {"truth", "outcomes", "handoffs"},
     "intents": {"intents"},
     "frames": {"frames"},
 }
@@ -135,6 +135,36 @@ class EpisodeLogger:
                 os.fsync(handle.fileno())
             key = f"{domain}/{stream}"
             self._record_counts[key] = self._record_counts.get(key, 0) + 1
+
+    def append_trace(self, trace: dict) -> None:
+        """Append a six-link observation-to-assignment audit trace."""
+        if not isinstance(trace, dict):
+            raise TypeError("trace must be a mapping")
+        required = {
+            "observation_id", "evidence_id", "information_version",
+            "task_id", "decision_id",
+        }
+        missing = sorted(required - set(trace))
+        if missing:
+            raise ValueError(f"trace requires: {', '.join(missing)}")
+        status = trace.get("status", "success")
+        if status == "success" and not trace.get("assignment_id"):
+            raise ValueError("trace requires assignment_id for success")
+        if not isinstance(trace["information_version"], int) or trace["information_version"] < 0:
+            raise ValueError("trace information_version must be a nonnegative integer")
+        payload = deepcopy(trace)
+        payload.setdefault("status", status)
+        self.append("blue", "decisions", {"audit_trace": payload})
+
+    def append_handoff(self, event: dict) -> None:
+        """Append one handoff ledger row; retries reuse the interruption ID."""
+        if not isinstance(event, dict):
+            raise TypeError("handoff event must be a mapping")
+        required = {"interruption_id", "status"}
+        missing = sorted(required - set(event))
+        if missing:
+            raise ValueError(f"handoff requires: {', '.join(missing)}")
+        self.append("evaluation", "handoffs", deepcopy(event))
 
     def finish(self, status: str) -> None:
         """Atomically mark the episode complete without deleting any records."""

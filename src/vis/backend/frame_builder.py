@@ -79,6 +79,56 @@ def _assessment_snapshot(assessment) -> dict | None:
     }
 
 
+def _evidence_snapshot(record) -> dict:
+    """Serialize public evidence geometry without exposing environment truth."""
+    spatial = record.spatial
+    payload = {
+        "evidence_id": record.evidence_id,
+        "kind": record.kind,
+        "source_id": record.source_id,
+        "contact_id": record.contact_id,
+        "observed_at_min": record.observed_at_min,
+        "expires_at_min": record.expires_at_min,
+        "strength": record.strength,
+    }
+    if hasattr(spatial, "origin_cells"):
+        payload.update({
+            "observer_position": list(spatial.origin_cells),
+            "bearing_deg": spatial.bearing_deg,
+            "bearing_std_deg": spatial.bearing_std_deg,
+        })
+    elif hasattr(spatial, "mean_cells"):
+        payload["position"] = list(spatial.mean_cells)
+    return payload
+
+
+def _passive_observation_snapshot(observation) -> dict:
+    """Expose bearing-only passive facts; environment gates stay server-side."""
+    return {
+        "observation_id": observation.observation_id,
+        "sample_id": observation.sample_id,
+        "emitter_track_id": observation.emitter_track_id,
+        "burst_id": observation.burst_id,
+        "observed_at_min": observation.observed_at_min,
+        "observer_uav_id": observation.observer_uav_id,
+        "observer_position": list(observation.observer_position_cells),
+        "bearing_deg": observation.bearing_deg,
+        "bearing_std_deg": observation.bearing_std_deg,
+    }
+
+
+def _passive_position_snapshot(position) -> dict:
+    return {
+        "position_id": position.position_id,
+        "sample_id": position.sample_id,
+        "emitter_track_id": position.emitter_track_id,
+        "burst_id": position.burst_id,
+        "observed_at_min": position.observed_at_min,
+        "position": list(position.position_cells),
+        "source_observation_ids": list(position.source_observation_ids),
+    }
+
+
 def _contact_snapshot(contact, *, realtime: bool) -> dict:
     sample_limit = 12 if realtime else None
     samples = contact.samples[-sample_limit:] if sample_limit else contact.samples
@@ -87,6 +137,12 @@ def _contact_snapshot(contact, *, realtime: bool) -> dict:
         "revision": contact.revision,
         "state": contact.state,
         "identity": contact.identity,
+        "vessel_class": getattr(contact, "vessel_class", "unknown"),
+        "class_confidence": getattr(contact, "class_confidence", 0.0),
+        "class_evidence_ids": list(getattr(contact, "class_evidence_ids", ())),
+        "activity": getattr(contact, "activity", "unknown"),
+        "activity_confidence": getattr(contact, "activity_confidence", 0.0),
+        "activity_evidence_ids": list(getattr(contact, "activity_evidence_ids", ())),
         "ais_mmsi": contact.ais_mmsi,
         "first_seen_min": contact.first_seen_min,
         "last_seen_min": contact.last_seen_min,
@@ -198,6 +254,9 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "target_group_id": u.target_group_id,
             "time_to_available_min": u.time_to_available,
             "sensor_mode": entity.sensor_mode if entity is not None else u.sensor_mode,
+            "active_mode": getattr(entity, "active_mode", "standby"),
+            "transition_remaining_min": getattr(entity, "transition_remaining_min", 0.0),
+            "passive_enabled": bool(getattr(entity, "passive_enabled", True)),
             "control_mode": u.control_mode,
             "control_owner": u.control_owner,
             "operation_mode": u.operation_mode,
@@ -350,6 +409,16 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "busy": False, "refueling_uav_ids": [],
         }]
 
+    scenario_vessels = []
+    if getattr(state, "editing_allowed", False):
+        for ship in ships or []:
+            scenario_vessels.append({
+                "scenario_entity_id": ship.id,
+                "revision": int(getattr(ship, "revision", 1)),
+                "position": list(getattr(ship, "float_position", (ship.position.col, ship.position.row))),
+                "vessel_class": getattr(ship, "vessel_class", "unknown"),
+            })
+
     frame = {
         "schema_version": "mission-frame/v2",
         "frame_id": step,
@@ -392,6 +461,39 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         if hasattr(state, "get_intent_events") else [],
         "runtime_status": getattr(state, "runtime_status", "running"),
         "blocked_role": getattr(state, "blocked_role", None),
+        "editing_allowed": bool(getattr(state, "editing_allowed", False)),
+        "configured_vessel_count": getattr(state, "configured_vessel_count", len(ship_list)),
+        "actual_vessel_count": getattr(state, "actual_vessel_count", len(ship_list)),
+        "information_version": int(getattr(state, "information_version", 0)),
+        "evidence": [
+            _evidence_snapshot(record)
+            for record in (
+                state.information_policy.evidence_store.active_records(state.current_time)
+                if getattr(state, "information_policy", None) is not None else ()
+            )
+        ],
+        "passive_observations": [
+            _passive_observation_snapshot(item)
+            for item in (
+                state.get_passive_observations()
+                if hasattr(state, "get_passive_observations") else ()
+            )
+        ],
+        "passive_positions": [
+            _passive_position_snapshot(item)
+            for item in (
+                state.get_passive_positions()
+                if hasattr(state, "get_passive_positions") else ()
+            )
+        ],
+        "handoffs": [
+            asdict(item)
+            for item in (
+                state.handoff_manager.attempts()
+                if getattr(state, "handoff_manager", None) is not None else ()
+            )
+        ],
+        "scenario_vessels": scenario_vessels,
         "memory_version": getattr(state, "memory_version", "baseline"),
         "llm_cycle": llm_cycle,
         # Retain V1 fields while appending the richer GOAL2 base model.

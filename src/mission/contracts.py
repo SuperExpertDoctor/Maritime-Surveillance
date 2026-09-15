@@ -1,6 +1,6 @@
 """Immutable public contracts for the mixed maritime mission domain."""
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 import hashlib
 import math
 from typing import Literal
@@ -9,6 +9,15 @@ from typing import Literal
 Vec2 = tuple[float, float]
 Rect = tuple[int, int, int, int]
 Identity = Literal["unknown", "target", "civilian"]
+VesselClass = Literal["unknown", "civilian", "research"]
+ActivityState = Literal[
+    "unknown", "normal", "suspected_violation", "confirmed_violation"
+]
+EvidenceKind = Literal[
+    "ais_position", "sar_contact", "eo_class", "eo_activity",
+    "passive_bearing", "passive_position", "evasive_maneuver",
+    "research_assessment", "violation_assessment", "handoff",
+]
 ContactState = Literal[
     "pending",
     "queued",
@@ -34,6 +43,294 @@ def ship_rng_manifest(episode_seed: int) -> dict[str, int]:
         )
         for stream in SHIP_RNG_STREAMS
     }
+
+
+@dataclass(frozen=True)
+class PointKernel:
+    mean_cells: Vec2
+    sigma_cells: float
+
+    def __post_init__(self) -> None:
+        _finite_vec2(self.mean_cells, "mean_cells")
+        _finite_nonnegative(self.sigma_cells, "sigma_cells")
+        object.__setattr__(self, "mean_cells", tuple(self.mean_cells))
+
+
+@dataclass(frozen=True)
+class BearingKernel:
+    origin_cells: Vec2
+    bearing_deg: float
+    bearing_std_deg: float
+    sigma_origin_cells: float
+    range_decay_cells: float
+
+    def __post_init__(self) -> None:
+        _finite_vec2(self.origin_cells, "origin_cells")
+        _finite_number(self.bearing_deg, "bearing_deg")
+        if not 0.0 < self.bearing_std_deg < 90.0:
+            raise ValueError("bearing_std_deg must be in (0, 90)")
+        _finite_nonnegative(self.sigma_origin_cells, "sigma_origin_cells")
+        if not math.isfinite(self.range_decay_cells) or self.range_decay_cells <= 0.0:
+            raise ValueError("range_decay_cells must be positive")
+        object.__setattr__(self, "origin_cells", tuple(self.origin_cells))
+
+
+@dataclass(frozen=True)
+class CovarianceKernel:
+    mean_cells: Vec2
+    covariance_cells2: tuple[tuple[float, float], tuple[float, float]]
+
+    def __post_init__(self) -> None:
+        _finite_vec2(self.mean_cells, "mean_cells")
+        if len(self.covariance_cells2) != 2 or any(
+            len(row) != 2 or not all(math.isfinite(value) for value in row)
+            for row in self.covariance_cells2
+        ):
+            raise ValueError("covariance_cells2 must be a finite 2x2 matrix")
+        object.__setattr__(self, "mean_cells", tuple(self.mean_cells))
+        object.__setattr__(
+            self,
+            "covariance_cells2",
+            tuple(tuple(row) for row in self.covariance_cells2),
+        )
+
+
+def _finite_number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name}: expected finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name}: expected finite number")
+    return number
+
+
+def _finite_nonnegative(value: object, name: str) -> float:
+    number = _finite_number(value, name)
+    if number < 0.0:
+        raise ValueError(f"{name}: expected non-negative number")
+    return number
+
+
+def _finite_vec2(value: object, name: str) -> None:
+    if value is None or len(value) != 2:
+        raise ValueError(f"{name}: expected a pair")
+    for item in value:
+        _finite_number(item, name)
+
+
+@dataclass(frozen=True)
+class PassiveBearingObservation:
+    observation_id: str
+    sample_id: str
+    emitter_track_id: str
+    burst_id: str
+    observed_at_min: float
+    observer_uav_id: str
+    observer_position_cells: Vec2
+    bearing_deg: float
+    bearing_std_deg: float
+
+    def __post_init__(self) -> None:
+        for name in ("observation_id", "sample_id", "emitter_track_id", "burst_id", "observer_uav_id"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ValueError(f"{name}: expected non-empty string")
+        _finite_nonnegative(self.observed_at_min, "observed_at_min")
+        _finite_vec2(self.observer_position_cells, "observer_position_cells")
+        _finite_number(self.bearing_deg, "bearing_deg")
+        if not 0.0 < self.bearing_std_deg < 90.0:
+            raise ValueError("bearing_std_deg must be in (0, 90)")
+        object.__setattr__(self, "observer_position_cells", tuple(self.observer_position_cells))
+
+
+@dataclass(frozen=True)
+class PassivePosition:
+    position_id: str
+    emitter_track_id: str
+    burst_id: str
+    sample_id: str
+    observed_at_min: float
+    position_cells: Vec2
+    source_observation_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name in ("position_id", "emitter_track_id", "burst_id", "sample_id"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ValueError(f"{name}: expected non-empty string")
+        _finite_nonnegative(self.observed_at_min, "observed_at_min")
+        _finite_vec2(self.position_cells, "position_cells")
+        if len(self.source_observation_ids) < 2 or any(
+            not isinstance(value, str) or not value for value in self.source_observation_ids
+        ):
+            raise ValueError("source_observation_ids must contain at least two IDs")
+        object.__setattr__(self, "position_cells", tuple(self.position_cells))
+        object.__setattr__(self, "source_observation_ids", tuple(self.source_observation_ids))
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    evidence_id: str
+    kind: EvidenceKind
+    source_id: str
+    contact_id: str | None
+    observed_at_min: float
+    expires_at_min: float
+    strength: float
+    spatial: PointKernel | BearingKernel | CovarianceKernel
+
+    def __post_init__(self) -> None:
+        if not self.evidence_id or not self.source_id:
+            raise ValueError("evidence requires evidence_id and source_id")
+        _finite_nonnegative(self.observed_at_min, "observed_at_min")
+        if not math.isfinite(self.expires_at_min) or self.expires_at_min < self.observed_at_min:
+            raise ValueError("expires_at_min must not precede observed_at_min")
+        if not math.isfinite(self.strength) or not 0.0 <= self.strength <= 1.0:
+            raise ValueError("strength must be in [0, 1]")
+
+
+@dataclass(frozen=True)
+class InfoFieldDelta:
+    previous_version: int
+    version: int
+    changed_bbox: Rect
+    max_abs_value_delta: float
+    value_changed: bool
+    crossed_candidate_threshold: bool
+    urgent: bool
+    reason_codes: tuple[str, ...]
+    cause_evidence_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.version <= self.previous_version:
+            raise ValueError("information version must increase")
+        if len(self.changed_bbox) != 4:
+            raise ValueError("changed_bbox must be a half-open rectangle")
+        if not math.isfinite(self.max_abs_value_delta) or self.max_abs_value_delta < 0.0:
+            raise ValueError("max_abs_value_delta must be finite and non-negative")
+        object.__setattr__(self, "reason_codes", tuple(self.reason_codes))
+        object.__setattr__(self, "cause_evidence_ids", tuple(self.cause_evidence_ids))
+
+
+@dataclass(frozen=True)
+class InformationSnapshot:
+    version: int
+    frozen_at_min: float
+    info: tuple[tuple[float, ...], ...]
+    strategic: tuple[tuple[float, ...], ...]
+    timeliness: tuple[tuple[float, ...], ...]
+    value: tuple[tuple[float, ...], ...]
+    recent_deltas: tuple[InfoFieldDelta, ...]
+
+    def __post_init__(self) -> None:
+        _finite_nonnegative(self.frozen_at_min, "frozen_at_min")
+        for name in ("info", "strategic", "timeliness", "value"):
+            matrix = tuple(tuple(float(item) for item in row) for row in getattr(self, name))
+            if any(not math.isfinite(item) for row in matrix for item in row):
+                raise ValueError(f"{name}: expected finite matrix")
+            object.__setattr__(self, name, matrix)
+        object.__setattr__(self, "recent_deltas", tuple(self.recent_deltas))
+
+
+@dataclass(frozen=True)
+class EvasiveManeuverFact:
+    fact_id: str
+    evasion_episode_id: str
+    episode_started: bool
+    mmsi: str
+    contact_id: str
+    observed_at_min: float
+    position_cells: Vec2
+    covariance_cells2: tuple[tuple[float, float], tuple[float, float]]
+
+    @property
+    def kind(self) -> str:
+        return "evasive_maneuver"
+
+    @property
+    def strength(self) -> float:
+        return 1.0
+
+
+@dataclass(frozen=True)
+class AisUpdateState:
+    mmsi: str
+    enabled: bool
+    revision: int
+    changed_at_min: float
+    reason: Literal["unclassified", "confirmed_civilian"]
+
+
+@dataclass(frozen=True)
+class VesselCommand:
+    command_id: str
+    episode_id: str
+    operation: Literal["create", "delete"]
+    vessel_id: str | None
+    expected_revision: int | None
+    vessel_class: Literal["civilian", "research"] | None
+    position_cells: Vec2 | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.command_id, str) or not self.command_id:
+            raise ValueError("command_id must be non-empty")
+        if not isinstance(self.episode_id, str) or not self.episode_id:
+            raise ValueError("episode_id must be non-empty")
+        if self.operation not in ("create", "delete"):
+            raise ValueError("invalid vessel command operation")
+
+
+@dataclass(frozen=True)
+class HandoffAttempt:
+    handoff_id: str
+    contact_id: str
+    source_uav_id: str
+    successor_uav_id: str | None
+    evidence_id: str
+    required_at_min: float
+    assignment_deadline_min: float
+    lock_deadline_min: float
+    assignment_committed_at_min: float | None
+    eo_lock_acquired_at_min: float | None
+    state: Literal["required", "pending", "succeeded", "failed"]
+    failure_reason: str | None
+
+
+@dataclass(frozen=True)
+class ContactAssessment:
+    vessel_class: VesselClass
+    class_confidence: float
+    class_evidence_ids: tuple[str, ...]
+    activity: ActivityState
+    activity_confidence: float
+    activity_evidence_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.vessel_class not in ("unknown", "civilian", "research"):
+            raise ValueError("invalid vessel_class")
+        if self.activity not in ("unknown", "normal", "suspected_violation", "confirmed_violation"):
+            raise ValueError("invalid activity")
+        for name in ("class_confidence", "activity_confidence"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1]")
+        object.__setattr__(self, "class_evidence_ids", tuple(self.class_evidence_ids))
+        object.__setattr__(self, "activity_evidence_ids", tuple(self.activity_evidence_ids))
+
+
+@dataclass(frozen=True)
+class SensorSnapshot:
+    active_mode: Literal["standby", "switching_to_sar", "sar", "switching_to_eo", "eo"]
+    transition_remaining_min: float
+    passive_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if self.active_mode not in {
+            "standby", "switching_to_sar", "sar", "switching_to_eo", "eo",
+        }:
+            raise ValueError("invalid active_mode")
+        _finite_nonnegative(self.transition_remaining_min, "transition_remaining_min")
+        if not self.passive_enabled:
+            raise ValueError("passive sensing must remain enabled")
 
 
 @dataclass(frozen=True)
@@ -117,6 +414,99 @@ class ContactSnapshot:
     cleared_at_min: float | None
     next_probe_not_before_min: float
     samples: tuple[ObservationSample, ...]
+    _position_covariance_cells2: tuple[tuple[float, float], tuple[float, float]] | None = field(
+        default=None, kw_only=True
+    )
+    # The public dual-dimension names are InitVars so the established
+    # positional snapshot contract remains readable by old replay code.  The
+    # values are retained in private init fields, which dataclasses.replace()
+    # carries forward across the store's immutable updates.
+    vessel_class: InitVar[VesselClass | None] = field(default=None, kw_only=True, repr=False)
+    class_confidence: InitVar[float | None] = field(default=None, kw_only=True, repr=False)
+    class_evidence_ids: InitVar[tuple[str, ...] | None] = field(default=None, kw_only=True, repr=False)
+    activity: InitVar[ActivityState | None] = field(default=None, kw_only=True, repr=False)
+    activity_confidence: InitVar[float | None] = field(default=None, kw_only=True, repr=False)
+    activity_evidence_ids: InitVar[tuple[str, ...] | None] = field(default=None, kw_only=True, repr=False)
+    _vessel_class: VesselClass | None = field(default=None, kw_only=True, repr=False)
+    _class_confidence: float | None = field(default=None, kw_only=True, repr=False)
+    _class_evidence_ids: tuple[str, ...] = field(default=(), kw_only=True, repr=False)
+    _activity: ActivityState | None = field(default=None, kw_only=True, repr=False)
+    _activity_confidence: float | None = field(default=None, kw_only=True, repr=False)
+    _activity_evidence_ids: tuple[str, ...] = field(default=(), kw_only=True, repr=False)
+
+    def __post_init__(
+        self,
+        vessel_class: VesselClass | None,
+        class_confidence: float | None,
+        class_evidence_ids: tuple[str, ...] | None,
+        activity: ActivityState | None,
+        activity_confidence: float | None,
+        activity_evidence_ids: tuple[str, ...] | None,
+    ) -> None:
+        legacy_class = {
+            "unknown": "unknown",
+            "civilian": "civilian",
+            "target": "research",
+        }[self.identity]
+        resolved_class = vessel_class if vessel_class is not None else (
+            self._vessel_class or legacy_class
+        )
+        if resolved_class not in ("unknown", "civilian", "research"):
+            raise ValueError("invalid vessel_class")
+        resolved_class_confidence = (
+            float(class_confidence)
+            if class_confidence is not None
+            else (self._class_confidence if self._class_confidence is not None else 0.0)
+        )
+        if (not math.isfinite(resolved_class_confidence)
+                or not 0.0 <= resolved_class_confidence <= 1.0):
+            raise ValueError("class_confidence must be finite and in [0, 1]")
+        resolved_activity = activity if activity is not None else (
+            self._activity or "unknown"
+        )
+        if resolved_activity not in (
+            "unknown", "normal", "suspected_violation", "confirmed_violation",
+        ):
+            raise ValueError("invalid activity")
+        resolved_activity_confidence = (
+            float(activity_confidence)
+            if activity_confidence is not None
+            else (self._activity_confidence if self._activity_confidence is not None else 0.0)
+        )
+        if (not math.isfinite(resolved_activity_confidence)
+                or not 0.0 <= resolved_activity_confidence <= 1.0):
+            raise ValueError("activity_confidence must be finite and in [0, 1]")
+        object.__setattr__(self, "_vessel_class", resolved_class)
+        object.__setattr__(self, "_class_confidence", resolved_class_confidence)
+        object.__setattr__(self, "_class_evidence_ids", tuple(
+            class_evidence_ids if class_evidence_ids is not None else self._class_evidence_ids
+        ))
+        object.__setattr__(self, "_activity", resolved_activity)
+        object.__setattr__(self, "_activity_confidence", resolved_activity_confidence)
+        object.__setattr__(self, "_activity_evidence_ids", tuple(
+            activity_evidence_ids if activity_evidence_ids is not None
+            else self._activity_evidence_ids
+        ))
+
+    def __getattribute__(self, name: str):
+        # InitVars are constructor-only by design. Map their public names to
+        # the retained estimates so callers can use the new contract without
+        # changing the old dataclass field layout.
+        private_name = {
+            "vessel_class": "_vessel_class",
+            "class_confidence": "_class_confidence",
+            "class_evidence_ids": "_class_evidence_ids",
+            "activity": "_activity",
+            "activity_confidence": "_activity_confidence",
+            "activity_evidence_ids": "_activity_evidence_ids",
+        }.get(name)
+        if private_name is not None:
+            return object.__getattribute__(self, private_name)
+        return object.__getattribute__(self, name)
+
+    @property
+    def position_covariance_cells2(self):
+        return self._position_covariance_cells2
 
 
 @dataclass(frozen=True)
@@ -213,7 +603,9 @@ class IntentStatus:
 @dataclass(frozen=True)
 class TaskCandidate:
     task_id: str
-    kind: Literal["search", "probe", "track"]
+    kind: Literal[
+        "search", "direction_search", "investigation", "probe", "track"
+    ]
     bbox: Rect | None
     contact_id: str | None
     intent_ids: tuple[str, ...]
@@ -223,6 +615,21 @@ class TaskCandidate:
     estimated_duration_min: float
     utility: float
     expected_information_gain: float
+    _information_version: int = field(default=0, repr=False, kw_only=True)
+
+    @property
+    def information_version(self) -> int:
+        return self._information_version
+
+    @property
+    def cells(self) -> tuple[tuple[int, int], ...]:
+        if self.bbox is None:
+            return ()
+        return tuple(
+            (col, row)
+            for col in range(self.bbox[0], self.bbox[2])
+            for row in range(self.bbox[1], self.bbox[3])
+        )
 
 
 @dataclass(frozen=True)
@@ -255,7 +662,9 @@ class FeasibleEdge:
 @dataclass(frozen=True)
 class TaskRecord:
     task_id: str
-    kind: Literal["search", "probe", "track"]
+    kind: Literal[
+        "search", "direction_search", "investigation", "probe", "track"
+    ]
     status: Literal[
         "candidate", "approved", "executing", "completed", "cancelled", "blocked"
     ]
@@ -290,6 +699,7 @@ class MissionSnapshot:
     memory_version: str
     planning_map_version: int
     reviewer_summary: str
+    _information_version: int = field(default=0, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", tuple(self.candidates))
@@ -302,6 +712,10 @@ class MissionSnapshot:
         object.__setattr__(self, "contacts", tuple(self.contacts))
         object.__setattr__(self, "intents", tuple(self.intents))
         object.__setattr__(self, "intent_statuses", tuple(self.intent_statuses))
+
+    @property
+    def information_version(self) -> int:
+        return self._information_version
 
 
 @dataclass(frozen=True)
@@ -317,9 +731,14 @@ class AssignmentBatch:
     snapshot_id: str
     assignments: tuple[Assignment, ...]
     selection_call_id: str
+    _information_version: int = field(default=0, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "assignments", tuple(self.assignments))
+
+    @property
+    def information_version(self) -> int:
+        return self._information_version
 
 
 @dataclass(frozen=True)
@@ -367,6 +786,11 @@ class MissionSelection:
     preempt_uav_ids: tuple[str, ...]
     defer_reason: str | None
     notes: str
+    _information_version: int = field(default=0, repr=False, kw_only=True)
+
+    @property
+    def information_version(self) -> int:
+        return self._information_version
 
 
 @dataclass(frozen=True)
@@ -388,31 +812,54 @@ class RedPlan:
     notes: str
 
 
+# New planning terminology retains the immutable legacy snapshot type while
+# allowing callers to migrate without duplicating the contract.
+PlanningSnapshot = MissionSnapshot
+
+
 __all__ = [
     "Assessment",
+    "ActivityState",
+    "AisUpdateState",
     "Assignment",
     "AssignmentBatch",
+    "BearingKernel",
     "ContactSnapshot",
     "ContactState",
+    "ContactAssessment",
     "CommandResult",
+    "CovarianceKernel",
+    "EvasiveManeuverFact",
+    "EvidenceKind",
+    "EvidenceRecord",
     "FeasibleEdge",
+    "HandoffAttempt",
     "Identity",
+    "InfoFieldDelta",
+    "InformationSnapshot",
     "Intent",
     "IntentCommand",
     "IntentStatus",
     "MissionSelection",
     "MissionSnapshot",
     "ObservationSample",
+    "PassiveBearingObservation",
+    "PassivePosition",
+    "PlanningSnapshot",
+    "PointKernel",
     "ProbeSession",
     "Rect",
     "RedMotionParameters",
     "RedPlan",
     "RuntimeCommand",
+    "SensorSnapshot",
     "SHIP_RNG_STREAMS",
     "TaskCandidate",
     "TaskRecord",
     "TrajectoryFeatures",
     "UavResource",
+    "VesselClass",
+    "VesselCommand",
     "Vec2",
     "VisualDetection",
     "ship_rng_manifest",

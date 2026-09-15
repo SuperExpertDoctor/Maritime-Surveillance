@@ -8,7 +8,6 @@ constraints.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json

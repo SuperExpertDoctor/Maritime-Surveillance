@@ -1,7 +1,8 @@
 ﻿import pytest
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
-from src.schedule.trigger_manager import TriggerManager, TriggerDecision
+from src.schedule.trigger_manager import TriggerManager
+from src.mission.contracts import InfoFieldDelta
 
 
 @pytest.fixture
@@ -62,3 +63,25 @@ def test_mission_state_changes_trigger_heavy_replanning(sm, event_type):
     decision = tm.check(5.0)
 
     assert decision.trigger_type == "heavy"
+
+
+def test_urgent_information_delta_triggers_one_versioned_heavy_plan(sm):
+    sm.cycle = 1
+    tm = TriggerManager(sm)
+    tm.notify_information_delta(InfoFieldDelta(
+        previous_version=6,
+        version=7,
+        changed_bbox=(2, 2, 5, 5),
+        max_abs_value_delta=0.0,
+        value_changed=False,
+        crossed_candidate_threshold=False,
+        urgent=True,
+        reason_codes=("evasive_maneuver",),
+        cause_evidence_ids=("EV-1",),
+    ), time=7.0)
+
+    first = tm.check(7.0)
+    second = tm.check(7.0)
+    assert first.trigger_type == "heavy"
+    assert first.information_version == 7
+    assert second.trigger_type == "none"

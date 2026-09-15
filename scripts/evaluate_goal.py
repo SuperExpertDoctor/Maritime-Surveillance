@@ -15,8 +15,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.env.simulation import SimulationEngine
-from src.schedule.config_loader import ConfigLoader
+from src.env.simulation import SimulationEngine  # noqa: E402
+from src.schedule.config_loader import ConfigLoader  # noqa: E402
 
 
 CHECKPOINTS = (120, 240, 360, 480)

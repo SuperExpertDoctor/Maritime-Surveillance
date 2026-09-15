@@ -52,6 +52,13 @@ def test_api_config_exposes_control_strategy_contract():
     assert payload["control"]["observation"]["schema_version"] == "control-observation/v2"
     assert payload["control"]["safety"]["max_invalid_commands"] == 3
     assert "heuristic" in payload["control"]
+    assert payload["uav"]["count"] == config.uav.count
+    assert "count_max" not in payload["uav"]
+    assert payload["ship"]["population"]["total_count"] == config.ship.population.total_count
+    assert "initial_ship_count" not in payload["ship"]
+    assert "target_ship_count" not in payload["ship"]
+    assert payload["sensor"]["passive"]["detection_range_cells"] == 10.0
+    assert payload["mission_alignment"]["information_update"]["value_alpha"] == 0.45
 
 
 def test_frame_logger_retries_a_transient_windows_sharing_violation(tmp_path, monkeypatch):

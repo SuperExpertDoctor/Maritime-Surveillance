@@ -37,6 +37,198 @@ class ContactConfig:
 
 
 @dataclass(frozen=True)
+class PopulationConfig:
+    """Actual vessel population and its deterministic class proportions."""
+
+    total_count: int
+    civilian_ratio: float
+    research_ratio: float
+
+    def __post_init__(self) -> None:
+        if isinstance(self.total_count, bool) or not isinstance(self.total_count, int):
+            raise ValueError("population.total_count: expected integer")
+        if self.total_count < 0:
+            raise ValueError("population.total_count: expected integer >= 0")
+        ratios = (self.civilian_ratio, self.research_ratio)
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) for value in ratios):
+            raise ValueError("population ratios: expected finite numbers")
+        if any(value < 0.0 or value > 1.0 for value in ratios):
+            raise ValueError("population ratios: expected values in [0, 1]")
+        if abs(math.fsum(ratios) - 1.0) > 1e-9:
+            raise ValueError("population ratios must sum to 1")
+
+
+@dataclass(frozen=True)
+class PassiveConfig:
+    measurement_interval_min: float = 1.0
+    reference_detection_probability: float = 0.90
+    detection_range_cells: float = 10.0
+    range_scale_cells: float = 10.0
+    bearing_std_deg: float = 3.0
+    received_power_std_db: float = 2.0
+    reference_distance_cells: float = 1.0
+    minimum_received_power_db: float = -90.0
+    position_association_radius_cells: float = 1.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "measurement_interval_min", "detection_range_cells", "range_scale_cells",
+            "reference_distance_cells", "position_association_radius_cells",
+        ):
+            _positive(getattr(self, name), f"passive.{name}")
+        _probability(
+            self.reference_detection_probability,
+            "passive.reference_detection_probability",
+        )
+        if not 0.0 < self.bearing_std_deg < 90.0:
+            raise ValueError("passive.bearing_std_deg must be in (0, 90)")
+        _non_negative(self.received_power_std_db, "passive.received_power_std_db")
+        finite_number(self.minimum_received_power_db, "passive.minimum_received_power_db")
+
+
+@dataclass(frozen=True)
+class EmitterConfig:
+    mean_silent_interval_min: float = 10.0
+    burst_duration_min: tuple[float, float] = (0.5, 2.0)
+    source_power_at_reference_db: float = -40.0
+
+    def __post_init__(self) -> None:
+        _positive(self.mean_silent_interval_min, "emitter.mean_silent_interval_min")
+        if len(self.burst_duration_min) != 2:
+            raise ValueError("emitter.burst_duration_min must contain two values")
+        low, high = (finite_number(value, "emitter.burst_duration_min")
+                     for value in self.burst_duration_min)
+        if low <= 0.0 or high < low:
+            raise ValueError("emitter.burst_duration_min must be positive and ordered")
+        finite_number(
+            self.source_power_at_reference_db,
+            "emitter.source_power_at_reference_db",
+        )
+        object.__setattr__(self, "burst_duration_min", (low, high))
+
+
+@dataclass(frozen=True)
+class ActivityConfig:
+    regulated_bboxes: tuple[tuple[int, int, int, int], ...] = ((8, 8, 22, 22),)
+    schedule_start_min: tuple[float, float] = (30.0, 120.0)
+    schedule_duration_min: tuple[float, float] = (60.0, 120.0)
+    survey_command_speed_kn: float = 10.0
+    survey_track_spacing_cells: float = 1.0
+    trajectory_window_min: float = 20.0
+    min_observed_duration_min: float = 12.0
+    observed_speed_max_kn: float = 12.0
+    reversal_angle_min_deg: float = 120.0
+    min_reversal_count: int = 2
+    radiation_window_min: float = 10.0
+    min_distinct_bursts: int = 2
+    research_equipment_pd: float = 0.90
+    research_equipment_pfa: float = 0.05
+    deployed_equipment_pd: float = 0.85
+    deployed_equipment_pfa: float = 0.05
+
+    def __post_init__(self) -> None:
+        for bbox in self.regulated_bboxes:
+            if len(bbox) != 4 or not all(isinstance(value, int) and not isinstance(value, bool)
+                                         for value in bbox):
+                raise ValueError("activity.regulated_bboxes must contain integer bboxes")
+            x0, y0, x1, y1 = bbox
+            if not x0 < x1 or not y0 < y1:
+                raise ValueError("activity.regulated_bboxes must use non-empty half-open boxes")
+        for name, value in (
+            ("schedule_start_min", self.schedule_start_min),
+            ("schedule_duration_min", self.schedule_duration_min),
+        ):
+            if len(value) != 2:
+                raise ValueError(f"activity.{name} must contain two values")
+            low, high = (finite_number(item, f"activity.{name}") for item in value)
+            if low <= 0.0 or high < low:
+                raise ValueError(f"activity.{name} must be positive and ordered")
+        for name in (
+            "survey_command_speed_kn", "survey_track_spacing_cells",
+            "trajectory_window_min", "min_observed_duration_min",
+            "observed_speed_max_kn", "radiation_window_min",
+        ):
+            _positive(getattr(self, name), f"activity.{name}")
+        if not 0.0 < self.reversal_angle_min_deg <= 180.0:
+            raise ValueError("activity.reversal_angle_min_deg must be in (0, 180]")
+        for name in ("min_reversal_count", "min_distinct_bursts"):
+            _integer(getattr(self, name), f"activity.{name}", minimum=1)
+        for name in (
+            "research_equipment_pd", "research_equipment_pfa",
+            "deployed_equipment_pd", "deployed_equipment_pfa",
+        ):
+            _probability(getattr(self, name), f"activity.{name}")
+
+
+@dataclass(frozen=True)
+class EvasionConfig:
+    observer_range_cells: float = 6.0
+    history_window_min: float = 6.0
+    response_window_min: float = 3.0
+    minimum_samples_per_window: int = 3
+    minimum_window_span_min: float = 1.5
+    minimum_course_change_deg: float = 45.0
+    minimum_speed_increase_kn: float = 3.0
+    minimum_outward_speed_kn: float = 3.0
+    minimum_range_increase_cells: float = 0.05
+    confirmation_samples: int = 2
+    forced_maneuver_exclusion_cells: float = 2.0
+    rearm_clear_min: float = 5.0
+    evidence_ttl_min: float = 20.0
+    evidence_tau_min: float = 8.0
+    enabled: bool = False
+
+    def __post_init__(self) -> None:
+        for name in (
+            "observer_range_cells", "history_window_min", "response_window_min",
+            "minimum_window_span_min", "minimum_speed_increase_kn",
+            "minimum_outward_speed_kn", "minimum_range_increase_cells",
+            "forced_maneuver_exclusion_cells", "rearm_clear_min",
+            "evidence_ttl_min", "evidence_tau_min",
+        ):
+            _positive(getattr(self, name), f"evasion.{name}")
+        if self.response_window_min >= self.history_window_min:
+            raise ValueError("evasion.response_window_min must be below history_window_min")
+        _integer(self.minimum_samples_per_window, "evasion.minimum_samples_per_window", minimum=2)
+        _integer(self.confirmation_samples, "evasion.confirmation_samples", minimum=2)
+        if self.minimum_window_span_min > self.response_window_min:
+            raise ValueError("evasion.minimum_window_span_min exceeds response window")
+        if not 0.0 < self.minimum_course_change_deg <= 180.0:
+            raise ValueError("evasion.minimum_course_change_deg must be in (0, 180]")
+        _boolean(self.enabled, "evasion.enabled")
+
+
+@dataclass(frozen=True)
+class InformationUpdateConfig:
+    value_alpha: float = 0.45
+    value_beta: float = 0.35
+    value_gamma: float = 0.20
+    material_delta_threshold: float = 0.05
+    normal_heavy_cooldown_min: float = 1.0
+    kernel_epsilon: float = 0.01
+    planning_deadline_seconds: float = 2.0
+    postprocess_reserve_seconds: float = 0.2
+
+    def __post_init__(self) -> None:
+        weights = (self.value_alpha, self.value_beta, self.value_gamma)
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) or value < 0.0 for value in weights):
+            raise ValueError("information_update weights must be finite and non-negative")
+        if abs(math.fsum(weights) - 1.0) > 1e-9:
+            raise ValueError("information_update weights must sum to 1")
+        for name in ("material_delta_threshold", "kernel_epsilon"):
+            value = finite_number(getattr(self, name), f"information_update.{name}")
+            if not 0.0 < value <= 1.0:
+                raise ValueError(f"information_update.{name} must be in (0, 1]")
+        _positive(self.normal_heavy_cooldown_min, "information_update.normal_heavy_cooldown_min")
+        _positive(self.planning_deadline_seconds, "information_update.planning_deadline_seconds")
+        _positive(self.postprocess_reserve_seconds, "information_update.postprocess_reserve_seconds")
+        if self.postprocess_reserve_seconds >= self.planning_deadline_seconds:
+            raise ValueError("information_update.postprocess_reserve_seconds must be below deadline")
+
+
+@dataclass(frozen=True)
 class IntentConfig:
     max_active_intents: int
     default_valid_duration_min: float
@@ -76,6 +268,13 @@ class MissionConfig:
     intent: IntentConfig
     scheduling: SchedulingConfig
     evolution: EvolutionConfig
+
+    def __post_init__(self) -> None:
+        # Keep the four-field legacy dataclass shape while exposing the new
+        # alignment sections as immutable, non-serialized companions.
+        object.__setattr__(self, "activity", ActivityConfig())
+        object.__setattr__(self, "evasion", EvasionConfig())
+        object.__setattr__(self, "information_update", InformationUpdateConfig())
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -204,6 +403,10 @@ def validate_mission_config(config: "AppConfig") -> None:
     target_count = _integer(ship.target_ship_count, "ship.target_ship_count")
     if target_count > initial_count:
         raise ValueError("ship.target_ship_count must not exceed initial_ship_count")
+    population = ship.population
+    cols, rows = config.grid.resolution
+    if population.total_count > cols * rows:
+        raise ValueError("population.total_count exceeds grid capacity")
 
     _probability(
         ship.target_ais_on_probability, "ship.target_ais_on_probability"
@@ -301,6 +504,22 @@ def validate_mission_config(config: "AppConfig") -> None:
     cell_size_km = _positive(config.grid.cell_size_km, "grid.cell_size_km")
     if contact.cell_size_km is not None:
         _positive(contact.cell_size_km, "mission.contact.cell_size_km")
+    activity = config.mission.activity
+    for bbox in activity.regulated_bboxes:
+        if not (
+            0 <= bbox[0] < bbox[2] <= cols
+            and 0 <= bbox[1] < bbox[3] <= rows
+        ):
+            raise ValueError("mission.activity.regulated_bboxes must stay within grid")
+    if not (
+        ship.speed_min_kn
+        <= activity.survey_command_speed_kn
+        <= activity.observed_speed_max_kn
+        <= ship.speed_max_kn
+    ):
+        raise ValueError(
+            "mission.activity.survey_command_speed_kn must stay within ship speed bounds"
+        )
     eo_range_cells = _positive(
         config.sensor.eoir.detection_range_km,
         "sensor.eoir.detection_range_km",
@@ -391,10 +610,16 @@ def validate_mission_config(config: "AppConfig") -> None:
 
 
 __all__ = [
+    "ActivityConfig",
     "ContactConfig",
+    "EmitterConfig",
+    "EvasionConfig",
     "EvolutionConfig",
+    "InformationUpdateConfig",
     "IntentConfig",
     "MissionConfig",
+    "PassiveConfig",
+    "PopulationConfig",
     "SchedulingConfig",
     "finite_number",
     "load_strict_yaml",

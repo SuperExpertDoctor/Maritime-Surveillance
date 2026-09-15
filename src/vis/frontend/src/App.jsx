@@ -20,6 +20,9 @@ export default function App() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedBBox, setSelectedBBox] = useState(null);
   const [selectedContactId, setSelectedContactId] = useState(null);
+  const [vesselPlacement, setVesselPlacement] = useState(null);
+  const [selectedScenarioVesselId, setSelectedScenarioVesselId] = useState(null);
+  const [vesselCommandStatus, setVesselCommandStatus] = useState(null);
   const [liveEvents, setLiveEvents] = useState([]);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
   const mapExporterRef = useRef(null);
@@ -28,12 +31,23 @@ export default function App() {
   const mp4Export = useMp4Export(replay, mapExporterRef);
   const frame = mode === "live" ? live.frame : replay.frame;
   const readOnly = mode === "replay";
+  const editingAllowed = mode === "live" && Boolean(frame?.editing_allowed);
 
   useEffect(() => {
     setSelectionMode(false);
     setSelectedBBox(null);
     setSelectedContactId(null);
+    setVesselPlacement(null);
+    setSelectedScenarioVesselId(null);
+    setVesselCommandStatus(null);
   }, [mode]);
+
+  useEffect(() => {
+    if (!editingAllowed) {
+      setVesselPlacement(null);
+      setSelectedScenarioVesselId(null);
+    }
+  }, [editingAllowed]);
 
   useEffect(() => {
     if (mode !== "live" || !live.frame) return;
@@ -79,6 +93,83 @@ export default function App() {
       setSelectedContactId(null);
     }
   }, [frame, selectedContactId, selectedUavId]);
+
+  const commandId = () => globalThis.crypto?.randomUUID?.()
+    || `vessel-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const pollVesselCommand = async (id) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, attempt ? 150 : 0));
+      const response = await fetch(`/api/vessel-commands/${encodeURIComponent(id)}`);
+      if (!response.ok) throw new Error(`command_${response.status}`);
+      const result = await response.json();
+      if (result.status !== "queued") return result;
+    }
+    throw new Error("command_timeout");
+  };
+
+  const handlePlaceVessel = async (position, selectedType = vesselPlacement) => {
+    if (!editingAllowed || !selectedType || !frame?.episode_id) return;
+    const id = commandId();
+    setVesselCommandStatus({ status: "queued", message: "船舶命令排队中", commandId: id });
+    try {
+      const response = await fetch("/api/vessels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          episode_id: frame.episode_id,
+          command_id: id,
+          vessel_class: selectedType,
+          position_cells: position,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error_code || "vessel_create_failed");
+      const applied = await pollVesselCommand(result.command_id || id);
+      setVesselCommandStatus({
+        status: applied.status,
+        message: applied.status === "applied" ? "船舶已加入场景" : "船舶命令被拒绝",
+        commandId: applied.command_id || id,
+        errorCode: applied.error_code,
+      });
+      setVesselPlacement(null);
+    } catch (error) {
+      setVesselCommandStatus({ status: "rejected", message: "船舶命令失败", errorCode: error.message });
+    }
+  };
+
+  const handleDeleteVessel = async () => {
+    if (!editingAllowed || !selectedScenarioVesselId || !frame?.episode_id) return;
+    const vessel = (frame.scenario_vessels || []).find(
+      (item) => item.scenario_entity_id === selectedScenarioVesselId,
+    );
+    if (!vessel) return;
+    const id = commandId();
+    setVesselCommandStatus({ status: "queued", message: "删除命令排队中", commandId: id });
+    try {
+      const response = await fetch(`/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          episode_id: frame.episode_id,
+          command_id: id,
+          expected_revision: vessel.revision,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error_code || "vessel_delete_failed");
+      const applied = await pollVesselCommand(result.command_id || id);
+      setVesselCommandStatus({
+        status: applied.status,
+        message: applied.status === "applied" ? "船舶已删除" : "删除命令被拒绝",
+        commandId: applied.command_id || id,
+        errorCode: applied.error_code,
+      });
+      setSelectedScenarioVesselId(null);
+    } catch (error) {
+      setVesselCommandStatus({ status: "rejected", message: "删除命令失败", errorCode: error.message });
+    }
+  };
 
   const connectionLabel = {
     idle: "待机",
@@ -193,6 +284,16 @@ export default function App() {
         onSelectionCommit={(bbox) => { setSelectedBBox(bbox); setSidebarOpen(true); }}
         onSelectContact={setSelectedContactId}
         selectedContactId={selectedContactId}
+        placementMode={Boolean(vesselPlacement && editingAllowed)}
+        onPlaceVessel={handlePlaceVessel}
+        onDropVessel={(vesselClass, position) => {
+          if (editingAllowed) {
+            setVesselPlacement(vesselClass);
+            handlePlaceVessel(position, vesselClass);
+          }
+        }}
+        selectedScenarioVesselId={selectedScenarioVesselId}
+        onSelectScenarioVessel={setSelectedScenarioVesselId}
       />
       <RightSidebar
         frame={frame}
@@ -206,6 +307,14 @@ export default function App() {
         onClearSelection={() => setSelectedBBox(null)}
         selectedContactId={selectedContactId}
         onSelectContact={setSelectedContactId}
+        editingAllowed={editingAllowed}
+        vesselPlacement={vesselPlacement}
+        onSelectVesselType={setVesselPlacement}
+        onCancelVesselPlacement={() => setVesselPlacement(null)}
+        selectedScenarioVesselId={selectedScenarioVesselId}
+        onSelectScenarioVessel={setSelectedScenarioVesselId}
+        onDeleteVessel={handleDeleteVessel}
+        vesselCommandStatus={vesselCommandStatus}
       />
       <BottomDrawer
         frame={frame}

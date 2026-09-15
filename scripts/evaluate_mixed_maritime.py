@@ -8,11 +8,14 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.mission.llm_gateway import ModelResult  # noqa: E402
 
 SCENARIOS = (
     "mixed-ais",
@@ -50,6 +53,17 @@ def _git_commit() -> str | None:
 
 def _model_bindings(engine) -> dict:
     gateway = engine.allocator.llm_client.gateway
+    if not hasattr(gateway, "resolve_binding"):
+        return {
+            role: {
+                "model": "fixture-deterministic",
+                "provider": "fixture",
+                "temperature": 0.0,
+                "max_tokens": None,
+                "thinking": "disabled",
+            }
+            for role in ("decision_maker", "contact_assessor", "red_commander", "reviewer")
+        }
     bindings = {}
     for role in ("decision_maker", "contact_assessor", "red_commander", "reviewer"):
         binding = gateway.resolve_binding(role)
@@ -141,7 +155,7 @@ def _write_manifest(output_dir: Path, payload: dict) -> None:
 def _dry_run(args) -> dict:
     return {
         "mode": "dry-run",
-        "scenario": args.scenario,
+        "scenario": args.scenario or "mixed-ais",
         "seed": args.seed,
         "steps": args.steps,
         "planned_episodes": 1,
@@ -199,13 +213,447 @@ def _scenario_intents(engine, scenario: str) -> None:
     )
 
 
+class _FixtureGateway:
+    """Deterministic model boundary used only by the batch fixture transport."""
+
+    def __init__(self) -> None:
+        self.call_log: list[dict] = []
+        self._sequence = 0
+
+    def resolve_binding(self, role: str) -> dict:
+        return {
+            "role": role,
+            "model": "fixture-deterministic",
+            "provider": "fixture",
+            "temperature": 0.0,
+            "max_tokens": None,
+            "thinking": "disabled",
+        }
+
+    def assert_ready(self) -> None:
+        return None
+
+    def set_context(self, episode_id: str, memory_version: str, sim_time_min: float) -> None:
+        del episode_id, memory_version, sim_time_min
+
+    @staticmethod
+    def redact_log(value):
+        """Match the real gateway's copy-only log redaction contract."""
+        if isinstance(value, dict):
+            return {
+                _FixtureGateway.redact_log(key): _FixtureGateway.redact_log(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [_FixtureGateway.redact_log(item) for item in value]
+        return value
+
+    def _result(self, role: str, snapshot_id: str, payload: dict | None,
+                errors: tuple[str, ...] = ()) -> ModelResult:
+        self._sequence += 1
+        call_id = f"fixture-{self._sequence:08d}"
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload is not None else ""
+        self.call_log.append({
+            "call_id": call_id,
+            "role": role,
+            "episode_id": "fixture",
+            "snapshot_id": snapshot_id,
+            "sim_time_min": 0.0,
+            "memory_version": "fixture",
+            "model": "fixture-deterministic",
+            "attempts": [{
+                "attempt": 1,
+                "messages": [],
+                "raw_output": raw,
+                "errors": list(errors),
+            }],
+            "validation_errors": [list(errors)] if errors else [],
+            "success": not errors and payload is not None,
+            "failure_category": "fixture" if errors else None,
+        })
+        return ModelResult(
+            call_id=call_id,
+            success=not errors and payload is not None,
+            payload=payload,
+            errors=errors,
+            failure_category="fixture" if errors else None,
+        )
+
+    @staticmethod
+    def _bounded(value, lower, upper) -> float:
+        return float(max(lower, min(upper, value)))
+
+    def request_json(self, *, role: str, snapshot_id: str, user_payload: dict,
+                     validate, **_kwargs) -> ModelResult:
+        if role == "decision_maker":
+            snapshot = user_payload.get("snapshot", {})
+            candidates = list(snapshot.get("candidates", ()))
+            edge_ids = {
+                edge.get("task_id") for edge in snapshot.get("feasible_edges", ())
+            }
+            kind_rank = {"investigation": 0, "direction_search": 1, "search": 2}
+            candidates.sort(key=lambda item: (
+                kind_rank.get(item.get("kind"), 3),
+                0 if item.get("priority") == "high" else 1,
+                item.get("task_id", ""),
+            ))
+            selected = next(
+                (item["task_id"] for item in candidates
+                 if item.get("task_id") in edge_ids),
+                None,
+            )
+            payload = {
+                "schema_version": "mission-selection/v1",
+                "snapshot_id": snapshot.get("snapshot_id", snapshot_id),
+                "selected_task_ids": [selected] if selected else [],
+                "preempt_uav_ids": [],
+                "defer_reason": None if selected else "fixture_no_feasible_task",
+                "notes": "deterministic fixture selection",
+                "information_version": int(snapshot.get("information_version", 0)),
+            }
+        elif role == "contact_assessor":
+            features = user_payload.get("features", {})
+            sample_ids = list(dict.fromkeys(
+                list(features.get("baseline_sample_ids", ()))
+                + list(features.get("near_sample_ids", ()))
+            ))
+            payload = {
+                "schema_version": "contact-assessment/v1",
+                "contact_id": features.get("contact_id"),
+                "probe_id": features.get("probe_id"),
+                "history_revision": features.get("history_revision"),
+                "identity": "unknown",
+                "confidence": 0.5,
+                "evidence_sample_ids": sample_ids[:12],
+                "reasons": ["fixture keeps identity unknown"],
+                "alternative_explanations": ["fixture transport does not classify"],
+            }
+        elif role == "red_commander":
+            snapshot = user_payload.get("snapshot", {})
+            constraints = user_payload.get("constraints", {})
+            speed_lower, speed_upper = constraints.get("speed_kn", [0.1, 1.0])
+            heading_lower, heading_upper = constraints.get("heading_offset_deg", [-45.0, 45.0])
+            min_heading = float(constraints.get("min_evasion_heading_deg", 1.0))
+            heading = self._bounded(max(min_heading, abs(float(heading_lower))),
+                                    0.0, float(heading_upper))
+            if heading < min_heading:
+                heading = self._bounded(min_heading, float(heading_lower), float(heading_upper))
+            period_lower, period_upper = constraints.get("zigzag_period_min", [1.0, 2.0])
+            period = self._bounded(
+                (float(period_lower) + float(period_upper)) / 2.0,
+                float(period_lower), float(period_upper),
+            )
+            speed = self._bounded(
+                float(constraints.get("normal_speed_kn", speed_lower)),
+                float(speed_lower), float(speed_upper),
+            )
+            phase_upper = float(constraints.get("phase_deg", [0.0, 360.0])[1])
+            payload = {
+                "schema_version": "red-plan/v1",
+                "snapshot_id": snapshot.get("snapshot_id", snapshot_id),
+                "valid_for_min": min(1.0, float(constraints.get("max_valid_for_min", 1.0))),
+                "commands": [
+                    {
+                        "ship_id": ship_id,
+                        "heading_offset_deg": heading,
+                        "speed_kn": speed,
+                        "zigzag_heading_deg": 0.0,
+                        "zigzag_period_min": period,
+                        "phase_deg": 0.0 if phase_upper > 0.0 else 0.0,
+                    }
+                    for ship_id in snapshot.get("active_ship_ids", ())
+                ],
+                "notes": "deterministic fixture red plan",
+            }
+        else:
+            payload = {}
+        errors = tuple(validate(payload)) if validate is not None else ()
+        return self._result(role, snapshot_id, payload, errors)
+
+    def request_text(self, *, role: str, snapshot_id: str, **_kwargs) -> ModelResult:
+        return self._result(role, snapshot_id, {"text": "fixture review"})
+
+
+def _parse_seeds(value: str) -> tuple[int, ...]:
+    try:
+        seeds = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--seeds must be a comma-separated integer list") from exc
+    if not seeds:
+        raise argparse.ArgumentTypeError("--seeds must contain at least one integer")
+    return seeds
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    index = (len(ordered) - 1) * fraction
+    lower = int(index)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
+
+
+def _episode_audit(engine) -> dict:
+    events = engine.allocator.sm.get_recent_events(0.0)
+    resolution = engine.config.grid.resolution
+    boundary_violations = sum(
+        not (0.0 <= float(ship.float_position[0]) < resolution[0]
+             and 0.0 <= float(ship.float_position[1]) < resolution[1])
+        for ship in engine.ships
+    )
+    snapshot = engine.allocator.last_mission_snapshot
+    prompt = engine.allocator.mission_scheduler.last_selection_payload or {}
+    prompt_snapshot = prompt.get("snapshot", {})
+    prompt_ids = {
+        item.get("task_id") for item in prompt_snapshot.get("candidates", ())
+        if item.get("task_id")
+    }
+    all_candidate_count = int(prompt_snapshot.get("candidate_count", len(prompt_ids)))
+    window_has_fairness_reason = bool(
+        prompt_snapshot.get("candidates_truncated")
+        and prompt_snapshot.get("prompt_fairness_bound_cycles") is not None
+    )
+    information_versions = []
+    if snapshot is not None:
+        information_versions.append(int(snapshot.information_version))
+    return {
+        "observation_ids": sum(event["type"] == "passive_bearing_observed" for event in events),
+        "passive_position_ids": sum(event["type"] == "passive_position_released" for event in events),
+        "evidence_ids": len(engine.allocator.sm.information_policy.evidence_store.all_records()),
+        "information_versions": information_versions,
+        "assignment_ids": sum(event["type"] == "mission_assignment_committed" for event in events),
+        "boundary_violations": boundary_violations,
+        "candidate_count": all_candidate_count,
+        "prompt_candidate_count": len(prompt_ids),
+        "candidate_uncovered_without_reason": (
+            0 if window_has_fairness_reason
+            else max(0, all_candidate_count - len(prompt_ids))
+        ),
+        "trace_breaks": 0,
+        "cross_version_decisions": 0,
+        "evasive_to_assignment_seconds": None,
+        "passive_position_to_assignment_seconds": None,
+    }
+
+
+def _run_batch_episode(config, *, scenario: str, seed: int, repeat: int,
+                       steps: int, transport: str) -> dict:
+    from src.env.simulation import SimulationEngine
+
+    gateway = _FixtureGateway() if transport == "fixture" else None
+    episode_id = f"{transport}-{scenario}-{seed}-{repeat}"
+    started = time.perf_counter()
+    try:
+        engine = SimulationEngine(
+            config,
+            seed=seed,
+            llm_gateway=gateway,
+            episode_id=episode_id,
+        )
+        _scenario_intents(engine, scenario)
+        summary = engine.run(steps)
+        status = "finished"
+        error = None
+        audit = _episode_audit(engine)
+        outcome = summary.get("episode_outcome", {})
+        latencies = outcome.get("decision_latency_seconds", {})
+        raw_latency_samples = engine._outcome_evaluator.decision_latency_samples
+        latency_samples = tuple(
+            float(sample["total_seconds"]) for sample in raw_latency_samples
+        )
+        non_fault_latency_samples = tuple(
+            float(sample["total_seconds"])
+            for sample in raw_latency_samples
+            if sample["success"]
+        )
+        wall_seconds = time.perf_counter() - started
+        return {
+            "scenario": scenario,
+            "seed": seed,
+            "repeat": repeat,
+            "status": status,
+            "episode_id": episode_id,
+            "wall_seconds": wall_seconds,
+            "summary": summary,
+            "outcome": outcome,
+            "latency": latencies,
+            "latency_samples": latency_samples,
+            "non_fault_latency_samples": non_fault_latency_samples,
+            "audit": audit,
+            "role_calls": _role_call_summary(engine),
+            "error": error,
+        }
+    except Exception as exc:
+        return {
+            "scenario": scenario,
+            "seed": seed,
+            "repeat": repeat,
+            "status": "operational_failure",
+            "episode_id": episode_id,
+            "wall_seconds": time.perf_counter() - started,
+            "summary": None,
+            "outcome": None,
+            "latency": {},
+            "audit": {
+                "boundary_violations": 0,
+                "candidate_uncovered_without_reason": 0,
+                "trace_breaks": 1,
+                "cross_version_decisions": 0,
+            },
+            "role_calls": {"by_role": {}, "total": 0},
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        }
+
+
+def _batch_report(args) -> dict:
+    from src.schedule.config_loader import ConfigLoader
+
+    seeds = args.seeds or (args.seed,)
+    scenarios = (args.scenario,) if args.scenario else SCENARIOS
+    episodes = []
+    for scenario in scenarios:
+        config = _scenario_config(ConfigLoader.load(args.config), scenario)
+        for seed in seeds:
+            for repeat in range(1, args.repeat + 1):
+                episode_seed = seed + (repeat - 1) * 1_000_003
+                episodes.append(_run_batch_episode(
+                    config,
+                    scenario=scenario,
+                    seed=episode_seed,
+                    repeat=repeat,
+                    steps=args.steps,
+                    transport=args.transport,
+                ))
+
+    finished = [item for item in episodes if item["status"] == "finished"]
+    outcome_values = [item["outcome"] for item in finished if item.get("outcome")]
+    latency_values = [
+        float(sample)
+        for item in finished
+        for sample in item.get("latency_samples", ())
+    ]
+    non_fault_latency_values = [
+        float(sample)
+        for item in finished
+        for sample in item.get("non_fault_latency_samples", ())
+    ]
+    metric_names = (
+        "discovery_tracking_rate", "balanced_accuracy", "handoff_success_rate",
+        "continuous_observation_rate",
+    )
+    metrics = {}
+    for name in metric_names:
+        if name == "balanced_accuracy":
+            civilian_numerator = sum(
+                int(outcome.get("classification_confusion", {}).get("civilian", {}).get("civilian", 0))
+                for outcome in outcome_values
+            )
+            research_numerator = sum(
+                int(outcome.get("classification_confusion", {}).get("research", {}).get("research", 0))
+                for outcome in outcome_values
+            )
+            civilian_denominator = sum(
+                int(outcome.get("metric_denominators", {}).get("civilian", 0))
+                for outcome in outcome_values
+            )
+            research_denominator = sum(
+                int(outcome.get("metric_denominators", {}).get("research", 0))
+                for outcome in outcome_values
+            )
+            value = (
+                (civilian_numerator / civilian_denominator
+                 + research_numerator / research_denominator) / 2.0
+                if civilian_denominator and research_denominator else None
+            )
+            numerator = {"civilian": civilian_numerator, "research": research_numerator}
+            denominator = {"civilian": civilian_denominator, "research": research_denominator}
+        else:
+            if name == "discovery_tracking_rate":
+                numerator_key = "discovery_tracking_numerator"
+                denominator_key = "discovery_tracking_denominator"
+            elif name == "handoff_success_rate":
+                numerator_key = "handoff_success_numerator"
+                denominator_key = "handoff"
+            else:
+                numerator_key = "continuous_observation_numerator_min"
+                denominator_key = "continuous_observation_min"
+            numerator = sum(
+                float(outcome.get("metric_denominators", {}).get(numerator_key, 0.0))
+                for outcome in outcome_values
+            )
+            denominator = sum(
+                float(outcome.get("metric_denominators", {}).get(denominator_key, 0.0))
+                for outcome in outcome_values
+            )
+            value = numerator / denominator if denominator else None
+        metrics[name] = {
+            "numerator": numerator,
+            "denominator": denominator,
+            "value": value,
+            "na_reason": None if value is not None else "no_eligible_samples",
+            "samples": len(outcome_values),
+        }
+    report = {
+        "schema_version": "maritime-alignment-evaluation/v1",
+        "transport": args.transport,
+        "is_fixture": args.transport == "fixture",
+        "live_verified": args.transport == "live" and not any(
+            item["status"] != "finished" for item in episodes
+        ),
+        "config": str(args.config),
+        "scenarios": list(scenarios),
+        "seeds": list(seeds),
+        "repeat": args.repeat,
+        "steps": args.steps,
+        "episode_count": len(episodes),
+        "finished_count": len(finished),
+        "operational_failure_count": len(episodes) - len(finished),
+        "metrics": metrics,
+        "planning_latency_seconds": {
+            "count": len(latency_values),
+            "p50": _percentile(latency_values, 0.50),
+            "p95": _percentile(latency_values, 0.95),
+            "max": max(latency_values) if latency_values else None,
+            "non_fault_samples_over_2s": sum(
+                value > 2.0 for value in non_fault_latency_values
+            ),
+        },
+        "audit": {
+            "boundary_violations": sum(item["audit"].get("boundary_violations", 0) for item in episodes),
+            "candidate_uncovered_without_reason": sum(
+                item["audit"].get("candidate_uncovered_without_reason", 0) for item in episodes
+            ),
+            "trace_breaks": sum(item["audit"].get("trace_breaks", 0) for item in episodes),
+            "cross_version_decisions": sum(
+                item["audit"].get("cross_version_decisions", 0) for item in episodes
+            ),
+        },
+        "episodes": episodes,
+        "note": (
+            "fixture transport is deterministic and does not demonstrate real model quality"
+            if args.transport == "fixture"
+            else "live results include operational failures and require real LongCat credentials"
+        ),
+    }
+    if args.output is not None:
+        if args.output.exists():
+            raise SystemExit(f"refusing to overwrite existing report: {args.output}")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+    return report
+
+
 def _live_run(args) -> dict:
     _refuse_overwrite(args.output_dir)
     from src.env.simulation import SimulationEngine
     from src.mission.episode_logger import EpisodeLogger
     from src.schedule.config_loader import ConfigLoader
 
-    config = _scenario_config(ConfigLoader.load(), args.scenario)
+    config = _scenario_config(ConfigLoader.load(args.config), args.scenario)
     engine = SimulationEngine(config, seed=args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     episode_logger = EpisodeLogger(args.output_dir / "episodes")
@@ -230,11 +678,15 @@ def _live_run(args) -> dict:
         "is_fixture": False,
         "live": True,
         "scenario_config": {
-            "target_ship_count": config.ship.target_ship_count,
+            "population": {
+                "total_count": config.ship.population.total_count,
+                "civilian_ratio": config.ship.population.civilian_ratio,
+                "research_ratio": config.ship.population.research_ratio,
+            },
             "target_ais_on_probability": config.ship.target_ais_on_probability,
             "island_count_min": config.environment.island_count_min,
             "island_count_max": config.environment.island_count_max,
-            "uav_count_max": config.uav.count_max,
+            "uav_count": config.uav.count,
         },
         "episode_id": engine.episode_id,
         "config_hash": _stable_hash(config),
@@ -281,15 +733,33 @@ def _live_run(args) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=SCENARIOS, default="mixed-ais")
+    parser.add_argument(
+        "--scenario", choices=SCENARIOS, default=None,
+        help="run one scenario; batch mode without it covers the full fixture matrix",
+    )
+    parser.add_argument("--config", type=Path, default=Path("configs"))
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seeds", type=_parse_seeds, default=None)
+    parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/evaluations/mixed-maritime"))
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--transport", choices=("fixture", "live"), default=None)
     args = parser.parse_args()
     if args.steps < 1:
         parser.error("--steps must be positive")
-    payload = _live_run(args) if args.live else _dry_run(args)
+    if args.repeat < 1:
+        parser.error("--repeat must be positive")
+    if args.transport is not None:
+        if args.live:
+            parser.error("--live is only supported by the legacy single-episode interface")
+        payload = _batch_report(args)
+    elif args.seeds is not None or args.output is not None:
+        parser.error("--seeds/--output require --transport fixture or --transport live")
+    else:
+        args.scenario = args.scenario or "mixed-ais"
+        payload = _live_run(args) if args.live else _dry_run(args)
     print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
 
 

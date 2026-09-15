@@ -31,6 +31,11 @@ const CanvasMap = forwardRef(function CanvasMap({
   onSelectionCommit,
   onSelectContact,
   selectedContactId,
+  placementMode = false,
+  onPlaceVessel,
+  onDropVessel,
+  selectedScenarioVesselId,
+  onSelectScenarioVessel,
 }, ref) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -163,6 +168,7 @@ const CanvasMap = forwardRef(function CanvasMap({
         showGrid,
         trailMode,
         selectedContactId,
+        selectedScenarioVesselId,
         hoverInfo: hoverRef.current,
         selectedUavId,
         frameCount: phase,
@@ -180,7 +186,7 @@ const CanvasMap = forwardRef(function CanvasMap({
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, hoverVersion, mapAssets, selectedContactId, selectedUavId, showGrid, sizeVersion, trailMode]);
+  }, [frame, hoverVersion, mapAssets, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, sizeVersion, trailMode]);
 
   useImperativeHandle(ref, () => ({
     async recordReplay(frames, { fps = 20, onProgress } = {}) {
@@ -213,6 +219,7 @@ const CanvasMap = forwardRef(function CanvasMap({
             cellSize, offsetX, offsetY, mapBounds, legendBounds,
             showGrid, trailMode, hoverInfo: null, selectedUavId,
             selectedContactId,
+            selectedScenarioVesselId,
             frameCount: index, assets: mapAssets,
           });
           context.restore();
@@ -226,7 +233,7 @@ const CanvasMap = forwardRef(function CanvasMap({
       }
       return finished;
     },
-  }), [mapAssets, selectedContactId, selectedUavId, showGrid, trailMode]);
+  }), [mapAssets, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, trailMode]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;
@@ -333,11 +340,17 @@ const CanvasMap = forwardRef(function CanvasMap({
   const handleClick = useCallback((event) => {
     if (selectionMode) return;
     const canvas = canvasRef.current;
-    if (!canvas || !frame?.uavs) return;
+    if (!canvas || !frame) return;
     const point = pointerPosition(event);
     if (!point) return;
     const { x: mouseX, y: mouseY } = point;
     const { cellSize, offsetX, offsetY } = layoutRef.current;
+
+    if (placementMode) {
+      const coord = pixelToCoord(mouseX, mouseY, cellSize, offsetX, offsetY);
+      if (coord) onPlaceVessel?.([coord.col + 0.5, coord.row + 0.5]);
+      return;
+    }
 
     for (const uav of frame.uavs) {
       const [col, row] = uav.position;
@@ -358,7 +371,36 @@ const CanvasMap = forwardRef(function CanvasMap({
         return;
       }
     }
-  }, [frame, onSelectContact, onSelectUav, pointerPosition, selectedUavId, selectionMode]);
+    for (const vessel of frame.scenario_vessels || []) {
+      const position = vessel.position;
+      if (!Array.isArray(position)) continue;
+      const centerX = offsetX + (Number(position[0]) + 0.5) * cellSize;
+      const centerY = offsetY + (Number(position[1]) + 0.5) * cellSize;
+      if (Math.hypot(mouseX - centerX, mouseY - centerY) < Math.max(10, cellSize * 0.7)) {
+        onSelectScenarioVessel?.(
+          vessel.scenario_entity_id === selectedScenarioVesselId ? null : vessel.scenario_entity_id,
+        );
+        return;
+      }
+    }
+  }, [frame, onPlaceVessel, onSelectContact, onSelectScenarioVessel, onSelectUav, placementMode, pointerPosition, selectedScenarioVesselId, selectedUavId, selectionMode]);
+
+  const handleDragOver = useCallback((event) => {
+    if (!placementMode && !event.dataTransfer.types.includes("application/x-vessel-class")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }, [placementMode]);
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    const vesselClass = event.dataTransfer.getData("application/x-vessel-class");
+    if (!vesselClass) return;
+    const point = pointerPosition(event);
+    const { cellSize, offsetX, offsetY } = layoutRef.current;
+    const coord = point && pixelToCoord(point.x, point.y, cellSize, offsetX, offsetY);
+    if (!coord) return;
+    onDropVessel?.(vesselClass, [coord.col + 0.5, coord.row + 0.5]);
+  }, [onDropVessel, pointerPosition]);
 
   const selectionBox = selection?.start && selection?.end
     ? {
@@ -379,7 +421,9 @@ const CanvasMap = forwardRef(function CanvasMap({
         onPointerCancel={cancelSelection}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
-        style={{ cursor: selectionMode ? "crosshair" : hovered ? "crosshair" : "default", touchAction: "none" }}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+        style={{ cursor: placementMode || selectionMode ? "crosshair" : hovered ? "crosshair" : "default", touchAction: "none" }}
         aria-label="Operational map"
       />
       {selectionBox && (
