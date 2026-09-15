@@ -244,7 +244,11 @@ def build_scheduling_value(
     now_min: float,
     searchable_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Return a weighted copy without stacking overlapping intent demand."""
+    """Return a weighted copy without stacking overlapping intent demand.
+
+    The static searchable-water mask is mandatory at the call boundary. This
+    helper has no map context from which it could safely infer land cells.
+    """
     now = _finite_nonnegative(now_min, "now_min")
     base = np.asarray(base_value)
     scans = np.asarray(last_scan)
@@ -253,11 +257,10 @@ def build_scheduling_value(
     if not np.isfinite(base).all():
         raise ValueError("base_value: expected finite values")
     if searchable_mask is None:
-        water = np.ones(base.shape, dtype=bool)
-    else:
-        water = np.asarray(searchable_mask, dtype=bool)
-        if water.shape != base.shape:
-            raise ValueError("searchable_mask must be a grid-sized matrix")
+        raise ValueError("searchable_mask is required to weight water cells safely")
+    water = np.asarray(searchable_mask, dtype=bool)
+    if water.shape != base.shape:
+        raise ValueError("searchable_mask must be a grid-sized matrix")
     result = np.array(base, dtype=float, copy=True)
     demand = np.zeros(base.shape, dtype=float)
     for intent in intents:

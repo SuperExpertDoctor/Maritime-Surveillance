@@ -139,12 +139,15 @@ def test_scheduling_value_uses_maximum_demand_and_never_mutates_base():
     base = np.full((4, 4), 0.25)
     original = base.copy()
     last_scan = np.full((4, 4), -np.inf)
+    searchable_mask = np.ones((4, 4), dtype=bool)
     intents = (
         _intent("I0001", (1, 1, 3, 3), "search_priority", "medium", 1.0),
         _intent("I0002", (2, 2, 4, 4), "search_priority", "high", 0.5),
     )
 
-    result = build_scheduling_value(base, intents, last_scan, now_min=20.0)
+    result = build_scheduling_value(
+        base, intents, last_scan, now_min=20.0, searchable_mask=searchable_mask,
+    )
 
     assert np.array_equal(base, original)
     assert result[1, 1] == pytest.approx(2.25)
@@ -174,17 +177,27 @@ def test_scheduling_value_does_not_weight_partial_land_intent_cells():
 def test_freshness_weight_uses_age_and_treats_never_scanned_as_one():
     base = np.zeros((2, 2))
     last_scan = np.array([[8.0, -np.inf], [0.0, 20.0]])
+    searchable_mask = np.ones((2, 2), dtype=bool)
     intent = _intent(
         "I0001", (0, 0, 2, 2), "maintain_freshness", "low", 1.0,
         revisit_interval_min=10.0,
     )
 
-    result = build_scheduling_value(base, (intent,), last_scan, now_min=20.0)
+    result = build_scheduling_value(
+        base, (intent,), last_scan, now_min=20.0, searchable_mask=searchable_mask,
+    )
 
     assert result[0, 0] == pytest.approx(1.0)
     assert result[0, 1] == pytest.approx(1.0)
     assert result[1, 0] == pytest.approx(1.0)
     assert result[1, 1] == pytest.approx(0.0)
+
+
+def test_scheduling_value_requires_static_water_mask():
+    with pytest.raises(ValueError, match="searchable_mask is required"):
+        build_scheduling_value(
+            np.zeros((2, 2)), (), np.full((2, 2), -np.inf), now_min=0.0,
+        )
 
 
 def _intent(intent_id, bbox, mode, priority, weight, revisit_interval_min=None):
