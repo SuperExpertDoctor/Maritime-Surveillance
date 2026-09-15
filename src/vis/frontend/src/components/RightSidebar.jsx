@@ -1,5 +1,7 @@
 import { Bot, CircleX, Crosshair, Plane, Radar, Ship, Waypoints } from "lucide-react";
 import { UAV_STATUS_COLORS } from "../renderer/colors";
+import ContactPanel from "./ContactPanel";
+import IntentPanel from "./IntentPanel";
 
 const STATUS_LABELS = {
   idle: "待命",
@@ -10,9 +12,10 @@ const STATUS_LABELS = {
   refueling: "加油",
 };
 
-export default function RightSidebar({ frame, onSelectUav, selectedUavId, open, onClose, lastLlmCycle }) {
+export default function RightSidebar({ frame, onSelectUav, selectedUavId, open, onClose, lastLlmCycle, readOnly, selection, onClearSelection, selectedContactId, onSelectContact }) {
   const uavs = frame?.uavs || [];
   const ships = frame?.ships || [];
+  const contacts = frame?.contacts || [];
   const regions = frame?.search_regions || [];
   const tracks = frame?.track_regions || [];
   const info = frame?.info_matrix || [];
@@ -45,7 +48,7 @@ export default function RightSidebar({ frame, onSelectUav, selectedUavId, open, 
             <Metric label="仿真时间" value={frame.timestamp || "--:--:--"} />
             <Metric label="决策周期" value={`#${frame.cycle ?? 0}`} />
             <Metric label="海域覆盖" value={`${coverage.toFixed(1)}%`} emphasized />
-            <Metric label="目标发现" value={`${ships.filter((ship) => ship.is_detected).length}/${ships.length}`} />
+            <Metric label="观测接触" value={contacts.length || ships.filter((ship) => ship.is_detected).length} />
           </section>
 
           <section className="sidebar-section">
@@ -93,6 +96,18 @@ export default function RightSidebar({ frame, onSelectUav, selectedUavId, open, 
             <div><Crosshair size={15} /><span>跟踪区</span><b>{tracks.length}</b></div>
             <div><Ship size={15} /><span>标记点</span><b>{frame.markers?.length || 0}</b></div>
           </section>
+
+          <IntentPanel
+            frame={frame}
+            readOnly={readOnly}
+            selection={selection}
+            onClearSelection={onClearSelection}
+          />
+          <ContactPanel
+            frame={frame}
+            selectedContactId={selectedContactId}
+            onSelectContact={onSelectContact}
+          />
 
           <section className="sidebar-section llm-summary">
             <div className="section-heading"><span><Bot size={15} />模型决策</span><small>{lastLlmCycle?.model || "LONGCAT-2.0"}</small></div>

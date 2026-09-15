@@ -2,6 +2,12 @@
 
 基于 LLM（LongCat）的 UAV 编队海上侦察动态任务调度系统。在 300 km × 300 km 海域中，10 架固定翼 UAV 执行区域覆盖搜索（SAR）与目标跟踪监视（EO/IR），LLM 作为全局决策器动态划分搜索区域，Hungarian 算法负责 UAV 与区域的最优配对。所有单 UAV 命令都经过统一的 `ControlCoordinator`，默认使用 heuristic 控制策略。
 
+当前 `feature/mixed-maritime-llm` 还包含混杂海上目标、全局卫星 AIS、递进式 EO
+核查、人工重点区和受验证策略记忆。当前实现和测试状态见
+[混合海上验证记录](docs/MIXED_MARITIME_VALIDATION.md)；设计契约见
+`docs/superpowers/specs/2026-09-14-mixed-maritime-llm-design.md`。本文后面的 GOAL/GOAL2
+章节是历史能力说明，不替代新方案的接触身份和 live 验证口径。
+
 ---
 
 ## 一、总体算法工作逻辑

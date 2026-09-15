@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from copy import deepcopy
@@ -140,6 +141,32 @@ class LLMGateway:
         self._validate_required_bindings()
         self.transport = transport if transport is not None else OpenAICompatibleTransport()
         self.call_log: list[dict] = []
+        self._context = {
+            "episode_id": "",
+            "sim_time_min": 0.0,
+            "memory_version": "baseline",
+        }
+
+    def set_context(
+        self,
+        episode_id: str,
+        memory_version: str,
+        sim_time_min: float,
+    ) -> None:
+        """Attach non-sensitive episode metadata to every subsequent call."""
+        if not isinstance(episode_id, str) or not episode_id:
+            raise ValueError("episode_id must be a non-empty string")
+        if not isinstance(memory_version, str) or not memory_version:
+            raise ValueError("memory_version must be a non-empty string")
+        if isinstance(sim_time_min, bool) or not isinstance(sim_time_min, (int, float)):
+            raise TypeError("sim_time_min must be numeric")
+        if not math.isfinite(float(sim_time_min)) or sim_time_min < 0:
+            raise ValueError("sim_time_min must be finite and non-negative")
+        self._context = {
+            "episode_id": episode_id,
+            "sim_time_min": float(sim_time_min),
+            "memory_version": memory_version,
+        }
 
     def _binding(self, role: str) -> dict:
         configured = self._bindings.get(role, {})
@@ -322,7 +349,10 @@ class LLMGateway:
         call = {
             "call_id": call_id,
             "role": role,
+            "episode_id": self._redact(self._context["episode_id"]),
             "snapshot_id": self._redact(snapshot_id),
+            "sim_time_min": self._context["sim_time_min"],
+            "memory_version": self._redact(self._context["memory_version"]),
             "model": self._redact(binding["model"]),
             "attempts": [],
             "raw_attempts": [],

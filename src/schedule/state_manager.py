@@ -32,6 +32,9 @@ class StateManager:
         self.episode_id = ""
         self.current_time = 0.0
         self.cycle = 0
+        self.runtime_status = "running"
+        self.blocked_role = None
+        self.memory_version = "baseline"
         self.lifecycle_mode = False
         self.info_field = InfoField(config)
         self._uavs = [

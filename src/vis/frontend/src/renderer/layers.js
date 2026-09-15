@@ -289,7 +289,35 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
   }
 }
 
-export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
+export function drawIntents(ctx, intents, statuses, cellSize, ox, oy) {
+  const statusById = new Map((statuses || []).map((status) => [status.intent_id, status]));
+  for (const intent of intents || []) {
+    if (!Array.isArray(intent.bbox) || intent.bbox.length !== 4) continue;
+    const [c0, r0, c1, r1] = intent.bbox;
+    if (!(c1 > c0 && r1 > r0)) continue;
+    const status = statusById.get(intent.intent_id);
+    const lifecycle = intent.lifecycle || "active";
+    const color = lifecycle === "expired"
+      ? "#64748B"
+      : lifecycle === "cancelled" ? "#94A3B8" : "#7C3AED";
+    const point = coordToPixel(c0, r0, cellSize, ox, oy);
+    const width = (c1 - c0) * cellSize;
+    const height = (r1 - r0) * cellSize;
+    ctx.save();
+    ctx.fillStyle = lifecycle === "active" ? "rgba(124, 58, 237, .10)" : "rgba(100, 116, 139, .07)";
+    ctx.fillRect(point.x, point.y, width, height);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lifecycle === "active" ? 1.8 : 1;
+    ctx.setLineDash(lifecycle === "active" ? [5, 3] : [2, 4]);
+    ctx.strokeRect(point.x + 1, point.y + 1, Math.max(0, width - 2), Math.max(0, height - 2));
+    ctx.restore();
+    const coverage = status ? Math.round((status.coverage_ratio || 0) * 100) : null;
+    const label = `${intent.intent_id}${coverage == null ? "" : ` ${coverage}%`}`;
+    text(ctx, label, point.x + 4, point.y + Math.max(11, cellSize * 0.48), color, Math.max(7, cellSize * 0.27), 700);
+  }
+}
+
+export function drawTrackRegions(ctx, regions, contacts, cellSize, ox, oy) {
   for (const region of regions || []) {
     const [c0, r0, c1, r1] = region.bbox;
     const { x, y } = coordToPixel(c0, r0, cellSize, ox, oy);
@@ -300,10 +328,13 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
     ctx.setLineDash([5, 4]);
     ctx.strokeRect(x, y, (c1 - c0) * cellSize, (r1 - r0) * cellSize);
     ctx.setLineDash([]);
-    const group = (ships || []).filter((ship) => ship.group_id === region.target_group_id && !ship.departed);
+    const group = (contacts || []).filter((contact) => {
+      const id = contact.contact_id || contact.group_id;
+      return id === region.target_group_id && contact.state !== "departed";
+    });
     if (group.length) {
-      const centerCol = group.reduce((sum, ship) => sum + ship.position[0], 0) / group.length;
-      const centerRow = group.reduce((sum, ship) => sum + ship.position[1], 0) / group.length;
+      const centerCol = group.reduce((sum, contact) => sum + (contact.estimated_position || contact.position)[0], 0) / group.length;
+      const centerRow = group.reduce((sum, contact) => sum + (contact.estimated_position || contact.position)[1], 0) / group.length;
       const center = gridCenter(centerCol, centerRow, cellSize, ox, oy);
       ctx.strokeStyle = "rgba(190, 18, 60, .72)";
       ctx.setLineDash([3, 4]);
@@ -312,6 +343,72 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
       ctx.stroke();
       ctx.setLineDash([]);
     }
+  }
+}
+
+function contactColor(contact) {
+  if (contact?.state === "lost" || contact?.state === "departed") return "#64748B";
+  if (contact?.identity === "target") return "#BE123C";
+  if (contact?.identity === "civilian") return "#0F766E";
+  return "#B45309";
+}
+
+export function drawContacts(ctx, contacts, cellSize, ox, oy, selectedId, phase = 0) {
+  for (const contact of contacts || []) {
+    const position = contact.estimated_position;
+    if (!Array.isArray(position) || position.length < 2) continue;
+    const color = contactColor(contact);
+    const center = gridCenter(Number(position[0]), Number(position[1]), cellSize, ox, oy);
+    const radius = Math.max(4, cellSize * (contact.contact_id === selectedId ? 0.34 : 0.25));
+    const samples = (contact.samples || []).filter((sample) => Array.isArray(sample.position));
+    if (samples.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = `${color}66`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      samples.forEach((sample, index) => {
+        const point = gridCenter(sample.position[0], sample.position[1], cellSize, ox, oy);
+        if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+    const aisSample = [...samples].reverse().find((sample) => sample.source === "ais");
+    if (aisSample && contact.state !== "departed") {
+      const aisPoint = gridCenter(aisSample.position[0], aisSample.position[1], cellSize, ox, oy);
+      ctx.save();
+      ctx.strokeStyle = "rgba(100, 116, 139, .62)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(center.x, center.y);
+      ctx.lineTo(aisPoint.x, aisPoint.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.save();
+    ctx.globalAlpha = contact.state === "lost" ? 0.5 : 1;
+    ctx.fillStyle = `${color}22`;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = contact.contact_id === selectedId ? 2 : 1.2;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius + 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (contact.contact_id === selectedId) {
+      ctx.globalAlpha = 0.78;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, radius + 7 + Math.sin(phase / 10) * 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    const status = contact.state === "lost" ? "LOST" : contact.identity === "target" ? "TARGET" : contact.identity === "civilian" ? "CLAIMED AIS" : "PENDING";
+    text(ctx, `${contact.contact_id} ${status}`, center.x + radius + 4, center.y + 3, color, Math.max(7, cellSize * 0.25), 700);
   }
 }
 
@@ -871,11 +968,11 @@ function cellSizeForShip(size, carrier) {
   return size * (carrier ? 4.6 : 4.15);
 }
 
-function drawClassificationSymbol(ctx, ship, center, size, military) {
+function drawClassificationSymbol(ctx, ship, center, size, classification) {
   if (ship.departed) return;
   ctx.save();
   ctx.lineWidth = 1;
-  if (military) {
+  if (classification === "target") {
     const x = center.x + size + 5;
     const y = center.y - size - 1;
     ctx.strokeStyle = "#F87171";
@@ -889,7 +986,7 @@ function drawClassificationSymbol(ctx, ship, center, size, military) {
     ctx.quadraticCurveTo(x - 2, y + 6, x, y + 6);
     ctx.quadraticCurveTo(x + 2, y + 6, x + 4, y + 2);
     ctx.stroke();
-  } else if (ship.is_military === false) {
+  } else if (classification === "civilian") {
     ctx.fillStyle = "#0369A1";
     ctx.beginPath();
     ctx.moveTo(center.x + size + 2, center.y - 2);
@@ -903,7 +1000,7 @@ function drawClassificationSymbol(ctx, ship, center, size, military) {
 
 function drawShipRadar(ctx, ship, center, cellSize) {
   if (ship.departed) return;
-  const radius = Math.max(cellSize * 1.6, Number(ship.radar_range_cells || 3) * cellSize);
+  const radius = cellSize * 3;
   const heading = (Number(ship.heading_deg) || 0) * Math.PI / 180;
   ctx.save();
   ctx.fillStyle = "rgba(6, 182, 212, .035)";
@@ -928,8 +1025,10 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
   const observedShips = (ships || []).filter((ship) => ship?.is_detected);
   drawGroupRings(ctx, observedShips, cellSize, ox, oy);
   for (const ship of observedShips) {
-    const military = ship.is_military === true || ship.discrimination === "military";
-    const color = military ? "#E11D48" : ship.is_military === false ? "#0369A1" : ship.is_detected ? "#CA8A04" : "#475569";
+    const classification = ship.identity || ship.assessment?.identity || "unknown";
+    const color = classification === "target"
+      ? "#E11D48"
+      : classification === "civilian" ? "#0369A1" : "#CA8A04";
     const size = Math.max(4, cellSize * (ship.ship_type === "carrier" ? 0.38 : 0.28));
     if (ship.trail?.length > 1) {
       ctx.save();
@@ -965,7 +1064,8 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
     if (ship.ais?.reported_position && !ship.departed) {
       const report = gridCenter(ship.ais.reported_position[0], ship.ais.reported_position[1], cellSize, ox, oy);
       ctx.save();
-      ctx.strokeStyle = military ? "rgba(251, 113, 133, .72)" : "rgba(148, 163, 184, .52)";
+      ctx.strokeStyle = classification === "target"
+        ? "rgba(251, 113, 133, .72)" : "rgba(148, 163, 184, .52)";
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 3]);
       ctx.beginPath();
@@ -976,10 +1076,9 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
     }
     const state = ship.departed
       ? "DEPARTED"
-      : ship.is_evasive
-        ? "EVADE"
-        : ship.ship_type === "carrier" ? "CV" : "DDG";
-    const stateColor = ship.departed ? "#64748B" : ship.is_evasive ? "#BE123C" : military ? "#BE123C" : "#334155";
+      : String(ship.state || ship.status || (ship.ship_type === "carrier" ? "CV" : "DDG")).toUpperCase();
+    const stateColor = ship.departed
+      ? "#64748B" : classification === "target" ? "#BE123C" : "#334155";
     text(ctx, state, center.x + size + 3, center.y + 3, stateColor, Math.max(7, cellSize * 0.26), 700);
   }
 }
@@ -1174,6 +1273,7 @@ export function renderFrame(ctx, frame, options = {}) {
     mapBounds,
     legendBounds,
     trailMode = "tail",
+    selectedContactId,
   } = options;
   const width = ctx.canvas.clientWidth || ctx.canvas.width;
   const height = ctx.canvas.clientHeight || ctx.canvas.height;
@@ -1193,13 +1293,20 @@ export function renderFrame(ctx, frame, options = {}) {
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
+    drawIntents(ctx, frame.intents, frame.intent_statuses, cellSize, offsetX, offsetY);
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
-    drawTrackRegions(ctx, frame.track_regions, frame.ships, cellSize, offsetX, offsetY);
+    const contacts = Array.isArray(frame.contacts) && frame.contacts.length
+      ? frame.contacts : frame.ships;
+    drawTrackRegions(ctx, frame.track_regions, contacts, cellSize, offsetX, offsetY);
     drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, baseCenters);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY, frameCount);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
-    drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
+    if (Array.isArray(frame.contacts) && frame.contacts.length) {
+      drawContacts(ctx, frame.contacts, cellSize, offsetX, offsetY, selectedContactId, frameCount);
+    } else {
+      drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
+    }
     drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets, baseCenters);
     drawBases(ctx, bases, baseCenters, cellSize, frameCount);
     drawTransparencyLegend(ctx, legendBounds);

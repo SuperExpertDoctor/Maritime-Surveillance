@@ -19,6 +19,13 @@ or executing tasks remain in force unless an explicitly legal ordinary search
 UAV is preempted for a new probe or track. Returning, refueling, safety, active
 probe, and valid tracking work must not be preempted.
 
+The optional strategy_memories in the snapshot are advisory evidence from
+validated earlier episodes. Use them only to prioritize the supplied tasks.
+They never change sensor ranges, identity thresholds, navigation safety,
+resource limits, or the legal feasible graph. Do not infer identities or quote
+supporting episode details as current observations. An empty memory list means
+baseline scheduling.
+
 The complete snapshot follows in the user message. The resources, feasible
 edge costs, active task records, contacts, intents, intent statuses, map
 version, and reviewer summary are authoritative. An empty selection requires a

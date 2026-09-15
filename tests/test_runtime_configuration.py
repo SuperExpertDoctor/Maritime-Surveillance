@@ -61,7 +61,7 @@ def test_control_configuration_defaults_to_heuristic():
 
     assert config.control.default_mode == "heuristic"
     assert config.control.per_uav == {}
-    assert config.control.observation.schema_version == "control-observation/v1"
+    assert config.control.observation.schema_version == "control-observation/v2"
     assert config.control.observation.local_window_cells == 11
     assert config.control.safety.reserve_range_cells == 4.0
     assert config.control.safety.max_invalid_commands == 3

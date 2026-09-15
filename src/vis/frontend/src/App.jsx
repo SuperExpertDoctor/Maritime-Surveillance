@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
+import { Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
 
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
@@ -17,6 +17,9 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [trailMode, setTrailMode] = useState("tail");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedBBox, setSelectedBBox] = useState(null);
+  const [selectedContactId, setSelectedContactId] = useState(null);
   const [liveEvents, setLiveEvents] = useState([]);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
   const mapExporterRef = useRef(null);
@@ -24,6 +27,13 @@ export default function App() {
   const replay = useReplay(mode === "replay");
   const mp4Export = useMp4Export(replay, mapExporterRef);
   const frame = mode === "live" ? live.frame : replay.frame;
+  const readOnly = mode === "replay";
+
+  useEffect(() => {
+    setSelectionMode(false);
+    setSelectedBBox(null);
+    setSelectedContactId(null);
+  }, [mode]);
 
   useEffect(() => {
     if (mode !== "live" || !live.frame) return;
@@ -65,7 +75,10 @@ export default function App() {
     if (selectedUavId && frame && !(frame.uavs || []).some((uav) => uav.id === selectedUavId)) {
       setSelectedUavId(null);
     }
-  }, [frame, selectedUavId]);
+    if (selectedContactId && frame && !(frame.contacts || []).some((contact) => contact.contact_id === selectedContactId)) {
+      setSelectedContactId(null);
+    }
+  }, [frame, selectedContactId, selectedUavId]);
 
   const connectionLabel = {
     idle: "待机",
@@ -153,6 +166,16 @@ export default function App() {
           <button className={drawerVisible ? "icon-btn active" : "icon-btn"} onClick={() => setDrawerVisible((value) => !value)} title="任务详情" aria-label="切换任务详情面板" aria-pressed={drawerVisible}>
             <PanelBottom size={17} />
           </button>
+          <button
+            className={selectionMode ? "icon-btn active" : "icon-btn"}
+            onClick={() => setSelectionMode((value) => !value)}
+            title={readOnly ? "回放只读" : "框选重点区"}
+            aria-label="框选重点区"
+            aria-pressed={selectionMode}
+            disabled={readOnly}
+          >
+            <Focus size={17} />
+          </button>
           <button className="icon-btn mobile-only" onClick={() => setSidebarOpen((value) => !value)} title="编队状态" aria-label="切换编队状态面板">
             <PanelRight size={17} />
           </button>
@@ -166,6 +189,10 @@ export default function App() {
         onSelectUav={setSelectedUavId}
         showGrid={showGrid}
         trailMode={trailMode}
+        selectionMode={selectionMode}
+        onSelectionCommit={(bbox) => { setSelectedBBox(bbox); setSidebarOpen(true); }}
+        onSelectContact={setSelectedContactId}
+        selectedContactId={selectedContactId}
       />
       <RightSidebar
         frame={frame}
@@ -174,6 +201,11 @@ export default function App() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         lastLlmCycle={displayedLlmCycle}
+        readOnly={readOnly}
+        selection={selectedBBox}
+        onClearSelection={() => setSelectedBBox(null)}
+        selectedContactId={selectedContactId}
+        onSelectContact={setSelectedContactId}
       />
       <BottomDrawer
         frame={frame}

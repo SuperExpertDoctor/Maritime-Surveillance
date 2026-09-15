@@ -138,6 +138,12 @@ def evaluate(steps: int = 480, seed: int = 42) -> dict:
         bool(ship.discrimination.get("is_military") == ship.actual_military)
         for ship in classified
     )
+    summary = engine.summary()
+    episode_outcome = summary.get("episode_outcome", {})
+    legacy_ais_accuracy = (
+        correct_classifications / len(classified) * 100.0
+        if classified else None
+    )
     final_metrics = _timeliness_metrics(engine)
     final_metrics.update({
         "median_revisit_min": round(float(np.median(revisit_intervals)), 3)
@@ -162,14 +168,26 @@ def evaluate(steps: int = 480, seed: int = 42) -> dict:
             float(np.mean(completed_sortie_searches)), 3,
         ) if completed_sortie_searches else 0.0,
         "completed_search_sorties": len(completed_sortie_searches),
-        "ais_accuracy_pct": round(
-            correct_classifications / len(classified) * 100.0,
-            3,
-        ) if classified else 0.0,
+        # Keep the historical key for consumers of this script.  It is not
+        # the evidence-based mixed-maritime classification metric.
+        "ais_accuracy_pct": round(legacy_ais_accuracy, 3)
+        if legacy_ais_accuracy is not None else 0.0,
+        "legacy_ais_accuracy_pct": round(legacy_ais_accuracy, 3)
+        if legacy_ais_accuracy is not None else None,
+        "ais_accuracy_definition": "legacy position/discrimination metric",
         "classified_ships": len(classified),
+        "mixed_maritime_classification_accuracy": episode_outcome.get(
+            "classification_accuracy"
+        ),
+        "mixed_maritime_terminal_classification_coverage": episode_outcome.get(
+            "terminal_classification_coverage"
+        ),
+        "mixed_maritime_false_civilian_ratio": episode_outcome.get(
+            "false_civilian_ratio"
+        ),
     })
     return {
-        "summary": engine.summary(),
+        "summary": summary,
         "theoretical_limits": _theoretical_limits(engine),
         "checkpoints": checkpoints,
         "final_metrics": final_metrics,

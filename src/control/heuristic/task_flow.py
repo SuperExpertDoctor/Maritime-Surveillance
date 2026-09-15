@@ -25,6 +25,7 @@ from src.schedule.state_manager import StateManager
 EVENT_TRANSITIONS = {
     "contact_assessed": OperationMode.TRACK,
     "mission_task_released": OperationMode.HOLDING,
+    "civilian_released": OperationMode.HOLDING,
     "target_lost": OperationMode.HOLDING,
     "duplicate_task_cancelled": OperationMode.HOLDING,
     "target_departed": OperationMode.HOLDING,

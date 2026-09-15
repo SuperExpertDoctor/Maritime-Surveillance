@@ -25,26 +25,40 @@ from src.mission.contracts import (
 )
 from src.mission.mission_scheduler import MissionScheduler
 from src.mission.task_catalog import TaskCatalog
+from src.mission.strategy_memory import StrategyMemoryStore
 
 
 class TaskAllocator:
     """Main orchestrator connecting all scheduling components."""
 
-    def __init__(self, config: AppConfig, *, llm_gateway=None):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        llm_gateway=None,
+        strategy_memory_store: StrategyMemoryStore | None = None,
+    ):
         self.config = config
         self.sm = StateManager(config)
         self.ivt = InfoValueTable(self.sm)
         self.extractor = CandidateExtractor()
         self.llm_client = LLMClient(config, gateway=llm_gateway)
-        self.reviewer = LLMReviewer(config, self.llm_client)
         self.trigger_manager = TriggerManager(self.sm)
         self.task_catalog = TaskCatalog()
+        self.strategy_memory_store = strategy_memory_store or StrategyMemoryStore()
+        self.reviewer = LLMReviewer(
+            config,
+            self.llm_client,
+            strategy_memory_store=self.strategy_memory_store,
+        )
+        self.memory_version = "baseline"
         self.mission_scheduler = MissionScheduler(
             llm_gateway=self.llm_client.gateway,
             reassignment_cooldown_min=config.mission.scheduling.reassignment_cooldown_min,
             max_tasks_in_prompt=config.mission.scheduling.max_tasks_in_prompt,
             allow_probe_preempt_search=config.mission.scheduling.allow_probe_preempt_search,
             allow_intent_preempt_search=config.mission.scheduling.allow_intent_preempt_search,
+            strategy_memory_store=self.strategy_memory_store,
         )
         self._mission_snapshot_counter = 0
         heuristic = config.control.heuristic
@@ -69,11 +83,14 @@ class TaskAllocator:
         intents: tuple[Intent, ...] = (),
         intent_statuses: tuple[IntentStatus, ...] = (),
         active_tasks: tuple[TaskRecord, ...] = (),
-        memory_version: str = "baseline",
+        memory_version: str | None = None,
         reviewer_summary: str | None = None,
     ) -> MissionSnapshot:
         """Publish a complete scheduler snapshot without applying a decision."""
         now = self.sm.current_time if now_min is None else float(now_min)
+        selected_memory_version = (
+            self.memory_version if memory_version is None else str(memory_version)
+        )
         if not math.isfinite(now) or now < 0:
             raise ValueError("now_min must be finite and non-negative")
         published_contacts = tuple(
@@ -118,7 +135,7 @@ class TaskAllocator:
             contacts=published_contacts,
             intents=published_intents,
             intent_statuses=tuple(intent_statuses),
-            memory_version=memory_version,
+            memory_version=selected_memory_version,
             planning_map_version=planning_map_version,
             reviewer_summary=(
                 self.llm_client._reviewer_memory
@@ -127,6 +144,13 @@ class TaskAllocator:
         )
         self._last_mission_snapshot = snapshot
         return snapshot
+
+    def set_strategy_memory_version(self, version: str) -> None:
+        """Pin the memory manifest used by all snapshots in this episode."""
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError("memory version must be a non-empty string")
+        self.memory_version = version.strip()
+        self.sm.memory_version = self.memory_version
 
     @property
     def last_mission_snapshot(self) -> MissionSnapshot | None:

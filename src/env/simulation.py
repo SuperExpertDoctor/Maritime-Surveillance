@@ -7,7 +7,7 @@ from uuid import uuid4
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import numpy as np
 
@@ -68,6 +68,11 @@ from src.mission.contracts import (
     VisualDetection,
 )
 from src.mission.contact_assessor import ContactAssessor
+from src.mission.outcome_evaluator import (
+    EvaluationTick,
+    OutcomeEvaluator,
+    VesselTruthSample,
+)
 from src.mission.intent_commands import (
     IntentCommandQueue,
     QueueFull,
@@ -106,6 +111,8 @@ class SimulationEngine:
         control_providers: Mapping[ControlMode | str, ControlProvider] | None = None,
         llm_gateway=None,
         episode_id: str | None = None,
+        strategy_memory_store=None,
+        strategy_memory_version: str | None = None,
     ):
         self.config = config
         self.seed = seed
@@ -114,7 +121,6 @@ class SimulationEngine:
         self._control_providers = dict(control_providers or {})
         self.reset_generation = 0
         self.rng = random.Random(seed)
-        random.seed(seed)
         self.clock = SimClock()
         base_positions = self._generate_base_positions()
         self.bases = [
@@ -127,7 +133,13 @@ class SimulationEngine:
             for index, position in enumerate(base_positions)
         ]
         self.base = self.bases[0]
-        self.allocator = TaskAllocator(config, llm_gateway=llm_gateway)
+        self.allocator = TaskAllocator(
+            config,
+            llm_gateway=llm_gateway,
+            strategy_memory_store=strategy_memory_store,
+        )
+        if strategy_memory_version is not None:
+            self.allocator.set_strategy_memory_version(strategy_memory_version)
         if llm_gateway is None:
             self.allocator.llm_client.assert_ready()
         self.allocator.sm.set_base_positions(base_positions)
@@ -186,6 +198,8 @@ class SimulationEngine:
         self.runtime_commands = RuntimeCommandQueue(
             config.mission.intent.mutation_queue_limit,
         )
+        self._evaluation_contact_links: dict[str, str] = {}
+        self._outcome_evaluator = OutcomeEvaluator(self.episode_id)
 
         self.uavs = [
             UAVEntity(
@@ -329,6 +343,7 @@ class SimulationEngine:
         self._runtime_status = "running"
         self._blocked_role: str | None = None
         self._retired_command_results: dict[str, CommandResult] = {}
+        self._publish_runtime_state()
 
     def _intent_searchable_mask(self) -> np.ndarray:
         """Build the static water denominator used by intent metrics."""
@@ -351,6 +366,24 @@ class SimulationEngine:
     def blocked_role(self) -> str | None:
         """Read-only model role that currently blocks the simulation."""
         return self._blocked_role
+
+    def _publish_runtime_state(self) -> None:
+        """Copy lifecycle metadata into the immutable frame source."""
+        self.allocator.sm.runtime_status = self._runtime_status
+        self.allocator.sm.blocked_role = self._blocked_role
+        self.allocator.sm.memory_version = self.allocator.memory_version
+        set_context = getattr(self.allocator.llm_client.gateway, "set_context", None)
+        if callable(set_context):
+            set_context(
+                self.episode_id,
+                self.allocator.memory_version,
+                float(self.clock.time),
+            )
+
+    def _set_runtime_state(self, status: str, blocked_role: str | None = None) -> None:
+        self._runtime_status = status
+        self._blocked_role = blocked_role
+        self._publish_runtime_state()
 
     def _create_ships(self) -> list[Ship]:
         return create_ship_population(
@@ -401,6 +434,8 @@ class SimulationEngine:
         previous_seed = self.seed
         generation = self.reset_generation + 1
         next_seed = self.seed + 1 if seed is None else int(seed)
+        strategy_memory_store = self.allocator.strategy_memory_store
+        strategy_memory_version = self.allocator.memory_version
         retired = dict(self._retired_command_results)
         for queue in (self.intent_commands, self.runtime_commands):
             for command in queue.drain():
@@ -414,6 +449,8 @@ class SimulationEngine:
             next_seed,
             control_providers=self._control_providers,
             llm_gateway=self._llm_gateway,
+            strategy_memory_store=strategy_memory_store,
+            strategy_memory_version=strategy_memory_version,
         )
         self._retired_command_results = retired
         self.reset_generation = generation
@@ -561,8 +598,8 @@ class SimulationEngine:
                     command.command_id, "rejected", None, "episode_finished",
                 )
             else:
-                self._runtime_status = "finished"
-                self._blocked_role = None
+                self._outcome_evaluator.invalidate("runtime_aborted")
+                self._set_runtime_state("finished")
                 self.allocator.sm.add_event("runtime_aborted", {
                     "command_id": command.command_id,
                 })
@@ -579,6 +616,7 @@ class SimulationEngine:
         try:
             self._prepare_red_decision(self.clock.time)
         except RedDecisionBlocked:
+            self._publish_runtime_state()
             self.last_result = {
                 "trigger_type": "model_blocked",
                 "action": None,
@@ -588,6 +626,7 @@ class SimulationEngine:
         t = self.clock.tick()
         sm = self.allocator.sm
         sm.current_time = t
+        self._publish_runtime_state()
         self._expire_intents(t)
 
         self._update_obstacles()
@@ -682,6 +721,8 @@ class SimulationEngine:
             self.heavy_triggers += 1
             interaction = result.get("llm_cycle") or {}
             self.llm_successes += int(bool(interaction.get("success")))
+            if interaction and not interaction.get("success", False):
+                self._outcome_evaluator.invalidate("decision_maker_failed")
             signature = tuple(
                 (region["id"], tuple(region["bbox"]))
                 for region in result.get("search_regions", [])
@@ -691,6 +732,7 @@ class SimulationEngine:
         elif result["trigger_type"] == "light":
             self.light_triggers += 1
         self._detect_and_resolve_path_conflicts(t)
+        self._observe_evaluation(t)
         self._record_statuses()
         return result
 
@@ -1091,12 +1133,11 @@ class SimulationEngine:
         try:
             plan = self.red_commander.decide(snapshot)
         except RedDecisionBlocked as exc:
-            self._runtime_status = "paused_model"
-            self._blocked_role = "red_commander"
+            self._outcome_evaluator.invalidate("red_decision_blocked")
+            self._set_runtime_state("paused_model", "red_commander")
             self.allocator.sm.add_event("red_decision_blocked", {"reason": str(exc)})
             raise
-        self._runtime_status = "running"
-        self._blocked_role = None
+        self._set_runtime_state("running")
         commands = {} if plan is None else {command.ship_id: command for command in plan.commands}
         for ship in self.ships:
             params = commands.get(ship.id) if ship.truth_identity == "target" else None
@@ -1488,6 +1529,7 @@ class SimulationEngine:
         self, uav: UAVEntity, reason: str, error: Exception
     ) -> None:
         self._emergency_failures[uav.id] = reason
+        self._outcome_evaluator.invalidate(reason)
         uav.sensor_mode = "off"
         self.allocator.trigger_manager.notify_event(
             "emergency_failure",
@@ -1537,7 +1579,9 @@ class SimulationEngine:
 
     def summary(self) -> dict:
         coverage = self.allocator.sm.get_coverage_stats()
+        outcome = self._outcome_evaluator.snapshot()
         return {
+            "episode_id": self.episode_id,
             "steps": int(self.clock.time),
             **coverage,
             "heavy_triggers": self.heavy_triggers,
@@ -1561,6 +1605,7 @@ class SimulationEngine:
             "status_history": dict(self.status_history),
             "scenario_seed": self.seed,
             "reset_generation": self.reset_generation,
+            "episode_outcome": asdict(outcome),
         }
 
     def _control_action_spec(self) -> ActionSpec:
@@ -1953,6 +1998,9 @@ class SimulationEngine:
                 continue
             if advanced.phase != "awaiting_assessment":
                 continue
+            call_count = len(
+                getattr(self.allocator.llm_client.gateway, "call_log", ())
+            )
             try:
                 features = build_features(
                     contact,
@@ -1965,6 +2013,14 @@ class SimulationEngine:
                 )
             except (TypeError, ValueError):
                 assessment = None
+            calls = getattr(self.allocator.llm_client.gateway, "call_log", ())
+            if assessment is None and call_count < len(calls):
+                if any(
+                    call.get("role") == "contact_assessor"
+                    and not call.get("success", False)
+                    for call in calls[call_count:]
+                ):
+                    self._outcome_evaluator.invalidate("contact_assessor_failed")
             if assessment is None:
                 continue
             try:
@@ -2201,10 +2257,88 @@ class SimulationEngine:
     def _handle_detection(self, uav: UAVEntity, ship: Ship, current_time: float) -> str:
         """SAR sensor adapter: a fix creates evidence, never a control assignment."""
         ship.mark_detected()  # evaluation/legacy visualization only
+        detection = self._visual_detection(
+            uav, ship.float_position, current_time, "sar",
+        )
         cid = self.allocator.sm.contacts.ingest_visual(
-            self._visual_detection(uav, ship.float_position, current_time, "sar"))
+            detection,
+        )
+        # This association is retained only by the evaluation side.  It lets
+        # outcome metrics count wrong aliases as wrong instead of correcting
+        # them with the physical vessel ID in the blue observation stream.
+        self._evaluation_contact_links[cid] = ship.id
         self._publish_contact_events(current_time)
         return cid
+
+    def _observe_evaluation(self, current_time: float) -> None:
+        """Publish an evaluator-only tick after all current-step effects settle."""
+        sm = self.allocator.sm
+        contacts = tuple(sm.contacts.list_snapshots())
+        canonical_links = {
+            sm.resolve_contact_id(contact_id): physical_id
+            for contact_id, physical_id in self._evaluation_contact_links.items()
+        }
+        contact_by_id = {contact.contact_id: contact for contact in contacts}
+        links = []
+        for uav in self.uavs:
+            if (
+                uav.status != "tracking"
+                or uav.sensor_mode != "eo"
+                or not uav.target_group_id
+            ):
+                continue
+            contact_id = sm.resolve_contact_id(uav.target_group_id)
+            physical_id = canonical_links.get(contact_id)
+            contact = contact_by_id.get(contact_id)
+            if physical_id is None or contact is None:
+                continue
+            try:
+                physical = next(
+                    ship for ship in self.ships if ship.id == physical_id
+                )
+            except StopIteration:
+                continue
+            if physical.departed or not uav.eo_sensor.is_target_visible(
+                uav.float_position, physical.float_position,
+            ):
+                continue
+            links.append((uav.id, contact_id, physical_id))
+
+        vessel_samples = tuple(
+            VesselTruthSample(
+                ship.id,
+                ship.truth_identity,
+                tuple(ship.float_position),
+                bool(ship.departed),
+                ship.ais_mode == "civilian",
+                "departed" if ship.departed else getattr(ship, "navigation_status", "ready"),
+            )
+            for ship in self.ships
+        )
+        operation_samples = tuple((uav.id, uav.status) for uav in self.uavs)
+        status_samples = self._evaluate_intent_statuses(current_time)
+        coverage = sm.get_coverage_stats()["coverage_pct"] / 100.0
+        self._outcome_evaluator.observe(EvaluationTick(
+            sim_time_min=float(current_time),
+            dt_min=float(self.clock.dt_min),
+            vessels=vessel_samples,
+            uav_operations=operation_samples,
+            task_records=tuple(self._mission_task_records.values()),
+            contacts=contacts,
+            valid_eo_links=tuple(links),
+            intent_statuses=tuple(status_samples),
+            unique_coverage_ratio=float(coverage),
+        ))
+
+    def _resume_search(self, uav: UAVEntity) -> bool:
+        """Retain the legacy hook without bypassing the global scheduler.
+
+        Older controller tests and integrations patched this hook while
+        releasing a track.  Search reassignment is now owned by the mission
+        scheduler, so an implicit handoff is deliberately never performed.
+        """
+        del uav
+        return False
 
     def _resolve_search_track_conflicts(
         self,

@@ -9,6 +9,8 @@ from src.schedule.info_value_table import InfoValueTable
 from src.schedule.llm_client import LLMClient
 from src.schedule.llm_reviewer import LLMReviewer
 from src.schedule.state_manager import StateManager
+from src.mission.outcome_evaluator import EpisodeOutcome
+from src.mission.strategy_memory import StrategyMemoryStore
 from tests.mission.conftest import ScriptedTransport
 
 
@@ -228,6 +230,40 @@ def test_reviewer_failure_preserves_memory_and_redacts_diagnostics(monkeypatch, 
     assert client.last_reviewer_interaction["failure_category"] == "transport"
     assert secret not in json.dumps(client.last_reviewer_interaction)
     assert secret not in caplog.text
+
+
+def test_strategy_reviewer_rejects_identifying_summary_before_model_call(tmp_path):
+    class CountingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def review(self, *_args, **_kwargs):
+            self.calls += 1
+            return "unsafe path"
+
+    outcomes = tuple(
+        EpisodeOutcome(
+            f"episode-{index}", True, (), 0.7, 0.8, 0.6, 0.9,
+            0.0, 1.0, 10.0, 2.0, 1, 0.7, 1, 1, 0, 1.0,
+        )
+        for index in range(3)
+    )
+    summaries = tuple(
+        {
+            "episode_id": f"episode-{index}",
+            "context": {"has_active_intent": "yes"},
+            "selected_task_ids": ["Q1"],
+        }
+        for index in range(3)
+    )
+    client = CountingClient()
+    reviewer = LLMReviewer(
+        ConfigLoader.load(), client,
+        strategy_memory_store=StrategyMemoryStore(tmp_path),
+    )
+
+    assert reviewer.propose_strategy(outcomes, summaries) is None
+    assert client.calls == 0
 
 
 def test_legacy_interaction_logs_redact_prompt_and_raw(monkeypatch):

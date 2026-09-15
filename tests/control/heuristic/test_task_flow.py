@@ -73,9 +73,10 @@ def _heuristic_flow(factory, coverage_task, *, atomic=None):
 
 def test_event_transitions_are_exact_and_exclude_work_range_exhausted():
     assert EVENT_TRANSITIONS == {
-        "contact_assessed": OperationMode.TRACK,
-        "mission_task_released": OperationMode.HOLDING,
-        "target_lost": OperationMode.HOLDING,
+            "contact_assessed": OperationMode.TRACK,
+            "mission_task_released": OperationMode.HOLDING,
+            "civilian_released": OperationMode.HOLDING,
+            "target_lost": OperationMode.HOLDING,
         "duplicate_task_cancelled": OperationMode.HOLDING,
         "target_departed": OperationMode.HOLDING,
         "search_complete": OperationMode.HOLDING,

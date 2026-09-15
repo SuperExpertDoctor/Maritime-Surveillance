@@ -1,5 +1,13 @@
 # Validation Record
 
+## Current Mixed Maritime Track
+
+本文件后面的 GOAL/GOAL2 是历史验收记录，保留用于回溯，不代表当前
+`feature/mixed-maritime-llm` 的身份研判、接触证据或策略自演进结果。当前方案的
+V01-V18 证据、fixture/live 边界和可复核命令见
+[MIXED_MARITIME_VALIDATION.md](MIXED_MARITIME_VALIDATION.md)。未执行真实 LongCat
+smoke 或 paired strategy validation 前，不得把历史结果迁移为新方案结果。
+
 Date: 2026-08-01
 
 ## Automated Checks

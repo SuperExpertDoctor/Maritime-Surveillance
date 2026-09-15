@@ -15,6 +15,7 @@ from src.mission.contracts import (
     TaskRecord,
     UavResource,
 )
+from src.mission.strategy_memory import StrategyMemoryStore
 
 
 SELECTION_SCHEMA = "mission-selection/v1"
@@ -612,6 +613,7 @@ class MissionScheduler:
         allow_intent_preempt_search: bool = False,
         system_prompt_path: str | None = None,
         selection_provider=None,
+        strategy_memory_store: StrategyMemoryStore | None = None,
     ):
         if gateway is not None and llm_gateway is not None:
             raise ValueError("pass gateway or llm_gateway, not both")
@@ -635,6 +637,7 @@ class MissionScheduler:
         with open(system_prompt_path, "r", encoding="utf-8") as stream:
             self.system_prompt = stream.read()
         self.selection_provider = selection_provider
+        self.strategy_memory_store = strategy_memory_store
         self.last_selection_payload: dict | None = None
         self.last_selection_call_id: str | None = None
         self.last_selection_success = False
@@ -799,6 +802,14 @@ class MissionScheduler:
         else:
             full["candidates_truncated"] = False
             full["candidate_count"] = len(candidates)
+        strategy_context = _strategy_context(snapshot)
+        memories = ()
+        if self.strategy_memory_store is not None:
+            memories = self.strategy_memory_store.select_for_context(
+                strategy_context, snapshot.memory_version,
+            )
+        full["strategy_memory_context"] = strategy_context
+        full["strategy_memories"] = [_jsonable(memory) for memory in memories]
         return {
             "schema_version": SELECTION_SCHEMA,
             "instructions": self.system_prompt,
@@ -817,4 +828,37 @@ __all__ = [
     "UavResource",
     "pair_selected_tasks",
     "validate_selection",
-]
+    ]
+
+
+def _strategy_context(snapshot: MissionSnapshot) -> dict[str, str]:
+    """Map a scheduler snapshot to the fixed memory condition vocabulary."""
+    resource_count = len(snapshot.resources)
+    available_fraction = (
+        len(snapshot.available_uav_ids) / resource_count
+        if resource_count else 0.0
+    )
+    live_contacts = sum(
+        contact.state not in {"cleared", "lost", "departed"}
+        for contact in snapshot.contacts
+    )
+    contact_denominator = max(resource_count, 3)
+
+    def band(value: float) -> str:
+        if value < 1.0 / 3.0:
+            return "low"
+        if value < 2.0 / 3.0:
+            return "medium"
+        return "high"
+
+    return {
+        "ais_contact_load": band(live_contacts / contact_denominator),
+        "available_uav_fraction": band(available_fraction),
+        "has_active_intent": (
+            "yes" if any(intent.lifecycle == "active" for intent in snapshot.intents)
+            else "no"
+        ),
+        # Obstacle impact is intentionally not inferred from free-form text;
+        # the snapshot contract has no weather metric, so baseline is used.
+        "weather_disruption": "low",
+    }

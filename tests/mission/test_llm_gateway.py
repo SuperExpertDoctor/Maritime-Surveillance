@@ -351,6 +351,23 @@ def test_text_request_returns_text_payload_and_logs_exact_raw(scripted_transport
     assert transport.calls[0]["json_mode"] is False
 
 
+def test_call_context_records_episode_time_and_memory_version(scripted_transport):
+    transport = scripted_transport({"reviewer": ["ok"]})
+    gateway = LLMGateway(transport=transport)
+    gateway.set_context("episode-live-01", "7", 12.0)
+
+    gateway.request_text(
+        role="reviewer",
+        snapshot_id="review-12",
+        system_prompt="review system",
+        user_payload={},
+    )
+
+    assert gateway.call_log[-1]["episode_id"] == "episode-live-01"
+    assert gateway.call_log[-1]["sim_time_min"] == 12.0
+    assert gateway.call_log[-1]["memory_version"] == "7"
+
+
 def test_empty_text_response_has_bounded_corrections_and_no_payload(
     scripted_transport,
 ):

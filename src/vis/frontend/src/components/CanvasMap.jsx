@@ -1,7 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { RadioTower } from "lucide-react";
 
-import { computeLayout, pixelToCoord } from "../renderer/geometry";
+import { computeLayout, dragToBBox, pixelToCoord } from "../renderer/geometry";
 import { renderFrame } from "../renderer/layers";
 
 const MAP_ASSET_SOURCES = {
@@ -27,6 +27,10 @@ const CanvasMap = forwardRef(function CanvasMap({
   onSelectUav,
   showGrid = false,
   trailMode = "tail",
+  selectionMode = false,
+  onSelectionCommit,
+  onSelectContact,
+  selectedContactId,
 }, ref) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -40,6 +44,8 @@ const CanvasMap = forwardRef(function CanvasMap({
   const [sizeVersion, setSizeVersion] = useState(0);
   const [mapAssets, setMapAssets] = useState({});
   const exportingRef = useRef(false);
+  const selectionRef = useRef(null);
+  const [selection, setSelection] = useState(null);
 
   useEffect(() => {
     let disposed = false;
@@ -156,6 +162,7 @@ const CanvasMap = forwardRef(function CanvasMap({
         legendBounds,
         showGrid,
         trailMode,
+        selectedContactId,
         hoverInfo: hoverRef.current,
         selectedUavId,
         frameCount: phase,
@@ -173,7 +180,7 @@ const CanvasMap = forwardRef(function CanvasMap({
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, hoverVersion, mapAssets, selectedUavId, showGrid, sizeVersion, trailMode]);
+  }, [frame, hoverVersion, mapAssets, selectedContactId, selectedUavId, showGrid, sizeVersion, trailMode]);
 
   useImperativeHandle(ref, () => ({
     async recordReplay(frames, { fps = 20, onProgress } = {}) {
@@ -205,6 +212,7 @@ const CanvasMap = forwardRef(function CanvasMap({
           renderFrame(context, frames[index], {
             cellSize, offsetX, offsetY, mapBounds, legendBounds,
             showGrid, trailMode, hoverInfo: null, selectedUavId,
+            selectedContactId,
             frameCount: index, assets: mapAssets,
           });
           context.restore();
@@ -218,7 +226,7 @@ const CanvasMap = forwardRef(function CanvasMap({
       }
       return finished;
     },
-  }), [mapAssets, selectedUavId, showGrid, trailMode]);
+  }), [mapAssets, selectedContactId, selectedUavId, showGrid, trailMode]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;
@@ -247,6 +255,75 @@ const CanvasMap = forwardRef(function CanvasMap({
     }
   }, [frame]);
 
+  const pointerPosition = useCallback((event) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }, []);
+
+  const isInsideTask = useCallback((point) => {
+    const bounds = layoutRef.current.taskBounds;
+    return Boolean(bounds && point
+      && point.x >= bounds.x && point.x <= bounds.x + bounds.width
+      && point.y >= bounds.y && point.y <= bounds.y + bounds.height);
+  }, []);
+
+  const cancelSelection = useCallback(() => {
+    const current = selectionRef.current;
+    if (current?.pointerId != null && canvasRef.current?.hasPointerCapture(current.pointerId)) {
+      canvasRef.current.releasePointerCapture(current.pointerId);
+    }
+    selectionRef.current = null;
+    setSelection(null);
+  }, []);
+
+  useEffect(() => {
+    if (!selectionMode) cancelSelection();
+  }, [cancelSelection, selectionMode]);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") cancelSelection();
+    };
+    const onBlur = () => cancelSelection();
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [cancelSelection]);
+
+  const handlePointerDown = useCallback((event) => {
+    if (!selectionMode || event.button !== 0) return;
+    const point = pointerPosition(event);
+    if (!isInsideTask(point)) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    selectionRef.current = { pointerId: event.pointerId, start: point, end: point };
+    setSelection({ start: point, end: point });
+  }, [isInsideTask, pointerPosition, selectionMode]);
+
+  const handlePointerMove = useCallback((event) => {
+    handleMouseMove(event);
+    const current = selectionRef.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    const point = pointerPosition(event);
+    current.end = point;
+    setSelection({ start: current.start, end: point });
+  }, [handleMouseMove, pointerPosition]);
+
+  const handlePointerUp = useCallback((event) => {
+    const current = selectionRef.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    const point = pointerPosition(event);
+    current.end = point;
+    const bbox = dragToBBox(current.start, point, layoutRef.current);
+    cancelSelection();
+    if (bbox) onSelectionCommit?.(bbox);
+  }, [cancelSelection, onSelectionCommit, pointerPosition]);
+
   const handleMouseLeave = useCallback(() => {
     hoverRef.current = null;
     setHovered(false);
@@ -254,11 +331,12 @@ const CanvasMap = forwardRef(function CanvasMap({
   }, []);
 
   const handleClick = useCallback((event) => {
+    if (selectionMode) return;
     const canvas = canvasRef.current;
     if (!canvas || !frame?.uavs) return;
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = event.clientX - rect.left;
-    const mouseY = event.clientY - rect.top;
+    const point = pointerPosition(event);
+    if (!point) return;
+    const { x: mouseX, y: mouseY } = point;
     const { cellSize, offsetX, offsetY } = layoutRef.current;
 
     for (const uav of frame.uavs) {
@@ -270,18 +348,47 @@ const CanvasMap = forwardRef(function CanvasMap({
         return;
       }
     }
-  }, [frame, onSelectUav, selectedUavId]);
+    for (const contact of frame.contacts || []) {
+      const position = contact.estimated_position;
+      if (!Array.isArray(position)) continue;
+      const centerX = offsetX + (Number(position[0]) + 0.5) * cellSize;
+      const centerY = offsetY + (Number(position[1]) + 0.5) * cellSize;
+      if (Math.hypot(mouseX - centerX, mouseY - centerY) < Math.max(10, cellSize * 0.65)) {
+        onSelectContact?.(contact.contact_id);
+        return;
+      }
+    }
+  }, [frame, onSelectContact, onSelectUav, pointerPosition, selectedUavId, selectionMode]);
+
+  const selectionBox = selection?.start && selection?.end
+    ? {
+      left: Math.min(selection.start.x, selection.end.x),
+      top: Math.min(selection.start.y, selection.end.y),
+      width: Math.abs(selection.start.x - selection.end.x),
+      height: Math.abs(selection.start.y - selection.end.y),
+    }
+    : null;
 
   return (
     <div className="canvas-area" ref={containerRef}>
       <canvas
         ref={canvasRef}
-        onMouseMove={handleMouseMove}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={cancelSelection}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
-        style={{ cursor: hovered ? "crosshair" : "default" }}
+        style={{ cursor: selectionMode ? "crosshair" : hovered ? "crosshair" : "default", touchAction: "none" }}
         aria-label="Operational map"
       />
+      {selectionBox && (
+        <div
+          className="selection-rect"
+          style={selectionBox}
+          aria-label="当前重点区框选"
+        />
+      )}
       {!frame && (
         <div className="map-empty" role="status">
           <RadioTower size={22} />
