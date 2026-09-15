@@ -12,12 +12,12 @@ from src.schedule.datatypes import Region, BBox
 class TaskAllocator:
     """Main orchestrator connecting all scheduling components."""
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, *, llm_gateway=None):
         self.config = config
         self.sm = StateManager(config)
         self.ivt = InfoValueTable(self.sm)
         self.extractor = CandidateExtractor()
-        self.llm_client = LLMClient(config)
+        self.llm_client = LLMClient(config, gateway=llm_gateway)
         self.reviewer = LLMReviewer(config, self.llm_client)
         self.trigger_manager = TriggerManager(self.sm)
 

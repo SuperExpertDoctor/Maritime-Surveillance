@@ -204,7 +204,7 @@ class Ship:
 
     @property
     def is_evading(self) -> bool:
-        return False
+        return self._navigation_params is not None
 
     @property
     def turn_rate_deg_min(self) -> float:
@@ -340,7 +340,7 @@ class Ship:
         if self.departed or dt_min <= 0.0:
             return (self.pose,)
         self.navigator.set_islands(islands)
-        route = self.navigator.plan(self.pose, None, self.normal_tangent_rad(),
+        route = self.navigator.plan(self.pose, self._navigation_params, self.normal_tangent_rad(),
                                     self._motion_time_min, self.land_mask)
         return self.advance(route, dt_min)
 

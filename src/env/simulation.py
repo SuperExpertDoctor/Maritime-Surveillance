@@ -56,6 +56,13 @@ from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import GridCoord, Region
 from src.schedule.task_allocator import TaskAllocator
 from src.mission.contracts import VisualDetection
+from src.mission.red_commander import (
+    RedCommander,
+    RedDecisionBlocked,
+    RedShipSnapshot,
+    RedSnapshot,
+    ThreatGate,
+)
 from src.utils.coverage_planner import CoveragePlanner
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
@@ -78,9 +85,11 @@ class SimulationEngine:
         seed: int = 42,
         *,
         control_providers: Mapping[ControlMode | str, ControlProvider] | None = None,
+        llm_gateway=None,
     ):
         self.config = config
         self.seed = seed
+        self._llm_gateway = llm_gateway
         self._control_providers = dict(control_providers or {})
         self.reset_generation = 0
         self.rng = random.Random(seed)
@@ -97,8 +106,9 @@ class SimulationEngine:
             for index, position in enumerate(base_positions)
         ]
         self.base = self.bases[0]
-        self.allocator = TaskAllocator(config)
-        self.allocator.llm_client.assert_ready()
+        self.allocator = TaskAllocator(config, llm_gateway=llm_gateway)
+        if llm_gateway is None:
+            self.allocator.llm_client.assert_ready()
         self.allocator.sm.set_base_positions(base_positions)
         self.land_mask = mainland_land_mask(
             config.grid.resolution,
@@ -240,6 +250,12 @@ class SimulationEngine:
             sample_step=heuristic.path_sample_step_cells,
         )
         self.ships = self._create_ships()
+        self.red_commander = RedCommander(
+            self.allocator.llm_client.gateway,
+            config.ship,
+            threat_gate=ThreatGate(config.ship),
+        )
+        self._red_snapshot_sequence = 0
         self._refresh_ais_signals(0.0)
         self.heavy_triggers = 0
         self.light_triggers = 0
@@ -271,6 +287,8 @@ class SimulationEngine:
         self.departed_ship_count = 0
         self._departed_contacts: set[str] = set()
         self.last_result: dict = {"trigger_type": "none", "action": None}
+        self.runtime_status = "running"
+        self.blocked_role: str | None = None
 
     def _create_ships(self) -> list[Ship]:
         return create_ship_population(
@@ -325,6 +343,7 @@ class SimulationEngine:
             self.config,
             next_seed,
             control_providers=self._control_providers,
+            llm_gateway=self._llm_gateway,
         )
         self.reset_generation = generation
         self.allocator.sm.scenario_generation = generation
@@ -337,6 +356,17 @@ class SimulationEngine:
         return self
 
     def step(self) -> dict:
+        if self.runtime_status != "running":
+            return self.last_result
+        try:
+            self._prepare_red_decision(self.clock.time)
+        except RedDecisionBlocked:
+            self.last_result = {
+                "trigger_type": "model_blocked",
+                "action": None,
+                "blocked_role": self.blocked_role,
+            }
+            return self.last_result
         t = self.clock.tick()
         sm = self.allocator.sm
         sm.current_time = t
@@ -429,6 +459,85 @@ class SimulationEngine:
         self._detect_and_resolve_path_conflicts(t)
         self._record_statuses()
         return result
+
+    def retry_blocked_decision(self) -> None:
+        """Retry a model decision without advancing simulation time."""
+        if self.runtime_status != "paused_model":
+            return
+        try:
+            self._prepare_red_decision(self.clock.time)
+        except RedDecisionBlocked:
+            return
+
+    def _prepare_red_decision(self, current_time: float) -> None:
+        """Build one red-only fleet snapshot and install its validated plan."""
+        self._red_snapshot_sequence += 1
+        uavs = tuple(
+            (
+                uav.id,
+                (float(uav.float_position[0]), float(uav.float_position[1])),
+                (
+                    float(
+                        uav.cruise_speed_kmh / uav.cell_size_km / 60.0
+                        * math.cos(uav.heading_rad)
+                    ),
+                    float(
+                        uav.cruise_speed_kmh / uav.cell_size_km / 60.0
+                        * math.sin(uav.heading_rad)
+                    ),
+                ),
+            )
+            for uav in self.uavs
+        )
+        ships = []
+        for ship in self.ships:
+            if ship.departed:
+                gate_state = "departed"
+            else:
+                minimum_distance = min(
+                    math.dist(ship.float_position, uav.float_position)
+                    for uav in self.uavs
+                )
+                gate_state = self.red_commander.threat_gate.update(
+                    ship.id, ship.truth_identity, minimum_distance, current_time
+                )
+            ships.append(
+                RedShipSnapshot(
+                    ship_id=ship.id,
+                    identity=ship.truth_identity,
+                    position_cells=(float(ship.float_position[0]), float(ship.float_position[1])),
+                    heading_deg=float(math.degrees(ship.heading_rad)),
+                    speed_kn=float(ship.speed_kn),
+                    normal_tangent_deg=float(math.degrees(ship.normal_tangent_rad())),
+                    gate_state=gate_state,
+                    ais_on=ship.ais_mode == "civilian",
+                )
+            )
+        snapshot = RedSnapshot(
+            snapshot_id=f"red-{self.reset_generation}-{self._red_snapshot_sequence}",
+            sim_time_min=float(current_time),
+            ships=tuple(ships),
+            uavs=uavs,
+            active_ship_ids=tuple(
+                item.ship_id for item in ships
+                if item.identity == "target" and item.gate_state in ("evasive", "recovering")
+            ),
+            land_mask_version=int(max((ship.navigator.map_version for ship in self.ships), default=0)),
+        )
+        try:
+            plan = self.red_commander.decide(snapshot)
+        except RedDecisionBlocked as exc:
+            self.runtime_status = "paused_model"
+            self.blocked_role = "red_commander"
+            self.allocator.sm.add_event("red_decision_blocked", {"reason": str(exc)})
+            raise
+        self.runtime_status = "running"
+        self.blocked_role = None
+        commands = {} if plan is None else {command.ship_id: command for command in plan.commands}
+        for ship in self.ships:
+            params = commands.get(ship.id) if ship.truth_identity == "target" else None
+            if params != ship._navigation_params:
+                ship.navigator.install(params, current_time)
 
     def _step_controlled_uav(self, uav: UAVEntity, current_time: float) -> bool:
         """Run one coordinator tick and return the low-fuel edge trigger."""

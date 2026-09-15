@@ -14,13 +14,16 @@ class LLMClient:
     def __init__(
         self, config: AppConfig,
         llm_params_path: str = "configs/llm_params.yaml", *, transport=None,
+        gateway=None,
     ):
         self.config = config
         self.prompt_builder = PromptBuilder()
         self._reviewer_memory = ""
         self.last_interaction: dict | None = None
         self.last_reviewer_interaction: dict | None = None
-        self.gateway = LLMGateway(llm_params_path, transport=transport)
+        self.gateway = gateway if gateway is not None else LLMGateway(
+            llm_params_path, transport=transport
+        )
 
     def resolve_binding(self, role: str) -> dict:
         return self.gateway.resolve_binding(role)
