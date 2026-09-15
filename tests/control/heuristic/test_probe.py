@@ -161,6 +161,18 @@ def test_missing_contact_does_not_advance_the_frozen_probe_session():
     assert not [event for event in decision.events if event.event_type == "probe_phase_changed"]
 
 
+def test_awaiting_assessment_keeps_probe_reservation_until_assessment():
+    controller = _controller(NavigatorSpy())
+    observation = _observation(probe=_probe("awaiting_assessment"))
+    _start(controller, observation)
+
+    decision = controller.act(observation)
+
+    assert decision.command.operation_mode is OperationMode.PROBE
+    assert decision.command.target_contact_id == "C0001"
+    assert decision.command.sensor_mode is SensorMode.OFF
+
+
 def test_production_probe_mask_allows_holding_fallback_without_contact():
     mask = ObservationProvider._action_mask(
         ControlOwner.HEURISTIC, OperationMode.PROBE, ()

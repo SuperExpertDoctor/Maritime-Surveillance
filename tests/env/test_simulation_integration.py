@@ -531,7 +531,7 @@ def test_search_route_uses_short_dubins_connectors_when_clear(monkeypatch):
     assert uav._scan_ranges
 
 
-def test_post_coverage_completion_restarts_local_revisit_without_idling():
+def test_post_coverage_completion_waits_for_scheduler_before_revisit():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     candidate = engine.allocator.extractor.extract(
         engine.allocator.sm
@@ -555,10 +555,14 @@ def test_post_coverage_completion_restarts_local_revisit_without_idling():
         engine.config.uav.freshness_patrol_start_min,
     )
 
-    assert uav.status == "transit"
+    assert uav.status == "idle"
     assert not uav.search_complete_pending
-    assert region.status == "active"
-    assert region.assigned_uav_id == uav.id
+    assert region.status == "completed"
+    assert region.assigned_uav_id is None
+    assert any(
+        event["type"] == "search_complete"
+        for event in engine.allocator.sm.get_recent_events(0)
+    )
 
 
 def test_freshness_patrol_caps_local_revisit_fleet_size():

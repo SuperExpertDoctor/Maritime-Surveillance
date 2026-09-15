@@ -272,6 +272,38 @@ def test_history_sample_limit_and_expiry_preserve_last_seen(store):
     assert store.snapshot(cid).state == "pending"
 
 
+def test_release_event_preserves_reservation_owner_before_clearing(store):
+    cid = store.ingest_visual(visual())
+    store.reserve(cid, "UAV-1", "P0001")
+
+    store.release(cid, 1.0, "probe_timeout")
+
+    event = store.events[-1]
+    assert event == {
+        "type": "contact_released",
+        "contact_id": cid,
+        "uav_id": "UAV-1",
+        "probe_id": "P0001",
+        "reason": "probe_timeout",
+    }
+    assert store.snapshot(cid).assigned_uav_id is None
+    assert store.snapshot(cid).active_probe_id is None
+
+
+def test_lost_event_preserves_reservation_owner_before_clearing(store):
+    cid = store.ingest_visual(visual())
+    store.reserve(cid, "UAV-1", "P0001")
+
+    assert store.expire(store.config.stale_after_min + 0.01) == (cid,)
+
+    event = next(event for event in store.events if event["type"] == "contact_lost")
+    assert event["uav_id"] == "UAV-1"
+    assert event["probe_id"] == "P0001"
+    assert store.snapshot(cid).state == "lost"
+    assert store.snapshot(cid).assigned_uav_id is None
+    assert store.snapshot(cid).active_probe_id is None
+
+
 def test_assessment_reservation_and_civilian_ais_cooldown(store):
     cid = store.ingest_visual(visual())
     store.reserve(cid, "UAV-1", "P0001")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import random
+from uuid import uuid4
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections.abc import Mapping
@@ -55,7 +56,25 @@ from src.control.heuristic.return_to_base import (
 from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import GridCoord, Region
 from src.schedule.task_allocator import TaskAllocator
-from src.mission.contracts import VisualDetection
+from src.mission.contracts import (
+    AssignmentBatch,
+    CommandResult,
+    ContactSnapshot,
+    IntentCommand,
+    ProbeSession,
+    RuntimeCommand,
+    TaskCandidate,
+    TaskRecord,
+    VisualDetection,
+)
+from src.mission.contact_assessor import ContactAssessor
+from src.mission.intent_commands import (
+    IntentCommandQueue,
+    QueueFull,
+    RuntimeCommandQueue,
+)
+from src.mission.intent_store import IntentStore
+from src.mission.trajectory_features import advance_probe, build_features
 from src.mission.red_commander import (
     RedCommander,
     RedDecisionBlocked,
@@ -86,9 +105,11 @@ class SimulationEngine:
         *,
         control_providers: Mapping[ControlMode | str, ControlProvider] | None = None,
         llm_gateway=None,
+        episode_id: str | None = None,
     ):
         self.config = config
         self.seed = seed
+        self.episode_id = episode_id or f"episode-{uuid4().hex}"
         self._llm_gateway = llm_gateway
         self._control_providers = dict(control_providers or {})
         self.reset_generation = 0
@@ -153,6 +174,18 @@ class SimulationEngine:
             include_islands=True,
         )
         self.allocator.sm.set_environment_obstacles(self.obstacles, self.obstacle_mask)
+        self.allocator.sm.episode_id = self.episode_id
+        self.intents = IntentStore(
+            self._intent_searchable_mask(), config.mission.intent,
+        )
+        self.intent_commands = IntentCommandQueue(
+            config.mission.intent.mutation_queue_limit,
+        )
+        # Runtime commands have the same bounded capacity but never share the
+        # intent idempotency namespace.
+        self.runtime_commands = RuntimeCommandQueue(
+            config.mission.intent.mutation_queue_limit,
+        )
 
         self.uavs = [
             UAVEntity(
@@ -194,6 +227,8 @@ class SimulationEngine:
         self._control_event_sequence = 1
         self._return_reservation_sequence = 1
         self._coordinator_tasks: dict[str, ControlTask] = {}
+        self._mission_task_records: dict[str, TaskRecord] = {}
+        self._next_probe_number = 1
         self._next_sortie_number: dict[str, int] = {
             uav.id: 1 for uav in self.uavs
         }
@@ -255,6 +290,10 @@ class SimulationEngine:
             config.ship,
             threat_gate=ThreatGate(config.ship),
         )
+        self.contact_assessor = ContactAssessor(
+            gateway=self.allocator.llm_client.gateway,
+            config=config.mission.contact,
+        )
         self._red_snapshot_sequence = 0
         self._refresh_ais_signals(0.0)
         self.heavy_triggers = 0
@@ -287,8 +326,31 @@ class SimulationEngine:
         self.departed_ship_count = 0
         self._departed_contacts: set[str] = set()
         self.last_result: dict = {"trigger_type": "none", "action": None}
-        self.runtime_status = "running"
-        self.blocked_role: str | None = None
+        self._runtime_status = "running"
+        self._blocked_role: str | None = None
+        self._retired_command_results: dict[str, CommandResult] = {}
+
+    def _intent_searchable_mask(self) -> np.ndarray:
+        """Build the static water denominator used by intent metrics."""
+        searchable = ~np.asarray(self.ship_land_mask, dtype=bool).copy()
+        if searchable.size:
+            searchable[0, :] = False
+            searchable[-1, :] = False
+            searchable[:, 0] = False
+            searchable[:, -1] = False
+            for base in self.bases:
+                searchable[base.position.col, base.position.row] = False
+        return searchable
+
+    @property
+    def runtime_status(self) -> str:
+        """Read-only lifecycle status exposed to API and operator views."""
+        return self._runtime_status
+
+    @property
+    def blocked_role(self) -> str | None:
+        """Read-only model role that currently blocks the simulation."""
+        return self._blocked_role
 
     def _create_ships(self) -> list[Ship]:
         return create_ship_population(
@@ -339,12 +401,21 @@ class SimulationEngine:
         previous_seed = self.seed
         generation = self.reset_generation + 1
         next_seed = self.seed + 1 if seed is None else int(seed)
+        retired = dict(self._retired_command_results)
+        for queue in (self.intent_commands, self.runtime_commands):
+            for command in queue.drain():
+                result = CommandResult(
+                    command.command_id, "rejected", None, "episode_reset",
+                )
+                queue.complete(result)
+                retired[command.command_id] = result
         self.__init__(
             self.config,
             next_seed,
             control_providers=self._control_providers,
             llm_gateway=self._llm_gateway,
         )
+        self._retired_command_results = retired
         self.reset_generation = generation
         self.allocator.sm.scenario_generation = generation
         self.allocator.sm.add_event("environment_reset", {
@@ -355,7 +426,154 @@ class SimulationEngine:
         })
         return self
 
+    @property
+    def retired_command_results(self) -> dict[str, CommandResult]:
+        return dict(self._retired_command_results)
+
+    def published_intent_snapshot(self) -> dict:
+        """Return the read model used by the operator API and later frames."""
+        now = float(self.clock.time)
+        statuses = self._evaluate_intent_statuses(now)
+        return {
+            "episode_id": self.episode_id,
+            "intents": self.intents.intents(),
+            "statuses": statuses,
+            "pending_commands": self.intent_commands.pending(),
+            "intent_events": self.allocator.sm.get_intent_events(),
+        }
+
+    def _evaluate_intent_statuses(self, now_min: float):
+        sm = self.allocator.sm
+        statuses = self.intents.evaluate(
+            sm.get_info_matrix(),
+            sm.get_last_scan_matrix(),
+            sm.get_searchable_mask(),
+            tuple(self._mission_task_records.values()),
+            now_min,
+        )
+        sm.publish_intent_snapshot(self.intents.intents(), statuses)
+        return statuses
+
+    def _record_intent_result(self, result: CommandResult) -> None:
+        self.allocator.sm.record_intent_event(result)
+
+    @staticmethod
+    def _intent_error_code(error: Exception) -> str:
+        message = str(error).lower()
+        if "revision" in message:
+            return "revision_conflict"
+        if "maximum active" in message:
+            return "intent_limit"
+        if "unknown intent" in message:
+            return "intent_not_found"
+        if "not active" in message:
+            return "intent_not_active"
+        return "invalid_intent"
+
+    def _expire_intents(self, current_time: float) -> tuple:
+        expired = self.intents.expire(current_time)
+        for intent in expired:
+            self.allocator.sm.add_event("intent_expired", {
+                "intent_id": intent.intent_id,
+                "revision": intent.revision,
+            })
+            self.allocator.trigger_manager.notify_event(
+                "intent_expired", time=current_time, intent_id=intent.intent_id,
+            )
+        return expired
+
+    def apply_pending_intent_commands(self) -> tuple[CommandResult, ...]:
+        """Apply queued intent mutations at a simulation-thread boundary."""
+        now = float(self.clock.time)
+        self.allocator.sm.current_time = now
+        self._expire_intents(now)
+        results: list[CommandResult] = []
+        for command in self.intent_commands.drain():
+            if command.episode_id != self.episode_id:
+                result = CommandResult(
+                    command.command_id, "rejected", None, "episode_conflict",
+                )
+            elif self.runtime_status == "finished":
+                result = CommandResult(
+                    command.command_id, "rejected", None, "episode_finished",
+                )
+            else:
+                try:
+                    if command.operation == "create":
+                        intent = self.intents.create(dict(command.payload), now)
+                    elif command.operation == "update":
+                        intent = self.intents.update(
+                            command.intent_id,
+                            command.expected_revision,
+                            dict(command.payload),
+                            now,
+                        )
+                    else:
+                        intent = self.intents.cancel(
+                            command.intent_id, command.expected_revision, now,
+                        )
+                    result = CommandResult(
+                        command.command_id, "applied", intent, None,
+                    )
+                    self.allocator.sm.add_event("intent_changed", {
+                        "command_id": command.command_id,
+                        "intent_id": intent.intent_id,
+                        "operation": command.operation,
+                        "revision": intent.revision,
+                    })
+                    self.allocator.trigger_manager.notify_event(
+                        "intent_changed", time=now,
+                        intent_id=intent.intent_id,
+                    )
+                except (TypeError, ValueError, KeyError) as exc:
+                    result = CommandResult(
+                        command.command_id, "rejected", None,
+                        self._intent_error_code(exc),
+                    )
+            self.intent_commands.complete(result)
+            self._record_intent_result(result)
+            results.append(result)
+        return tuple(results)
+
+    def apply_pending_runtime_commands(self) -> tuple[CommandResult, ...]:
+        """Apply retry/abort commands without advancing the simulation clock."""
+        results: list[CommandResult] = []
+        for command in self.runtime_commands.drain():
+            if command.episode_id != self.episode_id:
+                result = CommandResult(
+                    command.command_id, "rejected", None, "episode_conflict",
+                )
+            elif command.operation == "retry":
+                if self.runtime_status != "paused_model":
+                    result = CommandResult(
+                        command.command_id, "rejected", None, "runtime_not_paused",
+                    )
+                else:
+                    self.retry_blocked_decision()
+                    result = CommandResult(
+                        command.command_id,
+                        "applied" if self.runtime_status == "running" else "rejected",
+                        None,
+                        None if self.runtime_status == "running" else "model_blocked",
+                    )
+            elif self.runtime_status == "finished":
+                result = CommandResult(
+                    command.command_id, "rejected", None, "episode_finished",
+                )
+            else:
+                self._runtime_status = "finished"
+                self._blocked_role = None
+                self.allocator.sm.add_event("runtime_aborted", {
+                    "command_id": command.command_id,
+                })
+                result = CommandResult(command.command_id, "applied", None, None)
+            self.runtime_commands.complete(result)
+            results.append(result)
+        return tuple(results)
+
     def step(self) -> dict:
+        self.apply_pending_runtime_commands()
+        self.apply_pending_intent_commands()
         if self.runtime_status != "running":
             return self.last_result
         try:
@@ -370,6 +588,7 @@ class SimulationEngine:
         t = self.clock.tick()
         sm = self.allocator.sm
         sm.current_time = t
+        self._expire_intents(t)
 
         self._update_obstacles()
         self._update_ships(t)
@@ -437,11 +656,27 @@ class SimulationEngine:
                 self._begin_return(uav, t)
 
         self._update_sensors_and_detections(t)
+        self._advance_probe_sessions(t)
         self._update_lifecycle_mode(t)
         self._process_refuelling(t)
         self._sync_state_from_entities()
 
-        result = self.allocator.step(t)
+        if self.allocator.uses_legacy_scheduler():
+            result = self.allocator.step(t)
+            self._sync_assignments()
+        else:
+            result, batch = self.allocator.mission_step(
+                t,
+                active_tasks=tuple(self._mission_task_records.values()),
+                intents=self.intents.intents(),
+                intent_statuses=self._evaluate_intent_statuses(t),
+            )
+            if batch is not None:
+                if not self.apply_assignment_batch(batch):
+                    result = {
+                        **result,
+                        "action": "mission_assignment_rejected",
+                    }
         self.last_result = result
         if result["trigger_type"] == "heavy":
             self.heavy_triggers += 1
@@ -455,7 +690,6 @@ class SimulationEngine:
                 self.region_signatures.append(signature)
         elif result["trigger_type"] == "light":
             self.light_triggers += 1
-        self._sync_assignments()
         self._detect_and_resolve_path_conflicts(t)
         self._record_statuses()
         return result
@@ -468,6 +702,336 @@ class SimulationEngine:
             self._prepare_red_decision(self.clock.time)
         except RedDecisionBlocked:
             return
+
+    def apply_assignment_batch(self, batch: AssignmentBatch) -> bool:
+        """Validate and install one scheduler batch at the simulation boundary."""
+        if not isinstance(batch, AssignmentBatch):
+            return False
+        snapshot = self.allocator.last_mission_snapshot
+        if snapshot is None or batch.snapshot_id != snapshot.snapshot_id:
+            return False
+        if self.allocator.sm.obstacle_version != snapshot.planning_map_version:
+            return False
+
+        candidates = {
+            candidate.task_id: candidate for candidate in snapshot.candidates
+        }
+        resources = {resource.uav_id: resource for resource in snapshot.resources}
+        edges = {
+            (edge.task_id, edge.uav_id): edge
+            for edge in snapshot.feasible_edges
+        }
+        candidates.update(
+            {
+                record.task_id: replace(
+                    self.allocator._active_task_candidate(
+                        record, snapshot.resources
+                    ),
+                    feasible_uav_ids=tuple(sorted(
+                        edge.uav_id
+                        for (task_id, _), edge in edges.items()
+                        if task_id == record.task_id
+                    )),
+                )
+                for record in snapshot.active_tasks
+            }
+        )
+        if len({assignment.task_id for assignment in batch.assignments}) != len(batch.assignments):
+            return False
+        if len({assignment.uav_id for assignment in batch.assignments}) != len(batch.assignments):
+            return False
+
+        prepared: list[
+            tuple[object, ControlTask, TaskCandidate, object, ControlTask | None]
+        ] = []
+        route_plans: dict[str, SearchRoutePlan] = {}
+        reservations: list[tuple[str, str, str | None]] = []
+        reserved_contacts: set[str] = set()
+        for assignment in batch.assignments:
+            candidate = candidates.get(assignment.task_id)
+            resource = resources.get(assignment.uav_id)
+            if candidate is None or resource is None:
+                return False
+            if assignment.uav_id not in candidate.feasible_uav_ids:
+                return False
+            edge = edges.get((assignment.task_id, assignment.uav_id))
+            if edge is None:
+                return False
+            try:
+                lease = self.control_coordinator.current_lease(assignment.uav_id)
+            except KeyError:
+                return False
+            if lease.generation != assignment.expected_generation:
+                return False
+            if resource.generation != assignment.expected_generation:
+                return False
+            active = self.control_coordinator.active_task(assignment.uav_id)
+            if assignment.previous_task_id != (
+                active.task_id if active is not None else None
+            ):
+                return False
+            uav = next(
+                (entity for entity in self.uavs if entity.id == assignment.uav_id),
+                None,
+            )
+            if uav is None:
+                return False
+
+            if candidate.kind == "search":
+                if candidate.bbox is None:
+                    return False
+                region = Region(
+                    candidate.task_id,
+                    BBox(*candidate.bbox),
+                    "search",
+                    priority=candidate.priority,
+                    created_cycle=self.allocator.sm.cycle,
+                    assigned_uav_id=assignment.uav_id,
+                )
+                try:
+                    route_plan = plan_search_route(
+                        self._search_route_request(uav, region)
+                    )
+                except Exception:
+                    return False
+                if not route_plan.scanned_swath_count:
+                    return False
+                route_plans[assignment.task_id] = route_plan
+                control_task = ControlTask(
+                    candidate.task_id,
+                    OperationMode.COVERAGE,
+                    region_bbox=region.bbox,
+                )
+            elif candidate.contact_id is not None:
+                try:
+                    contact_id = self.allocator.sm.resolve_contact_id(
+                        candidate.contact_id
+                    )
+                    contact = self.allocator.sm.contacts.snapshot(contact_id)
+                except KeyError:
+                    return False
+                if contact_id in reserved_contacts:
+                    return False
+                if contact.assigned_uav_id is not None and not (
+                    contact.assigned_uav_id == assignment.uav_id
+                    and active is not None
+                    and active.task_id == assignment.task_id
+                ):
+                    return False
+                if contact.state in {"cleared", "lost", "departed"}:
+                    return False
+                if candidate.kind == "track" and contact.identity != "target":
+                    return False
+                if candidate.kind == "probe" and contact.identity != "unknown":
+                    return False
+                target = contact.estimated_position_cells
+                radius = (
+                    self.config.mission.contact.baseline_standoff_cells
+                    if candidate.kind == "probe"
+                    else self.config.mission.contact.near_standoff_cells
+                )
+                try:
+                    route = self.allocator._mission_navigator.plan_to_standoff(
+                        (*uav.float_position, uav.heading_rad),
+                        target,
+                        radius,
+                        self.allocator.sm.obstacle_mask,
+                        uav.R_min,
+                        snapshot.planning_map_version,
+                    )
+                except Exception:
+                    return False
+                if not route:
+                    return False
+                probe_id = (
+                    f"P{self._next_probe_number:04d}"
+                    if candidate.kind == "probe"
+                    else None
+                )
+                if (
+                    candidate.kind == "probe"
+                    and active is not None
+                    and active.task_id == assignment.task_id
+                    and active.probe_id is not None
+                ):
+                    probe_id = active.probe_id
+                control_task = ControlTask(
+                    candidate.task_id,
+                    OperationMode.PROBE if candidate.kind == "probe" else OperationMode.TRACK,
+                    target_contact_id=contact_id,
+                    probe_id=probe_id,
+                )
+                reservations.append((contact_id, assignment.uav_id, probe_id))
+                reserved_contacts.add(contact_id)
+            else:
+                return False
+            prepared.append((uav, control_task, candidate, assignment, active))
+
+        reserved: list[tuple[str, str, str | None]] = []
+        try:
+            for contact_id, uav_id, probe_id in reservations:
+                self.allocator.sm.contacts.reserve(contact_id, uav_id, probe_id)
+                reserved.append((contact_id, uav_id, probe_id))
+            leases = self.control_coordinator.assign_tasks_atomically(
+                tuple(
+                    (assignment.uav_id, task, assignment.expected_generation)
+                    for _, task, _, assignment, _ in prepared
+                ),
+                current_time=self.clock.time,
+                dt_min=self.clock.dt_min,
+            )
+        except Exception as exc:
+            for contact_id, _, _ in reversed(reserved):
+                self.allocator.sm.contacts.release(
+                    contact_id, self.clock.time, "assignment_rollback"
+                )
+            self.allocator.sm.add_event("mission_assignment_rejected", {
+                "reason": str(exc),
+                "snapshot_id": snapshot.snapshot_id,
+            })
+            return False
+
+        by_uav = {
+            assignment.uav_id: (uav, task, candidate, assignment, previous_task)
+            for (uav, task, candidate, assignment, previous_task) in prepared
+        }
+        for lease, assignment in zip(leases, batch.assignments):
+            uav, task, candidate, _, old_task = by_uav[assignment.uav_id]
+            if old_task is not None and old_task.task_id != task.task_id:
+                old_record = self._mission_task_records.get(old_task.task_id)
+                if old_record is not None:
+                    if old_record.kind == "search":
+                        self._mission_task_records[old_task.task_id] = replace(
+                            old_record,
+                            status="approved",
+                            finished_at_min=None,
+                            release_reason="preempted",
+                            assigned_uav_id=None,
+                        )
+                    else:
+                        self._mission_task_records[old_task.task_id] = replace(
+                            old_record,
+                            status="cancelled",
+                            finished_at_min=self.clock.time,
+                            release_reason="preempted",
+                            assigned_uav_id=None,
+                        )
+                for region in self.allocator.sm.get_search_regions():
+                    if region.id == old_task.task_id:
+                        region.status = "active" if (
+                            old_record is not None and old_record.kind == "search"
+                        ) else "stale"
+                        region.assigned_uav_id = None
+                self.allocator.sm.mark_uav_reassigned(
+                    assignment.uav_id, self.clock.time,
+                )
+            if candidate.kind == "search":
+                region = Region(
+                    candidate.task_id,
+                    BBox(*candidate.bbox),
+                    "search",
+                    priority=candidate.priority,
+                    created_cycle=self.allocator.sm.cycle,
+                    assigned_uav_id=assignment.uav_id,
+                )
+                regions = [
+                    item for item in self.allocator.sm.get_search_regions()
+                    if item.id != region.id
+                ]
+                self.allocator.sm.set_search_regions([*regions, region])
+                self.allocator.ivt.add_row(region.id, region.bbox, "search")
+                self._apply_search_route_plan(
+                    uav, region, route_plans[assignment.task_id]
+                )
+                self.allocator.sm.update_uav_status(
+                    uav.id,
+                    uav.status,
+                    uav.position,
+                    assigned_region_id=region.id,
+                    fuel_remaining_pct=uav.fuel_remaining_pct,
+                )
+            elif task.task_type is OperationMode.TRACK:
+                contact = self.allocator.sm.contacts.snapshot(task.target_contact_id)
+                uav.start_tracking(task.target_contact_id, contact.estimated_position_cells)
+                self.allocator.sm.update_uav_status(
+                    uav.id,
+                    "transit",
+                    uav.position,
+                    assigned_region_id=task.task_id,
+                    target_group_id=task.target_contact_id,
+                    fuel_remaining_pct=uav.fuel_remaining_pct,
+                )
+            else:
+                uav._mission_kind = "probe"
+                uav.status = "transit"
+                uav.sensor_mode = "off"
+                self.allocator.sm.update_uav_status(
+                    uav.id,
+                    "transit",
+                    uav.position,
+                    assigned_region_id=task.task_id,
+                    fuel_remaining_pct=uav.fuel_remaining_pct,
+                )
+                assert task.probe_id is not None
+                self.allocator.sm.set_probe_session(
+                    ProbeSession(
+                        task.probe_id,
+                        task.target_contact_id,
+                        uav.id,
+                        "baseline",
+                        self.clock.time,
+                        None,
+                        self.clock.time,
+                        (),
+                        (),
+                        0.0,
+                        None,
+                    )
+                )
+                self._next_probe_number += 1
+            self._coordinator_tasks[uav.id] = task
+            existing_record = self._mission_task_records.get(task.task_id)
+            if existing_record is None:
+                existing_record = TaskRecord(
+                    task.task_id,
+                    candidate.kind,
+                    "candidate",
+                    candidate.bbox,
+                    task.target_contact_id,
+                    candidate.intent_ids,
+                    None,
+                    None,
+                    candidate.eligible_since_min,
+                    None,
+                    None,
+                    None,
+                )
+            self._mission_task_records[task.task_id] = replace(
+                existing_record,
+                kind=candidate.kind,
+                status="approved",
+                bbox=candidate.bbox,
+                contact_id=task.target_contact_id,
+                intent_ids=candidate.intent_ids,
+                assigned_uav_id=uav.id,
+                approved_call_id=batch.selection_call_id,
+                finished_at_min=None,
+                release_reason=None,
+            )
+            self.allocator.sm.update_uav_control(
+                uav.id,
+                self.control_coordinator.configured_mode(uav.id).value,
+                lease.owner.value,
+                self.control_coordinator.operation_mode(uav.id).value,
+                lease.generation,
+                self.control_coordinator.safety_intervened(uav.id),
+            )
+        self.allocator.sm.add_event("mission_assignment_committed", {
+            "snapshot_id": snapshot.snapshot_id,
+            "selection_call_id": batch.selection_call_id,
+            "task_ids": [assignment.task_id for assignment in batch.assignments],
+        })
+        return True
 
     def _prepare_red_decision(self, current_time: float) -> None:
         """Build one red-only fleet snapshot and install its validated plan."""
@@ -527,12 +1091,12 @@ class SimulationEngine:
         try:
             plan = self.red_commander.decide(snapshot)
         except RedDecisionBlocked as exc:
-            self.runtime_status = "paused_model"
-            self.blocked_role = "red_commander"
+            self._runtime_status = "paused_model"
+            self._blocked_role = "red_commander"
             self.allocator.sm.add_event("red_decision_blocked", {"reason": str(exc)})
             raise
-        self.runtime_status = "running"
-        self.blocked_role = None
+        self._runtime_status = "running"
+        self._blocked_role = None
         commands = {} if plan is None else {command.ship_id: command for command in plan.commands}
         for ship in self.ships:
             params = commands.get(ship.id) if ship.truth_identity == "target" else None
@@ -590,6 +1154,13 @@ class SimulationEngine:
         active_task = self.control_coordinator.active_task(uav.id)
         if active_task is not None:
             self._coordinator_tasks[uav.id] = active_task
+            record = self._mission_task_records.get(active_task.task_id)
+            if record is not None and record.status == "approved":
+                self._mission_task_records[active_task.task_id] = replace(
+                    record,
+                    status="executing",
+                    started_at_min=tick.observation.timestamp_min,
+                )
         command = tick.execution.applied_command
         if command.operation_mode is OperationMode.TRACK:
             uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
@@ -648,6 +1219,16 @@ class SimulationEngine:
             region.status = "completed"
             region.completion_pct = 100.0
             region.assigned_uav_id = None
+        if region_id is not None:
+            record = self._mission_task_records.get(region_id)
+            if record is not None:
+                self._mission_task_records[region_id] = replace(
+                    record,
+                    status="completed",
+                    finished_at_min=event.timestamp_min,
+                    release_reason="search_complete",
+                    assigned_uav_id=None,
+                )
         uav.completed_searches_since_refuel += 1
         self._sortie_searched[uav.id] = True
         self.allocator.sm.clear_uav_assignment(uav.id)
@@ -1343,6 +1924,176 @@ class SimulationEngine:
                     uav.eo_fov = None
         self._publish_contact_events(current_time)
 
+    def _advance_probe_sessions(self, current_time: float) -> None:
+        """Advance probes and assess only after the frozen evidence gate opens."""
+        sm = self.allocator.sm
+        for probe in sm.get_probe_sessions():
+            try:
+                contact = sm.contacts.snapshot(probe.contact_id)
+            except KeyError:
+                sm.clear_probe_session(probe.probe_id)
+                continue
+            advanced = advance_probe(
+                probe,
+                contact.samples,
+                current_time,
+                self.config.mission.contact,
+            )
+            if advanced != probe:
+                sm.set_probe_session(advanced)
+                if advanced.phase != probe.phase:
+                    sm.add_event("probe_phase_changed", {
+                        "probe_id": advanced.probe_id,
+                        "contact_id": advanced.contact_id,
+                        "phase": advanced.phase,
+                    })
+
+            if advanced.phase == "finished":
+                self._finish_probe_session(contact, advanced, current_time)
+                continue
+            if advanced.phase != "awaiting_assessment":
+                continue
+            try:
+                features = build_features(
+                    contact,
+                    advanced,
+                    current_time,
+                    self.config.mission.contact,
+                )
+                assessment = self.contact_assessor.assess(
+                    contact, advanced, features, current_time
+                )
+            except (TypeError, ValueError):
+                assessment = None
+            if assessment is None:
+                continue
+            try:
+                sm.contacts.apply_assessment(assessment)
+            except (TypeError, ValueError):
+                continue
+            self._apply_probe_assessment(assessment, advanced, current_time)
+        self._publish_contact_events(current_time)
+
+    def _finish_probe_session(
+        self,
+        contact: ContactSnapshot,
+        probe: ProbeSession,
+        current_time: float,
+    ) -> None:
+        sm = self.allocator.sm
+        if contact.assigned_uav_id == probe.uav_id:
+            sm.contacts.release(
+                contact.contact_id,
+                current_time,
+                probe.completed_reason or "probe_timeout",
+            )
+        task = self.control_coordinator.active_task(probe.uav_id)
+        if task is not None and task.probe_id == probe.probe_id:
+            record = self._mission_task_records.get(task.task_id)
+            if record is not None:
+                self._mission_task_records[task.task_id] = replace(
+                    record,
+                    status="blocked",
+                    finished_at_min=current_time,
+                    release_reason=probe.completed_reason or "probe_timeout",
+                    assigned_uav_id=None,
+                )
+            if self.control_coordinator.has_controller(probe.uav_id):
+                self._queue_control_event(
+                    "task_failed",
+                    probe.uav_id,
+                    current_time,
+                    {
+                        "task_id": task.task_id,
+                        "contact_id": probe.contact_id,
+                        "probe_id": probe.probe_id,
+                        "reason": probe.completed_reason or "probe_timeout",
+                    },
+                )
+        sm.clear_probe_session(probe.probe_id)
+        sm.add_event("probe_timed_out", {
+            "probe_id": probe.probe_id,
+            "contact_id": probe.contact_id,
+            "uav_id": probe.uav_id,
+            "reason": probe.completed_reason or "probe_timeout",
+        })
+
+    def _apply_probe_assessment(
+        self,
+        assessment,
+        probe: ProbeSession,
+        current_time: float,
+    ) -> None:
+        sm = self.allocator.sm
+        task = self.control_coordinator.active_task(probe.uav_id)
+        if task is not None:
+            record = self._mission_task_records.get(task.task_id)
+            if record is not None:
+                self._mission_task_records[task.task_id] = replace(
+                    record,
+                    status="completed",
+                    finished_at_min=current_time,
+                    release_reason=f"assessment:{assessment.identity}",
+                    assigned_uav_id=None,
+                )
+        sm.add_event("assessment_applied", {
+            "assessment_id": assessment.assessment_id,
+            "contact_id": assessment.contact_id,
+            "probe_id": assessment.probe_id,
+            "identity": assessment.identity,
+            "history_revision": assessment.history_revision,
+        })
+        self.allocator.trigger_manager.notify_event(
+            "assessment_changed",
+            time=current_time,
+            contact_id=assessment.contact_id,
+            identity=assessment.identity,
+        )
+        if assessment.identity == "target":
+            track_task = ControlTask(
+                f"track:{assessment.contact_id}",
+                OperationMode.TRACK,
+                target_contact_id=assessment.contact_id,
+            )
+            self._mission_task_records[track_task.task_id] = TaskRecord(
+                track_task.task_id,
+                "track",
+                "approved",
+                None,
+                assessment.contact_id,
+                (),
+                probe.uav_id,
+                assessment.model_call_id,
+                current_time,
+                None,
+                None,
+                None,
+            )
+            if self.control_coordinator.has_controller(probe.uav_id):
+                self._queue_control_event(
+                    "contact_assessed",
+                    probe.uav_id,
+                    current_time,
+                    {
+                        "contact_id": assessment.contact_id,
+                        "probe_id": assessment.probe_id,
+                        "identity": assessment.identity,
+                    },
+                )
+        elif assessment.identity == "civilian":
+            if self.control_coordinator.has_controller(probe.uav_id):
+                self._queue_control_event(
+                    "mission_task_released",
+                    probe.uav_id,
+                    current_time,
+                    {
+                        "contact_id": assessment.contact_id,
+                        "probe_id": assessment.probe_id,
+                        "identity": assessment.identity,
+                    },
+                )
+        sm.clear_probe_session(probe.probe_id)
+
     def _process_ais_tracking(
         self,
         uav: UAVEntity,
@@ -1413,12 +2164,29 @@ class SimulationEngine:
             self._ais_measurements.pop(uav.id, None)
             uav.target_group_id = None
             sm.clear_uav_assignment(uav.id)
-            if not self.control_coordinator.has_controller(uav.id) and not self._resume_search(uav):
+            task_record = (
+                self._mission_task_records.get(task.task_id)
+                if task is not None else None
+            )
+            if task_record is not None and task_record.contact_id:
+                self._mission_task_records[task.task_id] = replace(
+                    task_record,
+                    status=(
+                        "completed"
+                        if event_type == "civilian_released"
+                        else "blocked"
+                    ),
+                    assigned_uav_id=None,
+                    finished_at_min=current_time,
+                    release_reason=event_type,
+                )
+            has_controller = self.control_coordinator.has_controller(uav.id)
+            if not has_controller:
                 sm.update_uav_status(
                     uav.id, "idle", uav.position,
                     fuel_remaining_pct=uav.fuel_remaining_pct,
                 )
-            elif self.control_coordinator.has_controller(uav.id):
+            elif self.control_coordinator.current_lease(uav.id).owner is ControlOwner.HEURISTIC:
                 self._queue_control_event(
                     event_type,
                     uav.id,
@@ -1429,28 +2197,6 @@ class SimulationEngine:
             event_type, time=current_time, group_id=group_id,
         )
         sm.add_event(event_type, {"group_id": group_id})
-
-    def _resume_search(self, uav: UAVEntity) -> bool:
-        """Immediately assign an unclaimed active search region when present."""
-        sm = self.allocator.sm
-        for region in sm.get_active_search_regions():
-            if region.assigned_uav_id is not None:
-                continue
-            region.assigned_uav_id = uav.id
-            try:
-                self._assign_search_route(uav, region)
-            except (RuntimeError, ValueError):
-                region.assigned_uav_id = None
-                continue
-            sm.update_uav_status(
-                uav.id,
-                uav.status,
-                uav.position,
-                assigned_region_id=region.id,
-                fuel_remaining_pct=uav.fuel_remaining_pct,
-            )
-            return True
-        return False
 
     def _handle_detection(self, uav: UAVEntity, ship: Ship, current_time: float) -> str:
         """SAR sensor adapter: a fix creates evidence, never a control assignment."""
@@ -1492,8 +2238,10 @@ class SimulationEngine:
                 )
                 self._begin_return(entity, current_time)
                 continue
-            if not self._resume_search(entity):
-                self._begin_return(entity, current_time)
+            # A retired search is not an implicit handoff.  Leave the UAV
+            # available only after its current route has been safely ended;
+            # the next mission assignment must come from the global scheduler.
+            self._begin_return(entity, current_time)
 
     def _begin_return(
         self,
@@ -1719,44 +2467,6 @@ class SimulationEngine:
                 if region.id == region_id:
                     assigned_region = region
                     break
-
-            # A completed first-pass region is a valid persistent patrol cell
-            # once broad coverage exists.  Retain the real LLM-approved
-            # partition and restart SAR locally, avoiding an idle interval and
-            # a fresh cross-map transit solely to revisit stale information.
-            if (
-                assigned_region is not None
-                and self._should_continue_freshness_patrol(uav, current_time)
-                and not self._needs_reserve_return(uav, include_idle=True)
-            ):
-                try:
-                    uav.search_complete_pending = False
-                    assigned_region.status = "active"
-                    assigned_region.assigned_uav_id = uav.id
-                    self._assign_search_route(
-                        uav,
-                        assigned_region,
-                        allow_revisit=True,
-                    )
-                    sm.update_uav_status(
-                        uav.id,
-                        uav.status,
-                        uav.position,
-                        assigned_region_id=assigned_region.id,
-                        fuel_remaining_pct=uav.fuel_remaining_pct,
-                    )
-                    sm.add_event("search_revisit_started", {
-                        "uav_id": uav.id,
-                        "region_id": assigned_region.id,
-                    })
-                    continue
-                except (RuntimeError, ValueError) as exc:
-                    self._freshness_patrol_uavs.discard(uav.id)
-                    sm.add_event("revisit_route_plan_failed", {
-                        "uav_id": uav.id,
-                        "region_id": assigned_region.id,
-                        "error": str(exc),
-                    })
 
             if assigned_region is not None:
                 assigned_region.status = "completed"

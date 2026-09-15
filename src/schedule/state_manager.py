@@ -1,6 +1,8 @@
 """Authoritative scheduling state and information-field facade."""
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import asdict, is_dataclass
 from typing import Optional
 import math
 
@@ -27,6 +29,7 @@ _OPERATION_BY_STATUS = {
 class StateManager:
     def __init__(self, config: AppConfig):
         self.config = config
+        self.episode_id = ""
         self.current_time = 0.0
         self.cycle = 0
         self.lifecycle_mode = False
@@ -46,6 +49,9 @@ class StateManager:
         self._markers: list[Marker] = []
         self._marker_counter = 0
         self._events: list[dict] = []
+        self._intent_events: list[dict] = []
+        self._published_intents: tuple = ()
+        self._published_intent_statuses: tuple = ()
         self._known_target_groups: set[str] = set()
         self.contacts = ContactStore(
             config.mission.contact, cell_size_km=config.grid.cell_size_km,
@@ -147,6 +153,18 @@ class StateManager:
             uav.assigned_region_id = None
             uav.target_group_id = None
 
+    def mark_uav_reassigned(self, uav_id: str, current_time: float) -> None:
+        """Record the last scheduler task switch used by cooldown checks."""
+        if isinstance(current_time, bool) or not isinstance(current_time, (int, float)):
+            raise TypeError("current_time must be a finite non-negative number")
+        current_time = float(current_time)
+        if not math.isfinite(current_time) or current_time < 0.0:
+            raise ValueError("current_time must be a finite non-negative number")
+        uav = self.get_uav(uav_id)
+        if uav is None:
+            raise KeyError(f"unknown UAV: {uav_id}")
+        uav.last_reassigned_at_min = current_time
+
     def set_probe_session(self, probe: ProbeSession) -> None:
         """Publish a session already advanced by the simulation thread."""
         if not isinstance(probe, ProbeSession):
@@ -155,6 +173,13 @@ class StateManager:
 
     def get_probe_session(self, probe_id: str) -> ProbeSession | None:
         return self._probe_sessions.get(probe_id)
+
+    def get_probe_sessions(self) -> tuple[ProbeSession, ...]:
+        """Return an immutable, deterministic view for the simulation thread."""
+        return tuple(
+            self._probe_sessions[probe_id]
+            for probe_id in sorted(self._probe_sessions)
+        )
 
     def clear_probe_session(self, probe_id: str) -> None:
         self._probe_sessions.pop(probe_id, None)
@@ -476,6 +501,31 @@ class StateManager:
     def add_event(self, event_type: str, data: dict) -> None:
         self._events.append({"type": event_type, "time": self.current_time, "data": data})
 
+    def record_intent_event(self, result) -> None:
+        """Retain a bounded, JSON-ready view of command application results."""
+        intent = getattr(result, "intent", None)
+        intent_data = asdict(intent) if is_dataclass(intent) else intent
+        self._intent_events.append({
+            "command_id": result.command_id,
+            "status": result.status,
+            "intent": intent_data,
+            "error_code": result.error_code,
+        })
+        del self._intent_events[:-100]
+
+    def get_intent_events(self) -> list[dict]:
+        return deepcopy(self._intent_events)
+
+    def publish_intent_snapshot(self, intents, statuses) -> None:
+        self._published_intents = tuple(deepcopy(tuple(intents)))
+        self._published_intent_statuses = tuple(deepcopy(tuple(statuses)))
+
+    def get_published_intent_snapshot(self) -> tuple[tuple, tuple]:
+        return (
+            deepcopy(self._published_intents),
+            deepcopy(self._published_intent_statuses),
+        )
+
     def get_recent_events(self, since_time: float) -> list[dict]:
         return [event for event in self._events if event["time"] >= since_time]
 
@@ -488,6 +538,10 @@ class StateManager:
 
     def get_info_matrix(self):
         return self.info_field.get_info_matrix()
+
+    def get_last_scan_matrix(self):
+        """Return scan timestamps without exposing the mutable information field."""
+        return self.info_field.last_scan_time.copy()
 
     def get_value_matrix(self):
         return self.info_field.get_value_matrix(self.current_time)

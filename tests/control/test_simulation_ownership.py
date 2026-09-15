@@ -82,7 +82,7 @@ def test_detection_preserves_heuristic_lease_until_explicit_assignment():
 class _LearningProbe(ControllerBase):
     def __init__(self, *, invalid: bool = False) -> None:
         self.invalid = invalid
-        self._observation_spec = ObservationSpec("control-observation/v1", 11)
+        self._observation_spec = ObservationSpec("control-observation/v2", 11)
         self._action_spec = ActionSpec(-1.0, 1.0, 0.1, 1.0)
 
     @property

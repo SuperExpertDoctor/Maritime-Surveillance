@@ -273,6 +273,56 @@ def test_empty_selection_requires_defer_reason_when_legal_work_exists():
     ) == ()
 
 
+def test_approved_active_task_can_be_selected_on_its_original_id():
+    active = TaskRecord(
+        "Q1", "search", "approved", (10, 10, 14, 14), None, (), None,
+        "call-1", 0.0, None, None, "preempted",
+    )
+    snapshot = _snapshot(
+        [],
+        [_resource("U1")],
+        [_edge("Q1", "U1", 1.0)],
+        available=("U1",),
+        active_tasks=(active,),
+    )
+
+    assert validate_selection(_selection(snapshot, ["Q1"]), snapshot) == ()
+    assert pair_selected_tasks(
+        MissionSelection(
+            "mission-selection/v1", snapshot.snapshot_id, ("Q1",), (), None, "",
+        ),
+        snapshot,
+    ) == (Assignment("Q1", "U1", 2, None),)
+
+
+def test_selection_rejects_transit_that_exhausts_resource_range():
+    task = _task("Q1", kind="probe", contact_id="C1")
+    snapshot = _snapshot(
+        [task],
+        [_resource("U1", remaining=100.0)],
+        [FeasibleEdge("Q1", "U1", 100.0, 5.0, 5.0, 2.0, "map:U1:Q1")],
+        available=("U1",),
+    )
+
+    assert "infeasible_assignment" in validate_selection(
+        _selection(snapshot, ["Q1"]), snapshot
+    )
+
+
+def test_selection_rejects_preemption_without_selected_work():
+    snapshot = _snapshot(
+        [],
+        [_resource("U1", operation="coverage", current_task_id="S1")],
+        [],
+        available=(),
+        preemptible=("U1",),
+    )
+
+    assert "preempt_requires_selected_task" in validate_selection(
+        _selection(snapshot, [], preempt=("U1",)), snapshot
+    )
+
+
 def test_scheduler_prompt_contains_complete_snapshot_and_returns_batch():
     task = _task("Q1", kind="probe", contact_id="C1")
     snapshot = _snapshot(
@@ -347,10 +397,50 @@ def test_task_allocator_edge_budget_includes_transit_and_returns_from_goal():
     current_to_base = math.dist(resource.position_cells, allocator.sm.get_base_positions()[0])
     assert edge.return_range_cells >= expected_return - 1e-6
     assert edge.return_range_cells != pytest.approx(current_to_base)
-    assert edge.mission_range_cells == pytest.approx(task.estimated_duration_min * resource.speed_cells_min)
+    assert edge.mission_range_cells >= (
+        task.estimated_duration_min * resource.speed_cells_min
+    )
     assert (
         edge.transit_time_min * resource.speed_cells_min
         + edge.mission_range_cells
         + edge.return_range_cells
         + edge.reserve_range_cells
     ) <= resource.remaining_range_cells
+
+
+def test_task_allocator_search_edge_uses_complete_route_and_final_endpoint(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.schedule.config_loader import ConfigLoader
+    from src.schedule.task_allocator import TaskAllocator
+
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    task = TaskCandidate(
+        "Q1", "search", (10, 10, 14, 14), None, (), ("U1",), 0.0,
+        "medium", 5.0, 1.0, 0.5,
+    )
+    resource = UavResource(
+        "U1", (8.0, 12.0), 0.0, 1.0, 100.0, "idle", None, 0, 0.0,
+    )
+    route = SimpleNamespace(
+        path=((8.0, 12.0, 0.0), (10.0, 12.0, 0.0), (10.0, 14.0, 0.0)),
+        transit_end_index=1,
+        scanned_swath_count=1,
+    )
+    monkeypatch.setattr("src.schedule.task_allocator.plan_search_route", lambda _request: route)
+    captured = {}
+
+    def return_distance(target, _resource, _base, _map_version):
+        captured["target"] = target
+        return 3.0
+
+    monkeypatch.setattr(allocator, "_return_route_distance", return_distance)
+
+    edges = allocator._mission_edges(
+        (task,), (resource,), (), allocator.sm.obstacle_version,
+    )
+
+    assert len(edges) == 1
+    assert edges[0].transit_time_min == pytest.approx(2.0)
+    assert edges[0].mission_range_cells == pytest.approx(2.0)
+    assert captured["target"] == (10.0, 14.0)

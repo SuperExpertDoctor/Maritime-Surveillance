@@ -648,6 +648,45 @@ def test_assign_task_replaces_heuristic_source_but_starts_it_on_next_tick():
     assert new_controller.start_observation is result.observation
 
 
+def test_assign_tasks_atomically_rejects_stale_member_without_partial_install():
+    config = ConfigLoader.load()
+    factory = DeterministicFactory(config.control)
+    coordinator, *_ = make_runtime(
+        {"UAV-1": ControlMode.HEURISTIC, "UAV-2": ControlMode.HEURISTIC},
+        factory=factory,
+    )
+    coordinator.start_work(
+        "UAV-1",
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=1.0,
+        task=coverage_task("S1"),
+    )
+    coordinator.start_work(
+        "UAV-2",
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=1.0,
+        task=coverage_task("S2"),
+    )
+    first_lease = coordinator.current_lease("UAV-1")
+    second_lease = coordinator.current_lease("UAV-2")
+    first_task = coordinator.active_task("UAV-1")
+    coordinator.assign_task("UAV-2", coverage_task("S2-current"), current_time=0.5)
+
+    with pytest.raises(StaleControlCommand, match="UAV-2"):
+        coordinator.assign_tasks_atomically(
+            (
+                ("UAV-1", coverage_task("S1-next"), first_lease.generation),
+                ("UAV-2", coverage_task("S2-next"), second_lease.generation),
+            ),
+            current_time=1.0,
+        )
+
+    assert coordinator.current_lease("UAV-1") == first_lease
+    assert coordinator.active_task("UAV-1") == first_task
+
+
 def valid_recovery_plan(uav: UAVEntity, reservation_id: str = "R1") -> RecoveryPlan:
     start = uav.pose
     destination = (start[0] + 1.0, start[1], start[2])

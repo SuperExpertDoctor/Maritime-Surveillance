@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import RLock
+from collections.abc import Sequence
 
 from src.control.common.contracts import ControlOwner
 
@@ -100,6 +101,44 @@ class ControlOwnership:
             )
             self._leases[lease.uav_id] = replacement
             return replacement
+
+    def transition_batch(
+        self,
+        requests: Sequence[tuple[ControlLease, ControlOwner, str, float]],
+    ) -> tuple[ControlLease, ...]:
+        """Replace several work leases without exposing an intermediate set."""
+        requests = tuple(requests)
+        uav_ids = [lease.uav_id for lease, *_ in requests]
+        if len(uav_ids) != len(set(uav_ids)):
+            raise ControlOwnershipError(
+                uav_ids[0] if uav_ids else "",
+                0,
+                0,
+            )
+        with self._lock:
+            current_leases = [
+                self._get_current(lease.uav_id) for lease, *_ in requests
+            ]
+            for expected, current in zip(
+                (lease for lease, *_ in requests), current_leases
+            ):
+                self._require_current(expected, current)
+            replacements = tuple(
+                ControlLease(
+                    current.uav_id,
+                    owner,
+                    controller_id,
+                    current.generation + 1,
+                    acquired_at_min,
+                )
+                for current, (_, owner, controller_id, acquired_at_min) in zip(
+                    current_leases, requests
+                )
+            )
+            self._leases.update(
+                {lease.uav_id: lease for lease in replacements}
+            )
+            return replacements
 
     def release_to_system(self, lease: ControlLease, acquired_at_min: float) -> ControlLease:
         with self._lock:

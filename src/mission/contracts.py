@@ -323,6 +323,43 @@ class AssignmentBatch:
 
 
 @dataclass(frozen=True)
+class IntentCommand:
+    """A versioned operator mutation waiting for the simulation thread."""
+
+    command_id: str
+    episode_id: str
+    operation: Literal["create", "update", "cancel"]
+    intent_id: str | None
+    expected_revision: int | None
+    payload: dict
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.payload, dict):
+            raise TypeError("IntentCommand.payload must be a mapping")
+        # Do not retain a caller-owned mutable mapping in a frozen contract.
+        object.__setattr__(self, "payload", dict(self.payload))
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Published status for an intent or runtime command."""
+
+    command_id: str
+    status: Literal["queued", "applied", "rejected"]
+    intent: Intent | None
+    error_code: str | None
+
+
+@dataclass(frozen=True)
+class RuntimeCommand:
+    """A simulation-thread command independent from intent mutations."""
+
+    command_id: str
+    episode_id: str
+    operation: Literal["retry", "abort"]
+
+
+@dataclass(frozen=True)
 class MissionSelection:
     schema_version: str
     snapshot_id: str
@@ -357,9 +394,11 @@ __all__ = [
     "AssignmentBatch",
     "ContactSnapshot",
     "ContactState",
+    "CommandResult",
     "FeasibleEdge",
     "Identity",
     "Intent",
+    "IntentCommand",
     "IntentStatus",
     "MissionSelection",
     "MissionSnapshot",
@@ -368,6 +407,7 @@ __all__ = [
     "Rect",
     "RedMotionParameters",
     "RedPlan",
+    "RuntimeCommand",
     "SHIP_RNG_STREAMS",
     "TaskCandidate",
     "TaskRecord",

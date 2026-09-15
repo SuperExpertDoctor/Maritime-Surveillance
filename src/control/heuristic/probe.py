@@ -74,7 +74,7 @@ class ProbeController(HeuristicControllerBase):
         if probe.phase == "finished":
             return self._finished_decision(observation, probe.completed_reason)
         if probe.phase == "awaiting_assessment":
-            return ControlDecision(self._holding_command(observation))
+            return ControlDecision(self._awaiting_assessment_command(observation))
         if self._blocked:
             return ControlDecision(self._holding_command(observation))
 
@@ -183,6 +183,25 @@ class ProbeController(HeuristicControllerBase):
                                             min(observation.self_state.speed_cells_min,
                                                 self.action_spec.max_speed_cells_min)),
                                  SensorMode.OFF, OperationMode.HOLDING)
+        self._validate(command, observation)
+        return command
+
+    def _awaiting_assessment_command(
+        self, observation: ControlObservation
+    ) -> ControlCommand:
+        command = ControlCommand(
+            0.0,
+            max(
+                self.action_spec.min_speed_cells_min,
+                min(
+                    observation.self_state.speed_cells_min,
+                    self.action_spec.max_speed_cells_min,
+                ),
+            ),
+            SensorMode.OFF,
+            OperationMode.PROBE,
+            self.task.target_contact_id,
+        )
         self._validate(command, observation)
         return command
 

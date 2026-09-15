@@ -8,12 +8,14 @@
   - /api/config        只读配置参数
 """
 import json
+import math
 import os
 import asyncio
 import shutil
 import subprocess
 import tempfile
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse, FileResponse
@@ -22,6 +24,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
+from src.mission.contracts import IntentCommand, RuntimeCommand
+from src.mission.intent_commands import (
+    CommandConflict,
+    IntentCommandService,
+    QueueFull,
+)
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
 
@@ -73,7 +81,14 @@ def _transcode_webm_to_mp4(payload: bytes) -> tuple[Path, Path]:
         raise
 
 
-def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
+def create_app(
+    config: AppConfig,
+    state_manager: StateManager,
+    *,
+    engine=None,
+    intent_service=None,
+    replay_mode: bool = False,
+) -> FastAPI:
     """创建 FastAPI 应用实例。
 
     仿真主循环通过 app.state 访问共享对象：
@@ -95,7 +110,7 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -111,6 +126,14 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
     app.state.bases = None
     app.state._live_clients = set()
     app.state.event_loop = None
+    app.state.replay_mode = bool(replay_mode)
+    app.state.intent_service = (
+        intent_service
+        if intent_service is not None
+        else IntentCommandService(engine, replay_mode=replay_mode)
+        if engine is not None
+        else None
+    )
 
     # --- 静态前端文件 ---
     if os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
@@ -232,6 +255,133 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
             background=BackgroundTask(shutil.rmtree, work_dir, ignore_errors=True),
         )
 
+    @app.get("/api/intents")
+    async def list_intents():
+        service = app.state.intent_service
+        if service is None:
+            return JSONResponse({
+                "episode_id": getattr(state_manager, "episode_id", ""),
+                "intents": [],
+                "statuses": [],
+                "pending_commands": [],
+                "intent_events": [],
+            })
+        snapshot = service.published_intents()
+        return JSONResponse(_intent_snapshot_payload(snapshot, service))
+
+    @app.get("/api/intent-commands/{command_id}")
+    async def get_intent_command(command_id: str):
+        service = app.state.intent_service
+        if service is None:
+            return _api_error("intent_service_unavailable", "intent service is unavailable", 409)
+        result = service.get_command_result(command_id)
+        if result is None:
+            return _api_error("command_not_found", "command was not found", 404)
+        return JSONResponse(_command_result_payload(result))
+
+    @app.post("/api/intents")
+    async def create_intent(request: Request):
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        service = app.state.intent_service
+        if service is None:
+            return _api_error("intent_service_unavailable", "intent service is unavailable", 409)
+        if _writes_blocked(app, service):
+            return _write_blocked_response(app, service)
+        allowed = {
+            "episode_id", "command_id", "label", "bbox", "mode", "priority",
+            "weight", "valid_duration_min", "revisit_interval_min",
+        }
+        validation_error = _validate_body(body, allowed, allowed)
+        if validation_error is not None:
+            return validation_error
+        if body["episode_id"] != service.episode_id:
+            return _api_error("episode_conflict", "command belongs to another episode", 409)
+        payload = {key: body[key] for key in allowed - {"episode_id", "command_id"}}
+        validation_error = _validate_intent_payload(payload, creating=True)
+        if validation_error is not None:
+            return validation_error
+        command = IntentCommand(
+            command_id=body["command_id"],
+            episode_id=body["episode_id"],
+            operation="create",
+            intent_id=None,
+            expected_revision=None,
+            payload=payload,
+        )
+        return _enqueue_intent_command(service, command)
+
+    @app.patch("/api/intents/{intent_id}")
+    async def update_intent(intent_id: str, request: Request):
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        service = app.state.intent_service
+        if service is None:
+            return _api_error("intent_service_unavailable", "intent service is unavailable", 409)
+        if _writes_blocked(app, service):
+            return _write_blocked_response(app, service)
+        metadata = {"episode_id", "command_id", "expected_revision"}
+        mutable = {
+            "label", "bbox", "mode", "priority", "weight",
+            "valid_duration_min", "revisit_interval_min",
+        }
+        validation_error = _validate_body(body, metadata | mutable, metadata)
+        if validation_error is not None:
+            return validation_error
+        if body["episode_id"] != service.episode_id:
+            return _api_error("episode_conflict", "command belongs to another episode", 409)
+        changes = {key: body[key] for key in body if key in mutable}
+        if not changes:
+            return _api_error("invalid_request", "at least one intent field is required", 422)
+        validation_error = _validate_intent_payload(changes, creating=False)
+        if validation_error is not None:
+            return validation_error
+        command = IntentCommand(
+            command_id=body["command_id"],
+            episode_id=body["episode_id"],
+            operation="update",
+            intent_id=intent_id,
+            expected_revision=body["expected_revision"],
+            payload=changes,
+        )
+        return _enqueue_intent_command(service, command)
+
+    @app.delete("/api/intents/{intent_id}")
+    async def cancel_intent(intent_id: str, request: Request):
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        service = app.state.intent_service
+        if service is None:
+            return _api_error("intent_service_unavailable", "intent service is unavailable", 409)
+        if _writes_blocked(app, service):
+            return _write_blocked_response(app, service)
+        allowed = {"episode_id", "command_id", "expected_revision"}
+        validation_error = _validate_body(body, allowed, allowed)
+        if validation_error is not None:
+            return validation_error
+        if body["episode_id"] != service.episode_id:
+            return _api_error("episode_conflict", "command belongs to another episode", 409)
+        command = IntentCommand(
+            command_id=body["command_id"],
+            episode_id=body["episode_id"],
+            operation="cancel",
+            intent_id=intent_id,
+            expected_revision=body["expected_revision"],
+            payload={},
+        )
+        return _enqueue_intent_command(service, command)
+
+    @app.post("/api/runtime/retry")
+    async def retry_runtime(request: Request):
+        return await _enqueue_runtime_command(app, request, "retry")
+
+    @app.post("/api/runtime/abort")
+    async def abort_runtime(request: Request):
+        return await _enqueue_runtime_command(app, request, "abort")
+
     @app.get("/api/config")
     async def get_config():
         """返回只读配置参数（分组格式）。"""
@@ -279,16 +429,33 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
                 "refuel_time_min": cfg.uav.refuel_time_min,
             },
             "ship": {
-                "count_min": cfg.ship.count_min,
-                "max_groups": cfg.ship.max_groups,
+                "initial_ship_count": cfg.ship.initial_ship_count,
+                "target_ship_count": cfg.ship.target_ship_count,
+                "target_ais_on_probability": cfg.ship.target_ais_on_probability,
                 "speed_kn": cfg.ship.speed_kn,
-                "zigzag_amplitude_km": cfg.ship.zigzag_amplitude_km,
-                "zigzag_period_min": cfg.ship.zigzag_period_min,
-                "zigzag_heading_deg": cfg.ship.zigzag_heading_deg,
+                "ais_update_interval_min": cfg.ship.ais_update_interval_min,
+                "ais_position_noise_cells": cfg.ship.ais_position_noise_cells,
                 "max_turn_rate_deg_min": cfg.ship.max_turn_rate_deg_min,
                 "yaw_time_constant_min": cfg.ship.yaw_time_constant_min,
                 "heading_control_gain_per_min": cfg.ship.heading_control_gain_per_min,
                 "turn_speed_loss_fraction": cfg.ship.turn_speed_loss_fraction,
+                "max_acceleration_kn_per_min": cfg.ship.max_acceleration_kn_per_min,
+                "detect_uav_radius_cells": cfg.ship.detect_uav_radius_cells,
+                "clear_uav_radius_cells": cfg.ship.clear_uav_radius_cells,
+                "clear_hold_min": cfg.ship.clear_hold_min,
+                "red_decision_cycle_min": cfg.ship.red_decision_cycle_min,
+                "red_plan_valid_min": cfg.ship.red_plan_valid_min,
+                "speed_min_kn": cfg.ship.speed_min_kn,
+                "speed_max_kn": cfg.ship.speed_max_kn,
+                "heading_offset_max_deg": cfg.ship.heading_offset_max_deg,
+                "zigzag_heading_max_deg": cfg.ship.zigzag_heading_max_deg,
+                "zigzag_period_min_min": cfg.ship.zigzag_period_min_min,
+                "zigzag_period_max_min": cfg.ship.zigzag_period_max_min,
+                "min_evasion_heading_deg": cfg.ship.min_evasion_heading_deg,
+                "min_evasion_speed_delta_kn": cfg.ship.min_evasion_speed_delta_kn,
+                "navigation_horizon_min": cfg.ship.navigation_horizon_min,
+                "integration_dt_min": cfg.ship.integration_dt_min,
+                "navigation_clearance_cells": cfg.ship.navigation_clearance_cells,
             },
             "llm": {
                 "heavy_cycle_min": cfg.llm.heavy_cycle_min,
@@ -323,6 +490,264 @@ def create_app(config: AppConfig, state_manager: StateManager) -> FastAPI:
         })
 
     return app
+
+
+def _api_error(error_code: str, message: str, status_code: int) -> JSONResponse:
+    return JSONResponse(
+        {"error_code": error_code, "message": message},
+        status_code=status_code,
+    )
+
+
+async def _request_object(request: Request) -> tuple[dict | None, JSONResponse | None]:
+    try:
+        body = await request.json()
+    except (TypeError, ValueError):
+        return None, _api_error("invalid_request", "request body must be valid JSON", 422)
+    if not isinstance(body, dict):
+        return None, _api_error("invalid_request", "request body must be an object", 422)
+    return body, None
+
+
+def _validate_body(
+    body: dict,
+    allowed: set[str],
+    required: set[str],
+) -> JSONResponse | None:
+    unknown = set(body) - allowed
+    missing = required - set(body)
+    if unknown:
+        return _api_error(
+            "invalid_request",
+            f"unexpected fields: {sorted(unknown)}",
+            422,
+        )
+    if missing:
+        return _api_error(
+            "invalid_request",
+            f"missing fields: {sorted(missing)}",
+            422,
+        )
+    for name in ("episode_id", "command_id"):
+        if name in body and (
+            not isinstance(body[name], str) or not body[name].strip()
+        ):
+            return _api_error("invalid_request", f"{name} must be a non-empty string", 422)
+    if "expected_revision" in body:
+        revision = body["expected_revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            return _api_error(
+                "invalid_request", "expected_revision must be a positive integer", 422,
+            )
+    return None
+
+
+def _validate_intent_payload(payload: dict, *, creating: bool) -> JSONResponse | None:
+    if creating:
+        required = {
+            "label", "bbox", "mode", "priority", "weight",
+            "valid_duration_min", "revisit_interval_min",
+        }
+        missing = required - set(payload)
+        if missing:
+            return _api_error(
+                "invalid_request", f"missing fields: {sorted(missing)}", 422,
+            )
+    if "label" in payload:
+        label = payload["label"]
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= 80:
+            return _api_error("invalid_request", "label must contain 1-80 characters", 422)
+    if "bbox" in payload:
+        bbox = payload["bbox"]
+        if (
+            not isinstance(bbox, list)
+            or len(bbox) != 4
+            or any(type(value) is not int for value in bbox)
+            or bbox[0] >= bbox[2]
+            or bbox[1] >= bbox[3]
+        ):
+            return _api_error("invalid_request", "bbox must be a non-empty integer rectangle", 422)
+    if "mode" in payload and payload["mode"] not in {
+        "search_priority", "maintain_freshness",
+    }:
+        return _api_error("invalid_request", "mode is invalid", 422)
+    if "priority" in payload and payload["priority"] not in {"high", "medium", "low"}:
+        return _api_error("invalid_request", "priority is invalid", 422)
+    if "weight" in payload:
+        weight = payload["weight"]
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, (int, float))
+            or not math.isfinite(float(weight))
+            or not 0.0 <= float(weight) <= 2.0
+        ):
+            return _api_error("invalid_request", "weight must be finite and in [0, 2]", 422)
+    if "valid_duration_min" in payload:
+        duration = payload["valid_duration_min"]
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(float(duration))
+            or float(duration) <= 0.0
+        ):
+            return _api_error("invalid_request", "valid_duration_min must be positive", 422)
+    if "revisit_interval_min" in payload and payload["revisit_interval_min"] is not None:
+        revisit = payload["revisit_interval_min"]
+        if (
+            isinstance(revisit, bool)
+            or not isinstance(revisit, (int, float))
+            or not math.isfinite(float(revisit))
+            or float(revisit) <= 0.0
+        ):
+            return _api_error(
+                "invalid_request", "revisit_interval_min must be positive or null", 422,
+            )
+    if creating:
+        mode = payload["mode"]
+        revisit = payload["revisit_interval_min"]
+        if mode == "maintain_freshness" and revisit is None:
+            return _api_error(
+                "invalid_request", "maintain_freshness requires revisit_interval_min", 422,
+            )
+        if mode == "search_priority" and revisit is not None:
+            return _api_error(
+                "invalid_request", "search_priority requires a null revisit_interval_min", 422,
+            )
+    elif "mode" in payload and "revisit_interval_min" in payload:
+        mode = payload["mode"]
+        revisit = payload["revisit_interval_min"]
+        if mode == "maintain_freshness" and revisit is None:
+            return _api_error(
+                "invalid_request", "maintain_freshness requires revisit_interval_min", 422,
+            )
+        if mode == "search_priority" and revisit is not None:
+            return _api_error(
+                "invalid_request", "search_priority requires a null revisit_interval_min", 422,
+            )
+    return None
+
+
+def _writes_blocked(app: FastAPI, service: IntentCommandService) -> bool:
+    return bool(
+        app.state.replay_mode
+        or service.replay_mode
+        or service.runtime_status == "finished"
+    )
+
+
+def _write_blocked_response(app: FastAPI, service: IntentCommandService) -> JSONResponse:
+    if app.state.replay_mode or service.replay_mode:
+        return _api_error("replay_read_only", "replay mode is read-only", 409)
+    return _api_error("episode_finished", "the simulation episode has finished", 409)
+
+
+def _enqueue_intent_command(
+    service: IntentCommandService,
+    command: IntentCommand,
+) -> JSONResponse:
+    try:
+        result = service.queue.enqueue(command)
+    except CommandConflict:
+        return _api_error("command_conflict", "command_id has a different payload", 409)
+    except QueueFull:
+        return _api_error("queue_full", "intent command queue is full", 429)
+    except (TypeError, ValueError) as exc:
+        return _api_error("invalid_request", str(exc), 422)
+    return JSONResponse(
+        {"command_id": result.command_id, "status": result.status},
+        status_code=202,
+    )
+
+
+async def _enqueue_runtime_command(
+    app: FastAPI,
+    request: Request,
+    operation: str,
+) -> JSONResponse:
+    body, error = await _request_object(request)
+    if error is not None:
+        return error
+    service = app.state.intent_service
+    if service is None:
+        return _api_error("intent_service_unavailable", "intent service is unavailable", 409)
+    if _writes_blocked(app, service):
+        return _write_blocked_response(app, service)
+    allowed = {"episode_id", "command_id"}
+    validation_error = _validate_body(body, allowed, allowed)
+    if validation_error is not None:
+        return validation_error
+    if body["episode_id"] != service.episode_id:
+        return _api_error("episode_conflict", "command belongs to another episode", 409)
+    if operation == "retry" and service.runtime_status != "paused_model":
+        return _api_error("runtime_not_paused", "retry requires paused_model", 409)
+    command = RuntimeCommand(
+        command_id=body["command_id"],
+        episode_id=body["episode_id"],
+        operation=operation,
+    )
+    try:
+        result = service.runtime_queue.enqueue(command)
+    except CommandConflict:
+        return _api_error("command_conflict", "command_id has a different payload", 409)
+    except QueueFull:
+        return _api_error("queue_full", "runtime command queue is full", 429)
+    except (TypeError, ValueError) as exc:
+        return _api_error("invalid_request", str(exc), 422)
+    return JSONResponse(
+        {"command_id": result.command_id, "status": result.status},
+        status_code=202,
+    )
+
+
+def _intent_snapshot_payload(snapshot: dict, service: IntentCommandService) -> dict:
+    return {
+        "episode_id": snapshot.get("episode_id", service.episode_id),
+        "intents": [
+            asdict(intent) if hasattr(intent, "__dataclass_fields__") else intent
+            for intent in snapshot.get("intents", ())
+        ],
+        "statuses": [
+            asdict(status) if hasattr(status, "__dataclass_fields__") else status
+            for status in snapshot.get("statuses", ())
+        ],
+        "pending_commands": [
+            _command_result_payload(result)
+            for result in snapshot.get("pending_commands", ())
+        ],
+        "intent_events": list(snapshot.get("intent_events", ())),
+    }
+
+
+def _command_result_payload(result) -> dict:
+    payload = {
+        "command_id": result.command_id,
+        "status": result.status,
+        "intent": (
+            asdict(result.intent)
+            if getattr(result, "intent", None) is not None
+            else None
+        ),
+        "error_code": result.error_code,
+    }
+    if result.error_code is not None:
+        payload["message"] = _ERROR_MESSAGES.get(
+            result.error_code, "command was rejected",
+        )
+    return payload
+
+
+_ERROR_MESSAGES = {
+    "episode_conflict": "command belongs to another episode",
+    "episode_reset": "command belongs to a reset episode",
+    "episode_finished": "the simulation episode has finished",
+    "revision_conflict": "intent revision does not match",
+    "intent_not_found": "intent was not found",
+    "intent_not_active": "intent is not active",
+    "intent_limit": "maximum active intents reached",
+    "invalid_intent": "intent failed validation",
+    "model_blocked": "the requested model is still blocked",
+    "runtime_not_paused": "retry requires paused_model",
+}
 
 
 def _build_frame_inner(app: FastAPI) -> dict:

@@ -1,5 +1,6 @@
 ﻿"""从 StateManager 构建 WebSocket/JSONL 帧 JSON。"""
 import math
+from dataclasses import asdict
 
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
@@ -207,6 +208,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     recent_events = state.get_recent_events(state.current_time - 1.0)
 
     coverage = state.get_coverage_stats()
+    published_intents, published_intent_statuses = (
+        state.get_published_intent_snapshot()
+        if hasattr(state, "get_published_intent_snapshot")
+        else ((), ())
+    )
 
     # 船舶列表（从 wm 实体构建）
     ship_list = []
@@ -293,6 +299,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "sim_time_min": state.current_time,
         "total_steps": total_steps,
         "mode": "live",
+        "episode_id": getattr(state, "episode_id", ""),
         "scenario_seed": getattr(state, "scenario_seed", None),
         "reset_generation": getattr(state, "scenario_generation", 0),
         "task_area": {
@@ -307,6 +314,16 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "markers": markers,
         "ships": ship_list,
         "events": recent_events,
+        "intents": [
+            asdict(intent) if hasattr(intent, "__dataclass_fields__") else intent
+            for intent in published_intents
+        ],
+        "intent_statuses": [
+            asdict(status) if hasattr(status, "__dataclass_fields__") else status
+            for status in published_intent_statuses
+        ],
+        "intent_events": state.get_intent_events()
+        if hasattr(state, "get_intent_events") else [],
         "llm_cycle": llm_cycle,
         # Retain V1 fields while appending the richer GOAL2 base model.
         "base_position": base_list[0]["position"],

@@ -141,7 +141,7 @@ def main(
 
     if start_server:
         _free_port(port)
-        app = create_app(config, engine.allocator.sm)
+        app = create_app(config, engine.allocator.sm, engine=engine)
         app.state.total_steps = steps
         def run_server():
             uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

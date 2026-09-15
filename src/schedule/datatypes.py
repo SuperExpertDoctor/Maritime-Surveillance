@@ -37,6 +37,7 @@ class UAVState:
     operation_mode: str = "idle"
     controller_generation: int = 0
     safety_intervened: bool = False
+    last_reassigned_at_min: float = 0.0
 
 
 @dataclass
