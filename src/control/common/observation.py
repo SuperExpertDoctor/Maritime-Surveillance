@@ -19,7 +19,10 @@ from src.control.common.contracts import (
     OperationMode,
     SensorMode,
     UAVObservation,
+    ControlTask,
 )
+from src.mission.contracts import ContactSnapshot, ProbeSession
+from src.mission.trajectory_features import select_keypoints
 from src.env.obstacle import Island, Thunderstorm
 from src.env.uav_entity import UAVEntity
 from src.schedule.config_loader import AppConfig
@@ -56,6 +59,7 @@ class ObservationProvider:
         safety_intervened: bool,
         current_time: float,
         dt_min: float,
+        task: ControlTask | None = None,
     ) -> ControlObservation:
         """Publish the controller's complete, immutable observation boundary."""
         window_cells = self._config.control.observation.local_window_cells
@@ -69,6 +73,7 @@ class ObservationProvider:
             state_manager.get_searchable_mask(), center, window_cells, False
         )
         contacts = self._contacts(state_manager, current_time)
+        probe, histories = self._probe_context(state_manager, task)
         return ControlObservation(
             schema_version=self._config.control.observation.schema_version,
             timestamp_min=float(current_time),
@@ -94,6 +99,8 @@ class ObservationProvider:
             shared_uavs=self._shared_uavs(state_manager),
             events=tuple(sorted(events, key=lambda event: event.sequence)),
             action_mask=self._action_mask(control_owner, operation_mode, contacts),
+            probe=probe,
+            contact_histories=histories,
         )
 
     @staticmethod
@@ -231,6 +238,24 @@ class ObservationProvider:
         return tuple(sorted(snapshots, key=lambda uav: uav.uav_id))
 
     @staticmethod
+    def _probe_context(
+        state_manager: StateManager, task: ControlTask | None
+    ) -> tuple[ProbeSession | None, tuple[ContactSnapshot, ...]]:
+        if task is None or task.task_type is not OperationMode.PROBE:
+            return None, ()
+        if not task.probe_id or not task.target_contact_id:
+            return None, ()
+        probe = state_manager.get_probe_session(task.probe_id)
+        try:
+            contact = state_manager.contacts.snapshot(task.target_contact_id)
+        except KeyError:
+            return probe, ()
+        samples = select_keypoints(
+            contact.samples, state_manager.config.mission.contact.prompt_keypoints_per_contact
+        )
+        return probe, (replace(contact, samples=samples),)
+
+    @staticmethod
     def _action_mask(
         control_owner: ControlOwner,
         operation_mode: OperationMode,
@@ -242,7 +267,7 @@ class ObservationProvider:
             operation_modes = [OperationMode.TRANSIT, OperationMode.COVERAGE]
             if target_contact_ids:
                 sensor_modes.append(SensorMode.EO)
-                operation_modes.append(OperationMode.TRACK)
+                operation_modes.extend((OperationMode.PROBE, OperationMode.TRACK))
         elif control_owner is ControlOwner.SYSTEM and operation_mode in (
             OperationMode.RETURN,
             OperationMode.HOLDING,

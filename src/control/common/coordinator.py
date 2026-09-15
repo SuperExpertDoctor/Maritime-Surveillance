@@ -139,6 +139,7 @@ class ControlCoordinator:
             factory,
             self._controllers,
             self._pending_tasks,
+            state_manager=state_manager,
             atomic=self._atomic,
         )
 
@@ -498,6 +499,8 @@ class ControlCoordinator:
                 raise ControlCoordinatorError(
                     f"work has not started for {uav_id}"
                 ) from exc
+            pending_task = self._pending_tasks.get(uav_id)
+            active_task = pending_task or self.active_task(uav_id)
             observation = self.observations.build(
                 uav,
                 self.state_manager,
@@ -509,6 +512,7 @@ class ControlCoordinator:
                 safety_intervened=self._last_safety_intervened[uav_id],
                 current_time=current_time,
                 dt_min=dt_min,
+                task=active_task,
             )
             pending_task = self._pending_tasks.pop(uav_id, None)
             if pending_task is not None:

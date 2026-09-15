@@ -105,6 +105,24 @@ def shifted_orbit_positions(
     )
 
 
+def plan_contact_orbit_entry(
+    tracker: LGVFTracker,
+    uav_pose: Pose,
+    target_position: Sequence[float],
+    standoff_cells: float,
+) -> tuple[Pose, ...]:
+    """Plan a checked orbit entry from an observed contact estimate only."""
+    if not math.isfinite(standoff_cells) or standoff_cells <= 0.0:
+        raise ValueError("standoff_cells must be finite and positive")
+    entry = tracker.plan_entry(uav_pose, target_position, standoff_cells)
+    route = tuple(tuple(map(float, pose)) for pose in entry.waypoints)
+    if not route or any(len(pose) != 3 for pose in route):
+        raise ValueError("orbit entry must contain pose triples")
+    if not all(math.isfinite(value) for pose in route for value in pose):
+        raise ValueError("orbit entry contains non-finite values")
+    return route
+
+
 class TrackingController(HeuristicControllerBase):
     """Approach and orbit a contact estimate without access to world truth."""
 
@@ -269,12 +287,13 @@ class TrackingController(HeuristicControllerBase):
 
     def _plan_orbit_entry(self, observation: ControlObservation) -> None:
         assert self.target_position is not None
-        entry = self.tracker.plan_entry(
+        entry = plan_contact_orbit_entry(
+            self.tracker,
             self._current_pose(observation),
             self.target_position,
             self.standoff_radius_cells,
         )
-        self._set_route(entry.waypoints, observation, "LGVF orbit entry")
+        self._set_route(entry, observation, "LGVF orbit entry")
         self.phase = TrackingPhase.ORBIT_ENTRY
 
     def _tracking_command(self, observation: ControlObservation) -> ControlCommand:
@@ -556,5 +575,6 @@ __all__ = [
     "TrackingPhase",
     "TrackingRouteError",
     "orbit_waypoint_positions",
+    "plan_contact_orbit_entry",
     "shifted_orbit_positions",
 ]

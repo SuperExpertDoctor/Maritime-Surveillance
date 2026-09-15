@@ -45,7 +45,7 @@ from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.state_manager import StateManager
 
 
-OBSERVATION_SPEC = ObservationSpec("control-observation/v1", 11)
+OBSERVATION_SPEC = ObservationSpec("control-observation/v2", 11)
 ACTION_SPEC = ActionSpec(-0.5, 0.5, 0.1, 1.0)
 
 
@@ -357,7 +357,7 @@ def test_queued_events_are_ordered_visible_once_and_delayed_one_tick():
     assert third.observation.events == ()
 
 
-def test_heuristic_transition_replaces_before_act_and_suppresses_consumed_event():
+def test_target_found_is_delivered_without_replacing_a_heuristic_task():
     config = ConfigLoader.load()
     factory = DeterministicFactory(config.control)
     coordinator, _, state_manager, _, resolved_factory = make_runtime(
@@ -382,20 +382,16 @@ def test_heuristic_transition_replaces_before_act_and_suppresses_consumed_event(
     )
 
     second = coordinator.step_uav(uav, current_time=2.0)
-    new_controller = resolved_factory.heuristic_creations[1][2]
 
-    assert len(old_controller.observations) == 1
+    assert len(old_controller.observations) == 2
     assert first.observation.self_state.operation_mode is OperationMode.IDLE
     assert second.observation.self_state.operation_mode is OperationMode.COVERAGE
-    assert old_controller.stop_reasons == [StopReason.PREEMPTED]
-    assert new_controller.calls == ["reset", "start", "act"]
-    assert new_controller.start_observation is second.observation
-    assert new_controller.observations == [second.observation]
-    assert second.observation.events == ()
+    assert old_controller.stop_reasons == []
+    assert [event.event_type for event in second.observation.events] == ["target_found"]
     assert second.lease.owner is ControlOwner.HEURISTIC
-    assert second.lease.generation == first.lease.generation + 1
-    assert second.lease.controller_id.startswith("tracking:")
-    assert coordinator._operation_modes["UAV-1"] is OperationMode.TRACK
+    assert second.lease.generation == first.lease.generation
+    assert second.lease.controller_id.startswith("coverage:")
+    assert coordinator._operation_modes["UAV-1"] is OperationMode.COVERAGE
 
 
 def test_learning_task_events_are_delivered_untouched_without_replacing_lease():
@@ -783,21 +779,7 @@ def test_external_return_revocation_clears_saved_coverage_without_consuming_life
     uav = make_uav("UAV-1")
     start_heuristic(coordinator)
     coordinator.step_uav(uav, current_time=1.0)
-    state_manager.record_target_observation(
-        "C1", GridCoord(12, 10), "UAV-1", observed_at=1.0
-    )
-    coordinator.queue_event(
-        ControlEvent(
-            1,
-            1.0,
-            "target_found",
-            "sensor",
-            "UAV-1",
-            {"contact_id": "C1"},
-        )
-    )
-    coordinator.step_uav(uav, current_time=2.0)
-    assert "UAV-1" in coordinator._task_flow._saved_coverage_tasks
+    assert "UAV-1" not in coordinator._task_flow._saved_coverage_tasks
     coordinator.queue_event(
         ControlEvent(
             2,

@@ -38,7 +38,13 @@ class OperationRegistry:
             previous_command is not None
             and previous_command.operation_mode is OperationMode.TRACK
         )
-        if previous_was_track and applied_command.operation_mode is not OperationMode.TRACK:
+        previous_was_probe = (
+            previous_command is not None
+            and previous_command.operation_mode is OperationMode.PROBE
+        )
+        if (previous_was_track or previous_was_probe) and applied_command.operation_mode not in (
+            OperationMode.TRACK, OperationMode.PROBE
+        ):
             if previous_command.target_contact_id:
                 self._state_manager.release_contact_reservation(
                     previous_command.target_contact_id, uav_id,

@@ -134,6 +134,7 @@ def test_observation_exposes_only_target_reports_and_published_hazards(engine):
     assert observation.action_mask.allowed_operation_modes == (
         OperationMode.TRANSIT,
         OperationMode.COVERAGE,
+        OperationMode.PROBE,
         OperationMode.TRACK,
     )
 

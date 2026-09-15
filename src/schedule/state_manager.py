@@ -10,7 +10,7 @@ from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
 from src.schedule.info_field import InfoField
 from src.mission.contact_store import ContactStore
-from src.mission.contracts import VisualDetection
+from src.mission.contracts import ProbeSession, VisualDetection
 
 
 _OPERATION_BY_STATUS = {
@@ -56,6 +56,7 @@ class StateManager:
         self._legacy_contact_ids: dict[str, str] = {}
         self._legacy_sample_counter = 0
         self._contact_event_cursor = 0
+        self._probe_sessions: dict[str, ProbeSession] = {}
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
         self.obstacle_version = 0
@@ -145,6 +146,18 @@ class StateManager:
         if uav:
             uav.assigned_region_id = None
             uav.target_group_id = None
+
+    def set_probe_session(self, probe: ProbeSession) -> None:
+        """Publish a session already advanced by the simulation thread."""
+        if not isinstance(probe, ProbeSession):
+            raise TypeError("probe must be a ProbeSession")
+        self._probe_sessions[probe.probe_id] = probe
+
+    def get_probe_session(self, probe_id: str) -> ProbeSession | None:
+        return self._probe_sessions.get(probe_id)
+
+    def clear_probe_session(self, probe_id: str) -> None:
+        self._probe_sessions.pop(probe_id, None)
 
     # Environment ----------------------------------------------------
     def set_environment_obstacles(self, obstacles: list, mask) -> None:

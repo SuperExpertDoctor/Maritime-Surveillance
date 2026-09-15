@@ -198,6 +198,7 @@ class SimulationEngine:
         self.control_factory = ControlFactory(
             config.control,
             action_spec=action_spec,
+            contact_config=config.mission.contact,
         )
         for mode, provider in self._control_providers.items():
             resolved_mode = ControlMode(mode)

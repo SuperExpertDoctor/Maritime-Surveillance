@@ -127,7 +127,7 @@ class CommonConfig:
 
 @dataclass(frozen=True)
 class ObservationControlConfig:
-    schema_version: str = "control-observation/v1"
+    schema_version: str = "control-observation/v2"
     local_window_cells: int = 11
 
 
