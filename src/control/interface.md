@@ -909,3 +909,19 @@ assert decision.command.schema_version == "control-command/v1"
 集成测试应通过 `ControlFactory.register(ControlMode.BC/RL, provider)` 和
 `SimulationEngine(control_providers=...)` 验证实际生命周期，不应直接调用私有字段
 替代 coordinator。
+
+## 11. Mixed Maritime Boundary
+
+混合海上任务继续使用本接口的 `ControlCoordinator`、ownership generation、
+`SafetyEnvelope` 和唯一 `UAVDynamicsExecutor`。控制器只接收公开的
+`ControlObservation` 与 action mask；不能读取 `Ship`、物理身份、`StateManager`、
+红方计划或评估器真值。
+
+卫星 AIS 和 SAR/EO 测量先进入 `ContactStore`，身份只由已批准的 probe 任务产生的
+有效证据研判。`unknown` 接触不能被控制器当作 target 或 civilian；接触释放和任务
+接力必须由全局任务调度批次提交，不能在控制器回调中直接恢复旧搜索。
+
+`mission-frame/v2` 的默认渲染层只显示 UAV、公开 contact snapshot、意图和运行状态。
+物理真值、红方状态和评估结果只能写入隔离的 `evaluation` 域，不得进入 blue prompt
+或控制 observation。模型角色失败时由仿真层进入 `paused_model`/`failed`，重试不推进
+仿真时间，也不构造 heuristic 或 rule-based 的伪模型决策。

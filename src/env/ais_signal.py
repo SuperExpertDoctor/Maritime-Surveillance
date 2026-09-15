@@ -32,46 +32,32 @@ class AISSignal:
 
 
 def _stable_number(value: str) -> int:
+    # Population IDs are unique generation ordinals. A character checksum
+    # collides even within the first hundred vessels (e.g. Ship-18/Ship-90).
+    if value.startswith("Ship-") and value[5:].isdigit():
+        return int(value[5:])
     return sum((index + 1) * ord(char) for index, char in enumerate(value))
 
 
 def generate_ais_signal(ship: "Ship", timestamp: float) -> AISSignal | None:
-    """Generate the signal actually broadcast by one physical ship.
-
-    Civil vessels report their measured navigation position with a bounded
-    sub-cell error.  Military vessels either remain silent or emit a position
-    displaced by more than the configured two-cell classification threshold.
-    The classification remains entirely position-based; the truth flag only
-    selects the target's communications behaviour.
-    """
+    """Generate a public AIS report without consulting hidden vessel identity."""
     mode = getattr(ship, "ais_mode", "civilian")
     if mode == "silent":
         return None
     serial = _stable_number(ship.id)
     phase = serial * 0.017 + float(timestamp) * 0.11
-    if mode == "deceptive":
-        offset = 3.0 + (serial % 7) * 0.12
-        reported = (
-            ship.float_position[0] + offset * math.cos(phase),
-            ship.float_position[1] + offset * math.sin(phase),
-        )
-        ship_name = f"UNKNOWN-{serial % 1000:03d}"
-        vessel_type = "Cargo"
-    else:
-        # 0.35 cell is within the documented civilian AIS uncertainty.
-        reported = (
-            ship.float_position[0] + 0.35 * math.cos(phase),
-            ship.float_position[1] + 0.35 * math.sin(phase),
-        )
-        ship_name = f"MV-CIV-{serial % 1000:03d}"
-        vessel_type = "Cargo"
+    noise = float(getattr(ship, "ais_position_noise_cells", 0.05))
+    reported = (
+        ship.float_position[0] + noise * math.cos(phase),
+        ship.float_position[1] + noise * math.sin(phase),
+    )
     return AISSignal(
         mmsi=f"{100000000 + serial % 899999999:09d}",
         reported_position=reported,
         reported_speed_kn=ship.speed_kn,
         reported_heading_deg=math.degrees(ship.heading_rad) % 360.0,
-        ship_name=ship_name,
-        ship_type=vessel_type,
+        ship_name=f"MV-{serial % 1000:03d}",
+        ship_type="Cargo",
         timestamp=float(timestamp),
     )
 

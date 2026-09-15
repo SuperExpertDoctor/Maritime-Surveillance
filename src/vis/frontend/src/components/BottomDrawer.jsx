@@ -138,27 +138,32 @@ function LLMTab({ llm }) {
 }
 
 function AisTab({ frame }) {
-  const rows = (frame?.ships || []).filter((ship) => ship.ais || ship.discrimination || ship.is_detected);
-  if (!rows.length) return <EmptyState text="No tracked AIS reports" />;
+  const rows = frame?.contacts?.length
+    ? frame.contacts.map((contact) => {
+      const ais = [...(contact.samples || [])].reverse().find((sample) => sample.source === "ais");
+      return { id: contact.contact_id, mmsi: contact.ais_mmsi, aisPosition: ais?.position, position: contact.estimated_position, state: contact.identity || "unknown" };
+    })
+    : (frame?.ships || []).map((ship) => ({
+      id: ship.id,
+      mmsi: ship.ais?.mmsi,
+      aisPosition: ship.ais?.reported_position,
+      position: ship.estimated_position,
+      state: "historical",
+    }));
   return (
     <div className="table-wrap">
       <table className="region-table ais-table">
-        <thead><tr><th>Target</th><th>MMSI</th><th>AIS position</th><th>EO estimate</th><th>Error</th><th>Result</th></tr></thead>
-        <tbody>{rows.map((ship) => {
-          const discrepancy = ship.discrimination?.discrepancy_cells;
-          const military = ship.discrimination?.is_military === true || ship.is_military === true;
-          const civilian = ship.discrimination?.is_military === false || ship.is_military === false;
-          return (
-            <tr className={military ? "ais-military" : civilian ? "ais-civilian" : ""} key={ship.id}>
-              <td><b>{ship.id}</b></td>
-              <td>{ship.ais?.mmsi || "SILENT"}</td>
-              <td className="mono">{formatPosition(ship.ais?.reported_position)}</td>
-              <td className="mono">{formatPosition(ship.estimated_position)}</td>
-              <td>{Number.isFinite(discrepancy) ? discrepancy.toFixed(2) : "-"}</td>
-              <td>{military ? "MILITARY" : civilian ? "CIVILIAN" : "PENDING"}</td>
-            </tr>
-          );
-        })}</tbody>
+        <thead><tr><th>接触</th><th>MMSI</th><th>AIS 位置</th><th>估计位置</th><th>样本</th><th>状态</th></tr></thead>
+        <tbody>{rows.map((contact) => (
+          <tr key={contact.id}>
+            <td><b>{contact.id}</b></td>
+            <td>{contact.mmsi || "无"}</td>
+            <td className="mono">{formatPosition(contact.aisPosition)}</td>
+            <td className="mono">{formatPosition(contact.position)}</td>
+            <td>{frame?.contacts?.length ? (frame.contacts.find((item) => item.contact_id === contact.id)?.samples?.length || 0) : "-"}</td>
+            <td>{contact.state === "unknown" ? "待核查" : contact.state === "target" ? "评估目标" : contact.state === "civilian" ? "声称民用 AIS" : "历史帧"}</td>
+          </tr>
+        ))}</tbody>
       </table>
     </div>
   );

@@ -49,7 +49,7 @@ def test_api_config_exposes_control_strategy_contract():
 
     assert payload["control"]["default_mode"] == "heuristic"
     assert payload["control"]["per_uav"] == {}
-    assert payload["control"]["observation"]["schema_version"] == "control-observation/v1"
+    assert payload["control"]["observation"]["schema_version"] == "control-observation/v2"
     assert payload["control"]["safety"]["max_invalid_commands"] == 3
     assert "heuristic" in payload["control"]
 

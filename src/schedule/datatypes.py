@@ -37,6 +37,7 @@ class UAVState:
     operation_mode: str = "idle"
     controller_generation: int = 0
     safety_intervened: bool = False
+    last_reassigned_at_min: float = 0.0
 
 
 @dataclass
@@ -47,7 +48,7 @@ class Marker:
     source_uav_id: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class TargetReport:
     """A target position that was actually observed by a UAV sensor.
 
@@ -55,7 +56,7 @@ class TargetReport:
     ground-truth ship instance.  Scheduling and LLM prompts may use only this
     report after a contact has been established.
     """
-    group_id: str
+    contact_id: str
     position: GridCoord
     observed_at: float
     source_uav_id: str

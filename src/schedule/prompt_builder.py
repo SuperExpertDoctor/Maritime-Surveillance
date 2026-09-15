@@ -1,10 +1,52 @@
 ﻿import os
+import json
 from src.schedule.state_manager import StateManager
 from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateResult
 
 
 class PromptBuilder:
+    @staticmethod
+    def contact_payload(sm: StateManager) -> list[dict]:
+        """Explicit blue field allowlist, accepting only published contact state."""
+        payload = []
+        cfg = sm.config.mission.contact
+        for c in sm.contacts.list_snapshots()[:cfg.prompt_contact_limit]:
+            assessment = c.last_assessment
+            payload.append({
+                "contact_id": c.contact_id, "revision": c.revision,
+                "state": c.state, "identity": c.identity, "ais_mmsi": c.ais_mmsi,
+                "first_seen_min": c.first_seen_min, "last_seen_min": c.last_seen_min,
+                "estimated_position_cells": c.estimated_position_cells,
+                "estimated_velocity_cells_min": c.estimated_velocity_cells_min,
+                "uncertainty_cells": c.uncertainty_cells,
+                "assigned_uav_id": c.assigned_uav_id, "active_probe_id": c.active_probe_id,
+                "cleared_at_min": c.cleared_at_min,
+                "next_probe_not_before_min": c.next_probe_not_before_min,
+                "last_assessment": None if assessment is None else {
+                    "assessment_id": assessment.assessment_id,
+                    "contact_id": assessment.contact_id, "probe_id": assessment.probe_id,
+                    "history_revision": assessment.history_revision,
+                    "assessed_at_min": assessment.assessed_at_min,
+                    "identity": assessment.identity, "confidence": assessment.confidence,
+                    "evidence_sample_ids": assessment.evidence_sample_ids,
+                    "reasons": assessment.reasons,
+                    "alternative_explanations": assessment.alternative_explanations,
+                    "model_call_id": assessment.model_call_id,
+                },
+                "samples": [{
+                    "sample_id": s.sample_id, "contact_id": s.contact_id,
+                    "observed_at_min": s.observed_at_min, "source": s.source,
+                    "source_id": s.source_id, "position_cells": s.position_cells,
+                    "velocity_cells_min": s.velocity_cells_min,
+                    "position_uncertainty_cells": s.position_uncertainty_cells,
+                    "observer_position_cells": s.observer_position_cells,
+                    "measured_range_cells": s.measured_range_cells,
+                    "navigation_context": s.navigation_context,
+                } for s in c.samples[-cfg.prompt_keypoints_per_contact:]],
+            })
+        return payload
+
     def __init__(self, system_prompt_path: str = None):
         if system_prompt_path is None:
             system_prompt_path = os.path.join(
@@ -84,10 +126,11 @@ class PromptBuilder:
             for report in reports:
                 velocity = report.velocity_cells_per_min
                 parts.append(
-                    f"- {report.group_id}: 最后观测=({report.position.col},{report.position.row}) "
+                    f"- {report.contact_id}: 最后观测=({report.position.col},{report.position.row}) "
                     f"时刻={report.observed_at:.1f}min 来源={report.source_uav_id} "
                     f"观测速度=({velocity[0]:.3f},{velocity[1]:.3f})格/min"
                 )
+            parts.append(json.dumps(self.contact_payload(sm), ensure_ascii=False, allow_nan=False))
 
         # 上一轮搜索区状态
         ivt.update_all()

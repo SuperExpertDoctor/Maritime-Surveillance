@@ -1,5 +1,6 @@
 ﻿"""从 StateManager 构建 WebSocket/JSONL 帧 JSON。"""
 import math
+from dataclasses import asdict
 
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
@@ -38,6 +39,70 @@ def _transit_progress(entity) -> float | None:
     segment_length = math.dist(segment_start, segment_end)
     completed += min(math.dist(segment_start, entity.float_position), segment_length)
     return max(0.0, min(1.0, completed / total))
+
+
+def _sample_snapshot(sample) -> dict:
+    """Serialize only an observation key point for the operator read model."""
+    return {
+        "sample_id": sample.sample_id,
+        "observed_at_min": sample.observed_at_min,
+        "source": sample.source,
+        "source_id": sample.source_id,
+        "position": list(sample.position_cells),
+        "velocity": list(sample.velocity_cells_min) if sample.velocity_cells_min else None,
+        "uncertainty_cells": sample.position_uncertainty_cells,
+        "observer_position": (
+            list(sample.observer_position_cells)
+            if sample.observer_position_cells is not None else None
+        ),
+        "measured_range_cells": sample.measured_range_cells,
+        "navigation_context": sample.navigation_context,
+    }
+
+
+def _assessment_snapshot(assessment) -> dict | None:
+    if assessment is None:
+        return None
+    # model_call_id stays in role-scoped logs; the operator view only needs
+    # the conclusion, reasons and the evidence references supporting it.
+    return {
+        "assessment_id": assessment.assessment_id,
+        "contact_id": assessment.contact_id,
+        "probe_id": assessment.probe_id,
+        "history_revision": assessment.history_revision,
+        "assessed_at_min": assessment.assessed_at_min,
+        "identity": assessment.identity,
+        "confidence": assessment.confidence,
+        "evidence_sample_ids": list(assessment.evidence_sample_ids),
+        "reasons": list(assessment.reasons),
+        "alternative_explanations": list(assessment.alternative_explanations),
+    }
+
+
+def _contact_snapshot(contact, *, realtime: bool) -> dict:
+    sample_limit = 12 if realtime else None
+    samples = contact.samples[-sample_limit:] if sample_limit else contact.samples
+    return {
+        "contact_id": contact.contact_id,
+        "revision": contact.revision,
+        "state": contact.state,
+        "identity": contact.identity,
+        "ais_mmsi": contact.ais_mmsi,
+        "first_seen_min": contact.first_seen_min,
+        "last_seen_min": contact.last_seen_min,
+        "estimated_position": list(contact.estimated_position_cells),
+        "estimated_velocity": (
+            list(contact.estimated_velocity_cells_min)
+            if contact.estimated_velocity_cells_min is not None else None
+        ),
+        "uncertainty_cells": contact.uncertainty_cells,
+        "assigned_uav_id": contact.assigned_uav_id,
+        "active_probe_id": contact.active_probe_id,
+        "last_assessment": _assessment_snapshot(contact.last_assessment),
+        "cleared_at_min": contact.cleared_at_min,
+        "next_probe_not_before_min": contact.next_probe_not_before_min,
+        "samples": [_sample_snapshot(sample) for sample in samples],
+    }
 
 
 def build_frame(state: StateManager, cycle: int, config: AppConfig,
@@ -207,6 +272,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     recent_events = state.get_recent_events(state.current_time - 1.0)
 
     coverage = state.get_coverage_stats()
+    published_intents, published_intent_statuses = (
+        state.get_published_intent_snapshot()
+        if hasattr(state, "get_published_intent_snapshot")
+        else ((), ())
+    )
 
     # 船舶列表（从 wm 实体构建）
     ship_list = []
@@ -225,12 +295,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 "is_detected": s.detected,
                 "ship_type": getattr(getattr(s, "ship_type", None), "value", "destroyer"),
                 "heading_deg": _heading_from_motion(trail, fallback_heading),
-                "is_military": getattr(s, "is_military", None),
                 "departed": bool(getattr(s, "departed", False)),
-                "is_evasive": bool(getattr(s, "is_evading", False)),
-                "radar_range_cells": float(
-                    getattr(s, "surface_search_radar_range_cells", 3.0)
-                ),
                 "estimated_position": (
                     list(s.estimated_position)
                     if getattr(s, "estimated_position", None) is not None
@@ -241,7 +306,6 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
                     if getattr(s, "ais_signal", None) is not None
                     else None
                 ),
-                "discrimination": getattr(s, "discrimination", None),
                 "trail": trail,  # 最近 60 个轨迹点
             })
 
@@ -287,12 +351,14 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         }]
 
     frame = {
+        "schema_version": "mission-frame/v2",
         "frame_id": step,
         "cycle": cycle,
         "timestamp": _format_time(state.current_time),
         "sim_time_min": state.current_time,
         "total_steps": total_steps,
         "mode": "live",
+        "episode_id": getattr(state, "episode_id", ""),
         "scenario_seed": getattr(state, "scenario_seed", None),
         "reset_generation": getattr(state, "scenario_generation", 0),
         "task_area": {
@@ -306,7 +372,27 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "track_regions": track_regions,
         "markers": markers,
         "ships": ship_list,
+        "contacts": [
+            _contact_snapshot(contact, realtime=realtime)
+            for contact in (
+                state.contacts.list_snapshots()
+                if getattr(state, "contacts", None) is not None else ()
+            )
+        ],
         "events": recent_events,
+        "intents": [
+            asdict(intent) if hasattr(intent, "__dataclass_fields__") else intent
+            for intent in published_intents
+        ],
+        "intent_statuses": [
+            asdict(status) if hasattr(status, "__dataclass_fields__") else status
+            for status in published_intent_statuses
+        ],
+        "intent_events": state.get_intent_events()
+        if hasattr(state, "get_intent_events") else [],
+        "runtime_status": getattr(state, "runtime_status", "running"),
+        "blocked_role": getattr(state, "blocked_role", None),
+        "memory_version": getattr(state, "memory_version", "baseline"),
         "llm_cycle": llm_cycle,
         # Retain V1 fields while appending the richer GOAL2 base model.
         "base_position": base_list[0]["position"],

@@ -202,11 +202,12 @@ def test_sar_requires_stable_straight_heading_before_writing_information():
 
 def test_simulation_applies_phase_speed_control_to_shared_trackers():
     engine = SimulationEngine(ConfigLoader.load())
-    center = engine._group_center("G1")
+    contact_id = engine.allocator.sm.contacts.list_snapshots()[0].contact_id
+    center = engine._contact_center(contact_id)
     first, second = engine.uavs[:2]
     for uav in (first, second):
         uav.status = "tracking"
-        uav.target_group_id = "G1"
+        uav.target_group_id = contact_id
     first._col, first._row = center[0] + 1.8, center[1]
     second._col = center[0] + 1.8 * math.cos(0.2)
     second._row = center[1] + 1.8 * math.sin(0.2)
@@ -240,7 +241,7 @@ def test_completed_search_starts_a_real_return_during_lifecycle_rotation():
     assert uav.mission_kind == "return"
 
 
-def test_tracking_dwell_starts_return_without_waiting_for_low_fuel():
+def test_tracking_dwell_starts_return_without_waiting_for_low_fuel(monkeypatch):
     engine = SimulationEngine(ConfigLoader.load())
     engine._lifecycle_mode = True
     engine.allocator.sm.lifecycle_mode = True
@@ -249,6 +250,8 @@ def test_tracking_dwell_starts_return_without_waiting_for_low_fuel():
     uav.target_group_id = "G1"
     engine._sortie_searched[uav.id] = True
     engine._tracking_started_at[uav.id] = -engine.config.uav.lifecycle_search_dwell_min
+    from src.schedule.trigger_manager import TriggerDecision
+    monkeypatch.setattr(engine.allocator.trigger_manager, "check", lambda _t: TriggerDecision("none"))
 
     engine.step()
 
@@ -528,7 +531,7 @@ def test_search_route_uses_short_dubins_connectors_when_clear(monkeypatch):
     assert uav._scan_ranges
 
 
-def test_post_coverage_completion_restarts_local_revisit_without_idling():
+def test_post_coverage_completion_waits_for_scheduler_before_revisit():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     candidate = engine.allocator.extractor.extract(
         engine.allocator.sm
@@ -552,10 +555,14 @@ def test_post_coverage_completion_restarts_local_revisit_without_idling():
         engine.config.uav.freshness_patrol_start_min,
     )
 
-    assert uav.status == "transit"
+    assert uav.status == "idle"
     assert not uav.search_complete_pending
-    assert region.status == "active"
-    assert region.assigned_uav_id == uav.id
+    assert region.status == "completed"
+    assert region.assigned_uav_id is None
+    assert any(
+        event["type"] == "search_complete"
+        for event in engine.allocator.sm.get_recent_events(0)
+    )
 
 
 def test_freshness_patrol_caps_local_revisit_fleet_size():

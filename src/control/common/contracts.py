@@ -10,6 +10,7 @@ from types import MappingProxyType
 import numpy as np
 
 from src.schedule.datatypes import BBox
+from src.mission.contracts import ContactSnapshot, ProbeSession
 
 
 class ControlMode(str, Enum):
@@ -28,6 +29,7 @@ class OperationMode(str, Enum):
     IDLE = "idle"
     TRANSIT = "transit"
     COVERAGE = "coverage"
+    PROBE = "probe"
     TRACK = "track"
     RETURN = "return"
     HOLDING = "holding"
@@ -197,6 +199,7 @@ class ControlTask:
     task_type: OperationMode
     region_bbox: BBox | None = None
     target_contact_id: str | None = None
+    probe_id: str | None = None
     recovery_plan: RecoveryPlan | None = None
 
 
@@ -231,6 +234,8 @@ class ControlObservation:
     shared_uavs: tuple[UAVObservation, ...]
     events: tuple[ControlEvent, ...]
     action_mask: ActionMask
+    probe: ProbeSession | None = None
+    contact_histories: tuple[ContactSnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -243,7 +248,9 @@ class ControlObservation:
             array = np.array(getattr(self, field_name), copy=True)
             array.setflags(write=False)
             object.__setattr__(self, field_name, array)
-        for field_name in ("contacts", "hazards", "bases", "shared_uavs", "events"):
+        for field_name in (
+            "contacts", "hazards", "bases", "shared_uavs", "events", "contact_histories"
+        ):
             object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
 
 

@@ -19,13 +19,16 @@ from src.control.common.contracts import (
 from src.control.common.factory import ControlFactory
 from src.control.common.ownership import ControlLease, ControlOwnership
 from src.control.heuristic.base import HeuristicControllerBase
+from src.schedule.state_manager import StateManager
 
 
 EVENT_TRANSITIONS = {
-    "target_found": OperationMode.TRACK,
-    "target_lost": OperationMode.COVERAGE,
-    "civilian_released": OperationMode.COVERAGE,
-    "target_departed": OperationMode.COVERAGE,
+    "contact_assessed": OperationMode.TRACK,
+    "mission_task_released": OperationMode.HOLDING,
+    "civilian_released": OperationMode.HOLDING,
+    "target_lost": OperationMode.HOLDING,
+    "duplicate_task_cancelled": OperationMode.HOLDING,
+    "target_departed": OperationMode.HOLDING,
     "search_complete": OperationMode.HOLDING,
     "task_failed": OperationMode.HOLDING,
 }
@@ -62,12 +65,14 @@ class HeuristicTaskFlow:
         controller_registry: MutableMapping[str, ControllerBase],
         pending_tasks: MutableMapping[str, ControlTask],
         *,
+        state_manager: StateManager | None = None,
         atomic: AtomicBoundary | None = None,
     ) -> None:
         self._ownership = ownership
         self._factory = factory
         self._controllers = controller_registry
         self._pending_tasks = pending_tasks
+        self._state_manager = state_manager
         self._saved_coverage_tasks: dict[str, ControlTask] = {}
         self._lock = RLock()
         self._atomic = atomic or self._under_lock
@@ -95,6 +100,22 @@ class HeuristicTaskFlow:
         if (
             lease.owner is not ControlOwner.HEURISTIC
             or event.event_type not in EVENT_TRANSITIONS
+        ):
+            return TaskTransition.unchanged(lease, controller, current_task)
+        if event.event_type == "contact_assessed" and (
+            current_task is None
+            or current_task.task_type is not OperationMode.PROBE
+            or event.payload.get("identity") != "target"
+            or event.payload.get("contact_id") != current_task.target_contact_id
+            or event.payload.get("probe_id") != current_task.probe_id
+        ):
+            return TaskTransition.unchanged(lease, controller, current_task)
+        if event.event_type == "mission_task_released" and (
+            current_task is None
+            or current_task.task_type is not OperationMode.PROBE
+            or event.payload.get("identity") != "civilian"
+            or event.payload.get("contact_id") != current_task.target_contact_id
+            or event.payload.get("probe_id") != current_task.probe_id
         ):
             return TaskTransition.unchanged(lease, controller, current_task)
 
@@ -126,6 +147,8 @@ class HeuristicTaskFlow:
             self._controllers[lease.uav_id] = replacement
             self._pending_tasks[lease.uav_id] = replacement_task
             self._update_saved_coverage(event, current_task)
+            if event.event_type == "mission_task_released":
+                self._release_contact_bindings(event, lease.uav_id)
             return current_lease
 
         current_lease = self._atomic(commit)
@@ -144,10 +167,10 @@ class HeuristicTaskFlow:
         event: ControlEvent,
         current_task: ControlTask | None,
     ) -> tuple[ControlTask, bool]:
-        if event.event_type == "target_found":
+        if event.event_type == "contact_assessed":
+            assert current_task is not None
             contact_id = event.payload.get("contact_id")
-            if not isinstance(contact_id, str) or not contact_id:
-                raise ValueError("target_found requires a non-empty contact_id")
+            assert isinstance(contact_id, str)
             return (
                 ControlTask(
                     f"track:{contact_id}",
@@ -156,21 +179,14 @@ class HeuristicTaskFlow:
                 ),
                 False,
             )
-        if event.event_type in {
-            "target_lost",
-            "civilian_released",
-            "target_departed",
-        }:
-            saved = self._saved_coverage_tasks.get(event.uav_id or "")
-            if saved is not None:
-                return saved, False
         del current_task
-        return (
-            ControlTask(
-                f"holding:{event.uav_id}:{event.sequence}",
-                OperationMode.HOLDING,
-            ),
-            True,
+        return self._holding_task(event), True
+
+    @staticmethod
+    def _holding_task(event: ControlEvent) -> ControlTask:
+        return ControlTask(
+            f"holding:{event.uav_id}:{event.sequence}",
+            OperationMode.HOLDING,
         )
 
     def _update_saved_coverage(
@@ -179,19 +195,29 @@ class HeuristicTaskFlow:
         uav_id = event.uav_id
         assert uav_id is not None
         if (
-            event.event_type == "target_found"
-            and previous_task is not None
-            and previous_task.task_type is OperationMode.COVERAGE
+            event.event_type in EVENT_TRANSITIONS
         ):
-            self._saved_coverage_tasks[uav_id] = previous_task
-        elif event.event_type in {
-            "target_lost",
-            "civilian_released",
-            "target_departed",
-            "search_complete",
-            "task_failed",
-        }:
             self._saved_coverage_tasks.pop(uav_id, None)
+
+    def _release_contact_bindings(self, event: ControlEvent, uav_id: str) -> None:
+        """Clear all scheduler-owned links before publishing the idle resource."""
+        if self._state_manager is None:
+            return
+        contact_id = event.payload.get("contact_id")
+        if not isinstance(contact_id, str) or not contact_id:
+            raise ValueError("mission_task_released requires a contact_id")
+        region = self._state_manager.get_track_region_for_group(contact_id)
+        if region is not None:
+            self._state_manager.release_track_region(
+                region.id, source_uav_id=uav_id, create_marker=False
+            )
+        self._state_manager.release_contact_reservation(
+            contact_id, uav_id, event.timestamp_min, "civilian"
+        )
+        self._state_manager.clear_uav_assignment(uav_id)
+        self._state_manager.add_event(
+            "resource_available", {"uav_id": uav_id, "contact_id": contact_id}
+        )
 
     @staticmethod
     def _active_task(

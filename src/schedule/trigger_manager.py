@@ -77,6 +77,15 @@ class TriggerManager:
 
         # Heavy: structural changes requiring LLM re-planning
         heavy_types = {
+            "contact_created",
+            "contact_merged",
+            "contact_lost",
+            "assessment_changed",
+            "contact_assessed",
+            "resource_available",
+            "mission_task_released",
+            "intent_changed",
+            "intent_expired",
             "uav_returned",
             "target_found",
             "target_lost",

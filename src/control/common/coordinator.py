@@ -27,7 +27,11 @@ from src.control.common.executor import ExecutionResult, UAVDynamicsExecutor
 from src.control.common.factory import ControlFactory
 from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
-from src.control.common.ownership import ControlLease, ControlOwnership
+from src.control.common.ownership import (
+    ControlLease,
+    ControlOwnership,
+    ControlOwnershipError,
+)
 from src.control.common.safety import (
     InvalidControlCommand,
     SafetyEnvelope,
@@ -139,6 +143,7 @@ class ControlCoordinator:
             factory,
             self._controllers,
             self._pending_tasks,
+            state_manager=state_manager,
             atomic=self._atomic,
         )
 
@@ -306,6 +311,169 @@ class ControlCoordinator:
         if old_controller is not None and old_controller is not controller:
             self._stop_controller(old_controller, StopReason.PREEMPTED)
         return lease
+
+    def assign_tasks_atomically(
+        self,
+        assignments: Sequence[tuple[str, ControlTask, int | None]],
+        *,
+        current_time: float,
+        dt_min: float = 1.0,
+    ) -> tuple[ControlLease, ...]:
+        """Prepare and commit several heuristic task assignments together."""
+        requests = tuple(assignments)
+        if not requests:
+            return ()
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        self._validate_time(dt_min, "dt_min")
+
+        prepared: list[
+            tuple[
+                str,
+                ControlTask,
+                int | None,
+                ControlLease,
+                ControllerBase,
+                str | None,
+                int | None,
+            ]
+        ] = []
+        seen_uavs: set[str] = set()
+        for request in requests:
+            if not isinstance(request, tuple) or len(request) != 3:
+                raise ControlCoordinatorError(
+                    "batch assignments must be (uav_id, task, expected_generation)"
+                )
+            uav_id, task, expected_generation = request
+            self._mode_for(uav_id)
+            if uav_id in seen_uavs:
+                raise ControlCoordinatorError(
+                    f"batch contains duplicate assignment for {uav_id}"
+                )
+            seen_uavs.add(uav_id)
+            if not isinstance(task, ControlTask):
+                raise ControlCoordinatorError("batch assignments require ControlTask values")
+            if expected_generation is not None and (
+                isinstance(expected_generation, bool)
+                or not isinstance(expected_generation, int)
+                or expected_generation < 0
+            ):
+                raise ControlCoordinatorError(
+                    "expected_generation must be a non-negative integer or None"
+                )
+            if self._configured_modes[uav_id] is not ControlMode.HEURISTIC:
+                raise ControlCoordinatorError(
+                    f"assign_tasks_atomically requires configured heuristic mode for {uav_id}"
+                )
+            current = self.ownership.current(uav_id)
+            if expected_generation is not None and (
+                current.generation != expected_generation
+            ):
+                raise StaleControlCommand(
+                    f"stale batch assignment for {uav_id}: expected generation "
+                    f"{expected_generation}, current generation {current.generation}"
+                )
+            if current.owner is ControlOwner.LEARNING:
+                raise ControlCoordinatorError(
+                    f"cannot assign a heuristic task under LEARNING owner for {uav_id}"
+                )
+            if (
+                current.owner is ControlOwner.SYSTEM
+                and self._operation_modes[uav_id] is OperationMode.RETURN
+            ):
+                raise ControlCoordinatorError(
+                    f"cannot assign a task while {uav_id} is returning"
+                )
+            controller = self.factory.create_heuristic(uav_id, task)
+            self._validate_controller(controller, ControlMode.HEURISTIC)
+            episode_id = None
+            sortie_number = None
+            if uav_id not in self._episode_ids:
+                if current.owner is not ControlOwner.SYSTEM:
+                    raise ControlCoordinatorError(
+                        f"cannot start a task under {current.owner.value} for {uav_id}"
+                    )
+                sortie_number = self._sortie_numbers.get(uav_id, 0) + 1
+                episode_id = f"{uav_id}:{sortie_number}"
+                controller.reset(
+                    ControllerContext(
+                        uav_id,
+                        dt_min,
+                        controller.observation_spec,
+                        controller.action_spec,
+                        episode_id,
+                        task,
+                    )
+                )
+            prepared.append(
+                (
+                    uav_id,
+                    task,
+                    expected_generation,
+                    current,
+                    controller,
+                    episode_id,
+                    sortie_number,
+                )
+            )
+
+        with self._lock:
+            for uav_id, _, expected_generation, observed, _, _, _ in prepared:
+                latest = self.ownership.current(uav_id)
+                if latest != observed:
+                    raise StaleControlCommand(
+                        self._stale_message(uav_id, observed, latest)
+                    )
+                if (
+                    expected_generation is not None
+                    and latest.generation != expected_generation
+                ):
+                    raise StaleControlCommand(
+                        f"stale batch assignment for {uav_id}: expected generation "
+                        f"{expected_generation}, current generation {latest.generation}"
+                    )
+
+            transition_requests = tuple(
+                (
+                    observed,
+                    ControlOwner.HEURISTIC,
+                    self._task_controller_id(task),
+                    current_time,
+                )
+                for _, task, _, observed, _, _, _ in prepared
+            )
+            try:
+                leases = self.ownership.transition_batch(transition_requests)
+            except ControlOwnershipError as exc:
+                raise StaleControlCommand(str(exc)) from exc
+
+            old_controllers: list[ControllerBase] = []
+            for (
+                uav_id,
+                task,
+                _,
+                _,
+                controller,
+                episode_id,
+                sortie_number,
+            ), _ in zip(prepared, leases):
+                self._task_flow.clear_saved_coverage(uav_id)
+                old_controller = self._controllers.get(uav_id)
+                if old_controller is not None and old_controller is not controller:
+                    old_controllers.append(old_controller)
+                self._controllers[uav_id] = controller
+                self._pending_tasks[uav_id] = task
+                if episode_id is not None and sortie_number is not None:
+                    self._episode_ids[uav_id] = episode_id
+                    self._sortie_numbers[uav_id] = sortie_number
+                    self._operation_modes[uav_id] = OperationMode.IDLE
+                    self._invalid_streaks[uav_id] = 0
+                    self._last_applied_commands[uav_id] = None
+                    self._last_safety_intervened[uav_id] = False
+                    self._last_tick_times[uav_id] = None
+
+        for controller in old_controllers:
+            self._stop_controller(controller, StopReason.PREEMPTED)
+        return leases
 
     def revoke_for_return(
         self,
@@ -498,6 +666,8 @@ class ControlCoordinator:
                 raise ControlCoordinatorError(
                     f"work has not started for {uav_id}"
                 ) from exc
+            pending_task = self._pending_tasks.get(uav_id)
+            active_task = pending_task or self.active_task(uav_id)
             observation = self.observations.build(
                 uav,
                 self.state_manager,
@@ -509,6 +679,7 @@ class ControlCoordinator:
                 safety_intervened=self._last_safety_intervened[uav_id],
                 current_time=current_time,
                 dt_min=dt_min,
+                task=active_task,
             )
             pending_task = self._pending_tasks.pop(uav_id, None)
             if pending_task is not None:
@@ -593,6 +764,14 @@ class ControlCoordinator:
         remaining = []
         for event in events:
             lease = self.ownership.current(uav_id)
+            if event.event_type == "duplicate_task_cancelled":
+                task = self.active_task(uav_id)
+                # A queued merge cancellation belongs to one controller
+                # generation, even when a replacement reuses the task ID.
+                if (task is None or event.payload.get("task_id") != task.task_id
+                        or event.payload.get("lease_generation") != lease.generation
+                        or event.payload.get("controller_id") != lease.controller_id):
+                    continue
             if (
                 lease.owner is not ControlOwner.HEURISTIC
                 or event.event_type not in EVENT_TRANSITIONS

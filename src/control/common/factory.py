@@ -20,6 +20,8 @@ from src.control.heuristic.return_to_base import (
     SystemHoldingController,
 )
 from src.control.heuristic.tracking import TrackingController
+from src.control.heuristic.probe import ProbeController
+from src.mission.config import ContactConfig
 from src.schedule.config_loader import ControlConfig
 
 
@@ -37,6 +39,7 @@ class ControlFactory:
         *,
         observation_spec: ObservationSpec | None = None,
         action_spec: ActionSpec | None = None,
+        contact_config: ContactConfig | None = None,
     ) -> None:
         self._config = config
         self._observation_spec = observation_spec or ObservationSpec(
@@ -44,6 +47,7 @@ class ControlFactory:
             config.observation.local_window_cells,
         )
         self._action_spec = action_spec or ActionSpec(-pi, pi, 0.1, 1.0)
+        self._contact_config = contact_config
         self._providers: dict[ControlMode, ControlProvider] = {
             ControlMode.HEURISTIC: self._create_builtin_heuristic,
         }
@@ -132,6 +136,10 @@ class ControlFactory:
             return CoverageController(**kwargs)
         if task.task_type is OperationMode.TRACK:
             return TrackingController(**kwargs)
+        if task.task_type is OperationMode.PROBE:
+            if self._contact_config is None:
+                raise ControlFactoryError("probe controller requires explicit ContactConfig")
+            return ProbeController(contact_config=self._contact_config, **kwargs)
         if task.task_type is OperationMode.RETURN:
             return ReturnToBaseController(**kwargs)
         if task.task_type is OperationMode.HOLDING:
@@ -146,10 +154,15 @@ class ControlFactory:
             raise ControlFactoryError("coverage task requires region_bbox")
         if task.task_type is OperationMode.TRACK and not task.target_contact_id:
             raise ControlFactoryError("track task requires target_contact_id")
+        if task.task_type is OperationMode.PROBE and (
+            not task.target_contact_id or not task.probe_id
+        ):
+            raise ControlFactoryError("probe task requires target_contact_id and probe_id")
         if task.task_type is OperationMode.RETURN and task.recovery_plan is None:
             raise ControlFactoryError("return task requires recovery_plan")
         if task.task_type not in {
             OperationMode.COVERAGE,
+            OperationMode.PROBE,
             OperationMode.TRACK,
             OperationMode.RETURN,
             OperationMode.HOLDING,
