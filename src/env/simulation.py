@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 import random
+import time
+import hashlib
 from uuid import uuid4
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -13,6 +15,7 @@ import numpy as np
 
 from src.env.base_station import BaseStation
 from src.env.ais_signal import generate_ais_signal
+from src.env.emitter import RadarEmitter
 from src.env.eo_sensor import EOSensor
 from src.env.obstacle import (
     Island,
@@ -26,6 +29,7 @@ from src.env.sar_sensor import SARSensor
 from src.env.ship import Ship, create_ship_population
 from src.env.sim_clock import SimClock
 from src.env.uav_entity import UAVEntity
+from src.sensor.passive import PassivePositionResolver, PassiveSensor
 from src.control.common.contracts import (
     ActionSpec,
     BaseObservation,
@@ -54,20 +58,26 @@ from src.control.heuristic.return_to_base import (
     RecoveryPlanner,
 )
 from src.schedule.config_loader import AppConfig
-from src.schedule.datatypes import GridCoord, Region
+from src.schedule.datatypes import BBox, GridCoord, Region
 from src.schedule.task_allocator import TaskAllocator
 from src.mission.contracts import (
     AssignmentBatch,
     CommandResult,
     ContactSnapshot,
-    IntentCommand,
+    CovarianceKernel,
+    EvidenceRecord,
+    PassiveBearingObservation,
+    PassivePosition,
+    PointKernel,
     ProbeSession,
-    RuntimeCommand,
     TaskCandidate,
     TaskRecord,
     VisualDetection,
+    VesselCommand,
 )
 from src.mission.contact_assessor import ContactAssessor
+from src.mission.evasion_detector import EvasionDetector
+from src.mission.handoff import HandoffManager
 from src.mission.outcome_evaluator import (
     EvaluationTick,
     OutcomeEvaluator,
@@ -75,10 +85,10 @@ from src.mission.outcome_evaluator import (
 )
 from src.mission.intent_commands import (
     IntentCommandQueue,
-    QueueFull,
     RuntimeCommandQueue,
 )
 from src.mission.intent_store import IntentStore
+from src.mission.vessel_commands import VesselCommandQueue, VesselCommandResult
 from src.mission.trajectory_features import advance_probe, build_features
 from src.mission.red_commander import (
     RedCommander,
@@ -102,6 +112,9 @@ from src.utils.search_route_planner import (
 )
 
 
+_SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
+
+
 class SimulationEngine:
     def __init__(
         self,
@@ -122,6 +135,12 @@ class SimulationEngine:
         self.reset_generation = 0
         self.rng = random.Random(seed)
         self.clock = SimClock()
+        self.vessel_commands = VesselCommandQueue(
+            maxsize=config.mission.intent.mutation_queue_limit,
+        )
+        self._vessel_revisions: dict[str, int] = {}
+        self._next_scenario_vessel_number = 1
+        self._editing_allowed = True
         base_positions = self._generate_base_positions()
         self.bases = [
             BaseStation(
@@ -200,6 +219,14 @@ class SimulationEngine:
         )
         self._evaluation_contact_links: dict[str, str] = {}
         self._outcome_evaluator = OutcomeEvaluator(self.episode_id)
+        self.handoff_manager = HandoffManager()
+        self.allocator.sm.handoff_manager = self.handoff_manager
+        self.evasion_detector = EvasionDetector(
+            config.mission.evasion,
+            cell_size_km=config.grid.cell_size_km,
+        )
+        self._ais_history: dict[str, list[tuple[float, tuple[float, float], str]]] = defaultdict(list)
+        self._evasion_observer_history: list[dict] = []
 
         self.uavs = [
             UAVEntity(
@@ -210,7 +237,7 @@ class SimulationEngine:
                 cell_size_km=config.grid.cell_size_km,
                 R_min=1.0,
             )
-            for index in range(config.uav.count_max)
+            for index in range(config.uav.count)
         ]
         for index, uav in enumerate(self.uavs):
             uav.heading_rad = self._inward_heading(self.bases[index % len(self.bases)].position)
@@ -237,6 +264,9 @@ class SimulationEngine:
                 max_range_cells=config.sensor.eoir.detection_range_km / config.grid.cell_size_km,
             )
             uav.storm_avoider.eo_detection_range_cells = uav.eo_sensor.max_range_cells
+        self._uav_position_history: dict[str, list[tuple[float, tuple[float, float]]]] = {
+            uav.id: [(0.0, uav.float_position)] for uav in self.uavs
+        }
 
         self._control_event_sequence = 1
         self._return_reservation_sequence = 1
@@ -299,6 +329,30 @@ class SimulationEngine:
             sample_step=heuristic.path_sample_step_cells,
         )
         self.ships = self._create_ships()
+        self._emitter_track_ids = {
+            ship.id: f"EMITTER-{index + 1:03d}"
+            for index, ship in enumerate(self.ships)
+            if ship.radar_emitter is not None
+        }
+        self.passive_sensors = {
+            uav.id: PassiveSensor(
+                config.sensor.passive,
+                seed=int.from_bytes(
+                    hashlib.sha256(
+                        f"{seed}:passive:{uav.id}".encode("ascii")
+                    ).digest()[:8],
+                    "big",
+                ),
+            )
+            for uav in self.uavs
+        }
+        self._passive_position_resolver = PassivePositionResolver()
+        self._next_passive_sample_min = float(config.sensor.passive.measurement_interval_min)
+        self._passive_sample_index = 0
+        self._ship_position_history: dict[str, list[tuple[float, tuple[float, float]]]] = {
+            ship.id: [(0.0, ship.float_position)] for ship in self.ships
+        }
+        self._vessel_revisions = {ship.id: 1 for ship in self.ships}
         self.red_commander = RedCommander(
             self.allocator.llm_client.gateway,
             config.ship,
@@ -363,6 +417,136 @@ class SimulationEngine:
         return self._runtime_status
 
     @property
+    def editing_allowed(self) -> bool:
+        return self._editing_allowed and self.clock.time <= 0.0
+
+    def vessel_command_result(self, command_id: str):
+        return self.vessel_commands.get(command_id)
+
+    def scenario_vessels(self) -> tuple[dict, ...]:
+        if not self.editing_allowed:
+            raise RuntimeError("editing_closed")
+        return tuple({
+            "scenario_entity_id": ship.id,
+            "revision": self._vessel_revisions.get(ship.id, 1),
+            "position": [float(ship.float_position[0]), float(ship.float_position[1])],
+            "vessel_class": ship.vessel_class,
+        } for ship in self.ships)
+
+    def apply_pending_vessel_commands(self) -> tuple[VesselCommandResult, ...]:
+        """Apply queued scenario edits on the simulation thread only."""
+        results: list[VesselCommandResult] = []
+        for command in self.vessel_commands.drain():
+            if command.episode_id != self.episode_id:
+                result = VesselCommandResult(
+                    command.command_id, "rejected", command.vessel_id, None,
+                    "episode_conflict",
+                )
+            elif not self.editing_allowed:
+                result = VesselCommandResult(
+                    command.command_id, "rejected", command.vessel_id, None,
+                    "editing_closed",
+                )
+            else:
+                try:
+                    if command.operation == "create":
+                        vessel = self._create_scenario_vessel(command)
+                        self.ships.append(vessel)
+                        self._vessel_revisions[vessel.id] = 1
+                        self._ship_position_history[vessel.id] = [
+                            (self.clock.time, vessel.float_position)
+                        ]
+                        if vessel.radar_emitter is not None:
+                            self._emitter_track_ids[vessel.id] = (
+                                f"EMITTER-{vessel.id}"
+                            )
+                        result = VesselCommandResult(
+                            command.command_id, "applied", vessel.id, 1, None,
+                        )
+                    else:
+                        vessel = next(
+                            (item for item in self.ships if item.id == command.vessel_id),
+                            None,
+                        )
+                        revision = self._vessel_revisions.get(command.vessel_id, 0)
+                        if vessel is None:
+                            raise ValueError("vessel_not_found")
+                        if revision != command.expected_revision:
+                            raise ValueError("revision_conflict")
+                        self.ships.remove(vessel)
+                        self._vessel_revisions.pop(vessel.id, None)
+                        self._ship_position_history.pop(vessel.id, None)
+                        self._emitter_track_ids.pop(vessel.id, None)
+                        result = VesselCommandResult(
+                            command.command_id, "applied", vessel.id, revision + 1, None,
+                        )
+                except ValueError as exc:
+                    code = str(exc)
+                    result = VesselCommandResult(
+                        command.command_id, "rejected", command.vessel_id, None, code,
+                    )
+            self.vessel_commands.complete(result)
+            results.append(result)
+        return tuple(results)
+
+    def _create_scenario_vessel(self, command: VesselCommand) -> Ship:
+        x, y = map(float, command.position_cells)
+        cols, rows = self.config.grid.resolution
+        margin = 1.0
+        if not (margin <= x < cols - margin and margin <= y < rows - margin):
+            raise ValueError("invalid_position")
+        cell = (int(math.floor(x)), int(math.floor(y)))
+        if self.ship_land_mask[cell[0], cell[1]] or self.obstacle_mask[cell[0], cell[1]]:
+            raise ValueError("invalid_position")
+        if any(math.dist((x, y), ship.float_position) < 1.0 for ship in self.ships):
+            raise ValueError("vessel_spacing_conflict")
+        vessel_id = f"scenario-vessel-{self._next_scenario_vessel_number}"
+        self._next_scenario_vessel_number += 1
+        side = 1.0
+        waypoints = (
+            (x, y, 0.0),
+            (min(cols - margin - 0.01, x + side), y, 0.0),
+            (min(cols - margin - 0.01, x + side), min(rows - margin - 0.01, y + side), math.pi / 2),
+            (x, min(rows - margin - 0.01, y + side), math.pi),
+        )
+        emitter = None
+        if command.vessel_class == "research":
+            emitter_seed = int.from_bytes(
+                hashlib.sha256(
+                    f"{self.seed}:{command.command_id}:manual-emitter".encode("ascii")
+                ).digest()[:8],
+                "big",
+            )
+            emitter = RadarEmitter(
+                vessel_id,
+                seed=emitter_seed,
+                config=self.config.sensor.emitter,
+            )
+        return Ship(
+            vessel_id,
+            GridCoord(int(math.floor(x)), int(math.floor(y))),
+            self.config.ship.speed_kn,
+            cell_size_km=self.config.grid.cell_size_km,
+            truth_identity="target" if command.vessel_class == "research" else "civilian",
+            ais_mode="civilian",
+            normal_route=waypoints,
+            patrol_route=waypoints,
+            ais_position_noise_cells=self.config.ship.ais_position_noise_cells,
+            max_turn_rate_deg_min=self.config.ship.max_turn_rate_deg_min,
+            yaw_time_constant_min=self.config.ship.yaw_time_constant_min,
+            heading_control_gain_per_min=self.config.ship.heading_control_gain_per_min,
+            turn_speed_loss_fraction=self.config.ship.turn_speed_loss_fraction,
+            max_acceleration_kn_per_min=self.config.ship.max_acceleration_kn_per_min,
+            land_mask=self.ship_land_mask,
+            navigator=self.ship_navigator,
+            navigation_horizon_min=self.config.ship.navigation_horizon_min,
+            integration_dt_min=self.config.ship.integration_dt_min,
+            navigation_clearance_cells=self.config.ship.navigation_clearance_cells,
+            radar_emitter=emitter,
+            vessel_class=command.vessel_class,
+        )
+
+    @property
     def blocked_role(self) -> str | None:
         """Read-only model role that currently blocks the simulation."""
         return self._blocked_role
@@ -371,6 +555,9 @@ class SimulationEngine:
         """Copy lifecycle metadata into the immutable frame source."""
         self.allocator.sm.runtime_status = self._runtime_status
         self.allocator.sm.blocked_role = self._blocked_role
+        self.allocator.sm.editing_allowed = self.editing_allowed
+        self.allocator.sm.configured_vessel_count = self.config.ship.population.total_count
+        self.allocator.sm.actual_vessel_count = len(getattr(self, "ships", ()))
         self.allocator.sm.memory_version = self.allocator.memory_version
         set_context = getattr(self.allocator.llm_client.gateway, "set_context", None)
         if callable(set_context):
@@ -611,6 +798,8 @@ class SimulationEngine:
     def step(self) -> dict:
         self.apply_pending_runtime_commands()
         self.apply_pending_intent_commands()
+        self.apply_pending_vessel_commands()
+        self._editing_allowed = False
         if self.runtime_status != "running":
             return self.last_result
         try:
@@ -626,6 +815,12 @@ class SimulationEngine:
         t = self.clock.tick()
         sm = self.allocator.sm
         sm.current_time = t
+        for failed_handoff in self.handoff_manager.advance(t):
+            sm.add_event("handoff_failed", {
+                "handoff_id": failed_handoff.handoff_id,
+                "contact_id": failed_handoff.contact_id,
+                "failure_reason": failed_handoff.failure_reason,
+            })
         self._publish_runtime_state()
         self._expire_intents(t)
 
@@ -694,6 +889,8 @@ class SimulationEngine:
                 })
                 self._begin_return(uav, t)
 
+        self._record_uav_position_history(t)
+        self._update_passive_sensors(t)
         self._update_sensors_and_detections(t)
         self._advance_probe_sessions(t)
         self._update_lifecycle_mode(t)
@@ -710,12 +907,28 @@ class SimulationEngine:
                 intents=self.intents.intents(),
                 intent_statuses=self._evaluate_intent_statuses(t),
             )
+            assignment_applied = batch is not None
             if batch is not None:
-                if not self.apply_assignment_batch(batch):
+                assignment_applied = self.apply_assignment_batch(batch)
+                if not assignment_applied:
                     result = {
                         **result,
                         "action": "mission_assignment_rejected",
                     }
+            timing = getattr(self.allocator, "last_decision_timing", None)
+            if timing is not None:
+                self._outcome_evaluator.record_decision_latency(
+                    snapshot_frozen_wall=timing["snapshot_frozen_wall"],
+                    decision_finished_wall=(
+                        timing["decision_finished_wall"]
+                        if assignment_applied else time.perf_counter()
+                    ),
+                    llm_seconds=timing["llm_seconds"],
+                    validation_seconds=timing["validation_seconds"],
+                    matching_seconds=timing["matching_seconds"],
+                    success=assignment_applied,
+                    failure_reason=None if assignment_applied else "assignment_rejected",
+                )
         self.last_result = result
         if result["trigger_type"] == "heavy":
             self.heavy_triggers += 1
@@ -819,7 +1032,7 @@ class SimulationEngine:
             if uav is None:
                 return False
 
-            if candidate.kind == "search":
+            if candidate.kind in _SEARCH_TASK_KINDS:
                 if candidate.bbox is None:
                     return False
                 region = Region(
@@ -862,7 +1075,11 @@ class SimulationEngine:
                     return False
                 if contact.state in {"cleared", "lost", "departed"}:
                     return False
-                if candidate.kind == "track" and contact.identity != "target":
+                if candidate.kind == "track" and not (
+                    contact.identity == "target"
+                    or getattr(contact, "activity", "unknown")
+                    in {"suspected_violation", "confirmed_violation"}
+                ):
                     return False
                 if candidate.kind == "probe" and contact.identity != "unknown":
                     return False
@@ -933,6 +1150,40 @@ class SimulationEngine:
             })
             return False
 
+        for assignment in batch.assignments:
+            candidate = candidates[assignment.task_id]
+            if candidate.contact_id is None:
+                continue
+            contact_id = self.allocator.sm.resolve_contact_id(candidate.contact_id)
+            attempt = next(
+                (
+                    item for item in self.handoff_manager.attempts()
+                    if item.contact_id == contact_id
+                    and item.state == "required"
+                    and item.source_uav_id != assignment.uav_id
+                ),
+                None,
+            )
+            if attempt is None:
+                continue
+            try:
+                self.handoff_manager.commit_assignment(
+                    attempt.handoff_id,
+                    assignment.uav_id,
+                    self.clock.time,
+                )
+            except (KeyError, ValueError):
+                return False
+            self._outcome_evaluator.record_handoff_assignment(
+                attempt.handoff_id,
+                at_min=self.clock.time,
+            )
+            self.allocator.sm.add_event("handoff_assignment_committed", {
+                "handoff_id": attempt.handoff_id,
+                "contact_id": contact_id,
+                "successor_uav_id": assignment.uav_id,
+            })
+
         by_uav = {
             assignment.uav_id: (uav, task, candidate, assignment, previous_task)
             for (uav, task, candidate, assignment, previous_task) in prepared
@@ -942,7 +1193,7 @@ class SimulationEngine:
             if old_task is not None and old_task.task_id != task.task_id:
                 old_record = self._mission_task_records.get(old_task.task_id)
                 if old_record is not None:
-                    if old_record.kind == "search":
+                    if old_record.kind in _SEARCH_TASK_KINDS:
                         self._mission_task_records[old_task.task_id] = replace(
                             old_record,
                             status="approved",
@@ -961,13 +1212,13 @@ class SimulationEngine:
                 for region in self.allocator.sm.get_search_regions():
                     if region.id == old_task.task_id:
                         region.status = "active" if (
-                            old_record is not None and old_record.kind == "search"
+                            old_record is not None and old_record.kind in _SEARCH_TASK_KINDS
                         ) else "stale"
                         region.assigned_uav_id = None
                 self.allocator.sm.mark_uav_reassigned(
                     assignment.uav_id, self.clock.time,
                 )
-            if candidate.kind == "search":
+            if candidate.kind in _SEARCH_TASK_KINDS:
                 region = Region(
                     candidate.task_id,
                     BBox(*candidate.bbox),
@@ -1485,6 +1736,67 @@ class SimulationEngine:
             "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
         })
 
+    def _require_handoff(self, uav: UAVEntity, report, current_time: float):
+        """Create one projected handoff fact before releasing a tracker."""
+        if report is None or not uav.target_group_id:
+            return None
+        sm = self.allocator.sm
+        successors = tuple(
+            candidate.id for candidate in sm.get_available_uavs()
+            if candidate.id != uav.id
+        )
+        existing_ids = {
+            attempt.handoff_id for attempt in self.handoff_manager.attempts()
+        }
+        attempt = self.handoff_manager.require(
+            report.contact_id,
+            source_uav_id=uav.id,
+            required_at_min=current_time,
+            last_position=(float(report.position.col), float(report.position.row)),
+            velocity_cells_min=report.velocity_cells_per_min,
+            last_observed_at_min=report.observed_at,
+        )
+        if attempt.handoff_id not in existing_ids:
+            evidence = self.handoff_manager.evidence(attempt.handoff_id)
+            if evidence.mean is not None and evidence.covariance_cells2 is not None:
+                fact = EvidenceRecord(
+                    evidence_id=attempt.evidence_id,
+                    kind="handoff",
+                    source_id=report.contact_id,
+                    contact_id=report.contact_id,
+                    observed_at_min=current_time,
+                    expires_at_min=current_time + 10.0,
+                    strength=1.0,
+                    spatial=CovarianceKernel(
+                        mean_cells=evidence.mean,
+                        covariance_cells2=evidence.covariance_cells2,
+                    ),
+                )
+                delta = sm.apply_information_facts([fact], current_time)
+                if delta is not None:
+                    self.allocator.trigger_manager.notify_information_delta(
+                        delta, time=current_time,
+                    )
+            self._outcome_evaluator.register_handoff(
+                attempt.handoff_id,
+                at_min=current_time,
+                successor_uav_ids=successors,
+            )
+            sm.add_event("handoff_required", {
+                "handoff_id": attempt.handoff_id,
+                "contact_id": attempt.contact_id,
+                "source_uav_id": attempt.source_uav_id,
+                "successor_uav_ids": list(successors),
+                "evidence_id": attempt.evidence_id,
+            })
+            self.allocator.trigger_manager.notify_event(
+                "handoff_required",
+                time=current_time,
+                uav_id=uav.id,
+                contact_id=report.contact_id,
+            )
+        return attempt
+
     def _prepare_return_state(self, uav: UAVEntity, current_time: float) -> None:
         sm = self.allocator.sm
         self._freshness_patrol_uavs.discard(uav.id)
@@ -1495,6 +1807,7 @@ class SimulationEngine:
         group_id = uav.target_group_id
         if group_id:
             report = sm.get_target_report(group_id)
+            self._require_handoff(uav, report, current_time)
             track = sm.get_track_region_for_group(group_id)
             if track is not None and track.assigned_uav_id == uav.id:
                 sm.release_track_region(track.id, uav.id, create_marker=True)
@@ -1732,7 +2045,17 @@ class SimulationEngine:
     def _update_ships(self, current_time: float) -> None:
         islands = [item for item in self.obstacles if isinstance(item, Island)]
         for ship in self.ships:
-            ship.step(self.clock.dt_min, islands)
+            try:
+                ship.step(self.clock.dt_min, islands, current_time=current_time)
+            except TypeError as exc:
+                # Keep legacy replay/test adapters with the original two-argument
+                # step signature working while the production Ship receives time.
+                if "current_time" not in str(exc):
+                    raise
+                ship.step(self.clock.dt_min, islands)
+            history = self._ship_position_history.setdefault(ship.id, [])
+            history.append((float(current_time), tuple(ship.float_position)))
+            del history[:-600]
             if ship.departed and ship.contact_id not in self._departed_contacts:
                 self._departed_contacts.add(ship.contact_id)
                 ship.set_tracked(False)
@@ -1743,14 +2066,193 @@ class SimulationEngine:
         interval = self.config.ship.ais_update_interval_min
         if current_time - getattr(self, "_last_ais_update", float("-inf")) < interval:
             return
+        ais_facts: list[EvidenceRecord] = []
         for ship in self.ships:
             if not ship.departed:
                 signal = generate_ais_signal(ship, current_time)
                 ship.set_ais_signal(signal)
                 if signal is not None:
-                    self.allocator.sm.contacts.ingest_ais(signal, current_time)
+                    contact_id = self.allocator.sm.contacts.ingest_ais(signal, current_time)
+                    self._ais_history[signal.mmsi].append((
+                        float(signal.timestamp),
+                        tuple(signal.reported_position),
+                        signal.mmsi,
+                    ))
+                    self._ais_history[signal.mmsi] = self._ais_history[signal.mmsi][-64:]
+                    # Initialization keeps legacy AIS contacts available to
+                    # the operator, but does not create planning evidence
+                    # before the edit window closes.
+                    if current_time > 0.0 or not self.editing_allowed:
+                        if self.allocator.sm.ais_updates.is_enabled(signal.mmsi):
+                            ais_facts.append(EvidenceRecord(
+                                evidence_id=(
+                                    f"AIS-EVIDENCE:{signal.mmsi}:"
+                                    f"{float(signal.timestamp).hex()}"
+                                ),
+                                kind="ais_position",
+                                source_id=signal.mmsi,
+                                contact_id=contact_id,
+                                observed_at_min=float(signal.timestamp),
+                                expires_at_min=float(signal.timestamp) + 15.0,
+                                strength=0.35,
+                                spatial=PointKernel(
+                                    mean_cells=tuple(signal.reported_position),
+                                    sigma_cells=max(
+                                        0.05,
+                                        self.config.ship.ais_position_noise_cells,
+                                    ),
+                                ),
+                            ))
         self._last_ais_update = current_time
+        if ais_facts:
+            delta = self.allocator.sm.apply_information_facts(ais_facts, current_time)
+            if delta is not None:
+                self.allocator.trigger_manager.notify_information_delta(
+                    delta, time=current_time,
+                )
         self._publish_contact_events(current_time)
+
+    @staticmethod
+    def _position_from_history(
+        history: list[tuple[float, tuple[float, float]]],
+        at_min: float,
+    ) -> tuple[float, float] | None:
+        if not history:
+            return None
+        if at_min <= history[0][0]:
+            return history[0][1]
+        for (left_time, left), (right_time, right) in zip(history, history[1:]):
+            if left_time <= at_min <= right_time:
+                span = right_time - left_time
+                if span <= 1e-12:
+                    return right
+                fraction = (at_min - left_time) / span
+                return (
+                    left[0] + fraction * (right[0] - left[0]),
+                    left[1] + fraction * (right[1] - left[1]),
+                )
+        return history[-1][1]
+
+    def _record_uav_position_history(self, current_time: float) -> None:
+        for uav in self.uavs:
+            history = self._uav_position_history.setdefault(uav.id, [])
+            position = tuple(uav.float_position)
+            if history and abs(history[-1][0] - current_time) <= 1e-9:
+                history[-1] = (float(current_time), position)
+            else:
+                history.append((float(current_time), position))
+            del history[:-600]
+
+    def _update_passive_sensors(self, current_time: float) -> None:
+        """Sample active emitters on one absolute clock and publish facts."""
+        sm = self.allocator.sm
+        interval = float(self.config.sensor.passive.measurement_interval_min)
+        for ship in self.ships:
+            if ship.radar_emitter is not None:
+                ship.radar_emitter.advance(current_time)
+
+        while self._next_passive_sample_min <= current_time + 1e-9:
+            sample_time = self._next_passive_sample_min
+            self._passive_sample_index += 1
+            sample_id = f"{self.episode_id}:passive:{self._passive_sample_index:08d}"
+            observations: list[PassiveBearingObservation] = []
+            grouped: dict[tuple[str, str, str], list[PassiveBearingObservation]] = defaultdict(list)
+            for ship in self.ships:
+                emitter = ship.radar_emitter
+                track_id = self._emitter_track_ids.get(ship.id)
+                if emitter is None or track_id is None or ship.departed:
+                    continue
+                burst = emitter.current_burst_at(sample_time)
+                if burst is None or burst.burst_id is None:
+                    continue
+                emitter_position = self._position_from_history(
+                    self._ship_position_history.get(ship.id, []), sample_time,
+                )
+                if emitter_position is None:
+                    emitter_position = ship.float_position
+                for uav in self.uavs:
+                    sensor = self.passive_sensors[uav.id]
+                    observer_position = self._position_from_history(
+                        self._uav_position_history.get(uav.id, []), sample_time,
+                    ) or tuple(uav.float_position)
+                    observation = sensor.observe(
+                        sample_id,
+                        uav.id,
+                        observer_position,
+                        track_id,
+                        burst.burst_id,
+                        emitter_position,
+                        self.config.sensor.emitter.source_power_at_reference_db,
+                        sample_time,
+                        burst_active=True,
+                    )
+                    if observation is None:
+                        continue
+                    observations.append(observation)
+                    grouped[(
+                        observation.sample_id,
+                        observation.emitter_track_id,
+                        observation.burst_id,
+                    )].append(observation)
+
+            positions: list[PassivePosition] = []
+            for key, group in sorted(grouped.items()):
+                track_id = key[1]
+                ship = next(
+                    (item for item in self.ships
+                     if self._emitter_track_ids.get(item.id) == track_id),
+                    None,
+                )
+                if ship is None:
+                    continue
+                emitter_position = self._position_from_history(
+                    self._ship_position_history.get(ship.id, []), sample_time,
+                ) or ship.float_position
+                position = self._passive_position_resolver.release(
+                    group, emitter_position,
+                )
+                if position is not None:
+                    positions.append(position)
+
+            activity_facts = []
+            for position in positions:
+                sm.register_passive_position(position)
+                activity_facts.extend(sm.drain_radiation_activity_evidence())
+            facts = [*observations, *positions, *activity_facts]
+            if facts:
+                sm.record_passive_observations(tuple(observations))
+                delta = sm.apply_information_facts(facts, sample_time)
+                if delta is not None:
+                    self.allocator.trigger_manager.notify_information_delta(
+                        delta, time=sample_time,
+                    )
+                for activity in activity_facts:
+                    sm.add_event("radiation_activity_evidence", {
+                        "evidence_id": activity.evidence_id,
+                        "contact_id": activity.contact_id,
+                        "source_id": activity.source_id,
+                        "observed_at_min": activity.observed_at_min,
+                    })
+                for observation in observations:
+                    sm.add_event("passive_bearing_observed", {
+                        "observation_id": observation.observation_id,
+                        "sample_id": observation.sample_id,
+                        "emitter_track_id": observation.emitter_track_id,
+                        "burst_id": observation.burst_id,
+                        "observer_uav_id": observation.observer_uav_id,
+                        "observer_position": list(observation.observer_position_cells),
+                        "bearing_deg": observation.bearing_deg,
+                    })
+                for position in positions:
+                    sm.add_event("passive_position_released", {
+                        "position_id": position.position_id,
+                        "sample_id": position.sample_id,
+                        "emitter_track_id": position.emitter_track_id,
+                        "burst_id": position.burst_id,
+                        "position": list(position.position_cells),
+                        "source_observation_ids": list(position.source_observation_ids),
+                    })
+            self._next_passive_sample_min += interval
 
     def _publish_contact_events(self, current_time: float) -> None:
         sm = self.allocator.sm
@@ -1805,6 +2307,58 @@ class SimulationEngine:
             if event["type"] in ("contact_created", "contact_merged", "contact_lost"):
                 self.allocator.trigger_manager.notify_event(
                     event["type"], time=current_time, contact_id=event["contact_id"])
+
+    def _evaluate_evasion(self, current_time: float) -> None:
+        """Derive AIS evasion facts from observed tracks, never from truth."""
+        sm = self.allocator.sm
+        for uav in self.uavs:
+            mission_kind = str(getattr(uav, "mission_kind", "")).lower()
+            if uav.status == "tracking" or mission_kind in {"probe", "track_entry"}:
+                operation = "track" if uav.status == "tracking" else "probe"
+            else:
+                operation = "idle"
+            self._evasion_observer_history.append({
+                "uav_id": uav.id,
+                "timestamp": float(current_time),
+                "position": tuple(uav.float_position),
+                "operation": operation,
+            })
+        self._evasion_observer_history = self._evasion_observer_history[-640:]
+        cols, rows = self.config.grid.resolution
+        boundary = (0.0, 0.0, float(cols), float(rows))
+        for mmsi, history in tuple(self._ais_history.items()):
+            if len(history) < 2:
+                continue
+            contact_id = next(
+                (
+                    contact.contact_id
+                    for contact in sm.contacts.list_snapshots()
+                    if contact.ais_mmsi == mmsi
+                ),
+                mmsi,
+            )
+            facts = self.evasion_detector.evaluate(
+                history,
+                self._evasion_observer_history,
+                now_min=current_time,
+                mission_boundary=boundary,
+                obstacles=self.obstacles,
+                contact_id=contact_id,
+            )
+            for fact in facts:
+                delta = sm.apply_information_facts([fact], current_time)
+                if delta is not None:
+                    self.allocator.trigger_manager.notify_information_delta(
+                        delta, time=current_time,
+                    )
+                sm.add_event("evasive_maneuver_detected", {
+                    "fact_id": fact.fact_id,
+                    "evasion_episode_id": fact.evasion_episode_id,
+                    "episode_started": fact.episode_started,
+                    "mmsi": fact.mmsi,
+                    "contact_id": fact.contact_id,
+                    "position": list(fact.position_cells),
+                })
 
     def _expire_contacts(self, current_time: float) -> None:
         self.allocator.sm.contacts.expire(current_time)
@@ -1967,6 +2521,7 @@ class SimulationEngine:
                 uav.sar_footprint = []
                 if uav.status != "tracking":
                     uav.eo_fov = None
+        self._evaluate_evasion(current_time)
         self._publish_contact_events(current_time)
 
     def _advance_probe_sessions(self, current_time: float) -> None:
@@ -2027,6 +2582,18 @@ class SimulationEngine:
                 sm.contacts.apply_assessment(assessment)
             except (TypeError, ValueError):
                 continue
+            if assessment.identity == "civilian":
+                assessed_contact = sm.contacts.snapshot(assessment.contact_id)
+                if assessed_contact.ais_mmsi:
+                    ais_state = sm.ais_updates.disable(
+                        assessed_contact.ais_mmsi,
+                        now_min=current_time,
+                    )
+                    sm.add_event("ais_value_updates_disabled", {
+                        "mmsi": assessed_contact.ais_mmsi,
+                        "revision": ais_state.revision,
+                        "contact_id": assessment.contact_id,
+                    })
             self._apply_probe_assessment(assessment, advanced, current_time)
         self._publish_contact_events(current_time)
 
@@ -2183,6 +2750,30 @@ class SimulationEngine:
                 self._visual_detection(uav, estimate, current_time, "eo"))
             self.allocator.sm.scan_cell(
                 GridCoord(*(int(round(v)) for v in estimate)), current_time, True)
+            contact_id = self.allocator.sm.resolve_contact_id(uav.target_group_id)
+            for attempt in self.handoff_manager.attempts():
+                if (
+                    attempt.state == "pending"
+                    and attempt.successor_uav_id == uav.id
+                    and self.allocator.sm.resolve_contact_id(attempt.contact_id) == contact_id
+                ):
+                    try:
+                        locked = self.handoff_manager.acquire_eo_lock(
+                            attempt.handoff_id,
+                            uav.id,
+                            current_time,
+                        )
+                    except (KeyError, ValueError):
+                        continue
+                    self._outcome_evaluator.record_handoff_lock(
+                        locked.handoff_id,
+                        at_min=current_time,
+                    )
+                    self.allocator.sm.add_event("handoff_eo_lock_acquired", {
+                        "handoff_id": locked.handoff_id,
+                        "contact_id": contact_id,
+                        "successor_uav_id": uav.id,
+                    })
 
     def _visual_detection(self, uav, position, current_time, source) -> VisualDetection:
         self._visual_sample_counter = getattr(self, "_visual_sample_counter", 0) + 1
@@ -2311,7 +2902,11 @@ class SimulationEngine:
                 tuple(ship.float_position),
                 bool(ship.departed),
                 ship.ais_mode == "civilian",
-                "departed" if ship.departed else getattr(ship, "navigation_status", "ready"),
+                (
+                    "departed" if ship.departed
+                    else "survey" if ship.activity_state_at(current_time) == "survey"
+                    else getattr(ship, "navigation_status", "ready")
+                ),
             )
             for ship in self.ships
         )
@@ -2408,6 +3003,7 @@ class SimulationEngine:
         self._ais_measurements.pop(uav.id, None)
         if uav.target_group_id:
             report = sm.get_target_report(uav.target_group_id)
+            self._require_handoff(uav, report, current_time)
             track = sm.get_track_region_for_group(uav.target_group_id)
             if track is not None and track.assigned_uav_id == uav.id:
                 sm.release_track_region(track.id, uav.id, create_marker=release_marker)

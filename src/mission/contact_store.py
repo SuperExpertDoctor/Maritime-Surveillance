@@ -11,7 +11,16 @@ import math
 
 from src.env.ais_signal import AISSignal
 from src.mission.config import ContactConfig
-from src.mission.contracts import Assessment, ContactSnapshot, ObservationSample, VisualDetection
+from src.mission.contracts import (
+    Assessment,
+    ContactAssessment,
+    ContactSnapshot,
+    EvidenceRecord,
+    ObservationSample,
+    PassivePosition,
+    PointKernel,
+    VisualDetection,
+)
 
 
 class ContactStore:
@@ -29,6 +38,11 @@ class ContactStore:
         self._confirmations: dict[str, tuple[str, int, float]] = {}
         self._events: list[dict] = []
         self._archive: list[ObservationSample] = []
+        self._emitter_contacts: dict[str, str] = {}
+        self._passive_position_ids: dict[str, str] = {}
+        self._passive_bursts: dict[str, dict[str, float]] = {}
+        self._radiation_activity_bursts: dict[str, set[str]] = {}
+        self._radiation_activity_queue: list[EvidenceRecord] = []
         self._counter = 0
         self._now = 0.0
 
@@ -43,6 +57,179 @@ class ContactStore:
     @property
     def archived_samples(self) -> tuple[ObservationSample, ...]:
         return tuple(self._archive)
+
+    @property
+    def emitter_contacts(self) -> dict[str, str]:
+        """Return stable signal-track associations without exposing vessel truth."""
+        return {
+            emitter: self.resolve(contact_id)
+            for emitter, contact_id in self._emitter_contacts.items()
+        }
+
+    def passive_burst_count(
+        self,
+        contact_id: str,
+        now_min: float,
+        *,
+        window_min: float = 10.0,
+    ) -> int:
+        self._finite_time(now_min)
+        if not math.isfinite(window_min) or window_min <= 0.0:
+            raise ValueError("window_min must be positive and finite")
+        resolved = self.resolve(contact_id)
+        bursts = self._passive_bursts.get(resolved, {})
+        return len({
+            burst_id for burst_id, timestamp in bursts.items()
+            if now_min - timestamp <= window_min
+        })
+
+    def drain_radiation_activity_evidence(self) -> tuple[EvidenceRecord, ...]:
+        """Return newly qualified radiation activity facts once, in order."""
+        evidence = tuple(self._radiation_activity_queue)
+        self._radiation_activity_queue.clear()
+        return evidence
+
+    def ingest_passive_position(
+        self,
+        position: PassivePosition,
+        *,
+        association_radius_cells: float = 1.0,
+        radiation_window_min: float = 10.0,
+        min_distinct_bursts: int = 2,
+    ) -> str:
+        """Associate a released passive position using observation geometry only.
+
+        The emitter track is stable across bursts.  A visual/AIS contact is
+        reused only when it is the unique nearest prediction inside the
+        configured radius; an equidistant pair remains a separate signal
+        contact and emits an ambiguity event.
+        """
+        if not isinstance(position, PassivePosition):
+            raise TypeError("position must be PassivePosition")
+        if (not math.isfinite(association_radius_cells)
+                or association_radius_cells <= 0.0):
+            raise ValueError("association_radius_cells must be positive and finite")
+        if not math.isfinite(radiation_window_min) or radiation_window_min <= 0.0:
+            raise ValueError("radiation_window_min must be positive and finite")
+        if (isinstance(min_distinct_bursts, bool)
+                or not isinstance(min_distinct_bursts, int)
+                or min_distinct_bursts < 1):
+            raise ValueError("min_distinct_bursts must be a positive integer")
+        known = self._passive_position_ids.get(position.position_id)
+        if known is not None:
+            return self.resolve(known)
+        self._finite_time(position.observed_at_min)
+        self._now = max(self._now, position.observed_at_min)
+
+        contact_id = self._emitter_contacts.get(position.emitter_track_id)
+        if contact_id is not None:
+            contact_id = self.resolve(contact_id)
+        else:
+            signal_ids = {
+                self.resolve(value) for value in self._emitter_contacts.values()
+            }
+            distances = []
+            for contact in self.list_snapshots():
+                if contact.contact_id in signal_ids or contact.state == "departed":
+                    continue
+                if abs(position.observed_at_min - contact.last_seen_min) > self.config.stale_after_min:
+                    continue
+                predicted = self._predicted_position(contact, position.observed_at_min)
+                distances.append((
+                    math.dist(position.position_cells, predicted), contact.contact_id,
+                ))
+            distances.sort()
+            if distances and distances[0][0] <= association_radius_cells:
+                tied = len(distances) > 1 and abs(
+                    distances[1][0] - distances[0][0]
+                ) <= 1e-9
+                if tied:
+                    self._event(
+                        "ambiguous_contact_association",
+                        emitter_track_id=position.emitter_track_id,
+                        position_id=position.position_id,
+                    )
+                else:
+                    contact_id = distances[0][1]
+                    self._event(
+                        "passive_position_associated",
+                        emitter_track_id=position.emitter_track_id,
+                        position_id=position.position_id,
+                        contact_id=contact_id,
+                    )
+            if contact_id is None:
+                contact_id = self._create(
+                    position.position_cells, position.observed_at_min,
+                )
+                self._event(
+                    "passive_signal_contact_created",
+                    emitter_track_id=position.emitter_track_id,
+                    position_id=position.position_id,
+                    contact_id=contact_id,
+                )
+            self._emitter_contacts[position.emitter_track_id] = contact_id
+
+        contact_id = self.resolve(contact_id)
+        contact = self.snapshot(contact_id)
+        previous_position = contact.estimated_position_cells
+        dt = position.observed_at_min - contact.last_seen_min
+        velocity = contact.estimated_velocity_cells_min
+        if dt > 1e-9 and contact.revision > 0:
+            velocity = tuple(
+                (current - previous) / dt
+                for current, previous in zip(position.position_cells, previous_position)
+            )
+        state = contact.state
+        if state == "lost":
+            state = "cleared" if contact.identity == "civilian" else "pending"
+        updated = replace(
+            contact,
+            revision=max(1, contact.revision + 1),
+            state=state,
+            first_seen_min=min(contact.first_seen_min, position.observed_at_min),
+            last_seen_min=max(contact.last_seen_min, position.observed_at_min),
+            estimated_position_cells=tuple(position.position_cells),
+            estimated_velocity_cells_min=velocity,
+        )
+        self._contacts[contact_id] = updated
+        self._passive_position_ids[position.position_id] = contact_id
+        bursts = self._passive_bursts.setdefault(contact_id, {})
+        bursts[position.burst_id] = position.observed_at_min
+        cutoff = position.observed_at_min - radiation_window_min
+        self._passive_bursts[contact_id] = {
+            burst_id: timestamp
+            for burst_id, timestamp in bursts.items()
+            if timestamp >= cutoff
+        }
+        qualified_bursts = self._radiation_activity_bursts.setdefault(contact_id, set())
+        if (
+            len(self._passive_bursts[contact_id]) >= min_distinct_bursts
+            and position.burst_id not in qualified_bursts
+        ):
+            qualified_bursts.add(position.burst_id)
+            self._radiation_activity_queue.append(EvidenceRecord(
+                evidence_id=(
+                    f"RADIATION-ACTIVITY:{position.emitter_track_id}:"
+                    f"{position.burst_id}"
+                ),
+                kind="research_assessment",
+                source_id=position.emitter_track_id,
+                contact_id=contact_id,
+                observed_at_min=position.observed_at_min,
+                expires_at_min=position.observed_at_min + 60.0,
+                strength=0.85,
+                spatial=PointKernel(
+                    mean_cells=position.position_cells,
+                    sigma_cells=1.0,
+                ),
+            ))
+            self._event(
+                "radiation_activity_evidence",
+                contact_id=contact_id,
+                emitter_track_id=position.emitter_track_id,
+                burst_id=position.burst_id,
+            )
+        return contact_id
 
     def resolve(self, contact_id: str) -> str:
         while contact_id in self._aliases:
@@ -124,8 +311,15 @@ class ContactStore:
         if detection.sample_id in self._sample_contacts:
             return self.resolve(self._sample_contacts[detection.sample_id])
         self._now = max(self._now, detection.observed_at_min)
-        visual_contacts = [c for c in self.list_snapshots()
-                           if any(s.source != "ais" for s in c.samples)]
+        signal_contacts = {
+            self.resolve(contact_id)
+            for contact_id in self._emitter_contacts.values()
+        }
+        visual_contacts = [
+            c for c in self.list_snapshots()
+            if c.contact_id in signal_contacts
+            or any(s.source != "ais" for s in c.samples)
+        ]
         cid, ambiguous = self._nearest(detection.position_cells, detection.observed_at_min,
                                       visual_contacts)
         if cid is None:
@@ -334,7 +528,19 @@ class ContactStore:
                 or not any(s.source != "ais" and s.sample_id in assessment.evidence_sample_ids
                            for s in c.samples)):
             raise ValueError("terminal assessment requires confident visual evidence")
-        c = replace(c, identity=assessment.identity, last_assessment=assessment)
+        dimension_class = {
+            "civilian": "civilian",
+            "target": "research",
+        }.get(assessment.identity)
+        c = replace(
+            c,
+            identity=assessment.identity,
+            last_assessment=assessment,
+            _vessel_class=dimension_class or c.vessel_class,
+            _class_confidence=(
+                assessment.confidence if dimension_class else c.class_confidence
+            ),
+        )
         if assessment.identity == "civilian":
             c = replace(c, state="cleared", cleared_at_min=assessment.assessed_at_min,
                         next_probe_not_before_min=assessment.assessed_at_min + self.config.civilian_recheck_cooldown_min)
@@ -343,3 +549,62 @@ class ContactStore:
         self._contacts[c.contact_id] = c
         if c.state == "cleared":
             self.release(c.contact_id, assessment.assessed_at_min, "civilian")
+
+    def apply_dimension_assessment(
+        self,
+        contact_id: str,
+        assessment: ContactAssessment,
+        *,
+        assessed_at_min: float,
+        expected_revision: int | None = None,
+    ) -> ContactSnapshot:
+        """Commit an observation-derived class/activity assessment.
+
+        This is separate from the legacy gateway ``Assessment`` because class
+        and activity have independent evidence references and confidences.
+        """
+        if not isinstance(assessment, ContactAssessment):
+            raise TypeError("assessment must be ContactAssessment")
+        self._finite_time(assessed_at_min)
+        contact = self.snapshot(contact_id)
+        if expected_revision is not None and contact.revision != expected_revision:
+            raise ValueError("contact revision conflict")
+        for name in ("class_evidence_ids", "activity_evidence_ids"):
+            ids = getattr(assessment, name)
+            if any(not isinstance(item, str) or not item for item in ids):
+                raise ValueError(f"{name} must contain non-empty IDs")
+        if (
+            assessment.vessel_class != "unknown"
+            and assessment.class_confidence < self.config.assessment_confidence_min
+        ):
+            raise ValueError("class assessment confidence is below threshold")
+        if (
+            assessment.activity != "unknown"
+            and assessment.activity_confidence < self.config.assessment_confidence_min
+        ):
+            raise ValueError("activity assessment confidence is below threshold")
+        updated = replace(
+            contact,
+            _vessel_class=assessment.vessel_class,
+            _class_confidence=assessment.class_confidence,
+            _class_evidence_ids=assessment.class_evidence_ids,
+            _activity=assessment.activity,
+            _activity_confidence=assessment.activity_confidence,
+            _activity_evidence_ids=assessment.activity_evidence_ids,
+        )
+        if assessment.activity in {"suspected_violation", "confirmed_violation"}:
+            updated = replace(updated, state="tracking")
+        self._contacts[updated.contact_id] = updated
+        self._event(
+            "assessment_changed",
+            contact_id=updated.contact_id,
+            assessed_at_min=assessed_at_min,
+            vessel_class=assessment.vessel_class,
+            activity=assessment.activity,
+            class_evidence_ids=assessment.class_evidence_ids,
+            activity_evidence_ids=assessment.activity_evidence_ids,
+        )
+        return updated
+
+    # Explicit alias for callers using the contract's terminology.
+    apply_contact_assessment = apply_dimension_assessment

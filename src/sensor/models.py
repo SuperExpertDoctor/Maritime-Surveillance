@@ -1,8 +1,9 @@
 """传感器模型：SAR、EO/IR、雷帧 —— 探测概率 + 距离限制 + 传感器融合。"""
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from src.schedule.datatypes import GridCoord
+from src.mission.config import PassiveConfig, EmitterConfig
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,8 @@ class SensorConfig:
     eoir: EoIrConfig
     radar: RadarConfig
     general: GeneralSensorConfig
+    passive: PassiveConfig = field(default_factory=PassiveConfig)
+    emitter: EmitterConfig = field(default_factory=EmitterConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +187,9 @@ class SensorSuite:
         self.sar = sar
         self.eoir = eoir
         self.radar = radar
-        self._sensors = [sar, eoir, radar]
+        # Radar remains available as a configured legacy component, but it is
+        # not a passive discovery source in the aligned mission contract.
+        self._sensors = [sar, eoir]
 
     @classmethod
     def from_config(cls, config: SensorConfig,

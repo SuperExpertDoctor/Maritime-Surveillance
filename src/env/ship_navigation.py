@@ -29,6 +29,16 @@ def clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
 
 
+def reflect_velocity(v: tuple[float, float], normal: tuple[float, float]) -> tuple[float, float]:
+    """Reflect only the velocity component pointing through a boundary normal."""
+    length = math.hypot(*normal)
+    if length <= 1e-12:
+        raise ValueError("boundary normal must be non-zero")
+    nx, ny = normal[0] / length, normal[1] / length
+    projection = v[0] * nx + v[1] * ny
+    return v[0] - 2.0 * projection * nx, v[1] - 2.0 * projection * ny
+
+
 @dataclass(frozen=True)
 class MotionState:
     pose: Pose
@@ -140,6 +150,8 @@ class ShipNavigator:
         return None
 
     def has_exited(self, pose, mask) -> bool:
+        if getattr(self.ship, "closed_route", False):
+            return False
         gate = self._exit_gate(mask)
         if gate is None:
             return False
@@ -219,6 +231,44 @@ class ShipNavigator:
             params.zigzag_heading_deg) * math.sin(math.radians(params.phase_deg)
                 + 2 * math.pi * (now_min - self.ship._navigation_installed_at_min) / params.zigzag_period_min)
 
+    def reflect_heading(self, velocity: tuple[float, float], normal: tuple[float, float]) -> float:
+        reflected = reflect_velocity(velocity, normal)
+        return math.atan2(reflected[1], reflected[0])
+
+    def plan_patrol_route(self, *, waypoints: tuple[Pose, ...] | None = None) -> tuple[Pose, ...]:
+        """Return the closed route used by actual normal vessel motion."""
+        if waypoints is not None:
+            if len(waypoints) < 2:
+                raise ValueError("patrol route requires at least two waypoints")
+            return tuple(waypoints)
+        route = tuple(self.ship.active_route())
+        if route:
+            return route
+        return tuple(self.ship.normal_route)
+
+    def plan_survey_lawnmower(
+        self,
+        regulated_bbox: tuple[int, int, int, int],
+        spacing_cells: float,
+    ) -> tuple[Pose, ...]:
+        """Create deterministic, in-bounds parallel survey legs."""
+        if spacing_cells <= 0.0:
+            raise ValueError("spacing_cells must be positive")
+        x0, y0, x1, y1 = regulated_bbox
+        if not x0 < x1 or not y0 < y1:
+            raise ValueError("regulated_bbox must be a non-empty half-open box")
+        points: list[Pose] = []
+        row = float(y0) + 0.5
+        reverse = False
+        while row < float(y1):
+            if reverse:
+                points.extend(((float(x1) - 0.5, row, math.pi), (float(x0) + 0.5, row, math.pi)))
+            else:
+                points.extend(((float(x0) + 0.5, row, 0.0), (float(x1) - 0.5, row, 0.0)))
+            reverse = not reverse
+            row += spacing_cells
+        return tuple(points)
+
     def plan(self, pose: Pose, params: RedMotionParameters | None,
              normal_tangent_rad: float, now_min: float, land_mask: np.ndarray) -> ShipRoute:
         # Once a chart is bound to the vessel, an external planner's old input
@@ -272,9 +322,11 @@ class ShipNavigator:
             yield state, command, normal_index
 
     def _normal_guidance(self, pose, index, mask):
-        route = self.ship.normal_route
+        route = self.ship.active_route()
         if len(route) < 2:
             return route[0][2], index
+        if self.ship.closed_route and index >= len(route) - 1:
+            index = 1
         index = min(index, len(route) - 1)
         while index < len(route) - 1:
             a, b = route[index - 1], route[index]
@@ -288,6 +340,9 @@ class ShipNavigator:
         while target_index < len(route) - 1 and math.dist(pose[:2], route[target_index][:2]) < lookahead:
             target_index += 1
         target = route[target_index][:2]
+        if self.ship.closed_route and target_index == len(route) - 1:
+            target = route[0][:2]
+            return math.atan2(target[1] - pose[1], target[0] - pose[0]), index
         gate = self._exit_gate(mask)
         if target_index == len(route) - 1 and gate is not None and math.dist(pose[:2], target) < lookahead:
             axis, sign, boundary, cross = gate
@@ -472,4 +527,4 @@ class ShipNavigator:
                          self.island_bounds, self.ship._navigation_generation)
 
 
-__all__ = ["ShipNavigator", "ShipRoute"]
+__all__ = ["ShipNavigator", "ShipRoute", "reflect_velocity"]

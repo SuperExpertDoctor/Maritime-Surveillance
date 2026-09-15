@@ -412,6 +412,80 @@ export function drawContacts(ctx, contacts, cellSize, ox, oy, selectedId, phase 
   }
 }
 
+export function drawPassiveEvidence(ctx, evidence, cellSize, ox, oy, phase = 0) {
+  for (const item of evidence || []) {
+    if (item.kind === "passive_bearing") {
+      const origin = item.observer_position || item.origin;
+      if (!Array.isArray(origin) || origin.length < 2) continue;
+      const center = gridCenter(Number(origin[0]), Number(origin[1]), cellSize, ox, oy);
+      // The public evidence contract is bearing-only. Use the configured
+      // receiver envelope as a rendering bound instead of a measured range.
+      const radius = Math.max(cellSize * 1.5, 10 * cellSize);
+      const bearing = Number(item.bearing_deg || 0) * Math.PI / 180;
+      const spread = Math.max(0.04, Number(item.bearing_std_deg || 3) * 2 * Math.PI / 180);
+      ctx.save();
+      ctx.fillStyle = "rgba(14, 116, 144, .09)";
+      ctx.strokeStyle = "rgba(14, 116, 144, .64)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(center.x, center.y);
+      ctx.arc(center.x, center.y, radius, bearing - spread, bearing + spread);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#0E7490";
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, Math.max(2, cellSize * 0.1), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else if (item.kind === "passive_position") {
+      const position = item.position;
+      if (!Array.isArray(position) || position.length < 2) continue;
+      const center = gridCenter(Number(position[0]), Number(position[1]), cellSize, ox, oy);
+      const size = Math.max(4, cellSize * 0.25);
+      const pulse = 1 + 0.12 * Math.sin(phase / 8);
+      ctx.save();
+      ctx.translate(center.x, center.y);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = "rgba(5, 150, 105, .18)";
+      ctx.strokeStyle = "#047857";
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(-size * pulse, -size * pulse, size * 2 * pulse, size * 2 * pulse);
+      ctx.strokeRect(-size * pulse, -size * pulse, size * 2 * pulse, size * 2 * pulse);
+      ctx.restore();
+    }
+  }
+}
+
+export function drawScenarioVessels(ctx, vessels, cellSize, ox, oy, selectedId) {
+  for (const vessel of vessels || []) {
+    if (!Array.isArray(vessel.position) || vessel.position.length < 2) continue;
+    const center = gridCenter(Number(vessel.position[0]), Number(vessel.position[1]), cellSize, ox, oy);
+    const selected = vessel.scenario_entity_id === selectedId;
+    const color = vessel.vessel_class === "research" ? "#B45309" : "#0369A1";
+    const radius = Math.max(4, cellSize * (selected ? 0.34 : 0.27));
+    ctx.save();
+    ctx.fillStyle = `${color}20`;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = selected ? 2 : 1.2;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius + (selected ? 5 : 3), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(center.x, center.y - radius);
+    ctx.lineTo(center.x + radius, center.y + radius);
+    ctx.lineTo(center.x - radius, center.y + radius);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    text(ctx, vessel.scenario_entity_id, center.x + radius + 4, center.y + 3, color, Math.max(7, cellSize * 0.24), 700);
+  }
+}
+
 export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) {
   for (const uav of uavs || []) {
     const mission = uav.mission_route || uav.planned_path || [];
@@ -1298,6 +1372,7 @@ export function renderFrame(ctx, frame, options = {}) {
     const contacts = Array.isArray(frame.contacts) && frame.contacts.length
       ? frame.contacts : frame.ships;
     drawTrackRegions(ctx, frame.track_regions, contacts, cellSize, offsetX, offsetY);
+    drawPassiveEvidence(ctx, frame.evidence, cellSize, offsetX, offsetY, frameCount);
     drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, baseCenters);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY, frameCount);
@@ -1307,6 +1382,7 @@ export function renderFrame(ctx, frame, options = {}) {
     } else {
       drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
     }
+    drawScenarioVessels(ctx, frame.scenario_vessels, cellSize, offsetX, offsetY, options.selectedScenarioVesselId);
     drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets, baseCenters);
     drawBases(ctx, bases, baseCenters, cellSize, frameCount);
     drawTransparencyLegend(ctx, legendBounds);

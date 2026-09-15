@@ -16,6 +16,7 @@ from src.mission.contracts import (
     UavResource,
 )
 from src.mission.strategy_memory import StrategyMemoryStore
+from src.mission.prompt_window import PromptWindow
 
 
 SELECTION_SCHEMA = "mission-selection/v1"
@@ -28,6 +29,7 @@ _SELECTION_FIELDS = {
     "defer_reason",
     "notes",
 }
+_OPTIONAL_SELECTION_FIELDS = {"information_version"}
 _PROTECTED_OPERATIONS = {
     "return",
     "returning",
@@ -46,6 +48,7 @@ _ORDINARY_SEARCH_OPERATIONS = {
     "transit",
 }
 _ACTIVE_RECORD_STATUSES = {"approved", "executing"}
+_SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
 
 
 def _jsonable(value):
@@ -66,7 +69,7 @@ def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
     if not isinstance(payload, dict):
         return None, ["selection must be an object"]
     errors: list[str] = []
-    unknown = set(payload) - _SELECTION_FIELDS
+    unknown = set(payload) - _SELECTION_FIELDS - _OPTIONAL_SELECTION_FIELDS
     missing = _SELECTION_FIELDS - set(payload)
     if unknown:
         errors.append(f"unknown_selection_fields: {sorted(unknown)}")
@@ -97,6 +100,11 @@ def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
         errors.append("notes_must_be_string")
     if errors:
         return None, errors
+    information_version = payload.get("information_version", 0)
+    if (isinstance(information_version, bool)
+            or not isinstance(information_version, int)
+            or information_version < 0):
+        errors.append("invalid_information_version")
     return MissionSelection(
         schema_version,
         snapshot_id,
@@ -104,6 +112,7 @@ def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
         tuple(preempt),
         defer_reason,
         payload["notes"],
+        _information_version=information_version if isinstance(information_version, int) else 0,
     ), []
 
 
@@ -139,7 +148,7 @@ def _ordinary_search(resource: UavResource, active_tasks: dict[str, TaskRecord])
         return False
     record = active_tasks.get(resource.current_task_id)
     return record is None or (
-        record.kind == "search" and record.status in _ACTIVE_RECORD_STATUSES
+        record.kind in _SEARCH_TASK_KINDS and record.status in _ACTIVE_RECORD_STATUSES
     )
 
 
@@ -236,11 +245,11 @@ def _edge_usable(
         # A declared preemption must actually launch a new contact task.
         if kind == "probe" and not allow_probe_preempt_search:
             return False
-        if kind == "search" and not (
+        if kind in _SEARCH_TASK_KINDS and not (
             allow_intent_preempt_search and bool(task.intent_ids)
         ):
             return False
-        if kind not in {"probe", "track", "search"}:
+        if kind not in {"probe", "track", *_SEARCH_TASK_KINDS}:
             return False
         if not is_preemptible:
             return False
@@ -363,7 +372,7 @@ def _actual_preempted(
             and (
                 task.kind in {"probe", "track"}
                 or (
-                    task.kind == "search"
+                    task.kind in _SEARCH_TASK_KINDS
                     and allow_intent_preempt_search
                     and bool(task.intent_ids)
                 )
@@ -390,6 +399,9 @@ def _validate_selection(
         errors.append("invalid_schema_version")
     if selection.snapshot_id != snapshot.snapshot_id:
         errors.append("stale_snapshot")
+    if (selection.information_version
+            and selection.information_version != snapshot.information_version):
+        errors.append("stale_information_version")
     if not isinstance(selection.selected_task_ids, (tuple, list)):
         errors.append("selected_task_ids_must_be_array")
         selected_task_ids = ()
@@ -424,7 +436,7 @@ def _validate_selection(
         if task_id not in known_tasks:
             errors.append(f"unknown_task_id: {task_id}")
     for task_id, task in (*candidates.items(), *active.items()):
-        if task.kind == "search" and task.bbox is None:
+        if task.kind in _SEARCH_TASK_KINDS and task.bbox is None:
             errors.append(f"search_task_missing_bbox: {task_id}")
         if task.kind in {"probe", "track"} and task.contact_id is None:
             errors.append(f"contact_task_missing_contact: {task_id}")
@@ -449,7 +461,7 @@ def _validate_selection(
     if active_contact_ids & set(selected_contacts):
         errors.append("duplicate_contact_with_active_task")
 
-    searches = [task for task in selected_tasks if task.kind == "search" and task.bbox]
+    searches = [task for task in selected_tasks if task.kind in _SEARCH_TASK_KINDS and task.bbox]
     for left_index, left in enumerate(searches):
         for right in searches[left_index + 1:]:
             if _overlap(left.bbox, right.bbox):
@@ -458,7 +470,7 @@ def _validate_selection(
         task for task in snapshot.active_tasks
         if (
             task.status in _ACTIVE_RECORD_STATUSES
-            and task.kind == "search"
+            and task.kind in _SEARCH_TASK_KINDS
             and task.bbox
             and task.task_id not in selected_task_ids
         )
@@ -637,6 +649,7 @@ class MissionScheduler:
         with open(system_prompt_path, "r", encoding="utf-8") as stream:
             self.system_prompt = stream.read()
         self.selection_provider = selection_provider
+        self.prompt_window = PromptWindow()
         self.strategy_memory_store = strategy_memory_store
         self.last_selection_payload: dict | None = None
         self.last_selection_call_id: str | None = None
@@ -781,22 +794,39 @@ class MissionScheduler:
         except ValueError as exc:
             self.last_selection_errors = (str(exc),)
             return None
-        return AssignmentBatch(snapshot.snapshot_id, assignments, call_id)
+        return AssignmentBatch(
+            snapshot.snapshot_id,
+            assignments,
+            call_id,
+            _information_version=snapshot.information_version,
+        )
 
     def _prompt_payload(self, snapshot: MissionSnapshot) -> dict:
         full = _jsonable(snapshot)
+        full["information_version"] = snapshot.information_version
+        full.pop("_information_version", None)
         candidates = list(full["candidates"])
+        for candidate in candidates:
+            if "_information_version" in candidate:
+                candidate["information_version"] = candidate.pop("_information_version")
         if len(candidates) > self.max_tasks_in_prompt:
-            candidate_objects = list(snapshot.candidates)
-            ordered = sorted(
-                candidate_objects,
-                key=lambda task: (
-                    0 if task.kind == "probe" else 1 if task.kind == "track" else 2,
-                    -min(max(snapshot.sim_time_min - task.eligible_since_min, 0.0), 30.0),
-                    task.task_id,
-                ),
-            )[: self.max_tasks_in_prompt]
-            full["candidates"] = [_jsonable(task) for task in ordered]
+            edge_ids = {edge.task_id for edge in snapshot.feasible_edges}
+            prompt_candidates = [
+                task for task in snapshot.candidates
+                if task.task_id in edge_ids
+            ] or list(snapshot.candidates)
+            window = self.prompt_window.select(
+                prompt_candidates,
+                self.max_tasks_in_prompt,
+                cycle=max(0, int(snapshot.sim_time_min)),
+            )
+            full["candidates"] = [_jsonable(task) for task in window.tasks]
+            for candidate in full["candidates"]:
+                if "_information_version" in candidate:
+                    candidate["information_version"] = candidate.pop("_information_version")
+            full["prompt_sources"] = window.sources
+            full["prompt_skip_cycles"] = window.skip_cycles
+            full["prompt_fairness_bound_cycles"] = window.fairness_bound_cycles
             full["candidates_truncated"] = True
             full["candidate_count"] = len(candidates)
         else:

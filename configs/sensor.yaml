@@ -28,6 +28,23 @@ radar:
   false_alarm_rate: 0.005     # 虚警率
   update_rate_hz: 1.0         # 更新频率
 
+# === Passive signal receiver ===
+passive:
+  measurement_interval_min: 1.0
+  reference_detection_probability: 0.90
+  detection_range_cells: 10.0
+  range_scale_cells: 10.0
+  bearing_std_deg: 3.0
+  received_power_std_db: 2.0
+  reference_distance_cells: 1.0
+  minimum_received_power_db: -90.0
+  position_association_radius_cells: 1.0
+
+emitter:
+  mean_silent_interval_min: 10.0
+  burst_duration_min: [0.5, 2.0]
+  source_power_at_reference_db: -40.0
+
 # === 通用传感器参数 ===
 general:
   search_efficiency: 0.75     # 搜索效率因子 (含转弯损耗)

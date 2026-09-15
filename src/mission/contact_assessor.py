@@ -7,7 +7,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from src.mission.config import ContactConfig
-from src.mission.contracts import Assessment, ContactSnapshot, ProbeSession, TrajectoryFeatures
+from src.mission.contracts import (
+    Assessment, ContactAssessment, ContactSnapshot, ProbeSession, TrajectoryFeatures,
+)
 from src.mission.llm_gateway import LLMGateway
 from src.mission.trajectory_features import build_features, select_keypoints
 
@@ -110,8 +112,16 @@ class ContactAssessor:
         self._prompt = Path(__file__).with_name("prompts").joinpath(
             "contact_assessor.txt").read_text(encoding="utf-8")
 
-    def assess(self, contact: ContactSnapshot, probe: ProbeSession,
-               features: TrajectoryFeatures, now_min: float) -> Assessment | None:
+    def assess(self, contact: ContactSnapshot, probe: ProbeSession | None = None,
+               features: TrajectoryFeatures | None = None,
+               now_min: float | None = None) -> Assessment | ContactAssessment | None:
+        # The legacy four-argument call is still the gateway-backed contact
+        # identity workflow. A single evidence batch uses the new dual-
+        # dimension, observation-only assessment contract.
+        if probe is None and features is None and now_min is None:
+            return self.assess_dimensions(contact)
+        if probe is None or features is None or now_min is None:
+            raise TypeError("legacy assessment requires contact, probe, features, and now_min")
         if not self._eligible(contact, probe, features, now_min):
             return None
         revision_key = (contact.contact_id, contact.revision)
@@ -148,6 +158,93 @@ class ContactAssessor:
             reasons=tuple(payload["reasons"]),
             alternative_explanations=tuple(payload["alternative_explanations"]),
             model_call_id=result.call_id,
+        )
+
+    @staticmethod
+    def assess_dimensions(evidence) -> ContactAssessment:
+        """Classify vessel class and activity from validated evidence families.
+
+        This deterministic adapter is intentionally conservative: a research
+        signal can establish the vessel class, but activity requires two
+        independent quality-gated families and at least one observed-motion
+        family. AIS silence alone contributes to neither dimension.
+        """
+        items = tuple(evidence or ())
+
+        def value(item, *names, default=None):
+            if isinstance(item, dict):
+                for name in names:
+                    if name in item:
+                        return item[name]
+                return default
+            for name in names:
+                if hasattr(item, name):
+                    return getattr(item, name)
+            return default
+
+        valid = [item for item in items if value(item, "passes_quality_gate", default=True)]
+        class_ids: list[str] = []
+        activity_ids: list[str] = []
+        class_candidates: list[tuple[str, float, str]] = []
+        families: set[str] = set()
+        normalized_items: list[tuple[object, str]] = []
+        for item in valid:
+            evidence_id = value(item, "evidence_id", "id", default="")
+            family = str(value(item, "family", "kind", default=""))
+            family = {
+                "research_assessment": "radiation_activity",
+                "violation_assessment": "violation_activity",
+                "eo_class": "class",
+                "sar_class": "class",
+            }.get(family, family)
+            families.add(family)
+            normalized_items.append((item, family))
+            explicit_class = value(item, "vessel_class", "classification", "class_label")
+            confidence = value(item, "confidence", "strength", default=1.0)
+            try:
+                confidence = max(0.0, min(1.0, float(confidence)))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if explicit_class in ("civilian", "research"):
+                class_candidates.append((explicit_class, confidence, evidence_id))
+            if family in {"eo_class", "class"}:
+                class_ids.append(evidence_id)
+            if family in {"eo_activity", "survey_motion", "radiation_activity", "violation_activity"}:
+                activity_ids.append(evidence_id)
+
+        if class_candidates:
+            vessel_class, class_confidence, _ = max(
+                class_candidates, key=lambda item: (item[1], item[2])
+            )
+        else:
+            vessel_class, class_confidence = "unknown", 0.0
+
+        independent_activity = families & {
+            "eo_activity", "survey_motion", "radiation_activity", "violation_activity",
+        }
+        has_motion_family = bool(independent_activity & {"eo_activity", "survey_motion"})
+        if len(independent_activity) >= 2 and has_motion_family:
+            activity = "confirmed_violation"
+            activity_confidence = min(
+                1.0, sum(
+                    float(value(item, "confidence", "strength", default=1.0))
+                    for item, family in normalized_items
+                    if family in independent_activity
+                ) / len(independent_activity)
+            )
+        elif independent_activity:
+            activity = "suspected_violation"
+            activity_confidence = 0.5
+        else:
+            activity = "unknown"
+            activity_confidence = 0.0
+        return ContactAssessment(
+            vessel_class=vessel_class,
+            class_confidence=class_confidence,
+            class_evidence_ids=tuple(item for item in class_ids if item),
+            activity=activity,
+            activity_confidence=activity_confidence,
+            activity_evidence_ids=tuple(item for item in activity_ids if item),
         )
 
     def _eligible(self, contact: ContactSnapshot, probe: ProbeSession,

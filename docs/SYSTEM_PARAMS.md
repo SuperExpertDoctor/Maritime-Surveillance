@@ -2,6 +2,34 @@
 
 > 所有参数定义与默认值。对应配置文件位于 `configs/` 目录。
 
+> **当前口径（2026-09-15）**：本文后续保留的基础环境与历史兼容参数仍用于回放和
+> 旧测试；旧身份规则不代表当前运行时语义。当前运行时使用 `vessel_class` 与
+> `activity` 两个独立维度，蓝方只接收观测和证据，不接收环境真值。
+
+## 当前需求对齐参数
+
+| 配置 | 当前值 | 说明 |
+|------|:--:|------|
+| UAV 数量 | 10 | `uav.count`，由实际场景状态驱动 |
+| 船舶总数 | 8 | `ship.population.total_count` |
+| civilian/research 比例 | 0.625 / 0.375 | 最大余数法分配，结果为 5 / 3 |
+| 信息价值权重 | 0.45 / 0.35 / 0.20 | `V=clip(alpha*(1-I)+beta*S+gamma*A,0,1)` |
+| 人工编辑窗口 | `sim_time_min == 0` 且首步前 | 运行和回放均只读 |
+
+### 被动辐射接收器
+
+被动接收器使用 `configs/sensor.yaml` 的 `passive` 段。`detection_range_cells` 是硬
+范围；先检查 burst、范围、接收功率和 Pd，再生成方位噪声。单机观测只含
+`observer_position_cells`、`bearing_deg` 和误差参数，不含距离、接收功率或辐射源位置。
+同一 `sample_id/emitter_track_id/burst_id` 中至少两架不同 UAV 成功时，才由环境边界
+发布真实位置；位置证据强度固定为 1.0，并生成调查候选，不重复叠加方位走廊增益。
+
+### 证据与调度版本
+
+`EvidenceStore` 按证据 ID 幂等接收、按主题 supersede 并按绝对仿真时间衰减。
+`InformationUpdatePolicy` 输出 `InfoFieldDelta`，记录版本、半开 dirty bbox、原因和
+证据 ID；候选、Prompt、决策和 `AssignmentBatch` 必须引用同一个信息版本。
+
 ---
 
 ## 一、任务环境

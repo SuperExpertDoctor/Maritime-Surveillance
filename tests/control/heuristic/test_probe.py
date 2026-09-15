@@ -4,7 +4,6 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from src.control.common.contracts import (
     ActionSpec,

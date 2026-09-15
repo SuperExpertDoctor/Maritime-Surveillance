@@ -4,9 +4,6 @@ import math
 import pytest
 
 from src.mission.contracts import (
-    ContactSnapshot,
-    Intent,
-    IntentStatus,
     MissionSelection,
     TaskCandidate,
     UavResource,
@@ -17,7 +14,6 @@ from src.mission.mission_scheduler import (
     MissionScheduler,
     MissionSnapshot,
     TaskRecord,
-    UavResource,
     pair_selected_tasks,
     validate_selection,
 )
@@ -406,6 +402,38 @@ def test_task_allocator_edge_budget_includes_transit_and_returns_from_goal():
         + edge.return_range_cells
         + edge.reserve_range_cells
     ) <= resource.remaining_range_cells
+
+
+def test_task_allocator_ignores_unreachable_bases_when_computing_return_range(monkeypatch):
+    from src.schedule.config_loader import ConfigLoader
+    from src.schedule.task_allocator import TaskAllocator
+
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    task = TaskCandidate(
+        "Q-probe", "probe", (10, 10, 14, 14), None, (), ("U1",), 0.0,
+        "high", 5.0, 1.0, 0.5,
+    )
+    resource = UavResource(
+        "U1", (8.0, 12.0), 0.0, 1.0, 100.0, "idle", None, 0, 0.0,
+    )
+    monkeypatch.setattr(allocator.sm, "get_base_positions", lambda: ((1, 1), (2, 2)))
+    monkeypatch.setattr(
+        allocator,
+        "_mission_route_metrics",
+        lambda *_args: (1.0, 2.0, (12.0, 12.0)),
+    )
+
+    def return_distance(_target, _resource, base, _map_version):
+        return None if base == (1.0, 1.0) else 3.0
+
+    monkeypatch.setattr(allocator, "_return_route_distance", return_distance)
+
+    edges = allocator._mission_edges(
+        (task,), (resource,), (), allocator.sm.obstacle_version,
+    )
+
+    assert len(edges) == 1
+    assert edges[0].return_range_cells == pytest.approx(3.0)
 
 
 def test_task_allocator_search_edge_uses_complete_route_and_final_endpoint(monkeypatch):

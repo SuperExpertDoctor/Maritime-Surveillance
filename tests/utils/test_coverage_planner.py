@@ -1,7 +1,6 @@
 import math
 
 import numpy as np
-import pytest
 
 from src.schedule.datatypes import BBox, GridCoord
 from src.utils.coverage_planner import CoveragePlanner

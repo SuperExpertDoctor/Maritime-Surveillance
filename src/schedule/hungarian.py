@@ -1,6 +1,6 @@
 ﻿import math
 from typing import Optional
-from src.schedule.datatypes import GridCoord, BBox
+from src.schedule.datatypes import BBox
 
 
 def _bbox_center(bbox: BBox) -> tuple[float, float]:

@@ -136,6 +136,45 @@ def test_zero_initial_ships_is_valid_when_target_count_is_zero():
     validate_mission_config(config)
 
 
+def test_population_total_cannot_exceed_grid_capacity():
+    config = ConfigLoader.load()
+    config = replace(
+        config,
+        ship=replace(config.ship, initial_ship_count=1000, target_ship_count=0),
+    )
+
+    with pytest.raises(ValueError, match="population.total_count"):
+        validate_mission_config(config)
+
+
+def test_activity_region_and_survey_speed_stay_inside_operational_bounds():
+    config = ConfigLoader.load()
+    object.__setattr__(
+        config.mission,
+        "activity",
+        replace(
+            config.mission.activity,
+            regulated_bboxes=((-1, 0, 22, 22),),
+            survey_command_speed_kn=10.0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="regulated_bboxes"):
+        validate_mission_config(config)
+
+    object.__setattr__(
+        config.mission,
+        "activity",
+        replace(
+            config.mission.activity,
+            regulated_bboxes=((8, 8, 22, 22),),
+            survey_command_speed_kn=9.0,
+        ),
+    )
+    with pytest.raises(ValueError, match="survey_command_speed_kn"):
+        validate_mission_config(config)
+
+
 def test_target_ship_count_cannot_exceed_initial_ship_count():
     config = ConfigLoader.load()
     config = replace(
@@ -318,4 +357,27 @@ def test_legacy_ship_fields_have_an_explicit_migration_error(tmp_path: Path):
     ship_path.write_text(yaml.safe_dump(ship_data), encoding="utf-8")
 
     with pytest.raises(ValueError, match="legacy ship configuration.*count_min"):
+        ConfigLoader.load(str(config_dir))
+
+
+def test_legacy_ship_population_fields_have_an_explicit_migration_error(tmp_path: Path):
+    config_dir = _copy_configs(tmp_path)
+    ship_path = config_dir / "ship.yaml"
+    ship_data = yaml.safe_load(ship_path.read_text(encoding="utf-8"))
+    ship_data.pop("population")
+    ship_data.update(initial_ship_count=8, target_ship_count=3)
+    ship_path.write_text(yaml.safe_dump(ship_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ship population.*initial_ship_count"):
+        ConfigLoader.load(str(config_dir))
+
+
+def test_legacy_uav_count_field_has_an_explicit_migration_error(tmp_path: Path):
+    config_dir = _copy_configs(tmp_path)
+    uav_path = config_dir / "uav.yaml"
+    uav_data = yaml.safe_load(uav_path.read_text(encoding="utf-8"))
+    uav_data["count_max"] = uav_data.pop("count")
+    uav_path.write_text(yaml.safe_dump(uav_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="uav.*use count instead of count_max"):
         ConfigLoader.load(str(config_dir))

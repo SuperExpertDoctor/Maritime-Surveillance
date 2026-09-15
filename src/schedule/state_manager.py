@@ -11,8 +11,14 @@ import numpy as np
 from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
 from src.schedule.info_field import InfoField
+from src.mission.information_update import InformationUpdatePolicy, ScanRefresh
 from src.mission.contact_store import ContactStore
-from src.mission.contracts import ProbeSession, VisualDetection
+from src.mission.contracts import (
+    PassiveBearingObservation,
+    PassivePosition,
+    ProbeSession,
+    VisualDetection,
+)
 
 
 _OPERATION_BY_STATUS = {
@@ -37,13 +43,14 @@ class StateManager:
         self.memory_version = "baseline"
         self.lifecycle_mode = False
         self.info_field = InfoField(config)
+        self.information_policy = InformationUpdatePolicy(config)
         self._uavs = [
             UAVState(
                 id=f"UAV-{index + 1}",
                 status="idle",
                 position=GridCoord(*config.environment.base_position),
             )
-            for index in range(config.uav.count_max)
+            for index in range(config.uav.count)
         ]
         self._search_regions: list[Region] = []
         self._track_regions: list[Region] = []
@@ -66,6 +73,8 @@ class StateManager:
         self._legacy_sample_counter = 0
         self._contact_event_cursor = 0
         self._probe_sessions: dict[str, ProbeSession] = {}
+        self._passive_positions: dict[str, PassivePosition] = {}
+        self._passive_observations: dict[str, PassiveBearingObservation] = {}
         self.obstacles: list = []
         self.obstacle_mask = np.zeros(config.grid.resolution, dtype=bool)
         self.obstacle_version = 0
@@ -535,19 +544,121 @@ class StateManager:
     # Information field facade -------------------------------------
     def scan_bbox(self, bbox: BBox, current_time: float, is_track: bool = False) -> None:
         self.info_field.scan_bbox(bbox, current_time, is_track)
+        self.information_policy.apply_batch(
+            [ScanRefresh(tuple(bbox), "track" if is_track else "search")],
+            current_time,
+        )
 
     def scan_cell(self, coord: GridCoord, current_time: float, is_track: bool = False) -> None:
         self.info_field.scan_cell(coord, current_time, is_track)
+        self.information_policy.apply_batch(
+            [ScanRefresh((coord.col, coord.row, coord.col + 1, coord.row + 1),
+                         "track" if is_track else "search")],
+            current_time,
+        )
+
+    def apply_information_facts(self, facts, current_time: float):
+        return self.information_policy.apply_batch(facts, current_time)
+
+    def register_passive_position(self, position: PassivePosition) -> None:
+        """Retain the latest conditional position for task generation."""
+        if not isinstance(position, PassivePosition):
+            raise TypeError("position must be PassivePosition")
+        self._passive_positions[position.emitter_track_id] = position
+        self.contacts.ingest_passive_position(
+            position,
+            association_radius_cells=(
+                self.config.sensor.passive.position_association_radius_cells
+            ),
+            radiation_window_min=self.config.mission.activity.radiation_window_min,
+            min_distinct_bursts=self.config.mission.activity.min_distinct_bursts,
+        )
+
+    def drain_radiation_activity_evidence(self):
+        """Drain contact-derived activity facts for the current information batch."""
+        return self.contacts.drain_radiation_activity_evidence()
+
+    def passive_position_contact_id(self, emitter_track_id: str) -> str | None:
+        """Return the observation-only contact associated with a signal track."""
+        return self.contacts.emitter_contacts.get(emitter_track_id)
+
+    def passive_burst_count(self, contact_id: str, now_min: float | None = None) -> int:
+        now = self.current_time if now_min is None else float(now_min)
+        return self.contacts.passive_burst_count(
+            contact_id,
+            now,
+            window_min=self.config.mission.activity.radiation_window_min,
+        )
+
+    def record_passive_observations(
+        self, observations: tuple[PassiveBearingObservation, ...] | list[PassiveBearingObservation]
+    ) -> None:
+        for observation in observations:
+            if not isinstance(observation, PassiveBearingObservation):
+                raise TypeError("observations must contain PassiveBearingObservation")
+            self._passive_observations[observation.observation_id] = observation
+        if len(self._passive_observations) > 2000:
+            keep = sorted(
+                self._passive_observations.values(),
+                key=lambda item: (item.observed_at_min, item.observation_id),
+            )[-2000:]
+            self._passive_observations = {
+                item.observation_id: item for item in keep
+            }
+
+    def get_passive_observations(self, now_min: float | None = None):
+        now = self.current_time if now_min is None else float(now_min)
+        return tuple(
+            self._passive_observations[key]
+            for key in sorted(self._passive_observations)
+            if self._passive_observations[key].observed_at_min <= now
+        )
+
+    def get_passive_positions(self, now_min: float | None = None) -> tuple[PassivePosition, ...]:
+        """Return active position releases without exposing environment truth."""
+        now = self.current_time if now_min is None else float(now_min)
+        active_sources = {
+            record.source_id
+            for record in self.information_policy.evidence_store.active_records(now)
+            if record.kind == "passive_position"
+        }
+        return tuple(
+            self._passive_positions[source_id]
+            for source_id in sorted(self._passive_positions)
+            if source_id in active_sources
+        )
+
+    @property
+    def information_version(self) -> int:
+        return self.information_policy.version
+
+    @property
+    def ais_updates(self):
+        return self.information_policy.ais_updates
+
+    def freeze_information_snapshot(self, current_time: float | None = None):
+        return self.information_policy.freeze_information_snapshot(
+            self.current_time if current_time is None else current_time
+        )
 
     def get_info_matrix(self):
-        return self.info_field.get_info_matrix()
+        policy_info = np.asarray(
+            self.information_policy.matrices(self.current_time)[0],
+            dtype=float,
+        )
+        return np.maximum(self.info_field.get_info_matrix(), policy_info)
 
     def get_last_scan_matrix(self):
         """Return scan timestamps without exposing the mutable information field."""
         return self.info_field.last_scan_time.copy()
 
     def get_value_matrix(self):
-        return self.info_field.get_value_matrix(self.current_time)
+        legacy_value = self.info_field.get_value_matrix(self.current_time)
+        policy_value = np.asarray(
+            self.information_policy.matrices(self.current_time)[3],
+            dtype=float,
+        )
+        return np.maximum(legacy_value, policy_value)
 
     def get_searchable_mask(self) -> np.ndarray:
         """Return cells that can be searched under the operational rules."""
@@ -580,10 +691,14 @@ class StateManager:
         }
 
     def get_avg_info_in_bbox(self, bbox: BBox) -> float:
-        return self.info_field.get_avg_info_in_bbox(bbox)
+        c0, r0, c1, r1 = bbox
+        patch = self.get_info_matrix()[c0:c1, r0:r1]
+        return float(np.mean(patch)) if patch.size else 0.0
 
     def get_avg_value_in_bbox(self, bbox: BBox) -> float:
-        return self.info_field.get_avg_value_in_bbox(bbox, self.current_time)
+        c0, r0, c1, r1 = bbox
+        patch = self.get_value_matrix()[c0:c1, r0:r1]
+        return float(np.mean(patch)) if patch.size else 0.0
 
 
 __all__ = ["StateManager"]

@@ -7,6 +7,7 @@ from typing import Sequence
 from src.env.dubins import Pose
 from src.env.eo_sensor import EOSensor, FOVCone
 from src.env.sar_sensor import SARSensor
+from src.mission.contracts import SensorSnapshot
 from src.schedule.datatypes import BBox, GridCoord
 from src.utils.ais_discriminator import EOMeasurement
 from src.utils.storm_avoider import StormAvoider, ThreatLevel
@@ -45,6 +46,10 @@ class UAVEntity:
         self.fuel_remaining_pct = 1.0
         self.status = "idle"
         self.sensor_mode = "off"
+        self._active_mode = "standby"
+        self._transition_target: str | None = None
+        self._transition_remaining_min = 0.0
+        self._passive_enabled = True
         self.assigned_region: BBox | None = None
         self.target_group_id: str | None = None
         self.waypoints: list[Pose] = []
@@ -100,6 +105,66 @@ class UAVEntity:
     @property
     def float_position(self) -> tuple[float, float]:
         return self._col, self._row
+
+    @property
+    def active_mode(self) -> str:
+        """Active payload state; passive reception is reported separately."""
+        return self._active_mode
+
+    @property
+    def transition_remaining_min(self) -> float:
+        return self._transition_remaining_min
+
+    @property
+    def passive_enabled(self) -> bool:
+        return self._passive_enabled
+
+    @property
+    def sensor_snapshot(self) -> SensorSnapshot:
+        return SensorSnapshot(
+            active_mode=self._active_mode,
+            transition_remaining_min=self._transition_remaining_min,
+            passive_enabled=self._passive_enabled,
+        )
+
+    def set_passive_enabled(self, enabled: bool) -> None:
+        if not enabled:
+            raise ValueError("passive sensing cannot be disabled")
+        self._passive_enabled = True
+
+    def request_active_mode(self, mode: str) -> None:
+        """Request a SAR/EO payload transition without affecting passive sensing."""
+        target = "standby" if mode in ("off", "standby") else str(mode)
+        if target not in {"standby", "sar", "eo"}:
+            raise ValueError("active mode must be standby, sar, or eo")
+        if target == self._active_mode and self._transition_remaining_min <= 0.0:
+            return
+        if target == "standby":
+            self._active_mode = "standby"
+            self._transition_target = None
+            self._transition_remaining_min = 0.0
+            self.sensor_mode = "off"
+            return
+        self._active_mode = f"switching_to_{target}"
+        self._transition_target = target
+        self._transition_remaining_min = 0.5
+        self.sensor_mode = "off"
+
+    def advance_sensor_transition(self, dt_min: float) -> None:
+        if isinstance(dt_min, bool) or not isinstance(dt_min, (int, float)):
+            raise TypeError("dt_min must be a finite positive number")
+        if not math.isfinite(float(dt_min)) or dt_min < 0.0:
+            raise ValueError("dt_min must be a finite positive number")
+        if self._transition_remaining_min <= 0.0:
+            return
+        self._transition_remaining_min = max(
+            0.0, self._transition_remaining_min - float(dt_min)
+        )
+        if self._transition_remaining_min == 0.0:
+            target = self._transition_target or "standby"
+            self._transition_target = None
+            self._active_mode = target
+            self.sensor_mode = "off" if target == "standby" else target
 
     def apply_motion(
         self,
@@ -294,6 +359,7 @@ class UAVEntity:
         """Advance the vehicle and report a newly reached low-fuel threshold."""
         if dt_min <= 0:
             return False
+        self.advance_sensor_transition(dt_min)
         airborne = self.status not in ("idle", "refueling")
         self._distance_this_step = 0.0
 

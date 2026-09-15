@@ -175,11 +175,11 @@ def test_sub_candidates_have_correct_local_values(sm):
     extractor = CandidateExtractor()
     result = extractor.extract(sm)
     V = sm.get_value_matrix()
-    I = sm.get_info_matrix()
+    info = sm.get_info_matrix()
     for cand in result.candidate_regions:
         bbox = cand["bbox"]
         patch_V = V[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
-        patch_I = I[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
+        patch_I = info[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
         expected_value = float(np.sum(patch_V))
         expected_info = float(np.mean(patch_I))
         assert abs(cand["total_value"] - expected_value) < 1e-6, (

@@ -1,11 +1,18 @@
 import os
 from dataclasses import dataclass, replace
+import math
 
 from src.mission.config import (
+    ActivityConfig,
     ContactConfig,
+    EmitterConfig,
+    EvasionConfig,
     EvolutionConfig,
+    InformationUpdateConfig,
     IntentConfig,
     MissionConfig,
+    PassiveConfig,
+    PopulationConfig,
     SchedulingConfig,
     load_strict_yaml,
     strict_dataclass,
@@ -15,6 +22,43 @@ from src.mission.config import (
 from src.sensor.models import (
     SarConfig, EoIrConfig, RadarConfig, GeneralSensorConfig, SensorConfig,
 )
+
+
+def allocate_population(total: int, ratios: dict[str, float]) -> dict[str, int]:
+    """Allocate a population with largest-remainder rounding and stable ties."""
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise ValueError("population total must be a non-negative integer")
+    order = ("civilian", "research")
+    if set(ratios) != set(order):
+        raise ValueError("population ratios must contain civilian and research")
+    values = tuple(ratios[key] for key in order)
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) or value < 0.0 for value in values):
+        raise ValueError("population ratios must be finite non-negative numbers")
+    total_ratio = math.fsum(values)
+    if total_ratio <= 0.0 or abs(total_ratio - 1.0) > 1e-9:
+        raise ValueError("population ratios must sum to 1")
+    quotas = {key: total * value / total_ratio for key, value in zip(order, values)}
+    result = {key: math.floor(quotas[key]) for key in order}
+    remaining = total - sum(result.values())
+    if not 0 <= remaining < len(order):
+        raise ValueError("population allocation is numerically inconsistent")
+    ranked = sorted(
+        order,
+        key=lambda key: (-(quotas[key] - result[key]), order.index(key)),
+    )
+    for key in ranked[:remaining]:
+        result[key] += 1
+    return result
+
+
+def validate_uav_count(value: object, *, formal_acceptance: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("uav.count: expected integer")
+    minimum = 10 if formal_acceptance else 1
+    if value < minimum:
+        raise ValueError(f"uav.count: expected integer >= {minimum}")
+    return value
 
 
 def _seed_sequence(value: object, name: str) -> tuple:
@@ -81,6 +125,11 @@ class UAVConfig:
     freshness_patrol_count: int = 5
     freshness_patrol_coverage_threshold_pct: float = 80.0
 
+    @property
+    def count(self) -> int:
+        """New semantic name; the legacy field remains for replay compatibility."""
+        return self.count_max
+
 
 @dataclass(frozen=True)
 class ShipConfig:
@@ -111,6 +160,35 @@ class ShipConfig:
     navigation_horizon_min: float
     integration_dt_min: float
     navigation_clearance_cells: float
+
+    def __post_init__(self) -> None:
+        population = None
+        if (
+            isinstance(self.initial_ship_count, int)
+            and not isinstance(self.initial_ship_count, bool)
+            and self.initial_ship_count >= 0
+            and isinstance(self.target_ship_count, int)
+            and not isinstance(self.target_ship_count, bool)
+            and 0 <= self.target_ship_count <= self.initial_ship_count
+        ):
+            research_ratio = (
+                self.target_ship_count / self.initial_ship_count
+                if self.initial_ship_count else 0.0
+            )
+            population = PopulationConfig(
+                total_count=self.initial_ship_count,
+                civilian_ratio=1.0 - research_ratio,
+                research_ratio=research_ratio,
+            )
+        object.__setattr__(self, "_population", population)
+
+    @property
+    def population(self) -> PopulationConfig:
+        if self._population is None:
+            # Keep validation errors anchored to the legacy fields for callers
+            # that construct an intentionally invalid compatibility config.
+            raise ValueError("ship population is invalid")
+        return self._population
 
 
 @dataclass
@@ -188,7 +266,10 @@ class ConfigLoader:
         grid_data["resolution"] = tuple(grid_data["resolution"])
         llm_params_data = _read("llm_params.yaml")
         mission_data = _read("mission.yaml")
-        mission_fields = {"contact", "intent", "scheduling", "evolution"}
+        mission_fields = {
+            "contact", "intent", "scheduling", "evolution", "activity",
+            "evasion", "information_update",
+        }
         unknown_mission_fields = set(mission_data) - mission_fields
         if unknown_mission_fields:
             raise ValueError(
@@ -204,6 +285,24 @@ class ConfigLoader:
                     evolution_data[seed_field],
                     f"mission.evolution.{seed_field}",
                 )
+        alignment_data = {
+            "activity": mission_data.get("activity", {}),
+            "evasion": mission_data.get("evasion", {}),
+            "information_update": mission_data.get("information_update", {}),
+        }
+        alignment_configs = {
+            "activity": ConfigLoader._alignment_dataclass(
+                alignment_data["activity"], ActivityConfig, "mission.activity",
+            ),
+            "evasion": ConfigLoader._alignment_dataclass(
+                alignment_data["evasion"], EvasionConfig, "mission.evasion",
+            ),
+            "information_update": ConfigLoader._alignment_dataclass(
+                alignment_data["information_update"],
+                InformationUpdateConfig,
+                "mission.information_update",
+            ),
+        }
         mission = MissionConfig(
             contact=replace(
                 strict_dataclass(mission_data.get("contact"), ContactConfig, "mission.contact"),
@@ -223,6 +322,8 @@ class ConfigLoader:
                 "mission.evolution",
             ),
         )
+        for name, value in alignment_configs.items():
+            object.__setattr__(mission, name, value)
         control_data = _read("control.yaml")
         configured_modes = {
             control_data["default_mode"],
@@ -256,6 +357,31 @@ class ConfigLoader:
         )
 
         ship_data = _read("ship.yaml")
+        population_data = ship_data.pop("population", None)
+        legacy_population_fields = {
+            "initial_ship_count", "target_ship_count",
+        } & set(ship_data)
+        if legacy_population_fields:
+            raise ValueError(
+                "legacy ship population configuration requires migration: "
+                f"{sorted(legacy_population_fields)}; use population.total_count "
+                "and population ratios"
+            )
+        if population_data is not None:
+            population = ConfigLoader._alignment_dataclass(
+                population_data, PopulationConfig, "ship.population",
+            )
+            allocation = allocate_population(
+                population.total_count,
+                {
+                    "civilian": population.civilian_ratio,
+                    "research": population.research_ratio,
+                },
+            )
+            ship_data.setdefault("initial_ship_count", population.total_count)
+            ship_data.setdefault("target_ship_count", allocation["research"])
+        else:
+            population = None
         legacy_ship_fields = {
             "count_min",
             "max_groups",
@@ -279,10 +405,18 @@ class ConfigLoader:
                 "target_ship_count"
             )
 
+        uav_data = _read("uav.yaml")
+        if "count" in uav_data:
+            if "count_max" in uav_data:
+                raise ValueError("uav: use count instead of count_max")
+            uav_data["count_max"] = uav_data.pop("count")
+        elif "count_max" in uav_data:
+            raise ValueError("uav: use count instead of count_max")
+
         config = AppConfig(
             environment=ConfigLoader._dict_to_dataclass(env_data, EnvironmentConfig),
             grid=ConfigLoader._dict_to_dataclass(grid_data, GridConfig),
-            uav=ConfigLoader._dict_to_dataclass(_read("uav.yaml"), UAVConfig),
+            uav=ConfigLoader._dict_to_dataclass(uav_data, UAVConfig),
             ship=strict_dataclass(ship_data, ShipConfig, "ship"),
             llm=ConfigLoader._dict_to_dataclass(llm_params_data["cycles"], LLMConfig),
             sensor=ConfigLoader._load_sensor_config(base_path),
@@ -290,8 +424,28 @@ class ConfigLoader:
             control=control,
             mission=mission,
         )
+        if population is not None:
+            object.__setattr__(config.ship, "_population", population)
         validate_mission_config(config)
         return config
+
+    @staticmethod
+    def _alignment_dataclass(data: object, cls, name: str):
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError(f"{name}: expected mapping")
+        normalized = dict(data)
+        for field_name in (
+            "burst_duration_min", "schedule_start_min", "schedule_duration_min",
+        ):
+            if field_name in normalized:
+                normalized[field_name] = tuple(normalized[field_name])
+        if cls is ActivityConfig and "regulated_bboxes" in normalized:
+            normalized["regulated_bboxes"] = tuple(
+                tuple(bbox) for bbox in normalized["regulated_bboxes"]
+            )
+        return strict_dataclass(normalized, cls, name)
 
     @staticmethod
     def _load_sensor_config(base_path: str) -> SensorConfig:
@@ -304,4 +458,10 @@ class ConfigLoader:
             eoir=ConfigLoader._dict_to_dataclass(data["eoir"], EoIrConfig),
             radar=ConfigLoader._dict_to_dataclass(data["radar"], RadarConfig),
             general=ConfigLoader._dict_to_dataclass(data["general"], GeneralSensorConfig),
+            passive=ConfigLoader._alignment_dataclass(
+                data.get("passive", {}), PassiveConfig, "sensor.passive",
+            ),
+            emitter=ConfigLoader._alignment_dataclass(
+                data.get("emitter", {}), EmitterConfig, "sensor.emitter",
+            ),
         )

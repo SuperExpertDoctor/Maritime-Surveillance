@@ -43,3 +43,45 @@ evolution:
   repeats_per_seed: 3
   minimum_score_gain: 0.02
   maximum_component_regression: 0.02
+activity:
+  regulated_bboxes: [[8, 8, 22, 22]]
+  schedule_start_min: [30.0, 120.0]
+  schedule_duration_min: [60.0, 120.0]
+  survey_command_speed_kn: 10.0
+  survey_track_spacing_cells: 1.0
+  trajectory_window_min: 20.0
+  min_observed_duration_min: 12.0
+  observed_speed_max_kn: 12.0
+  reversal_angle_min_deg: 120.0
+  min_reversal_count: 2
+  radiation_window_min: 10.0
+  min_distinct_bursts: 2
+  research_equipment_pd: 0.90
+  research_equipment_pfa: 0.05
+  deployed_equipment_pd: 0.85
+  deployed_equipment_pfa: 0.05
+evasion:
+  observer_range_cells: 6.0
+  history_window_min: 6.0
+  response_window_min: 3.0
+  minimum_samples_per_window: 3
+  minimum_window_span_min: 1.5
+  minimum_course_change_deg: 45.0
+  minimum_speed_increase_kn: 3.0
+  minimum_outward_speed_kn: 3.0
+  minimum_range_increase_cells: 0.05
+  confirmation_samples: 2
+  forced_maneuver_exclusion_cells: 2.0
+  rearm_clear_min: 5.0
+  evidence_ttl_min: 20.0
+  evidence_tau_min: 8.0
+  enabled: true
+information_update:
+  value_alpha: 0.45
+  value_beta: 0.35
+  value_gamma: 0.20
+  material_delta_threshold: 0.05
+  normal_heavy_cooldown_min: 1.0
+  kernel_epsilon: 0.01
+  planning_deadline_seconds: 2.0
+  postprocess_reserve_seconds: 0.2

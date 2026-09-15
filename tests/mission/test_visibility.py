@@ -11,8 +11,7 @@ from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import GridCoord, TargetReport
 from src.schedule.info_value_table import InfoValueTable
 from src.schedule.prompt_builder import PromptBuilder
-from src.schedule.state_manager import StateManager
-from tests.mission.test_contact_store import ais, visual
+from tests.mission.test_contact_store import visual
 
 
 @pytest.fixture

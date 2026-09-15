@@ -1,5 +1,4 @@
-﻿import pytest
-from src.schedule.datatypes import GridCoord, BBox
+﻿from src.schedule.datatypes import GridCoord, BBox
 from src.schedule.hungarian import hungarian_pair
 
 

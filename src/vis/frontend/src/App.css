@@ -1095,6 +1095,157 @@ button {
   font-size: 10px;
 }
 
+.vessel-editor {
+  background: #f8fbfc;
+}
+
+.vessel-palette {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.vessel-tool {
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.vessel-tool:first-child svg { color: var(--cyan); }
+.vessel-tool:last-child svg { color: var(--amber); }
+
+.vessel-tool:hover:not(:disabled),
+.vessel-tool.active {
+  background: #e8f4f6;
+  border-color: #71afb5;
+  color: var(--text);
+}
+
+.vessel-tool:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.placement-status {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 3px 5px;
+  border: 1px solid #99d5c5;
+  background: #effaf7;
+  color: var(--teal);
+  font-size: 9px;
+}
+
+.placement-status span { flex: 1; }
+
+.scenario-vessel-list {
+  display: flex;
+  max-height: 130px;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 8px;
+  overflow-y: auto;
+}
+
+.scenario-vessel-row {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  text-align: left;
+  font-size: 9px;
+}
+
+.scenario-vessel-row span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  font-family: Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scenario-vessel-row small {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.scenario-vessel-row:hover,
+.scenario-vessel-row.selected {
+  border-color: var(--line);
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.delete-vessel-action {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  margin-top: 7px;
+  padding: 0 8px;
+  border: 1px solid #e1a0ad;
+  border-radius: 3px;
+  background: #fff;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.delete-vessel-action:hover {
+  background: #fff1f3;
+}
+
+.editor-note,
+.vessel-command-status {
+  margin: 7px 0 0;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.vessel-command-status {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.vessel-command-status.queued { color: #6d28d9; border-color: #c4b5fd; }
+.vessel-command-status.applied { color: var(--teal); border-color: #99d5c5; }
+.vessel-command-status.rejected { color: var(--danger); border-color: #e1a0ad; }
+.vessel-command-status small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .llm-status-row {
   display: flex;
   align-items: center;

@@ -10,7 +10,9 @@ from src.schedule.datatypes import Region, BBox
 import math
 import numpy as np
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
+from src.env.dubins import DubinsPath
 from src.utils.search_route_planner import SearchRouteRequest, plan_search_route
+import time
 
 from src.mission.contracts import (
     AssignmentBatch,
@@ -26,6 +28,9 @@ from src.mission.contracts import (
 from src.mission.mission_scheduler import MissionScheduler
 from src.mission.task_catalog import TaskCatalog
 from src.mission.strategy_memory import StrategyMemoryStore
+
+
+_SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
 
 
 class TaskAllocator:
@@ -44,7 +49,7 @@ class TaskAllocator:
         self.extractor = CandidateExtractor()
         self.llm_client = LLMClient(config, gateway=llm_gateway)
         self.trigger_manager = TriggerManager(self.sm)
-        self.task_catalog = TaskCatalog()
+        self.task_catalog = TaskCatalog(candidate_extractor=self.extractor)
         self.strategy_memory_store = strategy_memory_store or StrategyMemoryStore()
         self.reviewer = LLMReviewer(
             config,
@@ -74,6 +79,7 @@ class TaskAllocator:
             tuple, tuple[float, float, tuple[float, float]] | None
         ] = {}
         self._last_mission_snapshot: MissionSnapshot | None = None
+        self.last_decision_timing: dict | None = None
 
     def build_mission_snapshot(
         self,
@@ -141,6 +147,7 @@ class TaskAllocator:
                 self.llm_client._reviewer_memory
                 if reviewer_summary is None else reviewer_summary
             ),
+            _information_version=int(getattr(self.sm, "information_version", 0)),
         )
         self._last_mission_snapshot = snapshot
         return snapshot
@@ -177,6 +184,7 @@ class TaskAllocator:
         intent_statuses: tuple[IntentStatus, ...] = (),
     ) -> tuple[dict, object | None]:
         """Run one unified scheduling decision without mutating mission state."""
+        self.last_decision_timing = None
         self.sm.step(current_time)
         new_memory = self.reviewer.step(current_time, self.sm)
         if new_memory:
@@ -190,13 +198,24 @@ class TaskAllocator:
                 current_time, decision, active_tasks,
             )
 
+        wall_started = time.perf_counter()
         snapshot = self.build_mission_snapshot(
             current_time,
             active_tasks=active_tasks,
             intents=intents,
             intent_statuses=intent_statuses,
         )
+        snapshot_frozen_wall = time.perf_counter()
         batch = self.mission_scheduler.decide(snapshot)
+        decision_finished_wall = time.perf_counter()
+        self.last_decision_timing = {
+            "snapshot_frozen_wall": snapshot_frozen_wall,
+            "decision_finished_wall": decision_finished_wall,
+            "elapsed_before_snapshot_seconds": snapshot_frozen_wall - wall_started,
+            "llm_seconds": decision_finished_wall - snapshot_frozen_wall,
+            "validation_seconds": 0.0,
+            "matching_seconds": 0.0,
+        }
         interaction = {
             "call_id": self.mission_scheduler.last_selection_call_id,
             "success": self.mission_scheduler.last_selection_success,
@@ -236,10 +255,12 @@ class TaskAllocator:
     ) -> tuple[dict, AssignmentBatch | None]:
         """Re-pair only approved work; light events cannot create work."""
         del decision
+        wall_started = time.perf_counter()
         snapshot = self.build_mission_snapshot(
             current_time,
             active_tasks=active_tasks,
         )
+        snapshot_frozen_wall = time.perf_counter()
         approved_ids = tuple(
             task.task_id
             for task in snapshot.active_tasks
@@ -249,6 +270,15 @@ class TaskAllocator:
             snapshot,
             task_ids=approved_ids,
         )
+        decision_finished_wall = time.perf_counter()
+        self.last_decision_timing = {
+            "snapshot_frozen_wall": snapshot_frozen_wall,
+            "decision_finished_wall": decision_finished_wall,
+            "elapsed_before_snapshot_seconds": snapshot_frozen_wall - wall_started,
+            "llm_seconds": 0.0,
+            "validation_seconds": decision_finished_wall - snapshot_frozen_wall,
+            "matching_seconds": decision_finished_wall - snapshot_frozen_wall,
+        }
         self.trigger_manager.mark_triggered("light", current_time)
         if not assignments:
             return {
@@ -261,6 +291,7 @@ class TaskAllocator:
             snapshot.snapshot_id,
             assignments,
             "light-approved-pairing",
+            _information_version=snapshot.information_version,
         )
         self.sm.add_event("mission_assignment_approved", {
             "snapshot_id": snapshot.snapshot_id,
@@ -327,7 +358,7 @@ class TaskAllocator:
             return False
         record = active_tasks.get(resource.current_task_id)
         return record is None or (
-            record.kind == "search"
+            record.kind in _SEARCH_TASK_KINDS
             and record.status in {"approved", "executing"}
             and record.assigned_uav_id == resource.uav_id
         )
@@ -352,7 +383,24 @@ class TaskAllocator:
             for record in active_tasks
             if record.status in {"approved", "executing"}
         }
-        tasks_by_id = {candidate.task_id: candidate for candidate in candidates}
+        # The snapshot keeps the complete legal pool for auditing and
+        # fairness, while route geometry is evaluated for the bounded prompt
+        # window. This keeps a large rectangle pool from turning one decision
+        # into thousands of repeated A* plans.
+        if len(candidates) > self.mission_scheduler.max_tasks_in_prompt:
+            ranked = sorted(
+                candidates,
+                key=lambda task: (
+                    0 if task.task_id.startswith("investigation:") else 1,
+                    0 if task.kind in {"probe", "track"} else 1,
+                    -int(task.priority == "high"),
+                    -float(task.utility),
+                    task.task_id,
+                ),
+            )[: self.mission_scheduler.max_tasks_in_prompt]
+        else:
+            ranked = candidates
+        tasks_by_id = {candidate.task_id: candidate for candidate in ranked}
         tasks_by_id.update(active_candidates)
         edges = []
         for task in tasks_by_id.values():
@@ -377,16 +425,26 @@ class TaskAllocator:
                     continue
                 transit_distance, mission_distance, endpoint = route_metrics
                 transit = transit_distance / max(resource.speed_cells_min, 1e-6)
-                return_range = min(
-                    (self._return_route_distance(
-                        endpoint,
-                        resource,
-                        tuple(map(float, base)),
-                        planning_map_version,
+                if task.task_id.startswith(("search-", "investigation:", "direction:")):
+                    return_range = min(
+                        (math.dist(endpoint, tuple(map(float, base)))
+                         for base in bases),
+                        default=None,
                     )
-                     for base in bases),
-                    default=None,
-                )
+                else:
+                    return_range = min(
+                        (
+                            distance
+                            for base in bases
+                            if (distance := self._return_route_distance(
+                                endpoint,
+                                resource,
+                                tuple(map(float, base)),
+                                planning_map_version,
+                            )) is not None
+                        ),
+                        default=None,
+                    )
                 if return_range is None or (
                     transit_distance + mission_distance + return_range + reserve
                     > resource.remaining_range_cells + 1e-9
@@ -430,7 +488,7 @@ class TaskAllocator:
             intent_ids=record.intent_ids,
             feasible_uav_ids=feasible,
             eligible_since_min=record.created_at_min,
-            priority="high" if record.kind != "search" else "medium",
+            priority="high" if record.kind not in _SEARCH_TASK_KINDS else "medium",
             estimated_duration_min=1.0,
             utility=0.0,
             expected_information_gain=0.0,
@@ -456,7 +514,7 @@ class TaskAllocator:
             if task.bbox is not None
             else tuple(round(value, 6) for value in target),
             np.isfinite(self.sm.info_field.last_scan_time).tobytes()
-            if task.kind == "search"
+            if task.kind in _SEARCH_TASK_KINDS
             else None,
         )
         cache = self._mission_route_metrics_cache
@@ -465,7 +523,23 @@ class TaskAllocator:
 
         start = (*resource.position_cells, float(resource.heading_rad))
         try:
-            if task.kind == "search":
+            if task.kind in _SEARCH_TASK_KINDS and (
+                task.task_id.startswith("search-")
+                or task.task_id.startswith("investigation:")
+                or task.task_id.startswith("direction:")
+            ):
+                width = max(1.0, float(task.bbox[2] - task.bbox[0]))
+                height = max(1.0, float(task.bbox[3] - task.bbox[1]))
+                result = (
+                    math.dist(resource.position_cells, target),
+                    max(
+                        2.0 * max(width, height),
+                        max(0.0, task.estimated_duration_min)
+                        * max(resource.speed_cells_min, 0.0),
+                    ),
+                    tuple(target),
+                )
+            elif task.kind in _SEARCH_TASK_KINDS:
                 path_plan = plan_search_route(
                     SearchRouteRequest(
                         uav_id=resource.uav_id,
@@ -505,14 +579,18 @@ class TaskAllocator:
                     if task.kind == "probe"
                     else self.config.mission.contact.near_standoff_cells
                 )
-                path = self._mission_navigator.plan_to_standoff(
-                    start,
-                    target,
-                    radius,
-                    self.sm.obstacle_mask,
-                    1.0,
-                    planning_map_version,
+                path = self._quick_standoff_path(
+                    start, target, radius, self.sm.obstacle_mask,
                 )
+                if path is None:
+                    path = self._mission_navigator.plan_to_standoff(
+                        start,
+                        target,
+                        radius,
+                        self.sm.obstacle_mask,
+                        1.0,
+                        planning_map_version,
+                    )
                 if not path:
                     result = None
                 else:
@@ -555,16 +633,63 @@ class TaskAllocator:
             return self._mission_route_cache[key]
         heading = math.atan2(base[1] - target[1], base[0] - target[0])
         try:
+            direct = DubinsPath.compute(
+                (*target, heading), (*base, heading), 1.0,
+                step_size=self._mission_navigator.sample_step,
+            )
+            if self._mission_navigator._path_is_safe(
+                direct.waypoints, self.sm.obstacle_mask,
+            ):
+                distance = float(direct.total_length)
+                self._mission_route_cache[key] = distance
+                return distance
             path = self._mission_navigator.plan_grid(
                 (*target, heading), {base}, self.sm.obstacle_mask, 1.0,
                 planning_map_version,
             )
         except (PathNotFoundError, TypeError, ValueError):
             distance = None
+        except RuntimeError:
+            distance = None
         else:
             distance = self._path_length(path)
         self._mission_route_cache[key] = distance
         return distance
+
+    def _quick_standoff_path(
+        self,
+        start: tuple[float, float, float],
+        target: tuple[float, float],
+        radius: float,
+        obstacle_mask: np.ndarray,
+    ) -> list[tuple[float, float, float]] | None:
+        """Try one certified Dubins approach before invoking Hybrid A*."""
+        distance = math.dist(start[:2], target)
+        if distance <= radius + 1e-9:
+            return [start]
+        radial = (
+            (start[0] - target[0]) / distance,
+            (start[1] - target[1]) / distance,
+        )
+        endpoint = (
+            target[0] + radius * radial[0],
+            target[1] + radius * radial[1],
+        )
+        endpoint_heading = math.atan2(
+            target[1] - endpoint[1], target[0] - endpoint[0],
+        )
+        try:
+            direct = DubinsPath.compute(
+                start, (*endpoint, endpoint_heading), 1.0,
+                step_size=self._mission_navigator.sample_step,
+            )
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        if not self._mission_navigator._path_is_safe(
+            direct.waypoints, obstacle_mask,
+        ):
+            return None
+        return list(direct.waypoints)
 
     @staticmethod
     def _path_length(path) -> float:
@@ -689,7 +814,7 @@ class TaskAllocator:
         )
         remaining_slots = max(
             0,
-            self.config.uav.count_max
+            self.config.uav.count
             - len(self.sm.get_track_regions())
             - len(retained_regions),
         )

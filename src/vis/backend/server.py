@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
-from src.mission.contracts import IntentCommand, RuntimeCommand
+from src.mission.contracts import IntentCommand, RuntimeCommand, VesselCommand
 from src.mission.intent_commands import (
     CommandConflict,
     IntentCommandService,
@@ -115,6 +115,7 @@ def create_app(
     )
 
     app.state.state_manager = state_manager
+    app.state.engine = engine
     app.state.config = config
     app.state.frame_logger = FrameLogger(output_dir=OUTPUT_DIR)
     app.state.current_cycle = 0
@@ -279,6 +280,86 @@ def create_app(
             return _api_error("command_not_found", "command was not found", 404)
         return JSONResponse(_command_result_payload(result))
 
+    @app.post("/api/vessels")
+    async def create_vessel(request: Request):
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        live_engine = app.state.engine
+        if live_engine is None:
+            return _api_error("engine_unavailable", "simulation engine is unavailable", 409)
+        allowed = {"episode_id", "command_id", "vessel_class", "position_cells"}
+        validation_error = _validate_body(body, allowed, allowed)
+        if validation_error is not None:
+            return validation_error
+        if not live_engine.editing_allowed:
+            return _api_error("editing_closed", "vessel editing is closed", 409)
+        if body["episode_id"] != live_engine.episode_id:
+            return _api_error("episode_conflict", "command belongs to another episode", 409)
+        position = body["position_cells"]
+        if (not isinstance(position, list) or len(position) != 2
+                or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                       or not math.isfinite(float(value)) for value in position)):
+            return _api_error("invalid_request", "position_cells must be two finite numbers", 422)
+        if body["vessel_class"] not in {"civilian", "research"}:
+            return _api_error("invalid_request", "vessel_class is invalid", 422)
+        command = VesselCommand(
+            body["command_id"], body["episode_id"], "create", None, None,
+            body["vessel_class"], tuple(float(value) for value in position),
+        )
+        try:
+            result = live_engine.vessel_commands.enqueue(command)
+        except Exception as exc:
+            if exc.__class__.__name__ == "CommandConflict":
+                return _api_error("command_conflict", str(exc), 409)
+            return _api_error("invalid_request", str(exc), 422)
+        return JSONResponse(_vessel_result_payload(result), status_code=202)
+
+    @app.delete("/api/vessels/{vessel_id}")
+    async def delete_vessel(vessel_id: str, request: Request):
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        live_engine = app.state.engine
+        if live_engine is None:
+            return _api_error("engine_unavailable", "simulation engine is unavailable", 409)
+        allowed = {"episode_id", "command_id", "expected_revision"}
+        validation_error = _validate_body(body, allowed, allowed)
+        if validation_error is not None:
+            return validation_error
+        if not live_engine.editing_allowed:
+            return _api_error("editing_closed", "vessel editing is closed", 409)
+        if body["episode_id"] != live_engine.episode_id:
+            return _api_error("episode_conflict", "command belongs to another episode", 409)
+        command = VesselCommand(
+            body["command_id"], body["episode_id"], "delete", vessel_id,
+            body["expected_revision"], None, None,
+        )
+        try:
+            result = live_engine.vessel_commands.enqueue(command)
+        except Exception as exc:
+            if exc.__class__.__name__ == "CommandConflict":
+                return _api_error("command_conflict", str(exc), 409)
+            return _api_error("invalid_request", str(exc), 422)
+        return JSONResponse(_vessel_result_payload(result), status_code=202)
+
+    @app.get("/api/vessel-commands/{command_id}")
+    async def get_vessel_command(command_id: str):
+        live_engine = app.state.engine
+        result = live_engine.vessel_command_result(command_id) if live_engine else None
+        if result is None:
+            return _api_error("command_not_found", "vessel command was not found", 404)
+        return JSONResponse(_vessel_result_payload(result))
+
+    @app.get("/api/scenario/vessels")
+    async def scenario_vessels():
+        live_engine = app.state.engine
+        if live_engine is None:
+            return _api_error("engine_unavailable", "simulation engine is unavailable", 409)
+        if not live_engine.editing_allowed:
+            return _api_error("editing_closed", "vessel editing is closed", 409)
+        return JSONResponse({"vessels": list(live_engine.scenario_vessels())})
+
     @app.post("/api/intents")
     async def create_intent(request: Request):
         body, error = await _request_object(request)
@@ -417,7 +498,7 @@ def create_app(
                 "fragment_threshold_cells": cfg.grid.fragment_threshold_cells,
             },
             "uav": {
-                "count_max": cfg.uav.count_max,
+                "count": cfg.uav.count,
                 "cruise_speed_kmh": cfg.uav.cruise_speed_kmh,
                 "endurance_h": cfg.uav.endurance_h,
                 "sortie_endurance_h": cfg.uav.sortie_endurance_h,
@@ -429,8 +510,11 @@ def create_app(
                 "refuel_time_min": cfg.uav.refuel_time_min,
             },
             "ship": {
-                "initial_ship_count": cfg.ship.initial_ship_count,
-                "target_ship_count": cfg.ship.target_ship_count,
+                "population": {
+                    "total_count": cfg.ship.population.total_count,
+                    "civilian_ratio": cfg.ship.population.civilian_ratio,
+                    "research_ratio": cfg.ship.population.research_ratio,
+                },
                 "target_ais_on_probability": cfg.ship.target_ais_on_probability,
                 "speed_kn": cfg.ship.speed_kn,
                 "ais_update_interval_min": cfg.ship.ais_update_interval_min,
@@ -461,6 +545,51 @@ def create_app(
                 "heavy_cycle_min": cfg.llm.heavy_cycle_min,
                 "reviewer_cycle_min": cfg.llm.reviewer_cycle_min,
                 "max_retries": cfg.llm.max_retries,
+            },
+            "sensor": {
+                "passive": {
+                    "measurement_interval_min": cfg.sensor.passive.measurement_interval_min,
+                    "reference_detection_probability": cfg.sensor.passive.reference_detection_probability,
+                    "detection_range_cells": cfg.sensor.passive.detection_range_cells,
+                    "range_scale_cells": cfg.sensor.passive.range_scale_cells,
+                    "bearing_std_deg": cfg.sensor.passive.bearing_std_deg,
+                    "minimum_received_power_db": cfg.sensor.passive.minimum_received_power_db,
+                    "position_association_radius_cells": cfg.sensor.passive.position_association_radius_cells,
+                },
+                "emitter": {
+                    "mean_silent_interval_min": cfg.sensor.emitter.mean_silent_interval_min,
+                    "burst_duration_min": list(cfg.sensor.emitter.burst_duration_min),
+                    "source_power_at_reference_db": cfg.sensor.emitter.source_power_at_reference_db,
+                },
+            },
+            "mission_alignment": {
+                "activity": {
+                    "regulated_bboxes": [list(bbox) for bbox in cfg.mission.activity.regulated_bboxes],
+                    "schedule_start_min": list(cfg.mission.activity.schedule_start_min),
+                    "schedule_duration_min": list(cfg.mission.activity.schedule_duration_min),
+                    "survey_command_speed_kn": cfg.mission.activity.survey_command_speed_kn,
+                    "survey_track_spacing_cells": cfg.mission.activity.survey_track_spacing_cells,
+                    "min_observed_duration_min": cfg.mission.activity.min_observed_duration_min,
+                    "observed_speed_max_kn": cfg.mission.activity.observed_speed_max_kn,
+                    "min_reversal_count": cfg.mission.activity.min_reversal_count,
+                    "min_distinct_bursts": cfg.mission.activity.min_distinct_bursts,
+                },
+                "evasion": {
+                    "observer_range_cells": cfg.mission.evasion.observer_range_cells,
+                    "history_window_min": cfg.mission.evasion.history_window_min,
+                    "response_window_min": cfg.mission.evasion.response_window_min,
+                    "minimum_course_change_deg": cfg.mission.evasion.minimum_course_change_deg,
+                    "minimum_speed_increase_kn": cfg.mission.evasion.minimum_speed_increase_kn,
+                    "minimum_outward_speed_kn": cfg.mission.evasion.minimum_outward_speed_kn,
+                    "enabled": cfg.mission.evasion.enabled,
+                },
+                "information_update": {
+                    "value_alpha": cfg.mission.information_update.value_alpha,
+                    "value_beta": cfg.mission.information_update.value_beta,
+                    "value_gamma": cfg.mission.information_update.value_gamma,
+                    "material_delta_threshold": cfg.mission.information_update.material_delta_threshold,
+                    "planning_deadline_seconds": cfg.mission.information_update.planning_deadline_seconds,
+                },
             },
             "control": {
                 "default_mode": cfg.control.default_mode,
@@ -501,12 +630,32 @@ def _api_error(error_code: str, message: str, status_code: int) -> JSONResponse:
 
 async def _request_object(request: Request) -> tuple[dict | None, JSONResponse | None]:
     try:
-        body = await request.json()
-    except (TypeError, ValueError):
+        raw = await request.body()
+        body = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+        )
+    except ValueError as exc:
+        if str(exc) == "duplicate_json_key":
+            return None, _api_error("duplicate_json_key", "duplicate JSON object key", 422)
         return None, _api_error("invalid_request", "request body must be valid JSON", 422)
     if not isinstance(body, dict):
         return None, _api_error("invalid_request", "request body must be an object", 422)
     return body, None
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate_json_key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value):
+    raise ValueError(f"invalid_json_constant:{value}")
 
 
 def _validate_body(
@@ -734,6 +883,16 @@ def _command_result_payload(result) -> dict:
             result.error_code, "command was rejected",
         )
     return payload
+
+
+def _vessel_result_payload(result) -> dict:
+    return {
+        "command_id": result.command_id,
+        "status": result.status,
+        "vessel_id": result.vessel_id,
+        "revision": result.revision,
+        "error_code": result.error_code,
+    }
 
 
 _ERROR_MESSAGES = {

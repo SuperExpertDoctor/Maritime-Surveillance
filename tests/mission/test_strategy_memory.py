@@ -1,9 +1,7 @@
-from dataclasses import replace
 
 import pytest
 
 from src.mission.contracts import (
-    ContactSnapshot,
     FeasibleEdge,
     Intent,
     MissionSnapshot,
@@ -95,7 +93,6 @@ def test_truth_ids_and_code_payloads_are_rejected(tmp_path, summary):
 
 
 def test_invalid_condition_keys_and_long_advice_cannot_be_saved(tmp_path):
-    store = StrategyMemoryStore(tmp_path)
     with pytest.raises(ValueError, match="applies_when"):
         StrategyMemory(
             "M0001", 1, "candidate", {"contact_id": "C1"}, "short advice",
