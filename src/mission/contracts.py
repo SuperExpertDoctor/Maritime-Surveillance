@@ -195,6 +195,22 @@ class Intent:
 
 
 @dataclass(frozen=True)
+class IntentStatus:
+    intent_id: str
+    revision: int
+    evaluated_at_min: float
+    searchable_cells: int
+    scanned_cells: int
+    unseen_cells: int
+    fresh_cells: int
+    coverage_ratio: float
+    freshness_ratio: float
+    max_scan_age_min: float | None
+    assigned_task_ids: tuple[str, ...]
+    unmet_reason: str | None
+
+
+@dataclass(frozen=True)
 class TaskCandidate:
     task_id: str
     kind: Literal["search", "probe", "track"]
@@ -244,6 +260,7 @@ __all__ = [
     "ContactState",
     "Identity",
     "Intent",
+    "IntentStatus",
     "MissionSelection",
     "ObservationSample",
     "ProbeSession",

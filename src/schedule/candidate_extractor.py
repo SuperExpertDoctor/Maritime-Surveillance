@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.mission.contracts import Intent
 from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.state_manager import StateManager
 from src.utils.coverage_planner import CoveragePlanner
@@ -19,10 +20,22 @@ class CandidateExtractor:
     def __init__(self):
         self.coverage_planner = CoveragePlanner(sample_step=0.25)
 
-    def extract(self, sm: StateManager) -> CandidateResult:
+    def extract(
+        self,
+        sm: StateManager,
+        scheduling_value: np.ndarray | None = None,
+        intents: tuple[Intent, ...] = (),
+    ) -> CandidateResult:
         gc = sm.config.grid
         cols, rows = gc.resolution
-        V = sm.get_value_matrix()
+        if scheduling_value is None:
+            V = sm.get_value_matrix()
+        else:
+            V = np.asarray(scheduling_value, dtype=float)
+            if V.shape != (cols, rows) or not np.isfinite(V).all():
+                raise ValueError("scheduling_value must be a finite grid-sized matrix")
+            V = V.copy()
+        active_intents = tuple(intent for intent in intents if intent.lifecycle == "active")
         I = sm.get_info_matrix()
         seen = np.isfinite(sm.info_field.last_scan_time)
         searchable = sm.get_searchable_mask()
@@ -78,7 +91,12 @@ class CandidateExtractor:
             sm.get_track_region_for_group(report.contact_id) is None
             for report in sm.get_target_reports()
         )
-        K = 10 if sm.lifecycle_mode else min(max(available * 2, int(has_handoff_report)), 10)
+        if active_intents or scheduling_value is not None:
+            # Candidate supply represents available work, not just idle UAVs:
+            # T11 can preempt ordinary search work after this stage.
+            K = sm.config.mission.intent.candidate_limit
+        else:
+            K = 10 if sm.lifecycle_mode else min(max(available * 2, int(has_handoff_report)), 10)
         clusters = clusters[:max(K * 4, K)]
 
         # Step 5: rectangle fitting and track-region overlap filtering
@@ -189,6 +207,14 @@ class CandidateExtractor:
         candidates.sort(key=candidate_key)
         if sm.lifecycle_mode:
             candidates = self._order_lifecycle_candidates(candidates, sm, base_positions)
+        if active_intents:
+            for candidate in candidates:
+                candidate["intent_ids"] = self._matching_intent_ids(
+                    candidate["bbox"], active_intents
+                )
+            candidates = self._reserve_intent_candidates(
+                candidates, active_intents, sm.config.mission.intent.general_candidate_reserve
+            )
         selected = []
         seen_bboxes = set()
         for candidate in candidates:
@@ -234,6 +260,51 @@ class CandidateExtractor:
             candidate_regions=candidates,
             fragment_alerts=fragments,
         )
+
+    @staticmethod
+    def _matching_intent_ids(bbox: BBox, intents: tuple[Intent, ...]) -> tuple[str, ...]:
+        return tuple(
+            intent.intent_id
+            for intent in intents
+            if not (
+                bbox.col_end <= intent.bbox[0]
+                or intent.bbox[2] <= bbox.col_start
+                or bbox.row_end <= intent.bbox[1]
+                or intent.bbox[3] <= bbox.row_start
+            )
+        )
+
+    @staticmethod
+    def _reserve_intent_candidates(
+        candidates: list[dict],
+        intents: tuple[Intent, ...],
+        general_reserve: int,
+    ) -> list[dict]:
+        """Reserve general capacity then give each focus area one legal option."""
+        ordered = []
+        used_bboxes = set()
+
+        def add(candidate: dict) -> None:
+            key = tuple(candidate["bbox"])
+            if key not in used_bboxes:
+                ordered.append(candidate)
+                used_bboxes.add(key)
+
+        for candidate in candidates:
+            if not candidate["intent_ids"] and len(ordered) < general_reserve:
+                add(candidate)
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        for intent in sorted(
+            intents,
+            key=lambda item: (item.expires_at_min, priority_order[item.priority], item.intent_id),
+        ):
+            for candidate in candidates:
+                if intent.intent_id in candidate["intent_ids"]:
+                    add(candidate)
+                    break
+        for candidate in candidates:
+            add(candidate)
+        return ordered
 
     def _handoff_candidates(
         self,
