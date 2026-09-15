@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 
+from src.control.common.contracts import ControlOwner, ControlTask, OperationMode
 from src.env.simulation import SimulationEngine
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox, GridCoord
@@ -86,6 +87,33 @@ def test_sar_is_off_during_dubins_turns():
     uav._update_scan_direction()
     assert uav.status == "searching"
     assert uav.sensor_mode == "sar"
+
+
+def test_refuelling_promotes_finished_work_lease_before_reset():
+    engine = SimulationEngine(ConfigLoader.load(), seed=11, llm_gateway=object())
+    uav = engine.uavs[0]
+    task = ControlTask(
+        "coverage:refuel-regression",
+        OperationMode.COVERAGE,
+        region_bbox=BBox(4, 4, 8, 8),
+    )
+    engine.control_coordinator.start_work(
+        uav.id,
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=1.0,
+        task=task,
+    )
+    uav.position = engine.base.position
+    uav.status = "refueling"
+    engine._return_base_by_uav[uav.id] = engine.base
+
+    for current_time in range(int(engine.base.refuel_time_min) + 1):
+        engine._process_refuelling(float(current_time))
+
+    assert uav.status == "idle"
+    assert engine.control_coordinator.current_lease(uav.id).owner is ControlOwner.SYSTEM
+    assert not engine.control_coordinator.has_controller(uav.id)
 
 
 def test_dynamic_obstacle_replans_remaining_return_route():

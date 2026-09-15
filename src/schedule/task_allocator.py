@@ -63,6 +63,12 @@ class TaskAllocator:
             max_tasks_in_prompt=config.mission.scheduling.max_tasks_in_prompt,
             allow_probe_preempt_search=config.mission.scheduling.allow_probe_preempt_search,
             allow_intent_preempt_search=config.mission.scheduling.allow_intent_preempt_search,
+            planning_deadline_seconds=(
+                config.mission.information_update.planning_deadline_seconds
+            ),
+            postprocess_reserve_seconds=(
+                config.mission.information_update.postprocess_reserve_seconds
+            ),
             strategy_memory_store=self.strategy_memory_store,
         )
         self._mission_snapshot_counter = 0
@@ -206,8 +212,19 @@ class TaskAllocator:
             intent_statuses=intent_statuses,
         )
         snapshot_frozen_wall = time.perf_counter()
-        batch = self.mission_scheduler.decide(snapshot)
+        decision_deadline = (
+            snapshot_frozen_wall
+            + self.config.mission.information_update.planning_deadline_seconds
+        )
+        batch = self.mission_scheduler.decide(
+            snapshot,
+            deadline_monotonic=decision_deadline,
+        )
         decision_finished_wall = time.perf_counter()
+        failure_reason = None
+        if batch is None:
+            errors = self.mission_scheduler.last_selection_errors
+            failure_reason = errors[0] if errors else "decision_failed"
         self.last_decision_timing = {
             "snapshot_frozen_wall": snapshot_frozen_wall,
             "decision_finished_wall": decision_finished_wall,
@@ -215,14 +232,30 @@ class TaskAllocator:
             "llm_seconds": decision_finished_wall - snapshot_frozen_wall,
             "validation_seconds": 0.0,
             "matching_seconds": 0.0,
+            "failure_reason": failure_reason,
         }
         interaction = {
             "call_id": self.mission_scheduler.last_selection_call_id,
             "success": self.mission_scheduler.last_selection_success,
             "errors": list(self.mission_scheduler.last_selection_errors),
+            "failure_category": self.mission_scheduler.last_selection_failure_category,
         }
         self.trigger_manager.mark_triggered("heavy", current_time)
         self.sm.cycle += 1
+        if batch is None:
+            self.trigger_manager.schedule_heavy_retry(
+                current_time,
+                reason=failure_reason or "decision_failed",
+            )
+            self.sm.add_event("decision_failed", {
+                "cycle": self.sm.cycle,
+                "snapshot_id": snapshot.snapshot_id,
+                "information_version": snapshot.information_version,
+                "reason": failure_reason or "decision_failed",
+                "errors": list(self.mission_scheduler.last_selection_errors),
+                "call_id": self.mission_scheduler.last_selection_call_id,
+                "retry_at_min": current_time + 1.0,
+            })
         self.sm.add_event("mission_decision", {
             "cycle": self.sm.cycle,
             "success": bool(batch is not None),

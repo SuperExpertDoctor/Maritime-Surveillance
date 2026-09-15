@@ -37,6 +37,19 @@ def test_initial_deployment_triggers_heavy_without_waiting_for_periodic_cycle(sm
     assert decision.reason == "initial fleet deployment"
 
 
+def test_decision_failure_retries_after_one_simulation_minute(sm):
+    tm = TriggerManager(sm)
+    sm.cycle = 1
+
+    tm.schedule_heavy_retry(10.0, reason="decision_deadline_exceeded")
+
+    assert tm.check(10.99).trigger_type == "none"
+    decision = tm.check(11.0)
+    assert decision.trigger_type == "heavy"
+    assert decision.reason == "retry after decision_deadline_exceeded"
+    assert tm.check(11.0).trigger_type == "none"
+
+
 def test_uav_search_complete_light_trigger(sm):
     tm = TriggerManager(sm)
     tm.notify_event("search_complete", time=10.0, uav_id="UAV-1", region_id="S1")

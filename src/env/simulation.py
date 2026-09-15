@@ -1461,6 +1461,10 @@ class SimulationEngine:
                 uav._mission_kind = "track_entry"
         elif command.operation_mode not in (OperationMode.TRACK,):
             uav.target_group_id = None
+        if command.operation_mode is OperationMode.HOLDING:
+            self._promote_work_controller_to_holding(
+                uav, tick.observation.timestamp_min,
+            )
         if command.sensor_mode is SensorMode.SAR:
             uav.sar_look_direction = uav.sar_look_direction or "right"
             uav.sar_scan_heading_rad = uav.heading_rad
@@ -1491,6 +1495,25 @@ class SimulationEngine:
             uav.status = "refueling"
             uav.sensor_mode = "off"
             self._land_for_refuelling(uav)
+
+    def _promote_work_controller_to_holding(
+        self, uav: UAVEntity, current_time: float
+    ) -> None:
+        """Keep physical holding/refuelling aligned with SYSTEM ownership."""
+        if not self.control_coordinator.has_controller(uav.id):
+            return
+        lease = self.control_coordinator.current_lease(uav.id)
+        if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+            return
+        task = ControlTask(
+            f"holding:{uav.id}:{current_time}", OperationMode.HOLDING,
+        )
+        self.control_coordinator.promote_to_system_holding(
+            uav.id,
+            current_time=current_time,
+            task_id=task.task_id,
+        )
+        self._coordinator_tasks[uav.id] = task
 
     def _record_search_completion_event(
         self, uav: UAVEntity, event: ControlEvent
@@ -3307,6 +3330,7 @@ class SimulationEngine:
         for uav in self.uavs:
             if uav.status != "refueling":
                 continue
+            self._promote_work_controller_to_holding(uav, current_time)
             base = self._return_base_by_uav.get(
                 uav.id,
                 self._nearest_base(uav.float_position),

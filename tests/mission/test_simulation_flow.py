@@ -107,3 +107,21 @@ def test_decision_maker_failure_preserves_existing_task():
     assert result["action"] == "mission_selection_unavailable"
     assert engine.control_coordinator.current_lease(assignment.uav_id) == before
     assert engine.control_coordinator.active_task(assignment.uav_id) == before_task
+
+
+def test_failed_mission_decision_emits_failure_and_retries_after_one_minute():
+    engine = _engine()
+
+    result, returned_batch = engine.allocator.mission_step(1.0)
+
+    assert returned_batch is None
+    assert result["action"] == "mission_selection_unavailable"
+    failure = next(
+        event
+        for event in engine.allocator.sm.get_recent_events(1.0)
+        if event["type"] == "decision_failed"
+    )
+    assert failure["data"]["reason"] == "model_selection_unavailable"
+    assert failure["data"]["retry_at_min"] == 2.0
+    assert engine.allocator.trigger_manager.check(1.99).trigger_type == "none"
+    assert engine.allocator.trigger_manager.check(2.0).trigger_type == "heavy"

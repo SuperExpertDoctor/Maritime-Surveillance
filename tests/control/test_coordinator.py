@@ -727,6 +727,23 @@ def test_reserved_validated_return_atomically_installs_system_controller_and_pre
     assert result.observation.self_state.operation_mode is OperationMode.RETURN
 
 
+def test_work_controller_can_promote_to_system_holding_before_refuel():
+    coordinator, ownership, *_ = make_runtime(
+        {"UAV-1": ControlMode.HEURISTIC}
+    )
+    start_heuristic(coordinator)
+
+    lease = coordinator.promote_to_system_holding(
+        "UAV-1", current_time=1.0
+    )
+
+    assert lease.owner is ControlOwner.SYSTEM
+    assert coordinator.current_lease("UAV-1") is lease
+    assert coordinator.operation_mode("UAV-1") is OperationMode.HOLDING
+    assert coordinator.active_task("UAV-1").task_type is OperationMode.HOLDING
+    assert ownership.current("UAV-1") is lease
+
+
 @pytest.mark.parametrize(
     "plan_update, message",
     [

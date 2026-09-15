@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable
@@ -67,7 +68,7 @@ class OpenAICompatibleTransport:
         client = OpenAI(
             api_key=api_key,
             base_url=api_base,
-            timeout=timeout_seconds or 120.0,
+            timeout=120.0 if timeout_seconds is None else timeout_seconds,
             max_retries=0,
         )
         kwargs = {
@@ -284,10 +285,14 @@ class LLMGateway:
         system_prompt: str,
         user_payload: dict,
         validate: Callable[[dict], tuple[str, ...]],
+        deadline_monotonic: float | None = None,
+        transport_deadline_monotonic: float | None = None,
     ) -> ModelResult:
         return self._request(
             role=role, snapshot_id=snapshot_id, system_prompt=system_prompt,
             user_payload=user_payload, validate=validate,
+            deadline_monotonic=deadline_monotonic,
+            transport_deadline_monotonic=transport_deadline_monotonic,
         )
 
     def request_text(
@@ -297,10 +302,14 @@ class LLMGateway:
         snapshot_id: str,
         system_prompt: str,
         user_payload: dict,
+        deadline_monotonic: float | None = None,
+        transport_deadline_monotonic: float | None = None,
     ) -> ModelResult:
         return self._request(
             role=role, snapshot_id=snapshot_id, system_prompt=system_prompt,
             user_payload=user_payload, validate=None,
+            deadline_monotonic=deadline_monotonic,
+            transport_deadline_monotonic=transport_deadline_monotonic,
         )
 
     def request_probe(
@@ -331,9 +340,21 @@ class LLMGateway:
         attempt_limit: int | None = None,
         max_tokens: int | None = None,
         timeout_seconds: float | None = None,
+        deadline_monotonic: float | None = None,
+        transport_deadline_monotonic: float | None = None,
     ) -> ModelResult:
         if role not in _ROLE_TOKEN_LIMITS:
             raise LLMConfigurationError(f"unsupported model role: {role}")
+        self._validate_deadline(deadline_monotonic, "deadline_monotonic")
+        self._validate_deadline(
+            transport_deadline_monotonic, "transport_deadline_monotonic"
+        )
+        if (
+            deadline_monotonic is not None
+            and transport_deadline_monotonic is not None
+            and transport_deadline_monotonic > deadline_monotonic
+        ):
+            raise ValueError("transport deadline must not exceed absolute deadline")
         call_id = uuid4().hex
         if user_content is None:
             user_content = json.dumps(
@@ -377,6 +398,21 @@ class LLMGateway:
                 "errors": [],
             }
             call["attempts"].append(attempt)
+            if self._deadline_expired(deadline_monotonic):
+                last_errors = ("decision_deadline_exceeded",)
+                attempt["errors"] = list(last_errors)
+                failure_category = "timeout"
+                break
+            transport_timeout = self._transport_timeout(
+                timeout_seconds=timeout_seconds,
+                deadline_monotonic=deadline_monotonic,
+                transport_deadline_monotonic=transport_deadline_monotonic,
+            )
+            if transport_timeout == 0.0:
+                last_errors = ("decision_deadline_exceeded",)
+                attempt["errors"] = list(last_errors)
+                failure_category = "timeout"
+                break
             try:
                 raw = self.transport.complete(
                     role=role,
@@ -391,7 +427,7 @@ class LLMGateway:
                     api_base=binding["api_base"],
                     api_key_env=binding["api_key_env"],
                     supports_json_mode=binding["supports_json_mode"],
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=transport_timeout,
                 )
             except AssertionError:
                 raise
@@ -411,6 +447,13 @@ class LLMGateway:
                 )
                 continue
 
+            if self._transport_deadline_expired(
+                transport_deadline_monotonic, deadline_monotonic
+            ):
+                last_errors = ("decision_deadline_exceeded",)
+                attempt["errors"] = list(last_errors)
+                failure_category = "timeout"
+                break
             if not isinstance(raw, str):
                 raw = str(raw)
             attempt["raw_output"] = self._redact(raw)
@@ -425,6 +468,11 @@ class LLMGateway:
                     last_errors = (f"response is not valid JSON: {exc}",)
                 else:
                     last_errors = tuple(validate(payload))
+            if self._deadline_expired(deadline_monotonic):
+                last_errors = ("decision_deadline_exceeded",)
+                attempt["errors"] = list(last_errors)
+                failure_category = "timeout"
+                break
             if not last_errors:
                 call["success"] = True
                 return ModelResult(call_id, True, payload, (), None)
@@ -452,6 +500,53 @@ class LLMGateway:
             errors=tuple(self._redact(error) for error in last_errors),
             failure_category=failure_category,
         )
+
+    @staticmethod
+    def _validate_deadline(value: float | None, name: str) -> None:
+        if value is None:
+            return
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise ValueError(f"{name} must be a finite number")
+
+    @staticmethod
+    def _deadline_expired(deadline_monotonic: float | None) -> bool:
+        return (
+            deadline_monotonic is not None
+            and time.perf_counter() >= deadline_monotonic
+        )
+
+    @staticmethod
+    def _transport_deadline_expired(
+        transport_deadline_monotonic: float | None,
+        deadline_monotonic: float | None,
+    ) -> bool:
+        effective_deadline = transport_deadline_monotonic
+        if effective_deadline is None:
+            effective_deadline = deadline_monotonic
+        return LLMGateway._deadline_expired(effective_deadline)
+
+    @staticmethod
+    def _transport_timeout(
+        *,
+        timeout_seconds: float | None,
+        deadline_monotonic: float | None,
+        transport_deadline_monotonic: float | None,
+    ) -> float | None:
+        effective_deadline = transport_deadline_monotonic
+        if effective_deadline is None:
+            effective_deadline = deadline_monotonic
+        if effective_deadline is None:
+            return timeout_seconds
+        remaining = effective_deadline - time.perf_counter()
+        if remaining <= 0.0:
+            return 0.0
+        if timeout_seconds is None:
+            return remaining
+        return min(float(timeout_seconds), remaining)
 
 
 __all__ = [

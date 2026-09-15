@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import time
 
 import pytest
 import yaml
@@ -176,6 +177,39 @@ def test_timeout_is_bounded_by_application_retry_limit(scripted_transport):
     assert result.failure_category == "timeout"
     assert result.errors == ("slow model",)
     assert len(transport.calls) == 3
+
+
+def test_absolute_deadline_rejects_late_response_without_retry():
+    class SlowTransport:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            time.sleep(0.02)
+            return '{"answer": 1}'
+
+    transport = SlowTransport()
+    gateway = LLMGateway(transport=transport)
+    deadline = time.perf_counter() + 0.005
+
+    result = gateway.request_json(
+        role="decision_maker",
+        snapshot_id="deadline",
+        system_prompt="system",
+        user_payload={"marker": "deadline"},
+        validate=_validate_answer,
+        deadline_monotonic=deadline,
+        transport_deadline_monotonic=deadline - 0.001,
+    )
+
+    assert not result.success
+    assert result.payload is None
+    assert result.failure_category == "timeout"
+    assert result.errors == ("decision_deadline_exceeded",)
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["timeout_seconds"] <= 0.005
+    assert gateway.call_log[-1]["failure_category"] == "timeout"
 
 
 def test_role_requests_do_not_share_conversation_messages(scripted_transport):

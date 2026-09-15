@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import asdict, is_dataclass
 
 from src.mission.contracts import (
@@ -21,6 +22,8 @@ from src.mission.prompt_window import PromptWindow
 
 SELECTION_SCHEMA = "mission-selection/v1"
 DEFAULT_REASSIGNMENT_COOLDOWN_MIN = 5.0
+DEFAULT_PLANNING_DEADLINE_SECONDS = 2.0
+DEFAULT_POSTPROCESS_RESERVE_SECONDS = 0.2
 _SELECTION_FIELDS = {
     "schema_version",
     "snapshot_id",
@@ -623,6 +626,8 @@ class MissionScheduler:
         max_tasks_in_prompt: int = 40,
         allow_probe_preempt_search: bool = True,
         allow_intent_preempt_search: bool = False,
+        planning_deadline_seconds: float = DEFAULT_PLANNING_DEADLINE_SECONDS,
+        postprocess_reserve_seconds: float = DEFAULT_POSTPROCESS_RESERVE_SECONDS,
         system_prompt_path: str | None = None,
         selection_provider=None,
         strategy_memory_store: StrategyMemoryStore | None = None,
@@ -638,10 +643,26 @@ class MissionScheduler:
             raise ValueError("allow_intent_preempt_search must be boolean")
         self.allow_probe_preempt_search = allow_probe_preempt_search
         self.allow_intent_preempt_search = allow_intent_preempt_search
+        self.planning_deadline_seconds = float(planning_deadline_seconds)
+        self.postprocess_reserve_seconds = float(postprocess_reserve_seconds)
         if self.reassignment_cooldown_min < 0 or not math.isfinite(self.reassignment_cooldown_min):
             raise ValueError("reassignment_cooldown_min must be finite and non-negative")
         if self.max_tasks_in_prompt <= 0:
             raise ValueError("max_tasks_in_prompt must be positive")
+        if (
+            self.planning_deadline_seconds <= 0
+            or not math.isfinite(self.planning_deadline_seconds)
+        ):
+            raise ValueError("planning_deadline_seconds must be positive and finite")
+        if (
+            self.postprocess_reserve_seconds < 0
+            or not math.isfinite(self.postprocess_reserve_seconds)
+            or self.postprocess_reserve_seconds >= self.planning_deadline_seconds
+        ):
+            raise ValueError(
+                "postprocess_reserve_seconds must be finite, non-negative, "
+                "and below planning_deadline_seconds"
+            )
         if system_prompt_path is None:
             system_prompt_path = os.path.join(
                 os.path.dirname(__file__), "prompts", "mission_scheduler.txt"
@@ -655,6 +676,7 @@ class MissionScheduler:
         self.last_selection_call_id: str | None = None
         self.last_selection_success = False
         self.last_selection_errors: tuple[str, ...] = ()
+        self.last_selection_failure_category: str | None = None
 
     def validate_selection(self, payload, snapshot: MissionSnapshot) -> tuple[str, ...]:
         return _validate_selection(
@@ -751,18 +773,36 @@ class MissionScheduler:
             for task_id in selected
         )
 
-    def decide(self, snapshot: MissionSnapshot) -> AssignmentBatch | None:
+    def decide(
+        self,
+        snapshot: MissionSnapshot,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> AssignmentBatch | None:
         """Ask the decision-maker to select work, then pair it atomically."""
+        if deadline_monotonic is None:
+            deadline_monotonic = time.perf_counter() + self.planning_deadline_seconds
+        elif (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+            or not math.isfinite(float(deadline_monotonic))
+        ):
+            raise ValueError("deadline_monotonic must be a finite number")
         payload = self._prompt_payload(snapshot)
         self.last_selection_payload = payload
         self.last_selection_call_id = None
         self.last_selection_success = False
         self.last_selection_errors = ()
+        self.last_selection_failure_category = None
+        if self._deadline_expired(deadline_monotonic):
+            self._fail_selection("decision_deadline_exceeded", "timeout")
+            return None
         if self.selection_provider is not None:
             raw = self.selection_provider(snapshot, payload)
             call_id = "selection-provider"
             success = True
             response = raw
+            failure_category = None
         elif self.gateway is not None:
             result = self.gateway.request_json(
                 role="decision_maker",
@@ -770,29 +810,55 @@ class MissionScheduler:
                 system_prompt=self.system_prompt,
                 user_payload=payload,
                 validate=lambda candidate: self.validate_selection(candidate, snapshot),
+                deadline_monotonic=deadline_monotonic,
+                transport_deadline_monotonic=(
+                    deadline_monotonic - self.postprocess_reserve_seconds
+                ),
             )
             call_id = result.call_id
             success = result.success
             response = result.payload
+            failure_category = result.failure_category
         else:
+            self._fail_selection("model_selection_unavailable", "transport")
             return None
         self.last_selection_call_id = call_id
         self.last_selection_success = bool(success)
+        self.last_selection_failure_category = failure_category
+        if self._deadline_expired(deadline_monotonic):
+            self._fail_selection("decision_deadline_exceeded", "timeout")
+            return None
         if not success or response is None:
-            self.last_selection_errors = ("model_selection_unavailable",)
+            self.last_selection_errors = (
+                ("decision_deadline_exceeded",)
+                if failure_category == "timeout"
+                else ("model_selection_unavailable",)
+            )
             return None
         errors = self.validate_selection(response, snapshot)
+        if self._deadline_expired(deadline_monotonic):
+            self._fail_selection("decision_deadline_exceeded", "timeout")
+            return None
         if errors:
             self.last_selection_errors = tuple(errors)
+            self.last_selection_failure_category = "validation"
             return None
         parsed, parse_errors = _selection_object(response)
+        if self._deadline_expired(deadline_monotonic):
+            self._fail_selection("decision_deadline_exceeded", "timeout")
+            return None
         if parsed is None or parse_errors:
             self.last_selection_errors = tuple(parse_errors)
+            self.last_selection_failure_category = "validation"
             return None
         try:
             assignments = self.pair_selected_tasks(parsed, snapshot)
         except ValueError as exc:
             self.last_selection_errors = (str(exc),)
+            self.last_selection_failure_category = "validation"
+            return None
+        if self._deadline_expired(deadline_monotonic):
+            self._fail_selection("decision_deadline_exceeded", "timeout")
             return None
         return AssignmentBatch(
             snapshot.snapshot_id,
@@ -800,6 +866,15 @@ class MissionScheduler:
             call_id,
             _information_version=snapshot.information_version,
         )
+
+    @staticmethod
+    def _deadline_expired(deadline_monotonic: float) -> bool:
+        return time.perf_counter() >= deadline_monotonic
+
+    def _fail_selection(self, error: str, category: str) -> None:
+        self.last_selection_success = False
+        self.last_selection_errors = (error,)
+        self.last_selection_failure_category = category
 
     def _prompt_payload(self, snapshot: MissionSnapshot) -> dict:
         full = _jsonable(snapshot)

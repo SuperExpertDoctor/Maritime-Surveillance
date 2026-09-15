@@ -1,4 +1,6 @@
 ﻿from dataclasses import dataclass, field
+import math
+
 from src.mission.contracts import InfoFieldDelta
 from src.schedule.state_manager import StateManager
 
@@ -17,6 +19,8 @@ class TriggerManager:
         self._pending_events: list[dict] = []
         self._last_heavy_time: float = 0.0
         self._last_light_time: float = 0.0
+        self._heavy_retry_at: float | None = None
+        self._heavy_retry_reason: str = "decision_failed"
 
     def notify_event(self, event_type: str, time: float, **kwargs) -> None:
         # Dedup: skip duplicate (event_type, uav_id) within a 5-min window
@@ -65,6 +69,14 @@ class TriggerManager:
         decision = self._check_events(current_time)
         if decision.trigger_type != "none":
             return decision
+
+        if self._heavy_retry_at is not None and current_time >= self._heavy_retry_at:
+            reason = self._heavy_retry_reason
+            self._heavy_retry_at = None
+            return TriggerDecision(
+                trigger_type="heavy",
+                reason=f"retry after {reason}",
+            )
 
         # The fleet begins with no approved SAR partition.  Waiting an entire
         # periodic cycle before the first real LLM decision strands every UAV
@@ -180,5 +192,23 @@ class TriggerManager:
     def mark_triggered(self, trigger_type: str, time: float) -> None:
         if trigger_type == "heavy":
             self._last_heavy_time = time
+            if self._heavy_retry_at is not None and time >= self._heavy_retry_at:
+                self._heavy_retry_at = None
         elif trigger_type == "light":
             self._last_light_time = time
+
+    def schedule_heavy_retry(self, current_time: float, *, reason: str) -> None:
+        """Schedule a failed model decision for one simulation minute later."""
+        if (
+            isinstance(current_time, bool)
+            or not isinstance(current_time, (int, float))
+            or not math.isfinite(float(current_time))
+            or current_time < 0.0
+        ):
+            raise ValueError("current_time must be finite and non-negative")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be a non-empty string")
+        retry_at = float(current_time) + 1.0
+        if self._heavy_retry_at is None or retry_at > self._heavy_retry_at:
+            self._heavy_retry_at = retry_at
+            self._heavy_retry_reason = reason.strip()

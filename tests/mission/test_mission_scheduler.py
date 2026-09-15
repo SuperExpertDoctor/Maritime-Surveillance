@@ -1,5 +1,6 @@
 from dataclasses import replace
 import math
+import time
 
 import pytest
 
@@ -352,6 +353,47 @@ def test_scheduler_prompt_contains_complete_snapshot_and_returns_batch():
     assert serialized["contacts"] == []
     assert serialized["intents"] == []
     assert serialized["planning_map_version"] == 7
+
+
+def test_scheduler_rejects_response_after_absolute_deadline():
+    task = _task("Q1", kind="probe", contact_id="C1")
+    snapshot = _snapshot(
+        [task], [_resource("U1")], [_edge("Q1", "U1", 1.0)], available=("U1",)
+    )
+
+    class SlowGateway:
+        def __init__(self):
+            self.kwargs = None
+
+        def request_json(self, **kwargs):
+            from src.mission.llm_gateway import ModelResult
+
+            self.kwargs = kwargs
+            time.sleep(0.02)
+            return ModelResult(
+                "late-call",
+                True,
+                _selection(snapshot, ["Q1"]),
+                (),
+                None,
+            )
+
+    gateway = SlowGateway()
+    scheduler = MissionScheduler(
+        gateway=gateway,
+        postprocess_reserve_seconds=0.001,
+    )
+    deadline = time.perf_counter() + 0.005
+
+    batch = scheduler.decide(snapshot, deadline_monotonic=deadline)
+
+    assert batch is None
+    assert scheduler.last_selection_success is False
+    assert scheduler.last_selection_errors == ("decision_deadline_exceeded",)
+    assert gateway.kwargs["deadline_monotonic"] == deadline
+    assert gateway.kwargs["transport_deadline_monotonic"] == pytest.approx(
+        deadline - 0.001
+    )
 
 
 def test_task_allocator_exposes_unified_snapshot_and_preserves_gateway():

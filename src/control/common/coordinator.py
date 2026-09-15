@@ -604,6 +604,50 @@ class ControlCoordinator:
             self._stop_controller(old_controller, StopReason.PREEMPTED)
         return lease
 
+    def promote_to_system_holding(
+        self, uav_id: str, *, current_time: float, task_id: str | None = None
+    ) -> ControlLease:
+        """Transfer a finished work controller into system-owned holding."""
+        self._require_uav(uav_id)
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        task = ControlTask(
+            task_id or f"holding:{uav_id}:{current_time}",
+            OperationMode.HOLDING,
+        )
+        with self._lock:
+            current = self.ownership.current(uav_id)
+            if current.owner is ControlOwner.SYSTEM:
+                if self._operation_modes[uav_id] is OperationMode.HOLDING:
+                    return current
+                raise ControlCoordinatorError(
+                    f"{uav_id} is already SYSTEM-owned outside holding"
+                )
+            if current.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+                raise ControlCoordinatorError(
+                    f"{uav_id} cannot enter SYSTEM holding from {current.owner.value}"
+                )
+        controller = self.factory.create_heuristic(uav_id, task)
+        self._validate_controller(controller, ControlMode.HEURISTIC)
+        with self._lock:
+            latest = self.ownership.current(uav_id)
+            if latest != current:
+                raise StaleControlCommand(
+                    self._stale_message(uav_id, current, latest)
+                )
+            lease = self.ownership.replace(
+                current,
+                ControlOwner.SYSTEM,
+                f"holding:{task.task_id}",
+                current_time,
+            )
+            old_controller = self._controllers.get(uav_id)
+            self._controllers[uav_id] = controller
+            self._pending_tasks[uav_id] = task
+            self._operation_modes[uav_id] = OperationMode.HOLDING
+        if old_controller is not None and old_controller is not controller:
+            self._stop_controller(old_controller, StopReason.PREEMPTED)
+        return lease
+
     def reset_after_refuel(
         self, uav_id: str, *, current_time: float
     ) -> ControlLease:
