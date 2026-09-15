@@ -22,6 +22,7 @@ _SAMPLE_KEYS = (
     "position_cells", "velocity_cells_min", "position_uncertainty_cells",
     "observer_position_cells", "measured_range_cells", "navigation_context",
 )
+_MAX_EVIDENCE_SAMPLE_IDS = 12
 
 
 def _visual_sample(sample, probe: ProbeSession) -> bool:
@@ -32,6 +33,14 @@ def _visual_sample(sample, probe: ProbeSession) -> bool:
         and sample.observer_position_cells is not None
         and sample.measured_range_cells is not None
     )
+
+
+def _current_evidence_samples(contact: ContactSnapshot, probe: ProbeSession,
+                              features: TrajectoryFeatures):
+    """Return phase-scoped visual observations for this assessment revision."""
+    phase_ids = set(features.baseline_sample_ids) | set(features.near_sample_ids)
+    return tuple(sample for sample in contact.samples
+                 if sample.sample_id in phase_ids and _visual_sample(sample, probe))
 
 
 def _bounded_text_list(value, name: str) -> tuple[str, ...]:
@@ -74,16 +83,15 @@ def validate_assessment_payload(payload: dict, contact: ContactSnapshot,
     if not isinstance(evidence, list) or not evidence or any(not isinstance(item, str) for item in evidence):
         errors.append("evidence_sample_ids must be a nonempty list of strings")
     else:
-        samples = {sample.sample_id: sample for sample in contact.samples}
+        eligible_ids = {sample.sample_id for sample in _current_evidence_samples(contact, probe, features)}
         baseline_ids = set(features.baseline_sample_ids)
         near_ids = set(features.near_sample_ids)
+        if len(evidence) > _MAX_EVIDENCE_SAMPLE_IDS:
+            errors.append(f"evidence_sample_ids must contain at most {_MAX_EVIDENCE_SAMPLE_IDS} entries")
         if len(evidence) != len(set(evidence)):
             errors.append("evidence_sample_ids must be unique")
-        for sample_id in evidence:
-            sample = samples.get(sample_id)
-            if sample is None or not _visual_sample(sample, probe):
-                errors.append("evidence must reference current visual evidence")
-                break
+        if not set(evidence) <= eligible_ids:
+            errors.append("evidence must reference current eligible visual evidence")
         if identity != "unknown" and (
                 not set(evidence) & baseline_ids or not set(evidence) & near_ids):
             errors.append("terminal assessment must cite baseline and near evidence")
@@ -163,14 +171,10 @@ class ContactAssessor:
         def sample_payload(sample):
             return {key: getattr(sample, key) for key in _SAMPLE_KEYS}
 
-        approach = [sample for sample in contact.samples if _visual_sample(sample, probe)]
-        last = contact.last_assessment
-        last_payload = None if last is None else {
-            "identity": last.identity,
-            "confidence": last.confidence,
-            "evidence_sample_ids": list(last.evidence_sample_ids),
-            "assessed_at_min": last.assessed_at_min,
-        }
+        approach = select_keypoints(
+            _current_evidence_samples(contact, probe, features),
+            self.config.prompt_keypoints_per_contact,
+        )
         return {
             "features": {key: getattr(features, key) for key in _FEATURE_KEYS},
             "keypoints": [sample_payload(sample) for sample in select_keypoints(
@@ -181,7 +185,6 @@ class ContactAssessor:
                     "measured_range_cells")}
                 for sample in approach
             ],
-            "last_assessment": last_payload,
             "map_context": {"near_land_fraction": features.near_land_fraction,
                             "confounders": list(features.confounders)},
         }

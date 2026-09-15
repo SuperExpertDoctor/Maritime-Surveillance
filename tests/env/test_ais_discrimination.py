@@ -2,82 +2,49 @@ import math
 
 import pytest
 
-from src.env.ais_signal import AISSignal, generate_ais_signal
+from src.env.ais_signal import generate_ais_signal
 from src.env.simulation import SimulationEngine
 from src.schedule.config_loader import ConfigLoader
-from src.schedule.datatypes import GridCoord, Region
+from src.schedule.datatypes import GridCoord
 from src.utils.ais_discriminator import AISDiscriminator, EOMeasurement
+from tests.mission.conftest import ScriptedTransport
+
+
+@pytest.fixture
+def engine(monkeypatch):
+    monkeypatch.setenv("LONGCAT_API_KEY", "task-8-offline-fixture")
+    transport = ScriptedTransport({})
+    monkeypatch.setattr("src.mission.llm_gateway.OpenAICompatibleTransport.complete", transport.complete)
+    return SimulationEngine(ConfigLoader.load(), seed=42)
 
 
 @pytest.mark.parametrize("index", range(20))
-def test_position_discriminator_recognizes_civilian_signals(index):
-    discriminator = AISDiscriminator(2.0)
+def test_eo_position_estimation_is_only_a_measurement(index):
     pose = (2.0 + index * 0.1, 3.0 + index * 0.05, math.radians(15 + index))
     target = (4.0 + index * 0.1, 4.5 + index * 0.05)
     bearing = math.atan2(target[1] - pose[1], target[0] - pose[0]) - pose[2]
     measurement = EOMeasurement(bearing, math.dist(pose[:2], target))
-    estimated = discriminator.estimate_target_position(pose, measurement)
-    signal = AISSignal("123456789", target, 16, 45, "MV Civil", "Cargo", 2.0)
-
-    result = discriminator.discriminate(signal, estimated)
-
-    assert not result.is_military
-    assert result.discrepancy_cells == pytest.approx(0.0, abs=1e-8)
+    estimated = AISDiscriminator.estimate_target_position(pose, measurement)
+    assert estimated == pytest.approx(target)
+    assert AISDiscriminator.estimate_target_position(pose, {
+        "relative_bearing_rad": bearing, "distance_cells": measurement.distance_cells,
+    }) == pytest.approx(target)
 
 
-@pytest.mark.parametrize("index", range(20))
-def test_position_discriminator_recognizes_deceptive_military_signals(index):
-    discriminator = AISDiscriminator(2.0)
-    pose = (5.0, 5.0, 0.0)
-    target = (7.0 + index * 0.02, 5.5)
-    measurement = EOMeasurement(math.atan2(target[1] - pose[1], target[0] - pose[0]), math.dist(pose[:2], target))
-    estimated = discriminator.estimate_target_position(pose, measurement)
-    signal = AISSignal("123456789", (target[0] + 3.0, target[1]), 20, 0, "Unknown", "Cargo", 2.0)
-
-    result = discriminator.discriminate(signal, estimated)
-
-    assert result.is_military
-    assert result.discrepancy_cells > 2.0
+def test_legacy_ais_identity_decision_paths_are_removed():
+    # Task 8 replaces the old silent=>military and consistent=>civilian rules.
+    assert not hasattr(AISDiscriminator, "discriminate")
+    assert not hasattr(AISDiscriminator, "discriminate_formation")
 
 
-def test_silent_ais_is_military():
-    result = AISDiscriminator(2.0).discriminate(None, (5.0, 5.0))
-
-    assert result.is_military
-    assert result.reason == "AIS silent"
-
-
-@pytest.mark.parametrize("index", range(20))
-def test_formation_discriminator_uses_centroid_for_civilian_members(index):
-    discriminator = AISDiscriminator(2.0)
-    center = (10.0 + index * 0.03, 12.0 - index * 0.02)
-    signals = [
-        AISSignal("111111111", (center[0] - 1.0, center[1]), 16, 0, "A", "Cargo", 1.0),
-        AISSignal("222222222", (center[0] + 1.0, center[1]), 16, 0, "B", "Cargo", 1.0),
-    ]
-
-    result = discriminator.discriminate_formation(signals, center)
-
-    assert not result.is_military
-
-
-@pytest.mark.parametrize("index", range(20))
-def test_formation_discriminator_treats_silent_member_as_military(index):
-    discriminator = AISDiscriminator(2.0)
-    center = (10.0 + index * 0.03, 12.0 - index * 0.02)
-    signal = AISSignal("333333333", (center[0] + 3.0, center[1]), 20, 0, "Unknown", "Cargo", 1.0)
-
-    result = discriminator.discriminate_formation([signal, None], center)
-
-    assert result.is_military
-    assert result.reason == "AIS formation member silent"
-
-
-def test_engine_records_eo_observations_without_ais_truth_classification():
-    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+@pytest.mark.parametrize("ais_mode", ["civilian", "silent"])
+def test_silent_or_consistent_ais_remains_unknown_until_validated_observation(engine, ais_mode):
     ship = engine.ships[0]
+    # Establish a claimed contact before silence; silence itself is not evidence.
     ship.ais_mode = "civilian"
     group_id = engine.allocator.sm.contacts.ingest_ais(generate_ais_signal(ship, 0), 0)
+    ship.ais_mode = ais_mode
+    assert engine.allocator.sm.contacts.snapshot(group_id).identity == "unknown"
     center = ship.float_position  # sensor fixture geometry, never a blue lookup
     uav = engine.uavs[0]
     uav.position = GridCoord(int(round(center[0] - 1)), int(round(center[1])))
@@ -99,6 +66,7 @@ def test_engine_records_eo_observations_without_ais_truth_classification():
     assert engine.allocator.sm.get_track_region_for_group(group_id) is not None
     assert engine.allocator.sm.get_target_report(group_id) is not None
     assert any(s.source == "eo" for s in engine.allocator.sm.contacts.snapshot(group_id).samples)
+    assert engine.allocator.sm.contacts.snapshot(group_id).identity == "unknown"
     assert ship.is_military is None
     assert ship.discrimination is None
     assert engine.ais_discriminations == 0
@@ -106,8 +74,7 @@ def test_engine_records_eo_observations_without_ais_truth_classification():
     assert not engine.allocator.sm.get_active_markers()
 
 
-def test_departed_target_releases_track_without_marker():
-    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+def test_departed_target_releases_track_without_marker(engine):
     group_id = engine.allocator.sm.contacts.list_snapshots()[0].contact_id
     uav = engine.uavs[0]
     center = engine._contact_center(group_id)
