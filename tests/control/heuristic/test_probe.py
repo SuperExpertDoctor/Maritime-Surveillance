@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from src.control.common.contracts import (
-    ActionMask,
     ActionSpec,
     ContactObservation,
     ControlMode,
@@ -19,6 +18,7 @@ from src.control.common.contracts import (
     SensorMode,
     UAVObservation,
 )
+from src.control.common.observation import ObservationProvider
 from src.control.heuristic.navigation import PathNotFoundError
 from src.mission.contracts import ContactSnapshot, ProbeSession
 from src.schedule.config_loader import ConfigLoader
@@ -28,9 +28,11 @@ class NavigatorSpy:
     def __init__(self, *, blocked: bool = False) -> None:
         self.blocked = blocked
         self.calls: list[tuple[float, float]] = []
+        self.targets: list[tuple[float, float]] = []
 
     def plan_to_standoff(self, start, target, radius, mask, r_min, map_version=0):
         self.calls.append((float(radius), float(map_version)))
+        self.targets.append(tuple(map(float, target)))
         if self.blocked:
             raise PathNotFoundError(tuple(start), "probe standoff", map_version)
         goal = (float(target[0]) - float(radius), float(target[1]), 0.0)
@@ -94,10 +96,8 @@ def _observation(*, probe: ProbeSession, position=(2.0, 10.0), contacts=None):
         bases=(),
         shared_uavs=(),
         events=(),
-        action_mask=ActionMask(
-            (SensorMode.OFF, SensorMode.EO),
-            (OperationMode.PROBE, OperationMode.HOLDING),
-            tuple(contact.contact_id for contact in contacts),
+        action_mask=ObservationProvider._action_mask(
+            ControlOwner.HEURISTIC, OperationMode.PROBE, contacts
         ),
         probe=probe,
         contact_histories=(_history(),),
@@ -161,6 +161,27 @@ def test_missing_contact_does_not_advance_the_frozen_probe_session():
     assert not [event for event in decision.events if event.event_type == "probe_phase_changed"]
 
 
+def test_production_probe_mask_allows_holding_fallback_without_contact():
+    mask = ObservationProvider._action_mask(
+        ControlOwner.HEURISTIC, OperationMode.PROBE, ()
+    )
+
+    assert OperationMode.HOLDING in mask.allowed_operation_modes
+    assert SensorMode.OFF in mask.allowed_sensor_modes
+
+
+def test_production_probe_mask_allows_holding_before_first_probe_command():
+    task = ControlTask(
+        "probe:C0001", OperationMode.PROBE,
+        target_contact_id="C0001", probe_id="P0001",
+    )
+    mask = ObservationProvider._action_mask(
+        ControlOwner.HEURISTIC, OperationMode.IDLE, (), task=task
+    )
+
+    assert OperationMode.HOLDING in mask.allowed_operation_modes
+
+
 def test_unreachable_near_orbit_reports_probe_blocked_once():
     controller = _controller(NavigatorSpy(blocked=True))
     observation = _observation(probe=_probe("closing"))
@@ -171,3 +192,29 @@ def test_unreachable_near_orbit_reports_probe_blocked_once():
 
     assert [event.event_type for event in first.events] == ["probe_blocked"]
     assert second.events == ()
+
+
+def test_probe_predicts_observable_motion_and_replans_on_fresh_estimate():
+    navigator = NavigatorSpy()
+    controller = _controller(navigator)
+    first_contact = replace(
+        _contact(), estimated_velocity=(1.0, 0.5), observed_at_min=1.0
+    )
+    first = _observation(probe=_probe(), contacts=(first_contact,))
+    _start(controller, first)
+
+    controller.act(first)
+
+    assert navigator.targets == [(13.0, 10.5)]
+
+    fresh_contact = replace(
+        first_contact,
+        estimated_position=(14.0, 11.0),
+        estimated_velocity=(2.0, -1.0),
+        observed_at_min=2.0,
+    )
+    fresh = replace(first, timestamp_min=2.0, contacts=(fresh_contact,))
+    controller.act(fresh)
+
+    assert len(navigator.targets) == 2
+    assert navigator.targets[-1] == (16.0, 10.0)

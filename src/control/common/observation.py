@@ -98,7 +98,9 @@ class ObservationProvider:
             bases=tuple(sorted(bases, key=lambda base: base.base_id)),
             shared_uavs=self._shared_uavs(state_manager),
             events=tuple(sorted(events, key=lambda event: event.sequence)),
-            action_mask=self._action_mask(control_owner, operation_mode, contacts),
+            action_mask=self._action_mask(
+                control_owner, operation_mode, contacts, task=task
+            ),
             probe=probe,
             contact_histories=histories,
         )
@@ -260,6 +262,8 @@ class ObservationProvider:
         control_owner: ControlOwner,
         operation_mode: OperationMode,
         contacts: Sequence[ContactObservation],
+        *,
+        task: ControlTask | None = None,
     ) -> ActionMask:
         target_contact_ids = tuple(sorted(contact.contact_id for contact in contacts))
         if control_owner in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
@@ -268,6 +272,10 @@ class ObservationProvider:
             if target_contact_ids:
                 sensor_modes.append(SensorMode.EO)
                 operation_modes.extend((OperationMode.PROBE, OperationMode.TRACK))
+            if operation_mode is OperationMode.PROBE or (
+                task is not None and task.task_type is OperationMode.PROBE
+            ):
+                operation_modes.append(OperationMode.HOLDING)
         elif control_owner is ControlOwner.SYSTEM and operation_mode in (
             OperationMode.RETURN,
             OperationMode.HOLDING,

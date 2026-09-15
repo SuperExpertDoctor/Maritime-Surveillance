@@ -106,7 +106,10 @@ def test_target_assessment_replaces_an_active_probe_with_tracking(factory, cover
     )
 
     transition = flow.handle(
-        _event("contact_assessed", contact_id="C1", identity="target"), lease
+        _event(
+            "contact_assessed", contact_id="C1", identity="target", probe_id="P1"
+        ),
+        lease,
     )
 
     assert transition.consumed
@@ -116,6 +119,31 @@ def test_target_assessment_replaces_an_active_probe_with_tracking(factory, cover
     assert transition.task == ControlTask("track:C1", OperationMode.TRACK, target_contact_id="C1")
     assert controllers["UAV-1"] is transition.controller
     assert controller is not transition.controller
+
+
+def test_stale_target_assessment_cannot_replace_the_active_probe(
+    factory, coverage_task
+):
+    flow, ownership, lease, controllers, pending_tasks, controller = _heuristic_flow(
+        factory, coverage_task
+    )
+    active_probe = ControlTask(
+        "probe:C1", OperationMode.PROBE, target_contact_id="C1", probe_id="P2"
+    )
+    pending_tasks["UAV-1"] = active_probe
+
+    transition = flow.handle(
+        _event(
+            "contact_assessed", contact_id="C1", identity="target", probe_id="P1"
+        ),
+        lease,
+    )
+
+    assert not transition.consumed
+    assert transition.current_lease is lease
+    assert ownership.current("UAV-1") is lease
+    assert controllers["UAV-1"] is controller
+    assert pending_tasks["UAV-1"] is active_probe
 
 
 @pytest.mark.parametrize("event_type", ["search_complete", "task_failed"])

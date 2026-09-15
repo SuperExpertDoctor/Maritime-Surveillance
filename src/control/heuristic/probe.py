@@ -36,6 +36,7 @@ class ProbeController(HeuristicControllerBase):
         self.task: ControlTask | None = None
         self._route: RouteFollower | None = None
         self._route_phase: str | None = None
+        self._route_contact_key: tuple[tuple[float, float], tuple[float, float], float] | None = None
         self._reported_phases: set[str] = set()
         self._blocked = False
         self._timeout_reported = False
@@ -58,6 +59,7 @@ class ProbeController(HeuristicControllerBase):
         self.task = task
         self._route = None
         self._route_phase = None
+        self._route_contact_key = None
         self._reported_phases.clear()
         self._blocked = False
         self._timeout_reported = False
@@ -77,16 +79,24 @@ class ProbeController(HeuristicControllerBase):
             return ControlDecision(self._holding_command(observation))
 
         phase, standoff = self._phase_and_standoff(probe.phase)
+        contact_key = self._contact_key(observation, contact)
         try:
-            if self._route_phase != probe.phase or self._route is None:
+            if (
+                self._route_phase != probe.phase
+                or self._route is None
+                or self._route_contact_key != contact_key
+            ):
                 self._route = self._plan_route(observation, contact, standoff)
                 self._route_phase = probe.phase
+                self._route_contact_key = contact_key
             if self._at_standoff(observation, contact, standoff):
+                target_position = self._predicted_contact_position(observation, contact)
                 entry = plan_contact_orbit_entry(
-                    self.tracker, self._pose(observation), contact.estimated_position, standoff
+                    self.tracker, self._pose(observation), target_position, standoff
                 )
                 self._route = RouteFollower(entry)
                 self._route_phase = probe.phase
+                self._route_contact_key = contact_key
                 command = self._route.next_command(
                     observation, self.action_spec, SensorMode.EO, OperationMode.PROBE
                 )
@@ -114,11 +124,39 @@ class ProbeController(HeuristicControllerBase):
         self._route = None
 
     def _plan_route(self, observation: ControlObservation, contact: ContactObservation, standoff: float) -> RouteFollower:
+        target_position = self._predicted_contact_position(observation, contact)
         path = self.navigator.plan_to_standoff(
-            self._pose(observation), contact.estimated_position, standoff,
+            self._pose(observation), target_position, standoff,
             observation.planning_obstacle_mask, self.r_min, observation.planning_map_version,
         )
         return RouteFollower(path)
+
+    def _contact_key(
+        self, observation: ControlObservation, contact: ContactObservation
+    ) -> tuple[tuple[float, float], tuple[float, float], float]:
+        return (
+            tuple(map(float, contact.estimated_position)),
+            tuple(map(float, contact.estimated_velocity)),
+            self._prediction_horizon(observation),
+        )
+
+    def _predicted_contact_position(
+        self, observation: ControlObservation, contact: ContactObservation
+    ) -> tuple[float, float]:
+        position = tuple(map(float, contact.estimated_position))
+        velocity = tuple(map(float, contact.estimated_velocity))
+        if len(position) != 2 or len(velocity) != 2:
+            raise ValueError("contact position and velocity must contain two values")
+        if not all(math.isfinite(value) for value in (*position, *velocity)):
+            raise ValueError("contact position and velocity must be finite")
+        horizon = self._prediction_horizon(observation)
+        return tuple(position[index] + velocity[index] * horizon for index in range(2))
+
+    def _prediction_horizon(self, observation: ControlObservation) -> float:
+        dt_min = float(observation.dt_min)
+        if not math.isfinite(dt_min) or dt_min <= 0.0:
+            raise ValueError("observation dt_min must be finite and positive")
+        return min(dt_min, float(self._config.max_sample_gap_min))
 
     def _blocked_decision(self, observation: ControlObservation, reason: str) -> ControlDecision:
         events: tuple[ControllerEventRequest, ...] = ()

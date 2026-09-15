@@ -106,6 +106,7 @@ class HeuristicTaskFlow:
             or current_task.task_type is not OperationMode.PROBE
             or event.payload.get("identity") != "target"
             or event.payload.get("contact_id") != current_task.target_contact_id
+            or event.payload.get("probe_id") != current_task.probe_id
         ):
             return TaskTransition.unchanged(lease, controller, current_task)
         if event.event_type == "mission_task_released" and (
