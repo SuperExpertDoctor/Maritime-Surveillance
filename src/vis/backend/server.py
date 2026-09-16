@@ -301,16 +301,15 @@ def create_app(
         validation_error = _validate_body(body, allowed, allowed)
         if validation_error is not None:
             return validation_error
-        if not live_engine.editing_allowed:
-            return _api_error("editing_closed", "vessel editing is closed", 409)
-        if body["episode_id"] != live_engine.episode_id:
-            return _api_error("episode_conflict", "command belongs to another episode", 409)
+        write_error = _vessel_write_error(app, body["episode_id"])
+        if write_error is not None:
+            return write_error
         position = body["position_cells"]
         if (not isinstance(position, list) or len(position) != 2
                 or any(isinstance(value, bool) or not isinstance(value, (int, float))
                        or not math.isfinite(float(value)) for value in position)):
             return _api_error("invalid_request", "position_cells must be two finite numbers", 422)
-        if body["vessel_class"] not in {"civilian", "research"}:
+        if body["vessel_class"] not in {"type_i", "type_ii"}:
             return _api_error("invalid_request", "vessel_class is invalid", 422)
         command = VesselCommand(
             body["command_id"], body["episode_id"], "create", None, None,
@@ -336,13 +335,41 @@ def create_app(
         validation_error = _validate_body(body, allowed, allowed)
         if validation_error is not None:
             return validation_error
-        if not live_engine.editing_allowed:
-            return _api_error("editing_closed", "vessel editing is closed", 409)
-        if body["episode_id"] != live_engine.episode_id:
-            return _api_error("episode_conflict", "command belongs to another episode", 409)
+        write_error = _vessel_write_error(app, body["episode_id"])
+        if write_error is not None:
+            return write_error
         command = VesselCommand(
             body["command_id"], body["episode_id"], "delete", vessel_id,
             body["expected_revision"], None, None,
+        )
+        try:
+            result = live_engine.vessel_commands.enqueue(command)
+        except Exception as exc:
+            if exc.__class__.__name__ == "CommandConflict":
+                return _api_error("command_conflict", str(exc), 409)
+            return _api_error("invalid_request", str(exc), 422)
+        return JSONResponse(_vessel_result_payload(result), status_code=202)
+
+    @app.patch("/api/vessels/{vessel_id}/ais")
+    async def set_vessel_ais(vessel_id: str, request: Request):
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        live_engine = app.state.engine
+        if live_engine is None:
+            return _api_error("engine_unavailable", "simulation engine is unavailable", 409)
+        allowed = {"episode_id", "command_id", "expected_revision", "ais_enabled"}
+        validation_error = _validate_body(body, allowed, allowed)
+        if validation_error is not None:
+            return validation_error
+        write_error = _vessel_write_error(app, body["episode_id"])
+        if write_error is not None:
+            return write_error
+        if type(body["ais_enabled"]) is not bool:
+            return _api_error("invalid_request", "ais_enabled must be boolean", 422)
+        command = VesselCommand(
+            body["command_id"], body["episode_id"], "set_ais", vessel_id,
+            body["expected_revision"], None, None, body["ais_enabled"],
         )
         try:
             result = live_engine.vessel_commands.enqueue(command)
@@ -365,8 +392,6 @@ def create_app(
         live_engine = app.state.engine
         if live_engine is None:
             return _api_error("engine_unavailable", "simulation engine is unavailable", 409)
-        if not live_engine.editing_allowed:
-            return _api_error("editing_closed", "vessel editing is closed", 409)
         return JSONResponse({"vessels": list(live_engine.scenario_vessels())})
 
     @app.post("/api/intents")
@@ -791,6 +816,22 @@ def _writes_blocked(app: FastAPI, service: IntentCommandService) -> bool:
         or service.replay_mode
         or service.runtime_status == "finished"
     )
+
+
+def _vessel_write_error(app: FastAPI, episode_id: str) -> JSONResponse | None:
+    """Apply the shared live/replay/episode gate before queueing a vessel write."""
+    if app.state.replay_mode:
+        return _api_error("replay_read_only", "replay mode is read-only", 409)
+    engine = app.state.engine
+    if engine is None:
+        return _api_error("engine_unavailable", "simulation engine is unavailable", 409)
+    if episode_id != engine.episode_id:
+        return _api_error("episode_conflict", "command belongs to another episode", 409)
+    if engine.runtime_status == "finished":
+        return _api_error("mutation_closed", "the simulation episode has finished", 409)
+    if not engine.vessel_mutation_allowed:
+        return _api_error("mutation_closed", "vessel mutation is unavailable", 409)
+    return None
 
 
 def _write_blocked_response(app: FastAPI, service: IntentCommandService) -> JSONResponse:

@@ -29,6 +29,17 @@ class _OfflineGateway:
         return ModelResult("offline-text", False, None, ("offline",), "transport")
 
 
+def _runtime_app(*, replay_mode=False):
+    config = ConfigLoader.load()
+    engine = SimulationEngine(
+        config,
+        seed=42,
+        llm_gateway=_OfflineGateway(),
+        episode_id="vessel-api-episode",
+    )
+    return create_app(config, engine.allocator.sm, engine=engine, replay_mode=replay_mode), engine
+
+
 def test_sync_broadcast_uses_the_running_server_event_loop():
     config = ConfigLoader.load()
     state = StateManager(config)
@@ -60,6 +71,64 @@ def test_initial_websocket_frame_includes_live_engine_entities():
     assert len(frame["obstacles"]) == len(engine.obstacles)
     assert len(frame["bases"]) == len(engine.bases)
     assert len(frame["scenario_vessels"]) == len(engine.ships)
+
+
+def test_runtime_vessel_ais_patch_accepts_only_strict_boolean_payload():
+    app, engine = _runtime_app()
+
+    with TestClient(app) as client:
+        invalid = client.patch(
+            "/api/vessels/Ship-1/ais",
+            json={
+                "episode_id": engine.episode_id,
+                "command_id": "ais-invalid",
+                "expected_revision": 1,
+                "ais_enabled": 1,
+            },
+        )
+        valid = client.patch(
+            "/api/vessels/Ship-1/ais",
+            json={
+                "episode_id": engine.episode_id,
+                "command_id": "ais-valid",
+                "expected_revision": 1,
+                "ais_enabled": False,
+            },
+        )
+
+    assert invalid.status_code == 422
+    assert valid.status_code == 202
+    assert valid.json()["status"] == "queued"
+
+
+def test_vessel_mutation_stays_open_after_first_step():
+    app, engine = _runtime_app()
+    engine.step()
+    assert engine.vessel_mutation_allowed is True
+
+
+def test_vessel_mutation_reports_replay_and_finished_states():
+    replay_app, replay_engine = _runtime_app(replay_mode=True)
+    finished_app, finished_engine = _runtime_app()
+    finished_engine._set_runtime_state("finished")
+    body = {
+        "episode_id": replay_engine.episode_id,
+        "command_id": "ais-replay",
+        "expected_revision": 1,
+        "ais_enabled": False,
+    }
+
+    with TestClient(replay_app) as client:
+        replay = client.patch("/api/vessels/Ship-1/ais", json=body)
+    body["episode_id"] = finished_engine.episode_id
+    body["command_id"] = "ais-finished"
+    with TestClient(finished_app) as client:
+        finished = client.patch("/api/vessels/Ship-1/ais", json=body)
+
+    assert replay.status_code == 409
+    assert replay.json()["error_code"] == "replay_read_only"
+    assert finished.status_code == 409
+    assert finished.json()["error_code"] == "mutation_closed"
 
 
 def test_applied_intent_is_present_in_the_next_websocket_frame():

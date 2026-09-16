@@ -414,11 +414,16 @@ class SimulationEngine:
     @property
     def runtime_status(self) -> str:
         """Read-only lifecycle status exposed to API and operator views."""
-        return self._runtime_status
+        return getattr(self, "_runtime_status", "running")
 
     @property
     def editing_allowed(self) -> bool:
-        return self._editing_allowed and self.clock.time <= 0.0
+        return self.vessel_mutation_allowed
+
+    @property
+    def vessel_mutation_allowed(self) -> bool:
+        """Whether live vessel commands may be accepted by the engine."""
+        return self.runtime_status != "finished"
 
     def vessel_command_result(self, command_id: str):
         return self.vessel_commands.get(command_id)

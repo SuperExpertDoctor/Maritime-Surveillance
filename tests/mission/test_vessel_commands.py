@@ -11,7 +11,7 @@ def _create(command_id="v-1"):
         operation="create",
         vessel_id=None,
         expected_revision=None,
-        vessel_class="research",
+        vessel_class="type_ii",
         position_cells=(12.5, 8.5),
     )
 
@@ -30,7 +30,7 @@ def test_command_id_reuse_with_changed_payload_is_rejected():
     queue = VesselCommandQueue(maxsize=2)
     queue.enqueue(_create())
     changed = VesselCommand(
-        "v-1", "episode-1", "create", None, None, "civilian", (12.5, 8.5)
+        "v-1", "episode-1", "create", None, None, "type_i", (12.5, 8.5)
     )
     with pytest.raises(CommandConflict):
         queue.enqueue(changed)
@@ -42,3 +42,10 @@ def test_delete_uses_revision_cas_and_queue_is_bounded():
     queue.enqueue(delete)
     with pytest.raises(RuntimeError):
         queue.enqueue(_create("v-2"))
+
+
+def test_set_ais_requires_only_id_revision_and_boolean():
+    command = VesselCommand(
+        "a-1", "episode-1", "set_ais", "Ship-2", 4, None, None, False,
+    )
+    assert VesselCommandQueue().enqueue(command).status == "queued"

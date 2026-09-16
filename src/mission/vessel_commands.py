@@ -88,6 +88,7 @@ def _payload(command: VesselCommand) -> dict:
         "expected_revision": command.expected_revision,
         "vessel_class": command.vessel_class,
         "position_cells": command.position_cells,
+        "ais_enabled": command.ais_enabled,
     }
 
 
@@ -99,20 +100,35 @@ def _validate(command: VesselCommand) -> None:
     if command.operation == "create":
         if command.vessel_id is not None or command.expected_revision is not None:
             raise ValueError("create command cannot contain vessel_id or revision")
-        if command.vessel_class not in {"civilian", "research"}:
+        if command.vessel_class not in {"type_i", "type_ii"}:
             raise ValueError("create command requires vessel_class")
+        if command.ais_enabled is not None:
+            raise ValueError("create command cannot contain ais_enabled")
         if command.position_cells is None or len(command.position_cells) != 2:
             raise ValueError("create command requires position_cells")
         if any(isinstance(value, bool) or not isinstance(value, (int, float))
                or not math.isfinite(float(value)) for value in command.position_cells):
             raise ValueError("position_cells must be finite")
     elif command.operation == "delete":
-        if not command.vessel_id or command.vessel_class is not None or command.position_cells is not None:
+        if (not command.vessel_id or command.vessel_class is not None
+                or command.position_cells is not None
+                or command.ais_enabled is not None):
             raise ValueError("delete command requires only vessel_id and revision")
         if (isinstance(command.expected_revision, bool)
                 or not isinstance(command.expected_revision, int)
                 or command.expected_revision < 1):
             raise ValueError("delete command requires positive expected_revision")
+    elif command.operation == "set_ais":
+        if (
+            not command.vessel_id
+            or isinstance(command.expected_revision, bool)
+            or not isinstance(command.expected_revision, int)
+            or command.expected_revision < 1
+            or type(command.ais_enabled) is not bool
+            or command.vessel_class is not None
+            or command.position_cells is not None
+        ):
+            raise ValueError("set_ais requires vessel_id, revision, and ais_enabled")
     else:
         raise ValueError("invalid vessel command operation")
 
