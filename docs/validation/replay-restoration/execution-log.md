@@ -55,3 +55,22 @@ extension interface.
   batches, continuation phase preservation, invalid-batch rollback, expired
   handoff rejection before lease installation, reservation snapshot restore,
   same-owner session updates, and reset isolation.
+
+## T02 Mission Task Lifecycle
+
+- Red evidence: holding left the previous probe record assigned to the UAV;
+  search preemption also needed to preserve the region's completion percentage
+  while clearing its assignment.
+- Implemented the idempotent `SimulationEngine._close_mission_task` boundary.
+  It synchronizes mission records, coordinator/state ownership, probe sessions,
+  contact/track reservations, search regions, and one release event without
+  touching a replacement task.
+- Added coverage for holding, repeated closure, search preemption, probe
+  reservation transition, task failure, range return, target release, and
+  vessel removal paths through the existing lifecycle regressions.
+- Focused regression after the final implementation patch:
+  `LONGCAT_API_KEY=offline-test python -m pytest tests/mission/test_simulation_flow.py tests/mission/test_mission_task_lifecycle.py tests/mission/test_contact_release.py tests/mission/test_dynamic_vessel_lifecycle.py -q`
+  -> `70 passed in 331.80s`.
+- Gate command:
+  `LONGCAT_API_KEY=offline-test python -m pytest tests/mission/test_mission_task_lifecycle.py tests/mission/test_contact_release.py tests/mission/test_dynamic_vessel_lifecycle.py tests/control/test_simulation_ownership.py tests/control/heuristic/test_task_flow.py tests/schedule/test_trigger_manager.py -q`
+- Gate result: `96 passed in 319.34s`.

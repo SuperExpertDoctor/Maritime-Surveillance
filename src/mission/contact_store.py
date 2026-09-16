@@ -499,6 +499,26 @@ class ContactStore:
         self._contacts[c.contact_id] = replace(c, assigned_uav_id=uav_id, active_probe_id=probe_id,
                                               state="approaching" if probe_id else "tracking")
 
+    def transition_reservation(
+        self,
+        contact_id: str,
+        uav_id: str,
+        expected_probe_id: str | None,
+        new_probe_id: str | None,
+    ) -> None:
+        """Change the operation represented by an existing owner reservation."""
+        c = self.snapshot(contact_id)
+        if (
+            c.assigned_uav_id != uav_id
+            or c.active_probe_id != expected_probe_id
+        ):
+            raise ValueError("reservation owner or probe does not match")
+        self._contacts[c.contact_id] = replace(
+            c,
+            active_probe_id=new_probe_id,
+            state="approaching" if new_probe_id else "tracking",
+        )
+
     def release(self, contact_id: str, now_min: float, reason: str) -> None:
         self._finite_time(now_min)
         c = self.snapshot(contact_id)
