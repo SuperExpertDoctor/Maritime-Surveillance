@@ -19,9 +19,9 @@ from src.mission.llm_gateway import ModelResult  # noqa: E402
 
 SCENARIOS = (
     "mixed-ais",
-    "all-civilian",
-    "silent-target",
-    "disguised-target",
+    "all-type-i",
+    "silent-type-ii",
+    "disguised-type-ii",
     "island-confounder",
     "no-resources",
     "intent-overlap",
@@ -167,16 +167,16 @@ def _dry_run(args) -> dict:
 
 def _scenario_config(config, scenario: str):
     """Apply only deterministic, production-safe scenario changes."""
-    if scenario == "all-civilian":
+    if scenario == "all-type-i":
         population = replace(
             config.ship.population,
             type_i_ratio=1.0,
             type_ii_ratio=0.0,
         )
         return replace(config, ship=replace(config.ship, population=population))
-    if scenario == "silent-target":
+    if scenario == "silent-type-ii":
         return replace(config, ship=replace(config.ship, type_ii_ais_on_probability=0.0))
-    if scenario == "disguised-target":
+    if scenario == "disguised-type-ii":
         return replace(config, ship=replace(config.ship, type_ii_ais_on_probability=1.0))
     if scenario == "island-confounder":
         return replace(

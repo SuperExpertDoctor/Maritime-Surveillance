@@ -28,7 +28,7 @@ class ContactConfig:
     approach_timeout_min: float
     probe_retry_cooldown_min: float
     assessment_confidence_min: float
-    civilian_recheck_cooldown_min: float
+    type_i_recheck_cooldown_min: float
     prompt_contact_limit: int
     prompt_keypoints_per_contact: int
     # Filled from grid configuration by ConfigLoader. Standalone callers may
@@ -74,17 +74,6 @@ class PopulationConfig:
         for key in ranked[:remaining]:
             result[key] += 1
         return result
-
-    @property
-    def civilian_ratio(self) -> float:
-        """Deprecated read adapter; removed after the migration boundary."""
-        return self.type_i_ratio
-
-    @property
-    def research_ratio(self) -> float:
-        """Deprecated read adapter; removed after the migration boundary."""
-        return self.type_ii_ratio
-
 
 @dataclass(frozen=True)
 class PassiveConfig:
@@ -149,8 +138,8 @@ class ActivityConfig:
     min_reversal_count: int = 2
     radiation_window_min: float = 10.0
     min_distinct_bursts: int = 2
-    research_equipment_pd: float = 0.90
-    research_equipment_pfa: float = 0.05
+    type_ii_equipment_pd: float = 0.90
+    type_ii_equipment_pfa: float = 0.05
     deployed_equipment_pd: float = 0.85
     deployed_equipment_pfa: float = 0.05
 
@@ -182,7 +171,7 @@ class ActivityConfig:
         for name in ("min_reversal_count", "min_distinct_bursts"):
             _integer(getattr(self, name), f"activity.{name}", minimum=1)
         for name in (
-            "research_equipment_pd", "research_equipment_pfa",
+            "type_ii_equipment_pd", "type_ii_equipment_pfa",
             "deployed_equipment_pd", "deployed_equipment_pfa",
         ):
             _probability(getattr(self, name), f"activity.{name}")
@@ -500,7 +489,7 @@ def validate_mission_config(config: "AppConfig") -> None:
         "probe_timeout_min",
         "approach_timeout_min",
         "probe_retry_cooldown_min",
-        "civilian_recheck_cooldown_min",
+        "type_i_recheck_cooldown_min",
     ):
         _positive(getattr(contact, name), f"mission.contact.{name}")
     for name in (

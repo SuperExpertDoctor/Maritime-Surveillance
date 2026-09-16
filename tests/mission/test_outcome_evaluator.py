@@ -183,7 +183,7 @@ def test_new_episode_json_contains_no_old_metric_keys():
     assert payload["type_ii_misclassified_as_type_i_ratio"] is None
     assert payload["type_i_probe_cost"] == 0.0
     assert "target_tracking_ratio" not in payload
-    assert "false_civilian_ratio" not in payload
+    assert "type_i_ratio" not in payload
     assert "civilian_probe_uav_min" not in payload
 
 

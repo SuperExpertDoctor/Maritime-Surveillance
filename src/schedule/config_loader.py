@@ -160,21 +160,6 @@ class ShipConfig:
     integration_dt_min: float
     navigation_clearance_cells: float
 
-    @property
-    def initial_ship_count(self) -> int:
-        """Deprecated read adapter for pre-migration callers."""
-        return self.population.total_count
-
-    @property
-    def target_ship_count(self) -> int:
-        """Deprecated read adapter for pre-migration callers."""
-        return self.population.allocate()["type_ii"]
-
-    @property
-    def target_ais_on_probability(self) -> float:
-        """Deprecated read adapter for pre-migration callers."""
-        return self.type_ii_ais_on_probability
-
 @dataclass
 class LLMConfig:
     heavy_cycle_min: float

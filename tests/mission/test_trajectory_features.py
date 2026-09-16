@@ -38,7 +38,7 @@ def session(**changes):
 
 
 def snapshot(samples, **changes):
-    values = dict(contact_id="C1", revision=42, state="observing", identity="unknown",
+    values = dict(contact_id="C1", revision=42, state="observing", vessel_class="unknown",
                   ais_mmsi=None, first_seen_min=0., last_seen_min=20.,
                   estimated_position_cells=(0., 0.), estimated_velocity_cells_min=None,
                   uncertainty_cells=.05, assigned_uav_id="U1", active_probe_id="P1",

@@ -36,7 +36,7 @@ _TTL = {
     "passive_bearing": (10.0, 3.0, 0.60),
     "passive_position": (15.0, 5.0, 1.00),
     "evasive_maneuver": (20.0, 8.0, 1.00),
-    "research_assessment": (60.0, 20.0, 0.85),
+    "type_ii_assessment": (60.0, 20.0, 0.85),
     "violation_assessment": (60.0, 20.0, 1.00),
     "handoff": (10.0, 5.0, 1.00),
     "track_loss": (20.0, 8.0, 1.00),
@@ -369,7 +369,7 @@ class InformationUpdatePolicy:
                 continue
             key = self.evidence_store.subject_key(record)
             is_new_urgent = record.kind in {
-                "evasive_maneuver", "passive_position", "research_assessment",
+                "evasive_maneuver", "passive_position", "type_ii_assessment",
                 "violation_assessment", "handoff",
             } and key not in self._urgent_subjects
             self.evidence_store.supersede(record, key)

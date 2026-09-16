@@ -213,10 +213,9 @@ def test_api_config_exposes_control_strategy_contract():
     assert payload["ship"]["population"]["total_count"] == config.ship.population.total_count
     assert payload["ship"]["population"]["type_i_ratio"] == config.ship.population.type_i_ratio
     assert payload["ship"]["population"]["type_ii_ratio"] == config.ship.population.type_ii_ratio
-    assert "civilian_ratio" not in payload["ship"]["population"]
-    assert "research_ratio" not in payload["ship"]["population"]
-    assert "initial_ship_count" not in payload["ship"]
-    assert "target_ship_count" not in payload["ship"]
+    assert set(payload["ship"]["population"]) == {
+        "total_count", "type_i_ratio", "type_ii_ratio",
+    }
     assert payload["ship"]["type_ii_ais_on_probability"] == config.ship.type_ii_ais_on_probability
     assert payload["sensor"]["passive"]["detection_range_cells"] == 10.0
     assert payload["mission_alignment"]["information_update"]["value_alpha"] == 0.45
@@ -260,12 +259,12 @@ def test_replay_total_refreshes_while_a_live_jsonl_file_is_growing(tmp_path, mon
     assert second["total"] == 2
 
 
-def test_replay_endpoint_normalizes_legacy_vessel_inventory(tmp_path, monkeypatch):
-    replay = tmp_path / "legacy.jsonl"
+def test_replay_endpoint_serves_canonical_vessel_inventory(tmp_path, monkeypatch):
+    replay = tmp_path / "canonical.jsonl"
     replay.write_text(
         json.dumps({
             "frame_id": 1,
-            "scenario_vessels": [{"vessel_class": "research", "ais_mode": "silent"}],
+            "scenario_vessels": [{"vessel_class": "type_ii", "ais_enabled": False}],
         }) + "\n",
         encoding="utf-8",
     )

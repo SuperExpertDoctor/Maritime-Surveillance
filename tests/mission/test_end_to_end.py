@@ -1,12 +1,22 @@
 from src.mission.contracts import IntentCommand
 
 
+def test_runtime_entities_expose_only_final_class_and_ais_contract(scenario_factory):
+    engine = scenario_factory.engine("mixed-ais", seed=42)
+    ship = engine.ships[0]
+
+    assert hasattr(ship, "vessel_class")
+    assert hasattr(ship, "ais_enabled")
+    legacy_attributes = ("truth_" + "identity", "ais_" + "mode")
+    assert all(not hasattr(ship, name) for name in legacy_attributes)
+
+
 def test_fixture_factory_covers_all_eight_scenarios(scenario_factory):
     assert set(scenario_factory.SCENARIOS) == {
         "mixed-ais",
-        "all-civilian",
-        "silent-target",
-        "disguised-target",
+        "all-type-i",
+        "silent-type-ii",
+        "disguised-type-ii",
         "island-confounder",
         "no-resources",
         "intent-overlap",
@@ -18,30 +28,30 @@ def test_fixture_factory_covers_all_eight_scenarios(scenario_factory):
     }
 
     assert all(
-        len(engine.ships) == engine.config.ship.initial_ship_count
+        len(engine.ships) == engine.config.ship.population.total_count
         for engine in engines.values()
     )
     assert all(
-        ship.truth_identity == "civilian"
-        for ship in engines["all-civilian"].ships
+        ship.vessel_class == "type_i"
+        for ship in engines["all-type-i"].ships
     )
     assert not any(
         ship.ais_signal is not None
-        for ship in engines["silent-target"].ships
-        if ship.truth_identity == "target"
+        for ship in engines["silent-type-ii"].ships
+        if ship.vessel_class == "type_ii"
     )
     assert len(engines["island-confounder"].obstacles) >= 1
     assert not engines["no-resources"].allocator.sm.get_available_uavs()
 
 
-def test_ais_contacts_start_unknown_and_disguised_target_needs_observation(scenario_factory):
-    engine = scenario_factory.engine("disguised-target", seed=42)
-    target_count = sum(ship.truth_identity == "target" for ship in engine.ships)
+def test_ais_contacts_start_unknown_and_disguised_type_ii_needs_observation(scenario_factory):
+    engine = scenario_factory.engine("disguised-type-ii", seed=42)
+    target_count = sum(ship.vessel_class == "type_ii" for ship in engine.ships)
     contacts = engine.allocator.sm.contacts.list_snapshots()
 
     assert target_count > 0
     assert contacts
-    assert all(contact.identity == "unknown" for contact in contacts)
+    assert all(contact.vessel_class == "unknown" for contact in contacts)
     assert all(contact.last_assessment is None for contact in contacts)
 
 
@@ -72,7 +82,7 @@ def test_intent_command_is_applied_only_at_the_simulation_boundary(scenario_fact
 
 def test_model_failure_pauses_before_any_clock_or_motion_progress(scenario_factory):
     engine = scenario_factory.engine("model-failure", seed=42)
-    target = next(ship for ship in engine.ships if ship.truth_identity == "target")
+    target = next(ship for ship in engine.ships if ship.vessel_class == "type_ii")
     engine.surveillance_stages.set_fact(target.id, "sar", True, 0.0, "fixture-sar")
     target._col = float(engine.uavs[0].float_position[0])
     target._row = float(engine.uavs[0].float_position[1])

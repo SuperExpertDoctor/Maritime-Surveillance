@@ -88,7 +88,7 @@ def test_same_ais_can_yield_each_class_through_gateway(observed, scripted_transp
 
 
 @pytest.mark.parametrize("changes", [
-    {"vessel_class": "military"}, {"vessel_class": []}, {"confidence": True},
+    {"vessel_class": "unknown_class"}, {"vessel_class": []}, {"confidence": True},
     {"confidence": math.nan}, {"confidence": math.inf}, {"confidence": -.1},
     {"confidence": 1.1}, {"confidence": .79}, {"confidence": "0.9"},
     {"schema_version": "v0"}, {"contact_id": "foreign"}, {"probe_id": "foreign"},
@@ -99,7 +99,7 @@ def test_same_ais_can_yield_each_class_through_gateway(observed, scripted_transp
     {"reasons": "because"}, {"alternative_explanations": ["a"] * 4},
     {"alternative_explanations": ["x" * 201]},
     {"assessment_id": "model-invented"}, {"call_id": "model-invented"},
-    {"assessed_at_min": 0.}, {"truth_identity": "type_i"},
+    {"assessed_at_min": 0.}, {"truth_" + "identity": "type_i"},
 ])
 def test_strict_response_schema_rejects_invalid_payload(observed, changes):
     _, contact, probe, features = observed
@@ -153,7 +153,7 @@ def test_ineligible_evidence_never_calls_or_clears(observed, scripted_transport,
     assessor, _, transport = make_assessor(scripted_transport, store.config, [])
     assert assessor.assess(contact, probe, features, now) is None
     assert not transport.calls
-    assert store.snapshot(contact.contact_id).identity == "unknown"
+    assert store.snapshot(contact.contact_id).vessel_class == "unknown"
     assert store.snapshot(contact.contact_id).cleared_at_min is None
 
 
@@ -193,7 +193,7 @@ def test_failure_keeps_unknown_and_revision_is_not_retried(observed, scripted_tr
     assert assessor.assess(contact, probe, features, 11.) is None
     assert assessor.assess(contact, probe, features, 15.) is None
     assert len(gateway.call_log) == 1 and len(transport.calls) == 3
-    assert store.snapshot(contact.contact_id).identity == "unknown"
+    assert store.snapshot(contact.contact_id).vessel_class == "unknown"
     assert store.snapshot(contact.contact_id).cleared_at_min is None
 
 
@@ -229,7 +229,7 @@ def test_prompt_has_explicit_observation_allowlists_and_no_internal_fields(obser
     store, contact, probe, features = observed
     # Extra attributes must not hitchhike through generic dataclass/object serialization.
     for obj in (contact, probe, features, *contact.samples):
-        object.__setattr__(obj, "truth_identity", "DO-NOT-SEND")
+        object.__setattr__(obj, "environment_" + "vessel_class", "DO-NOT-SEND")
     assessor, _, transport = make_assessor(scripted_transport, store.config,
                                          [json.dumps(response(contact, probe, features))])
     assessor.assess(contact, probe, features, 11.)

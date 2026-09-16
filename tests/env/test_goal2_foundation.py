@@ -420,18 +420,18 @@ def test_base_station_rejects_over_capacity_directly():
 def test_ships_are_independent_contacts_with_generic_public_types():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
 
-    assert len(engine.ships) == engine.config.ship.initial_ship_count
+    assert len(engine.ships) == engine.config.ship.population.total_count
     assert len({ship.group_id for ship in engine.ships}) == len(engine.ships)
     assert all(ship.group_id == ship.id for ship in engine.ships)
     assert {ship.ship_type.value for ship in engine.ships} == {"cargo"}
     assert len({ship.normal_route for ship in engine.ships}) == len(engine.ships)
 
 
-@pytest.mark.parametrize("identity", ("civilian", "target"))
-def test_normal_motion_does_not_read_tracking_state(identity):
+@pytest.mark.parametrize("vessel_class", ("type_i", "type_ii"))
+def test_normal_motion_does_not_read_tracking_state(vessel_class):
     untracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
     tracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    untracked = next(ship for ship in untracked_engine.ships if ship.truth_identity == identity)
+    untracked = next(ship for ship in untracked_engine.ships if ship.vessel_class == vessel_class)
     tracked = next(ship for ship in tracked_engine.ships if ship.id == untracked.id)
 
     tracked.set_tracked(True)

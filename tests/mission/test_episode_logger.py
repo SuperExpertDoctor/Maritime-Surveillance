@@ -40,7 +40,7 @@ def test_episode_logger_rejects_unknown_streams_and_sensitive_payloads(tmp_path)
     with pytest.raises(SensitiveLogError):
         logger.append("blue", "observations", {"Authorization": "Bearer secret"})
     with pytest.raises(SensitiveLogError):
-        logger.append("blue", "observations", {"actual_military": True})
+        logger.append("blue", "observations", {"environment_vessel_class": "type_ii"})
 
     assert list((tmp_path / "episode-fixture-02").rglob("*.jsonl")) == []
 

@@ -396,8 +396,6 @@ class SimulationEngine:
         self._tracking_started_at: dict[str, float] = {}
         self._ais_tracking_started_at: dict[str, float] = {}
         self._ais_measurements: dict[str, list[tuple[float, float]]] = {}
-        self.ais_discriminations = 0
-        self.civilian_releases = 0
         self.storm_avoidance_events = 0
         self._storm_levels: dict[str, int] = {}
         self._storm_level3_started_at: dict[str, float] = {}
@@ -2237,8 +2235,6 @@ class SimulationEngine:
             "ship_count": len(self.ships),
             "region_changes": len(self.region_signatures),
             "track_creations": self.track_creations,
-            "ais_discriminations": self.ais_discriminations,
-            "civilian_releases": self.civilian_releases,
             "storm_avoidance_events": self.storm_avoidance_events,
             "departed_ship_count": self.departed_ship_count,
             "base_refuel_counts": {base.id: base.refuel_count for base in self.bases},

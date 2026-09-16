@@ -260,9 +260,9 @@ def test_stale_or_unvalidated_route_cannot_move_ship_through_land():
     assert ship.pose != forged.poses[-1]
 
 
-@pytest.mark.parametrize("identity", ["civilian", "target"])
+@pytest.mark.parametrize("vessel_class", ["type_i", "type_ii"])
 @pytest.mark.parametrize("edge", ["left", "right", "top", "bottom"])
-def test_normal_departure_requires_crossing_own_exit_and_ignores_tracking(identity, edge):
+def test_normal_departure_requires_crossing_own_exit_and_ignores_tracking(vessel_class, edge):
     navigation()
     mask = np.zeros((12, 12), bool)
     endpoints = {"left": ((1., 6.), (0., 6.), math.pi),
@@ -272,7 +272,7 @@ def test_normal_departure_requires_crossing_own_exit_and_ignores_tracking(identi
     start, end, heading = endpoints[edge]
     route = ((*start, heading), (*end, heading))
     ships = [Ship(f"V{i}", GridCoord(1, 1), 18, cell_size_km=1,
-                  normal_route=route, truth_identity=identity) for i in range(2)]
+                  normal_route=route, vessel_class=vessel_class) for i in range(2)]
     assert hasattr(ships[0], "land_mask"), "ship must retain its real navigation chart"
     for ship in ships:
         ship.land_mask = mask

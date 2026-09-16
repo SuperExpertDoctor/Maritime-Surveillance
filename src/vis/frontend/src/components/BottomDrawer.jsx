@@ -141,7 +141,7 @@ function AisTab({ frame }) {
   const rows = frame?.contacts?.length
     ? frame.contacts.map((contact) => {
       const ais = [...(contact.samples || [])].reverse().find((sample) => sample.source === "ais");
-      return { id: contact.contact_id, mmsi: contact.ais_mmsi, aisPosition: ais?.position, position: contact.estimated_position, state: contact.identity || "unknown" };
+      return { id: contact.contact_id, mmsi: contact.ais_mmsi, aisPosition: ais?.position, position: contact.estimated_position, state: contact.vessel_class || "unknown" };
     })
     : (frame?.ships || []).map((ship) => ({
       id: ship.id,
@@ -161,7 +161,7 @@ function AisTab({ frame }) {
             <td className="mono">{formatPosition(contact.aisPosition)}</td>
             <td className="mono">{formatPosition(contact.position)}</td>
             <td>{frame?.contacts?.length ? (frame.contacts.find((item) => item.contact_id === contact.id)?.samples?.length || 0) : "-"}</td>
-            <td>{contact.state === "unknown" ? "待核查" : contact.state === "target" ? "评估目标" : contact.state === "civilian" ? "声称民用 AIS" : "历史帧"}</td>
+            <td>{contact.state === "unknown" ? "待核查" : contact.state === "type_i" ? "I 类船舶" : contact.state === "type_ii" ? "II 类船舶" : "历史帧"}</td>
           </tr>
         ))}</tbody>
       </table>

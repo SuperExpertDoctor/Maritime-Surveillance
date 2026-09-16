@@ -34,9 +34,7 @@ _SENSITIVE_KEY_PARTS = (
 )
 _BLUE_FORBIDDEN_KEYS = {
     "truth",
-    "actual_military",
-    "truth_identity",
-    "is_military",
+    "environment_vessel_class",
     "is_evasive",
     "identity",
     "gate_state",

@@ -83,7 +83,7 @@ def test_ship_and_mission_config_fields_match_design():
         "approach_timeout_min",
         "probe_retry_cooldown_min",
         "assessment_confidence_min",
-        "civilian_recheck_cooldown_min",
+        "type_i_recheck_cooldown_min",
         "prompt_contact_limit",
         "prompt_keypoints_per_contact",
         "cell_size_km",
@@ -386,12 +386,11 @@ def test_legacy_ship_population_fields_have_an_explicit_migration_error(tmp_path
     ship_data.pop("population")
     ship_data["population"] = {
         "total_count": 8,
-        "civilian_ratio": 0.625,
-        "research_ratio": 0.375,
+        "unsupported_ratio": 1.0,
     }
     ship_path.write_text(yaml.safe_dump(ship_data), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="type_i_ratio"):
+    with pytest.raises(ValueError, match="requires type_i_ratio"):
         ConfigLoader.load(str(config_dir))
 
 

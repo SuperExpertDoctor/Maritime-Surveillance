@@ -43,30 +43,11 @@ class ShipTruth:
         object.__setattr__(self, "normal_route", tuple(self.normal_route))
         object.__setattr__(self, "activity_schedule", tuple(self.activity_schedule))
 
-    # These read adapters keep older evaluator fixtures usable until T13.
-    @property
-    def identity(self) -> Literal["unknown", "target", "civilian"]:
-        return {
-            "unknown": "unknown",
-            "type_i": "civilian",
-            "type_ii": "target",
-        }[self.vessel_class]
-
-    @property
-    def ais_mode(self) -> Literal["civilian", "silent"]:
-        return "civilian" if self.ais_enabled else "silent"
-
-
 def _replace_truth(truth: ShipTruth, **changes) -> ShipTruth:
     return ShipTruth(
         changes.get("ship_id", truth.ship_id),
         changes.get("vessel_class", truth.vessel_class),
-        changes.get(
-            "ais_enabled",
-            truth.ais_enabled
-            if "ais_mode" not in changes
-            else changes["ais_mode"] == "civilian",
-        ),
+        changes.get("ais_enabled", truth.ais_enabled),
         changes.get("normal_route", truth.normal_route),
         changes.get("activity_schedule", truth.activity_schedule),
     )
@@ -85,7 +66,7 @@ class PopulationPlacementError(RuntimeError):
 
 
 class ShipType(str, Enum):
-    """Public vessel label; hidden identity never changes this value."""
+    """Public vessel label; environment truth never changes this value."""
 
     CARGO = "cargo"
 
@@ -108,8 +89,6 @@ class Ship:
         speed_kn: float,
         cell_size_km: float = 10.0,
         *,
-        truth_identity: Literal["target", "civilian"] | None = None,
-        ais_mode: Literal["civilian", "silent"] | None = None,
         normal_route: tuple[Pose, ...] = (),
         ais_position_noise_cells: float = 0.05,
         base_heading: float | None = None,
@@ -124,8 +103,8 @@ class Ship:
         integration_dt_min: float = .1,
         navigation_clearance_cells: float = .1,
         radar_emitter=None,
-        vessel_class: VesselClass | None = None,
-        ais_enabled: bool | None = None,
+        vessel_class: VesselClass = "type_i",
+        ais_enabled: bool = True,
         activity_schedule: tuple[tuple[float, float], ...] = (),
         patrol_route: tuple[Pose, ...] = (),
     ) -> None:
@@ -137,17 +116,14 @@ class Ship:
         )
         if not route:
             route = ((float(initial_position.col), float(initial_position.row), heading),)
-        resolved_vessel_class = vessel_class or (
-            "type_ii" if truth_identity == "target" else "type_i"
-        )
-        if ais_enabled is None:
-            ais_enabled = ais_mode != "silent" if ais_mode is not None else True
         if type(ais_enabled) is not bool:
             raise TypeError("ais_enabled must be bool")
-        if resolved_vessel_class == "type_i" and not ais_enabled:
+        if vessel_class not in ("unknown", "type_i", "type_ii"):
+            raise ValueError("invalid vessel_class")
+        if vessel_class == "type_i" and not ais_enabled:
             raise ValueError("type_i_ais_required")
         self.truth = ShipTruth(
-            ship_id, resolved_vessel_class, ais_enabled, route,
+            ship_id, vessel_class, ais_enabled, route,
             tuple(activity_schedule),
         )
         self.id = ship_id
@@ -173,8 +149,6 @@ class Ship:
         self._active_activity = "transit"
         self.ais_signal = None
         self.radar_emitter = radar_emitter
-        self.is_military: bool | None = None
-        self.discrimination = None
         self.estimated_position: tuple[float, float] | None = None
         self.departed = False
         self._detected = False
@@ -227,10 +201,6 @@ class Ship:
         return self.contact_id
 
     @property
-    def truth_identity(self) -> Literal["target", "civilian"]:
-        return self.truth.identity
-
-    @property
     def vessel_class(self) -> VesselClass:
         return self.truth.vessel_class
 
@@ -271,14 +241,6 @@ class Ship:
         if self._active_activity == "survey" and self.survey_route:
             return self.survey_route
         return self.patrol_route if self.closed_route else self.normal_route
-
-    @property
-    def ais_mode(self) -> Literal["civilian", "silent"]:
-        return self.truth.ais_mode
-
-    @ais_mode.setter
-    def ais_mode(self, value: Literal["civilian", "silent"]) -> None:
-        self.set_ais_enabled(value == "civilian")
 
     @property
     def normal_route(self) -> tuple[Pose, ...]:

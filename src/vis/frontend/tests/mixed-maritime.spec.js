@@ -55,7 +55,7 @@ function frameFixture(mode = "live", overrides = {}) {
       contact_id: "C0001",
       revision: 1,
       state: "pending",
-      identity: "unknown",
+      vessel_class: "unknown",
       ais_mmsi: "123456789",
       first_seen_min: 0,
       last_seen_min: 1,

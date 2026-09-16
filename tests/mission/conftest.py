@@ -58,9 +58,9 @@ class FixtureGateway:
 class ScenarioFactory:
     SCENARIOS = (
         "mixed-ais",
-        "all-civilian",
-        "silent-target",
-        "disguised-target",
+        "all-type-i",
+        "silent-type-ii",
+        "disguised-type-ii",
         "island-confounder",
         "no-resources",
         "intent-overlap",
@@ -70,7 +70,7 @@ class ScenarioFactory:
     @staticmethod
     def config(scenario: str):
         config = ConfigLoader.load()
-        if scenario == "all-civilian":
+        if scenario == "all-type-i":
             config = replace(
                 config,
                 ship=replace(
@@ -80,7 +80,7 @@ class ScenarioFactory:
                     ),
                 ),
             )
-        elif scenario == "silent-target":
+        elif scenario == "silent-type-ii":
             config = replace(
                 config,
                 ship=replace(config.ship, type_ii_ais_on_probability=0.0),

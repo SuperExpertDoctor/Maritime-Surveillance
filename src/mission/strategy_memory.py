@@ -28,7 +28,7 @@ _ALLOWED_CONDITION_VALUES = {
     "weather_disruption": {"low", "high"},
 }
 _FORBIDDEN_KEYS = {
-    "actual_military", "truth_identity", "is_military", "is_evasive",
+    "environment_vessel_class", "is_evasive",
     "gate_state", "physical_ship_id", "ship_truth", "red_plan", "red_snapshot",
     "truth", "identity", "contact_id", "ship_id", "uav_id", "model_call_id",
     "raw_attempts", "selected_task_ids", "preempt_uav_ids", "task_id", "region_id",

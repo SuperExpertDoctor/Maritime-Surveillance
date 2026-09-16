@@ -452,7 +452,7 @@ class ContactStore:
                          first_seen_min=min(a.first_seen_min, v.first_seen_min),
                          last_seen_min=max(a.last_seen_min, v.last_seen_min),
                          state=assessed.state if assessed.last_assessment else owner.state,
-                         identity=assessed.identity, last_assessment=assessed.last_assessment,
+                         last_assessment=assessed.last_assessment,
                          vessel_class=assessed.vessel_class,
                          class_confidence=assessed.class_confidence,
                          class_evidence_ids=assessed.class_evidence_ids,
@@ -540,7 +540,6 @@ class ContactStore:
         }.get(assessment.vessel_class)
         c = replace(
             c,
-            identity=assessment.vessel_class,
             last_assessment=assessment,
             vessel_class=dimension_class or c.vessel_class,
             class_confidence=(
@@ -549,7 +548,7 @@ class ContactStore:
         )
         if assessment.vessel_class == "type_i":
             c = replace(c, state="cleared", cleared_at_min=assessment.assessed_at_min,
-                        next_probe_not_before_min=assessment.assessed_at_min + self.config.civilian_recheck_cooldown_min)
+                        next_probe_not_before_min=assessment.assessed_at_min + self.config.type_i_recheck_cooldown_min)
         elif assessment.vessel_class == "type_ii":
             c = replace(c, state="tracking")
         self._contacts[c.contact_id] = c

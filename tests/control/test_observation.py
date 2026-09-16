@@ -68,13 +68,13 @@ def test_observation_excludes_undetected_ship_truth(engine):
     hidden = engine.ships[0]
     hidden._col = 27.12345
     hidden._row = 26.54321
-    hidden.actual_military = True
+    hidden.environment_vessel_class = "type_ii"
 
     observation = build_observation(engine)
 
     assert observation.contacts == ()
     assert "27.12345" not in repr(observation)
-    assert "actual_military" not in repr(observation)
+    assert "environment_vessel_class" not in repr(observation)
     assert "ships" not in inspect.signature(ObservationProvider).parameters
     assert "ships" not in inspect.signature(ObservationProvider.build).parameters
 

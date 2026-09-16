@@ -67,10 +67,6 @@ def test_ais_state_remains_unknown_until_validated_observation(engine, ais_enabl
     assert engine.allocator.sm.get_target_report(group_id) is not None
     assert any(s.source == "eo" for s in engine.allocator.sm.contacts.snapshot(group_id).samples)
     assert engine.allocator.sm.contacts.snapshot(group_id).vessel_class == "unknown"
-    assert ship.is_military is None
-    assert ship.discrimination is None
-    assert engine.ais_discriminations == 0
-    assert engine.civilian_releases == 0
     assert not engine.allocator.sm.get_active_markers()
 
 

@@ -47,7 +47,7 @@ def test_ais_mmsi_and_packet_are_idempotent(store):
     cid = store.ingest_ais(ais(speed=18), 0.0)
     first = store.snapshot(cid)
     assert cid == "C0001"
-    assert first.identity == "unknown" and first.state == "pending"
+    assert first.vessel_class == "unknown" and first.state == "pending"
     assert first.estimated_velocity_cells_min == pytest.approx((18 * 1.852 / 120, 0))
     assert store.ingest_ais(ais(speed=18), 1.0) == cid
     assert store.snapshot(cid) == first

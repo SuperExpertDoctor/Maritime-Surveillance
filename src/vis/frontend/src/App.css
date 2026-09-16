@@ -651,9 +651,9 @@ button {
   place-items: center;
 }
 
-.contact-state-dot.identity-unknown { color: var(--amber); }
-.contact-state-dot.identity-target { color: var(--danger); }
-.contact-state-dot.identity-civilian { color: var(--teal); }
+.contact-state-dot.vessel-class-unknown { color: var(--amber); }
+.contact-state-dot.vessel-class-type_ii { color: var(--danger); }
+.contact-state-dot.vessel-class-type_i { color: var(--teal); }
 
 .contact-copy {
   display: flex;
@@ -698,16 +698,16 @@ button {
   font: 700 11px/1 Consolas, monospace;
 }
 
-.identity-badge {
+.vessel-class-badge {
   padding: 3px 5px;
   border: 1px solid currentColor;
   border-radius: 2px;
   font-size: 8px;
 }
 
-.identity-unknown { color: var(--amber); }
-.identity-target { color: var(--danger); }
-.identity-civilian { color: var(--teal); }
+.vessel-class-unknown { color: var(--amber); }
+.vessel-class-type_ii { color: var(--danger); }
+.vessel-class-type_i { color: var(--teal); }
 
 .contact-detail dl {
   display: grid;
@@ -1479,12 +1479,12 @@ button {
   background: var(--panel-hover);
 }
 
-.ais-table tr.ais-military td:last-child {
+.ais-table tr.ais-type-ii td:last-child {
   color: var(--danger);
   font-weight: 700;
 }
 
-.ais-table tr.ais-civilian td:last-child {
+.ais-table tr.ais-type-i td:last-child {
   color: var(--text-soft);
 }
 

@@ -348,8 +348,8 @@ export function drawTrackRegions(ctx, regions, contacts, cellSize, ox, oy) {
 
 function contactColor(contact) {
   if (contact?.state === "lost" || contact?.state === "departed") return "#64748B";
-  if (contact?.identity === "target") return "#BE123C";
-  if (contact?.identity === "civilian") return "#0F766E";
+  if (contact?.vessel_class === "type_ii") return "#BE123C";
+  if (contact?.vessel_class === "type_i") return "#0F766E";
   return "#B45309";
 }
 
@@ -407,7 +407,7 @@ export function drawContacts(ctx, contacts, cellSize, ox, oy, selectedId, phase 
     ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-    const status = contact.state === "lost" ? "LOST" : contact.identity === "target" ? "TARGET" : contact.identity === "civilian" ? "CLAIMED AIS" : "PENDING";
+    const status = contact.state === "lost" ? "LOST" : contact.vessel_class === "type_ii" ? "TYPE II" : contact.vessel_class === "type_i" ? "TYPE I" : "PENDING";
     text(ctx, `${contact.contact_id} ${status}`, center.x + radius + 4, center.y + 3, color, Math.max(7, cellSize * 0.25), 700);
   }
 }
@@ -1046,7 +1046,7 @@ function drawClassificationSymbol(ctx, ship, center, size, classification) {
   if (ship.departed) return;
   ctx.save();
   ctx.lineWidth = 1;
-  if (classification === "target") {
+  if (classification === "type_ii") {
     const x = center.x + size + 5;
     const y = center.y - size - 1;
     ctx.strokeStyle = "#F87171";
@@ -1060,7 +1060,7 @@ function drawClassificationSymbol(ctx, ship, center, size, classification) {
     ctx.quadraticCurveTo(x - 2, y + 6, x, y + 6);
     ctx.quadraticCurveTo(x + 2, y + 6, x + 4, y + 2);
     ctx.stroke();
-  } else if (classification === "civilian") {
+  } else if (classification === "type_i") {
     ctx.fillStyle = "#0369A1";
     ctx.beginPath();
     ctx.moveTo(center.x + size + 2, center.y - 2);
@@ -1099,10 +1099,10 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
   const observedShips = (ships || []).filter((ship) => ship?.is_detected);
   drawGroupRings(ctx, observedShips, cellSize, ox, oy);
   for (const ship of observedShips) {
-    const classification = ship.identity || ship.assessment?.identity || "unknown";
-    const color = classification === "target"
+    const classification = ship.vessel_class || ship.assessment?.vessel_class || "unknown";
+    const color = classification === "type_ii"
       ? "#E11D48"
-      : classification === "civilian" ? "#0369A1" : "#CA8A04";
+      : classification === "type_i" ? "#0369A1" : "#CA8A04";
     const size = Math.max(4, cellSize * (ship.ship_type === "carrier" ? 0.38 : 0.28));
     if (ship.trail?.length > 1) {
       ctx.save();
@@ -1134,11 +1134,11 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
       ctx.stroke();
     }
     ctx.restore();
-    drawClassificationSymbol(ctx, ship, center, size, military);
+    drawClassificationSymbol(ctx, ship, center, size, classification);
     if (ship.ais?.reported_position && !ship.departed) {
       const report = gridCenter(ship.ais.reported_position[0], ship.ais.reported_position[1], cellSize, ox, oy);
       ctx.save();
-      ctx.strokeStyle = classification === "target"
+      ctx.strokeStyle = classification === "type_ii"
         ? "rgba(251, 113, 133, .72)" : "rgba(148, 163, 184, .52)";
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 3]);
@@ -1152,7 +1152,7 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
       ? "DEPARTED"
       : String(ship.state || ship.status || (ship.ship_type === "carrier" ? "CV" : "DDG")).toUpperCase();
     const stateColor = ship.departed
-      ? "#64748B" : classification === "target" ? "#BE123C" : "#334155";
+      ? "#64748B" : classification === "type_ii" ? "#BE123C" : "#334155";
     text(ctx, state, center.x + size + 3, center.y + 3, stateColor, Math.max(7, cellSize * 0.26), 700);
   }
 }

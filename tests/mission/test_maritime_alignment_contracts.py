@@ -38,7 +38,8 @@ def test_alignment_config_sections_are_loaded_with_hardened_defaults():
     config = ConfigLoader.load()
 
     assert config.uav.count == config.uav.count_max
-    assert config.ship.population.total_count == config.ship.initial_ship_count
+    allocation = config.ship.population.allocate()
+    assert sum(allocation.values()) == config.ship.population.total_count
     assert config.sensor.passive.detection_range_cells == 10.0
     assert config.sensor.emitter.burst_duration_min == (0.5, 2.0)
     assert isinstance(config.mission.activity, ActivityConfig)
@@ -151,9 +152,8 @@ def test_radiation_activity_does_not_establish_vessel_class():
 
 def test_contact_snapshot_retains_dual_dimension_estimates_across_replace():
     snapshot = ContactSnapshot(
-        "C-DIM", 1, "pending", "unknown", None, 0.0, 0.0, (4.0, 5.0),
+        "C-DIM", 1, "pending", "type_ii", None, 0.0, 0.0, (4.0, 5.0),
         None, 0.2, None, None, None, None, 0.0, (),
-        vessel_class="type_ii",
         class_confidence=0.9,
         class_evidence_ids=("EO-CLASS-1",),
         activity="suspected_violation",

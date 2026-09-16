@@ -1,6 +1,6 @@
 """Immutable public contracts for the mixed maritime mission domain."""
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 import hashlib
 import math
 from typing import Literal
@@ -8,7 +8,6 @@ from typing import Literal
 
 Vec2 = tuple[float, float]
 Rect = tuple[int, int, int, int]
-Identity = Literal["unknown", "type_ii", "type_i"]
 VesselClass = Literal["unknown", "type_i", "type_ii"]
 ActivityState = Literal[
     "unknown", "normal", "suspected_violation", "confirmed_violation"
@@ -391,25 +390,19 @@ class Assessment:
     probe_id: str
     history_revision: int
     assessed_at_min: float
-    vessel_class: Identity
+    vessel_class: VesselClass
     confidence: float
     evidence_sample_ids: tuple[str, ...]
     reasons: tuple[str, ...]
     alternative_explanations: tuple[str, ...]
     model_call_id: str
 
-    @property
-    def identity(self) -> Identity:
-        """Temporary read alias removed once all runtime callers use vessel_class."""
-        return self.vessel_class
-
-
 @dataclass(frozen=True)
 class ContactSnapshot:
     contact_id: str
     revision: int
     state: ContactState
-    identity: Identity
+    vessel_class: VesselClass
     ais_mmsi: str | None
     first_seen_min: float
     last_seen_min: float
@@ -425,96 +418,26 @@ class ContactSnapshot:
     _position_covariance_cells2: tuple[tuple[float, float], tuple[float, float]] | None = field(
         default=None, kw_only=True
     )
-    # The public dual-dimension names are InitVars so the established
-    # positional snapshot contract remains readable by old replay code.  The
-    # values are retained in private init fields, which dataclasses.replace()
-    # carries forward across the store's immutable updates.
-    vessel_class: InitVar[VesselClass | None] = field(default=None, kw_only=True, repr=False)
-    class_confidence: InitVar[float | None] = field(default=None, kw_only=True, repr=False)
-    class_evidence_ids: InitVar[tuple[str, ...] | None] = field(default=None, kw_only=True, repr=False)
-    activity: InitVar[ActivityState | None] = field(default=None, kw_only=True, repr=False)
-    activity_confidence: InitVar[float | None] = field(default=None, kw_only=True, repr=False)
-    activity_evidence_ids: InitVar[tuple[str, ...] | None] = field(default=None, kw_only=True, repr=False)
-    _vessel_class: VesselClass | None = field(default=None, kw_only=True, repr=False)
-    _class_confidence: float | None = field(default=None, kw_only=True, repr=False)
-    _class_evidence_ids: tuple[str, ...] = field(default=(), kw_only=True, repr=False)
-    _activity: ActivityState | None = field(default=None, kw_only=True, repr=False)
-    _activity_confidence: float | None = field(default=None, kw_only=True, repr=False)
-    _activity_evidence_ids: tuple[str, ...] = field(default=(), kw_only=True, repr=False)
+    class_confidence: float = field(default=0.0, kw_only=True)
+    class_evidence_ids: tuple[str, ...] = field(default=(), kw_only=True)
+    activity: ActivityState = field(default="unknown", kw_only=True)
+    activity_confidence: float = field(default=0.0, kw_only=True)
+    activity_evidence_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
-    def __post_init__(
-        self,
-        vessel_class: VesselClass | None,
-        class_confidence: float | None,
-        class_evidence_ids: tuple[str, ...] | None,
-        activity: ActivityState | None,
-        activity_confidence: float | None,
-        activity_evidence_ids: tuple[str, ...] | None,
-    ) -> None:
-        legacy_class = {
-            "unknown": "unknown",
-            "type_i": "type_i",
-            "type_ii": "type_ii",
-            # Kept only while old snapshot inputs are being migrated.
-            "civilian": "type_i",
-            "research": "type_ii",
-            "target": "type_ii",
-        }[self.identity]
-        resolved_class = vessel_class if vessel_class is not None else (
-            self._vessel_class or legacy_class
-        )
-        if resolved_class not in ("unknown", "type_i", "type_ii"):
+    def __post_init__(self) -> None:
+        if self.vessel_class not in ("unknown", "type_i", "type_ii"):
             raise ValueError("invalid vessel_class")
-        resolved_class_confidence = (
-            float(class_confidence)
-            if class_confidence is not None
-            else (self._class_confidence if self._class_confidence is not None else 0.0)
-        )
-        if (not math.isfinite(resolved_class_confidence)
-                or not 0.0 <= resolved_class_confidence <= 1.0):
-            raise ValueError("class_confidence must be finite and in [0, 1]")
-        resolved_activity = activity if activity is not None else (
-            self._activity or "unknown"
-        )
-        if resolved_activity not in (
+        for name in ("class_confidence", "activity_confidence"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1]")
+            object.__setattr__(self, name, value)
+        if self.activity not in (
             "unknown", "normal", "suspected_violation", "confirmed_violation",
         ):
             raise ValueError("invalid activity")
-        resolved_activity_confidence = (
-            float(activity_confidence)
-            if activity_confidence is not None
-            else (self._activity_confidence if self._activity_confidence is not None else 0.0)
-        )
-        if (not math.isfinite(resolved_activity_confidence)
-                or not 0.0 <= resolved_activity_confidence <= 1.0):
-            raise ValueError("activity_confidence must be finite and in [0, 1]")
-        object.__setattr__(self, "_vessel_class", resolved_class)
-        object.__setattr__(self, "_class_confidence", resolved_class_confidence)
-        object.__setattr__(self, "_class_evidence_ids", tuple(
-            class_evidence_ids if class_evidence_ids is not None else self._class_evidence_ids
-        ))
-        object.__setattr__(self, "_activity", resolved_activity)
-        object.__setattr__(self, "_activity_confidence", resolved_activity_confidence)
-        object.__setattr__(self, "_activity_evidence_ids", tuple(
-            activity_evidence_ids if activity_evidence_ids is not None
-            else self._activity_evidence_ids
-        ))
-
-    def __getattribute__(self, name: str):
-        # InitVars are constructor-only by design. Map their public names to
-        # the retained estimates so callers can use the new contract without
-        # changing the old dataclass field layout.
-        private_name = {
-            "vessel_class": "_vessel_class",
-            "class_confidence": "_class_confidence",
-            "class_evidence_ids": "_class_evidence_ids",
-            "activity": "_activity",
-            "activity_confidence": "_activity_confidence",
-            "activity_evidence_ids": "_activity_evidence_ids",
-        }.get(name)
-        if private_name is not None:
-            return object.__getattribute__(self, private_name)
-        return object.__getattribute__(self, name)
+        object.__setattr__(self, "class_evidence_ids", tuple(self.class_evidence_ids))
+        object.__setattr__(self, "activity_evidence_ids", tuple(self.activity_evidence_ids))
 
     @property
     def position_covariance_cells2(self):
@@ -846,7 +769,6 @@ __all__ = [
     "EvidenceRecord",
     "FeasibleEdge",
     "HandoffAttempt",
-    "Identity",
     "InfoFieldDelta",
     "InformationSnapshot",
     "Intent",

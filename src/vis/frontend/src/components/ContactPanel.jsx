@@ -1,10 +1,10 @@
 import { useMemo } from "react";
 import { CircleDot, Eye, FileSearch, Radio, ShieldQuestion } from "lucide-react";
 
-const IDENTITY_LABELS = {
+const VESSEL_CLASS_LABELS = {
   unknown: "待核查",
-  target: "评估目标",
-  civilian: "声称民用 AIS",
+  type_i: "I 类船舶",
+  type_ii: "II 类船舶",
 };
 
 const STATE_LABELS = {
@@ -51,15 +51,15 @@ export default function ContactPanel({ frame, selectedContactId, onSelectContact
                 onClick={() => onSelectContact?.(contact.contact_id)}
                 aria-pressed={contact.contact_id === selected?.contact_id}
               >
-                <span className={`contact-state-dot identity-${contact.identity || "unknown"}`}><CircleDot size={15} /></span>
-                <span className="contact-copy"><strong>{contact.contact_id}</strong><small>{IDENTITY_LABELS[contact.identity] || "待核查"} · {STATE_LABELS[contact.state] || contact.state}</small></span>
+                <span className={`contact-state-dot vessel-class-${contact.vessel_class || "unknown"}`}><CircleDot size={15} /></span>
+                <span className="contact-copy"><strong>{contact.contact_id}</strong><small>{VESSEL_CLASS_LABELS[contact.vessel_class] || "待核查"} · {STATE_LABELS[contact.state] || contact.state}</small></span>
                 <span className="contact-seen">{contact.samples?.length || 0}</span>
               </button>
             ))}
           </div>
           {selected && (
             <div className="contact-detail">
-              <div className="contact-detail-head"><strong>{selected.contact_id}</strong><span className={`identity-badge identity-${selected.identity || "unknown"}`}>{IDENTITY_LABELS[selected.identity] || "待核查"}</span></div>
+              <div className="contact-detail-head"><strong>{selected.contact_id}</strong><span className={`vessel-class-badge vessel-class-${selected.vessel_class || "unknown"}`}>{VESSEL_CLASS_LABELS[selected.vessel_class] || "待核查"}</span></div>
               <dl>
                 <div><dt>阶段</dt><dd>{STATE_LABELS[selected.state] || selected.state || "-"}</dd></div>
                 <div><dt>AIS 来源</dt><dd>{selected.ais_mmsi || "无"}</dd></div>

@@ -55,11 +55,11 @@ from src.mission.contracts import (
         (
             ContactSnapshot,
             (
-                "contact_id",
-                "revision",
-                "state",
-                "identity",
-                "ais_mmsi",
+                    "contact_id",
+                    "revision",
+                    "state",
+                    "vessel_class",
+                    "ais_mmsi",
                 "first_seen_min",
                 "last_seen_min",
                 "estimated_position_cells",
@@ -69,8 +69,13 @@ from src.mission.contracts import (
                 "active_probe_id",
                 "last_assessment",
                 "cleared_at_min",
-                "next_probe_not_before_min",
-                "samples",
+                    "next_probe_not_before_min",
+                    "samples",
+                    "class_confidence",
+                    "class_evidence_ids",
+                    "activity",
+                    "activity_confidence",
+                    "activity_evidence_ids",
             ),
         ),
         (
@@ -173,7 +178,7 @@ def test_contact_snapshot_does_not_expose_environment_truth():
         contact_id="C0001",
         revision=1,
         state="pending",
-        identity="unknown",
+        vessel_class="unknown",
         ais_mmsi="123456789",
         first_seen_min=1.0,
         last_seen_min=1.0,
@@ -192,14 +197,13 @@ def test_contact_snapshot_does_not_expose_environment_truth():
     prohibited = {
         "ship_id",
         "physical_ship_id",
-        "actual_military",
-        "truth_identity",
+        "vessel_class_truth",
         "is_evading",
         "red_motion_parameters",
     }
     assert prohibited.isdisjoint(serialized)
     with pytest.raises(FrozenInstanceError):
-        snapshot.identity = "target"
+        snapshot.vessel_class = "type_ii"
 
 
 def test_ship_truth_is_owned_by_the_environment_not_public_mission_contracts():
