@@ -3,7 +3,7 @@ from dataclasses import replace
 from scripts.evaluate_mixed_maritime import _FixtureGateway
 from scripts.replay_restoration_scenarios import build_scenario
 from src.env.emitter import EmitterState
-from src.mission.contracts import VesselCommand
+from src.mission.contracts import PassivePosition, VesselCommand
 from src.schedule.config_loader import ConfigLoader
 from src.env.simulation import SimulationEngine
 
@@ -175,3 +175,79 @@ def test_passive_gates_publish_bearing_or_position_then_investigation_task():
     )
     assert investigation.priority == "high"
     assert investigation.bbox is not None
+
+
+def test_information_version_flows_from_evidence_to_selection_and_commit():
+    engine = build_scenario("information-loop", seed=42, transport="fixture")
+    sm = engine.allocator.sm
+    sm.current_time = 1.0
+    position = PassivePosition(
+        position_id="POS-INTEGRATION-1",
+        emitter_track_id="EMITTER-INTEGRATION-1",
+        burst_id="BURST-INTEGRATION-1",
+        sample_id="SAMPLE-INTEGRATION-1",
+        observed_at_min=1.0,
+        position_cells=(15.0, 15.0),
+        source_observation_ids=("OBS-INTEGRATION-1", "OBS-INTEGRATION-2"),
+    )
+
+    sm.register_passive_position(position)
+    delta = sm.apply_information_facts((position,), 1.0)
+    engine._publish_information_delta(delta, 1.0)
+    assert delta is not None
+    version = sm.information_version
+    assert sm.apply_information_facts((position,), 1.0) is None
+    assert sm.information_version == version
+
+    statuses = engine._evaluate_intent_statuses(1.0)
+    snapshot = engine.allocator.build_mission_snapshot(
+        1.0,
+        intents=engine.intents.intents(),
+        intent_statuses=statuses,
+    )
+    task = next(
+        item for item in snapshot.candidates
+        if item.task_id == "investigation:EMITTER-INTEGRATION-1"
+    )
+    assert task.information_version == version
+    assert snapshot.information_version == version
+
+    scheduler = engine.allocator.mission_scheduler
+    batch = scheduler.decide(snapshot)
+
+    assert batch is not None
+    assert batch.information_version == version
+    assert task.task_id in {item.task_id for item in batch.assignments}
+    assert engine.apply_assignment_batch(batch)
+    assert any(
+        event["type"] == "mission_assignment_committed"
+        and task.task_id in event["data"]["task_ids"]
+        for event in sm.get_recent_events(0.0)
+    )
+
+    sm.current_time = 17.0
+    expired = sm.information_policy.advance_time(17.0)
+    engine._publish_information_delta(expired, 17.0)
+    assert expired is not None
+    assert "evidence_expired" in expired.reason_codes
+    assert sm.information_version > version
+    assert sm.get_passive_positions(17.0) == ()
+
+
+def test_information_prompt_exposes_bounded_fairness_metadata():
+    engine = build_scenario("information-loop", seed=42, transport="fixture")
+    snapshot = engine.allocator.build_mission_snapshot(
+        1.0,
+        intents=engine.intents.intents(),
+        intent_statuses=engine._evaluate_intent_statuses(1.0),
+    )
+    payload = engine.allocator.mission_scheduler._prompt_payload(snapshot)
+
+    assert payload["snapshot"]["candidates_truncated"] is True
+    assert payload["snapshot"]["prompt_fairness_bound_cycles"] is not None
+    prompt_ids = {
+        item["task_id"] for item in payload["snapshot"]["candidates"]
+    }
+    assert prompt_ids <= {
+        edge.task_id for edge in snapshot.feasible_edges
+    }
