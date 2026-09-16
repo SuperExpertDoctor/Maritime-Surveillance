@@ -74,3 +74,25 @@ extension interface.
 - Gate command:
   `LONGCAT_API_KEY=offline-test python -m pytest tests/mission/test_mission_task_lifecycle.py tests/mission/test_contact_release.py tests/mission/test_dynamic_vessel_lifecycle.py tests/control/test_simulation_ownership.py tests/control/heuristic/test_task_flow.py tests/schedule/test_trigger_manager.py -q`
 - Gate result: `96 passed in 319.34s`.
+
+## T03 Work-Conserving Selection
+
+- Red evidence: a model could return an empty selection with a defer reason,
+  or select one task while an independent task could use an idle UAV; hidden
+  prompt candidates also had no validation boundary.
+- Split selection validation from the previous legal-work shortcut. The public
+  and `MissionScheduler` validators now accept a fixed `visible_task_ids` set,
+  permit only visible candidates or approved active continuations, and run a
+  bounded augmentation check after basic legality succeeds.
+- Augmentation uses the full immutable edge graph, allows rematching selected
+  tasks, requires no extra preemption, and reports the first deterministic
+  visible witness only when a newly used UAV is in `available_uav_ids`.
+  A defer reason no longer overrides such a witness; an empty selection with
+  no feasible edge remains legal.
+- Red-to-green commands:
+  `python -m pytest tests/mission/test_mission_scheduler.py::test_reason_does_not_allow_empty_selection_with_idle_feasible_work tests/mission/test_mission_scheduler.py::test_partial_selection_must_add_independent_idle_work tests/mission/test_mission_scheduler.py::test_underutilization_allows_rematching_selected_work_to_use_idle_uav tests/mission/test_mission_scheduler.py::test_underutilization_does_not_force_work_without_an_idle_resource tests/mission/test_mission_scheduler.py::test_hidden_candidate_cannot_be_selected_or_create_underutilization_witness -q`
+  -> `5 passed in 0.32s`.
+- Gate command:
+  `python -m pytest tests/mission/test_mission_scheduler.py tests/mission/test_prompt_window.py tests/mission/test_intent_candidates.py -q`
+- Gate result: `31 passed in 1.63s` (including the prompt-hidden selection
+  regression).
