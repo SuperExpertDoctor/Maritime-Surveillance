@@ -195,6 +195,12 @@ class StateManager:
         """Publish a session already advanced by the simulation thread."""
         if not isinstance(probe, ProbeSession):
             raise TypeError("probe must be a ProbeSession")
+        previous = self._probe_sessions.get(probe.probe_id)
+        if previous is not None and (
+            previous.contact_id != probe.contact_id
+            or previous.uav_id != probe.uav_id
+        ):
+            raise ValueError("probe_id_owner_conflict")
         self._probe_sessions[probe.probe_id] = probe
 
     def get_probe_session(self, probe_id: str) -> ProbeSession | None:

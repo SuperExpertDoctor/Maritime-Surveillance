@@ -1303,6 +1303,8 @@ class SimulationEngine:
         route_plans: dict[str, SearchRoutePlan] = {}
         reservations: list[tuple[str, str, str | None]] = []
         reserved_contacts: set[str] = set()
+        handoff_commits: list[tuple[object, str, str]] = []
+        next_probe_number = self._next_probe_number
         for assignment in batch.assignments:
             candidate = candidates.get(assignment.task_id)
             resource = resources.get(assignment.uav_id)
@@ -1384,6 +1386,20 @@ class SimulationEngine:
                     return False
                 if candidate.kind == "probe" and contact.vessel_class != "unknown":
                     return False
+                handoff = next(
+                    (
+                        item
+                        for item in self.handoff_manager.attempts()
+                        if item.contact_id == contact_id
+                        and item.state == "required"
+                        and item.source_uav_id != assignment.uav_id
+                    ),
+                    None,
+                )
+                if handoff is not None:
+                    if self.clock.time > handoff.assignment_deadline_min:
+                        return False
+                    handoff_commits.append((handoff, assignment.uav_id, contact_id))
                 target = contact.estimated_position_cells
                 radius = (
                     self.config.mission.contact.baseline_standoff_cells
@@ -1403,18 +1419,25 @@ class SimulationEngine:
                     return False
                 if not route:
                     return False
-                probe_id = (
-                    f"P{self._next_probe_number:04d}"
-                    if candidate.kind == "probe"
-                    else None
-                )
-                if (
+                reuse_existing_probe = (
                     candidate.kind == "probe"
                     and active is not None
                     and active.task_id == assignment.task_id
+                    and active.target_contact_id == contact_id
                     and active.probe_id is not None
-                ):
+                    and (
+                        session := self.allocator.sm.get_probe_session(active.probe_id)
+                    ) is not None
+                    and session.contact_id == contact_id
+                    and session.uav_id == assignment.uav_id
+                )
+                if reuse_existing_probe:
                     probe_id = active.probe_id
+                elif candidate.kind == "probe":
+                    probe_id = f"P{next_probe_number:04d}"
+                    next_probe_number += 1
+                else:
+                    probe_id = None
                 control_task = ControlTask(
                     candidate.task_id,
                     OperationMode.PROBE if candidate.kind == "probe" else OperationMode.TRACK,
@@ -1427,11 +1450,12 @@ class SimulationEngine:
                 return False
             prepared.append((uav, control_task, candidate, assignment, active))
 
-        reserved: list[tuple[str, str, str | None]] = []
+        reservation_state = self.allocator.sm.contacts.capture_reservation_state(
+            contact_id for contact_id, _, _ in reservations
+        )
         try:
             for contact_id, uav_id, probe_id in reservations:
                 self.allocator.sm.contacts.reserve(contact_id, uav_id, probe_id)
-                reserved.append((contact_id, uav_id, probe_id))
             leases = self.control_coordinator.assign_tasks_atomically(
                 tuple(
                     (assignment.uav_id, task, assignment.expected_generation)
@@ -1441,40 +1465,24 @@ class SimulationEngine:
                 dt_min=self.clock.dt_min,
             )
         except Exception as exc:
-            for contact_id, _, _ in reversed(reserved):
-                self.allocator.sm.contacts.release(
-                    contact_id, self.clock.time, "assignment_rollback"
-                )
+            self.allocator.sm.contacts.restore_reservation_state(reservation_state)
             self.allocator.sm.add_event("mission_assignment_rejected", {
                 "reason": str(exc),
                 "snapshot_id": snapshot.snapshot_id,
             })
             return False
 
-        for assignment in batch.assignments:
-            candidate = candidates[assignment.task_id]
-            if candidate.contact_id is None:
-                continue
-            contact_id = self.allocator.sm.resolve_contact_id(candidate.contact_id)
-            attempt = next(
-                (
-                    item for item in self.handoff_manager.attempts()
-                    if item.contact_id == contact_id
-                    and item.state == "required"
-                    and item.source_uav_id != assignment.uav_id
-                ),
-                None,
-            )
-            if attempt is None:
-                continue
+        for attempt, successor_uav_id, contact_id in handoff_commits:
             try:
                 self.handoff_manager.commit_assignment(
                     attempt.handoff_id,
-                    assignment.uav_id,
+                    successor_uav_id,
                     self.clock.time,
                 )
-            except (KeyError, ValueError):
-                return False
+            except (KeyError, ValueError) as exc:
+                raise RuntimeError(
+                    "handoff changed after assignment commit"
+                ) from exc
             self._outcome_evaluator.record_handoff_assignment(
                 attempt.handoff_id,
                 at_min=self.clock.time,
@@ -1567,26 +1575,26 @@ class SimulationEngine:
                     fuel_remaining_pct=uav.fuel_remaining_pct,
                 )
                 assert task.probe_id is not None
-                self.allocator.sm.set_probe_session(
-                    ProbeSession(
-                        task.probe_id,
-                        task.target_contact_id,
-                        uav.id,
-                        "baseline",
-                        self.clock.time,
-                        None,
-                        self.clock.time,
-                        (),
-                        (),
-                        0.0,
-                        None,
+                if self.allocator.sm.get_probe_session(task.probe_id) is None:
+                    self.allocator.sm.set_probe_session(
+                        ProbeSession(
+                            task.probe_id,
+                            task.target_contact_id,
+                            uav.id,
+                            "baseline",
+                            self.clock.time,
+                            None,
+                            self.clock.time,
+                            (),
+                            (),
+                            0.0,
+                            None,
+                        )
                     )
-                )
                 for vessel_id in self._vessel_ids_for_contact(task.target_contact_id):
                     self._set_surveillance_fact(
                         vessel_id, "probe", True, self.clock.time, task.probe_id,
                     )
-                self._next_probe_number += 1
             self._coordinator_tasks[uav.id] = task
             existing_record = self._mission_task_records.get(task.task_id)
             if existing_record is None:
@@ -1624,6 +1632,7 @@ class SimulationEngine:
                 lease.generation,
                 self.control_coordinator.safety_intervened(uav.id),
             )
+        self._next_probe_number = next_probe_number
         self.allocator.sm.add_event("mission_assignment_committed", {
             "snapshot_id": snapshot.snapshot_id,
             "selection_call_id": batch.selection_call_id,

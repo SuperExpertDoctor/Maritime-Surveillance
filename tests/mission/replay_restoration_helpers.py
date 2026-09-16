@@ -17,7 +17,11 @@ def probe_batch(engine, count=6):
             (
                 edge
                 for edge in snapshot.feasible_edges
-                if edge.task_id == candidate.task_id and edge.uav_id not in used
+                if (
+                    edge.task_id == candidate.task_id
+                    and edge.uav_id not in used
+                    and edge.uav_id in snapshot.available_uav_ids
+                )
             ),
             None,
         )

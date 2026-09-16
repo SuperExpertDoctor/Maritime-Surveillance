@@ -513,6 +513,21 @@ class ContactStore:
         self._event("contact_released", contact_id=c.contact_id, uav_id=c.assigned_uav_id,
                     probe_id=c.active_probe_id, reason=reason)
 
+    def capture_reservation_state(self, contact_ids):
+        """Capture only contact reservations touched by a pending batch."""
+        resolved = tuple(sorted({self.resolve(contact_id) for contact_id in contact_ids}))
+        return (
+            tuple((contact_id, self.snapshot(contact_id)) for contact_id in resolved),
+            len(self._events),
+        )
+
+    def restore_reservation_state(self, state) -> None:
+        """Restore a reservation snapshot after a pre-commit failure."""
+        snapshots, event_count = state
+        for contact_id, snapshot in snapshots:
+            self._contacts[contact_id] = snapshot
+        del self._events[event_count:]
+
     def apply_assessment(self, assessment: Assessment) -> None:
         """Apply a service-validated assessment; reject stale probe/history references.
 

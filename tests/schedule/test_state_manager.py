@@ -1,8 +1,11 @@
 ﻿import pytest
 import numpy as np
 
+from dataclasses import replace
+
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import GridCoord, BBox, UAVState
+from src.mission.contracts import ProbeSession
 from src.schedule.state_manager import StateManager
 
 
@@ -138,6 +141,22 @@ def test_available_uavs_accepts_system_heuristic_idle_or_holding(
     )
 
     assert "UAV-1" in {uav.id for uav in sm.get_available_uavs()}
+
+
+def test_probe_session_updates_same_owner_but_rejects_owner_conflict(sm):
+    original = ProbeSession(
+        "P0001", "C0001", "UAV-1", "baseline", 0.0, None, 0.0,
+        (), (), 0.0, None,
+    )
+    advanced = replace(original, phase="near", baseline_started_at_min=1.0)
+    sm.set_probe_session(original)
+    sm.set_probe_session(advanced)
+    assert sm.get_probe_session("P0001") == advanced
+
+    with pytest.raises(ValueError, match="probe_id_owner_conflict"):
+        sm.set_probe_session(replace(original, contact_id="C0002"))
+    with pytest.raises(ValueError, match="probe_id_owner_conflict"):
+        sm.set_probe_session(replace(original, uav_id="UAV-2"))
 
 
 def test_coverage_excludes_obstacles_and_boundary(sm):

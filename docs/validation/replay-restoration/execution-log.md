@@ -40,3 +40,18 @@ the source logs listed below are read-only inputs.
 environment issue is recorded but not silently counted as a pass. `N/A` is used
 only when the plan explicitly defines a capability as compatibility or an
 extension interface.
+
+## T01 Probe Transaction
+
+- Red evidence: the new six-assignment test initially observed only one unique
+  probe ID (`P0001`) for six assignments.
+- Implemented local probe-ID allocation, same-owner continuation reuse,
+  owner-conflict validation, contact reservation rollback, and pre-commit
+  handoff deadline validation.
+- Gate command:
+  `python -m pytest tests/mission/test_simulation_flow.py tests/mission/test_contact_store.py tests/schedule/test_state_manager.py tests/mission/test_handoff.py -q`
+- Gate result: `70 passed in 21.29s`.
+- Covered evidence includes six concurrent sessions, allocation across two
+  batches, continuation phase preservation, invalid-batch rollback, expired
+  handoff rejection before lease installation, reservation snapshot restore,
+  same-owner session updates, and reset isolation.
