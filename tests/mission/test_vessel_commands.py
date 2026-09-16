@@ -1,7 +1,10 @@
 import pytest
 
 from src.mission.contracts import VesselCommand
-from src.mission.vessel_commands import CommandConflict, VesselCommandQueue
+from src.mission.vessel_commands import (
+    CommandConflict,
+    VesselCommandQueue,
+)
 
 
 def _create(command_id="v-1"):

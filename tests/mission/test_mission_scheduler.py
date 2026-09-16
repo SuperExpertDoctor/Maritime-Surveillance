@@ -332,8 +332,11 @@ def test_scheduler_prompt_contains_complete_snapshot_and_returns_batch():
             self.payload = None
             self.call_log = [{
                 "call_id": "call-1",
+                "role": "decision_maker",
                 "model": "LongCat-2.0",
                 "attempts": [],
+                "success": True,
+                "failure_category": None,
             }]
 
         def request_json(self, **kwargs):
