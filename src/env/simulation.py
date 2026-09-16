@@ -97,6 +97,7 @@ from src.mission.red_commander import (
     RedSnapshot,
     ThreatGate,
 )
+from src.mission.surveillance_stage import SurveillanceStageRegistry
 from src.utils.coverage_planner import CoveragePlanner
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
@@ -362,6 +363,11 @@ class SimulationEngine:
         self._ship_position_history: dict[str, list[tuple[float, tuple[float, float]]]] = {
             ship.id: [(0.0, ship.float_position)] for ship in self.ships
         }
+        self.surveillance_stages = SurveillanceStageRegistry()
+        for ship in self.ships:
+            self.surveillance_stages.register(
+                ship.id, ship.vessel_class, 0.0,
+            )
         self._vessel_revisions = {ship.id: 1 for ship in self.ships}
         self.red_commander = RedCommander(
             self.allocator.llm_client.gateway,
@@ -467,6 +473,9 @@ class SimulationEngine:
                         vessel = self._create_scenario_vessel(command)
                         self.ships.append(vessel)
                         self._vessel_revisions[vessel.id] = 1
+                        self.surveillance_stages.register(
+                            vessel.id, vessel.vessel_class, self.clock.time,
+                        )
                         self._ship_position_history[vessel.id] = [
                             (self.clock.time, vessel.float_position)
                         ]
@@ -684,6 +693,7 @@ class SimulationEngine:
                 self._evaluation_contact_links.pop(contact_id, None)
 
         self.red_commander.remove_ship(plan.vessel_id)
+        self.surveillance_stages.remove(plan.vessel_id)
         self._ais_force_refresh_ids.discard(plan.vessel_id)
         self._vessel_contact_ids.pop(plan.vessel_id, None)
         self.ships[:] = [ship for ship in self.ships if ship.id != plan.vessel_id]
@@ -752,6 +762,64 @@ class SimulationEngine:
         )
         self._next_scenario_vessel_number += 1
         return vessel
+
+    def _set_surveillance_fact(
+        self,
+        vessel_id: str,
+        source: str,
+        active: bool,
+        now_min: float,
+        cause_id: str,
+    ) -> None:
+        """Publish a source fact and its derived stage transition."""
+        try:
+            previous = self.surveillance_stages.snapshot(vessel_id)
+        except KeyError:
+            return
+        state = self.surveillance_stages.set_fact(
+            vessel_id, source, active, now_min, cause_id,
+        )
+        if state is None:
+            return
+        payload = {
+            "vessel_id": vessel_id,
+            "previous_stage": previous.stage,
+            "stage": state.stage,
+            "revision": state.revision,
+            "cause_id": state.cause_id,
+        }
+        self.allocator.sm.add_event("surveillance_stage_changed", payload)
+        self.allocator.trigger_manager.notify_event(
+            "surveillance_stage_changed", time=now_min, **payload,
+        )
+
+    def _vessel_ids_for_contact(self, contact_id: str) -> tuple[str, ...]:
+        """Resolve observation-only contact aliases back to environment IDs."""
+        sm = self.allocator.sm
+        try:
+            canonical = sm.resolve_contact_id(contact_id)
+        except (KeyError, TypeError):
+            canonical = contact_id
+        vessel_ids = set()
+        for vessel_id, contact_ids in self._vessel_contact_ids.items():
+            if canonical in {sm.resolve_contact_id(item) for item in contact_ids}:
+                vessel_ids.add(vessel_id)
+        for observed_id, vessel_id in self._evaluation_contact_links.items():
+            if sm.resolve_contact_id(observed_id) == canonical:
+                vessel_ids.add(vessel_id)
+        for ship in self.ships:
+            if ship.id == contact_id or ship.id == canonical:
+                vessel_ids.add(ship.id)
+        return tuple(sorted(vessel_ids))
+
+    def _clear_surveillance_contact(
+        self, contact_id: str, now_min: float, cause_id: str,
+    ) -> None:
+        for vessel_id in self._vessel_ids_for_contact(contact_id):
+            for source in ("eo_lock", "probe", "passive", "sar"):
+                self._set_surveillance_fact(
+                    vessel_id, source, False, now_min, cause_id,
+                )
 
     @property
     def blocked_role(self) -> str | None:
@@ -1491,6 +1559,10 @@ class SimulationEngine:
                         None,
                     )
                 )
+                for vessel_id in self._vessel_ids_for_contact(task.target_contact_id):
+                    self._set_surveillance_fact(
+                        vessel_id, "probe", True, self.clock.time, task.probe_id,
+                    )
                 self._next_probe_number += 1
             self._coordinator_tasks[uav.id] = task
             existing_record = self._mission_task_records.get(task.task_id)
@@ -2451,6 +2523,25 @@ class SimulationEngine:
             activity_facts = []
             for position in positions:
                 sm.register_passive_position(position)
+                associated_contact = sm.passive_position_contact_id(
+                    position.emitter_track_id,
+                )
+                emitter_ship = next(
+                    (
+                        item for item in self.ships
+                        if self._emitter_track_ids.get(item.id)
+                        == position.emitter_track_id
+                    ),
+                    None,
+                )
+                if emitter_ship is not None and associated_contact is not None:
+                    self._set_surveillance_fact(
+                        emitter_ship.id,
+                        "passive",
+                        True,
+                        sample_time,
+                        position.position_id,
+                    )
                 activity_facts.extend(sm.drain_radiation_activity_evidence())
             facts = [*observations, *positions, *activity_facts]
             if facts:
@@ -2537,6 +2628,9 @@ class SimulationEngine:
                         self.control_coordinator.assign_task(uid, task, current_time=current_time)
                         self._coordinator_tasks[uid] = task
             elif event["type"] == "contact_lost":
+                self._clear_surveillance_contact(
+                    event["contact_id"], current_time, "contact_lost",
+                )
                 self._release_target_group(event["contact_id"], current_time, "target_lost")
             if event["type"] in ("contact_created", "contact_merged", "contact_lost"):
                 self.allocator.trigger_manager.notify_event(
@@ -2868,6 +2962,10 @@ class SimulationEngine:
                     },
                 )
         sm.clear_probe_session(probe.probe_id)
+        for vessel_id in self._vessel_ids_for_contact(probe.contact_id):
+            self._set_surveillance_fact(
+                vessel_id, "probe", False, current_time, probe.probe_id,
+            )
         sm.add_event("probe_timed_out", {
             "probe_id": probe.probe_id,
             "contact_id": probe.contact_id,
@@ -2882,6 +2980,10 @@ class SimulationEngine:
         current_time: float,
     ) -> None:
         sm = self.allocator.sm
+        for vessel_id in self._vessel_ids_for_contact(assessment.contact_id):
+            self._set_surveillance_fact(
+                vessel_id, "probe", False, current_time, assessment.probe_id,
+            )
         task = self.control_coordinator.active_task(probe.uav_id)
         if task is not None:
             record = self._mission_task_records.get(task.task_id)
@@ -3031,6 +3133,7 @@ class SimulationEngine:
         """Release contact bindings and queue the ordinary lifecycle transition."""
         sm = self.allocator.sm
         group_id = sm.resolve_contact_id(group_id)
+        self._clear_surveillance_contact(group_id, current_time, event_type)
         sm.clear_target_report(group_id)
         track = sm.get_track_region_for_group(group_id)
         if track is not None:
@@ -3092,6 +3195,9 @@ class SimulationEngine:
         # outcome metrics count wrong aliases as wrong instead of correcting
         # them with the physical vessel ID in the blue observation stream.
         self._evaluation_contact_links[cid] = ship.id
+        self._set_surveillance_fact(
+            ship.id, "sar", True, current_time, detection.sample_id,
+        )
         self._publish_contact_events(current_time)
         return cid
 
@@ -3128,6 +3234,16 @@ class SimulationEngine:
             ):
                 continue
             links.append((uav.id, contact_id, physical_id))
+
+        linked_ship_ids = {physical_id for _, _, physical_id in links}
+        for ship in self.ships:
+            self._set_surveillance_fact(
+                ship.id,
+                "eo_lock",
+                ship.id in linked_ship_ids,
+                current_time,
+                f"eo-lock:{ship.id}" if ship.id in linked_ship_ids else "eo-lock-lost",
+            )
 
         vessel_samples = tuple(
             VesselTruthSample(
