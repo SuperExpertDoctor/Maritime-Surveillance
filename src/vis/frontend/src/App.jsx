@@ -68,25 +68,21 @@ export default function App() {
 
   const replayEvents = useMemo(() => {
     if (mode !== "replay") return [];
-    const unique = new Map();
-    replay.frames.slice(0, replay.index + 1).forEach((item) => {
-      if (!item) return;
-      (item.events || []).forEach((event) => {
-        const key = `${event.time}|${event.type}|${JSON.stringify(event.data)}`;
-        unique.set(key, event);
-      });
-    });
-    return [...unique.values()];
-  }, [mode, replay.frames, replay.index]);
+    return replay.markers.map((marker) => marker.event);
+  }, [mode, replay.markers]);
 
   const replayLlmCycle = useMemo(() => {
     if (mode !== "replay") return null;
-    for (let index = replay.index; index >= 0; index -= 1) {
-      if (replay.frames[index]?.llm_cycle) return replay.frames[index].llm_cycle;
-    }
-    return null;
-  }, [mode, replay.frames, replay.index]);
+    return replay.frame?.llm_cycle || null;
+  }, [mode, replay.frame]);
   const displayedLlmCycle = mode === "replay" ? replayLlmCycle : lastLlmCycle;
+
+  const replayConnectionStatus = replay.targetLoadingIndex != null || replay.loading
+    ? "connecting"
+    : replay.error ? "error" : "connected";
+  const replayConnectionLabel = replay.targetLoadingIndex != null
+    ? "载入目标帧"
+    : replay.error || (replay.loading ? "载入中" : `${replay.frames.length} 帧`);
 
   useEffect(() => {
     if (selectedUavId && frame && !(frame.uavs || []).some((uav) => uav.id === selectedUavId)) {
@@ -221,9 +217,9 @@ export default function App() {
             {replay.files.map((file) => <option key={file} value={file}>{file}</option>)}
           </select>
         )}
-        <span className={`connection-state ${mode === "live" ? live.status : replay.loading ? "connecting" : "connected"}`}>
+        <span className={`connection-state ${mode === "live" ? live.status : replayConnectionStatus}`}>
           <span className="connection-dot" />
-          {mode === "live" ? connectionLabel : replay.error || (replay.loading ? "载入中" : `${replay.frames.length} 帧`)}
+          {mode === "live" ? connectionLabel : replayConnectionLabel}
         </span>
         <div className="top-actions">
           <div className="trail-mode-switch" role="group" aria-label="UAV轨迹显示模式">
@@ -361,6 +357,8 @@ export default function App() {
         onSpeedChange={replay.setSpeed}
         frame={frame}
         markers={replay.markers}
+        loadedFrames={replay.loadedFrameCount}
+        targetLoadingIndex={replay.targetLoadingIndex}
         onExportMp4={mp4Export.exportMp4}
         exportAvailable={mp4Export.available}
         exporting={mp4Export.exporting}

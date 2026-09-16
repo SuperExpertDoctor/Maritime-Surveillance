@@ -136,3 +136,103 @@ test("contacts take the observation branch and scenario labels remain render-onl
   expect(result.withScenario).not.toContain("ship:legacy-ship");
   expect(result.fetchCalls).toBe(0);
 });
+
+test("replay markers deduplicate reordered events and keep the first frame index", async ({ page }) => {
+  await page.goto("/");
+  const markers = await page.evaluate(async () => {
+    const { collectReplayMarkers } = await import("/src/renderer/replayEvents.js");
+    return collectReplayMarkers([
+      { frame_id: 41, events: [{ type: "mission_assignment_committed", time: 2.5, data: { uav_id: "UAV-1", task_id: "T-1" } }] },
+      { frame_id: 99, events: [{ type: "mission_assignment_committed", time: 2.5, data: { task_id: "T-1", uav_id: "UAV-1" } }] },
+      { frame_id: 103, events: [{ type: "mission_assignment_committed", time: 2.5, data: { task_id: "T-1", uav_id: "UAV-1" } }] },
+    ]);
+  });
+  expect(markers).toHaveLength(1);
+  expect(markers[0].frameIndex).toBe(0);
+  expect(markers[0].type).toBe("mission_assignment_committed");
+  expect(markers[0].time).toBe(2.5);
+});
+
+test("unloaded replay seeks show no neighboring frame", async ({ page }) => {
+  let releaseChunk;
+  const delayedChunk = new Promise((resolve) => { releaseChunk = resolve; });
+  await page.route("**/api/replay/list", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ files: ["identity.jsonl"] }) });
+  });
+  await page.route(/\/api\/replay\?/, async (route) => {
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") || 0);
+    if (offset === 120) await delayedChunk;
+    const frames = Array.from({ length: 120 }, (_, index) => ({
+      frame_id: offset + index + 1,
+      timestamp: `00:${String(Math.floor((offset + index) / 60)).padStart(2, "0")}:${String((offset + index) % 60).padStart(2, "0")}`,
+      sim_time_min: offset + index,
+      uavs: [],
+      contacts: [],
+      ships: [],
+      events: [],
+    }));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ total: 240, frames }),
+    });
+  });
+
+  await page.goto("/");
+  await page.locator(".mode-switch button").nth(1).click();
+  await page.locator(".file-select").selectOption("identity.jsonl");
+  await expect(page.locator(".playback-readout.time")).toContainText("00:00:00");
+
+  await page.locator(".timeline-control input").fill("150");
+  await expect(page.locator(".connection-state")).toContainText("载入目标帧");
+  await expect(page.locator(".playback-readout.time")).toContainText("--:--:--");
+
+  releaseChunk();
+  await expect(page.locator(".playback-readout.time")).toContainText("00:02:30");
+});
+
+test("switching replay files cancels stale frames and markers", async ({ page }) => {
+  let releaseNew;
+  const delayedNew = new Promise((resolve) => { releaseNew = resolve; });
+  await page.route("**/api/replay/list", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ files: ["old.jsonl", "new.jsonl"] }) });
+  });
+  await page.route(/\/api\/replay\?/, async (route) => {
+    const file = new URL(route.request().url()).searchParams.get("file");
+    if (file === "new.jsonl") await delayedNew;
+    const isOld = file === "old.jsonl";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        total: 1,
+        frames: [{
+          frame_id: isOld ? 1 : 2,
+          timestamp: isOld ? "00:00:01" : "00:09:09",
+          sim_time_min: isOld ? 1 : 9,
+          uavs: [],
+          contacts: [],
+          ships: [],
+          events: isOld ? [{ type: "target_found", time: 1, data: { contact_id: "OLD" } }] : [],
+          llm_cycle: isOld ? { response: "old" } : null,
+        }],
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await page.locator(".mode-switch button").nth(1).click();
+  await page.locator(".file-select").selectOption("old.jsonl");
+  await expect(page.locator(".playback-readout.time")).toContainText("00:00:01");
+  await expect(page.locator(".event-marks i")).toHaveCount(1);
+
+  await page.locator(".file-select").selectOption("new.jsonl");
+  await expect(page.locator(".connection-state")).toContainText("载入中");
+  await expect(page.locator(".playback-readout.time")).toContainText("--:--:--");
+  await expect(page.locator(".event-marks i")).toHaveCount(0);
+
+  releaseNew();
+  await expect(page.locator(".playback-readout.time")).toContainText("00:09:09");
+  await expect(page.locator(".event-marks i")).toHaveCount(0);
+});

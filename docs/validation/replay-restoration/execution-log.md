@@ -212,3 +212,28 @@ extension interface.
 - Gate checks:
   `npx playwright test tests/mixed-maritime.spec.js --grep 'vessel|AIS|replay renders intent|operator can draw|drag geometry'`
   -> `8 passed`; `npm run build` -> Vite build passed.
+
+## T09 Replay Events, Identity, and Historical Compatibility
+
+- Red evidence: replay markers used insertion-order-sensitive JSON
+  serialization, only covered three legacy event names, and unloaded seeks
+  displayed a nearest loaded frame. The replay adapter normalized vessel data
+  but left missing historical collections and route fields undefined.
+- Added `collectReplayMarkers`/`replayEventKey` with recursively sorted object
+  keys, numeric time normalization, old/new event aliases, first loaded frame
+  binding, and an empty-assignment guard. The drawer and timeline consume the
+  same canonical event objects.
+- Replay requests now reject stale generations after the response, coalesce
+  same-generation chunk requests, expose target-frame loading and loaded-frame
+  progress, clear markers on file changes, and return `null` until the target
+  frame is present. LLM details likewise use only the current loaded frame.
+- The replay adapter returns detached historical frames with explicit list
+  defaults and empty legacy routes; it does not write the source JSONL.
+- Red-to-green checks:
+  `python -m pytest tests/vis/test_replay_adapter.py -q` -> `3 passed`;
+  `npx playwright test tests/replay-restoration.spec.js --grep 'markers|unloaded|switching'`
+  -> `3 passed`.
+- Gate checks:
+  `python -m pytest tests/vis/test_replay_adapter.py tests/env/test_server_runtime.py -q`
+  -> `16 passed`; frontend replay/legacy/mixed gate -> `16 passed`; `npm run build`
+  -> Vite build passed.
