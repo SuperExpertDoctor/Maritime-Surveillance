@@ -13,7 +13,7 @@ def _contact(
     contact_id,
     *,
     state="pending",
-    identity="unknown",
+    vessel_class="unknown",
     first_seen=2.0,
     last_seen=8.0,
     assigned=None,
@@ -25,8 +25,8 @@ def _contact(
         contact_id,
         1,
         state,
-        identity,
-        "mmsi-" + contact_id if identity == "unknown" else None,
+        vessel_class,
+        "mmsi-" + contact_id if vessel_class == "unknown" else None,
         first_seen,
         last_seen,
         position,
@@ -91,8 +91,8 @@ def test_catalog_keeps_probe_track_and_search_candidates_with_stable_ids(state):
     catalog = TaskCatalog(candidate_extractor=source)
     contacts = (
         _contact("C0001"),
-        _contact("C0002", state="tracking", identity="target", first_seen=1.0),
-        _contact("C0003", state="cleared", identity="civilian"),
+        _contact("C0002", state="tracking", vessel_class="type_ii", first_seen=1.0),
+        _contact("C0003", state="cleared", vessel_class="type_i"),
     )
 
     first = catalog.build(state, contacts, (_intent(),), now_min=10.0)

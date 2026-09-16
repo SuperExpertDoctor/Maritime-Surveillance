@@ -19,9 +19,9 @@ from src.mission.llm_gateway import ModelResult  # noqa: E402
 
 SCENARIOS = (
     "mixed-ais",
-    "all-civilian",
-    "silent-target",
-    "disguised-target",
+    "all-type-i",
+    "silent-type-ii",
+    "disguised-type-ii",
     "island-confounder",
     "no-resources",
     "intent-overlap",
@@ -167,12 +167,17 @@ def _dry_run(args) -> dict:
 
 def _scenario_config(config, scenario: str):
     """Apply only deterministic, production-safe scenario changes."""
-    if scenario == "all-civilian":
-        return replace(config, ship=replace(config.ship, target_ship_count=0))
-    if scenario == "silent-target":
-        return replace(config, ship=replace(config.ship, target_ais_on_probability=0.0))
-    if scenario == "disguised-target":
-        return replace(config, ship=replace(config.ship, target_ais_on_probability=1.0))
+    if scenario == "all-type-i":
+        population = replace(
+            config.ship.population,
+            type_i_ratio=1.0,
+            type_ii_ratio=0.0,
+        )
+        return replace(config, ship=replace(config.ship, population=population))
+    if scenario == "silent-type-ii":
+        return replace(config, ship=replace(config.ship, type_ii_ais_on_probability=0.0))
+    if scenario == "disguised-type-ii":
+        return replace(config, ship=replace(config.ship, type_ii_ais_on_probability=1.0))
     if scenario == "island-confounder":
         return replace(
             config,
@@ -322,10 +327,10 @@ class _FixtureGateway:
                 "contact_id": features.get("contact_id"),
                 "probe_id": features.get("probe_id"),
                 "history_revision": features.get("history_revision"),
-                "identity": "unknown",
+                "vessel_class": "unknown",
                 "confidence": 0.5,
                 "evidence_sample_ids": sample_ids[:12],
-                "reasons": ["fixture keeps identity unknown"],
+                "reasons": ["fixture keeps vessel_class unknown"],
                 "alternative_explanations": ["fixture transport does not classify"],
             }
         elif role == "red_commander":
@@ -545,29 +550,29 @@ def _batch_report(args) -> dict:
     metrics = {}
     for name in metric_names:
         if name == "balanced_accuracy":
-            civilian_numerator = sum(
-                int(outcome.get("classification_confusion", {}).get("civilian", {}).get("civilian", 0))
+            type_i_numerator = sum(
+                int(outcome.get("classification_confusion", {}).get("type_i", {}).get("type_i", 0))
                 for outcome in outcome_values
             )
-            research_numerator = sum(
-                int(outcome.get("classification_confusion", {}).get("research", {}).get("research", 0))
+            type_ii_numerator = sum(
+                int(outcome.get("classification_confusion", {}).get("type_ii", {}).get("type_ii", 0))
                 for outcome in outcome_values
             )
-            civilian_denominator = sum(
-                int(outcome.get("metric_denominators", {}).get("civilian", 0))
+            type_i_denominator = sum(
+                int(outcome.get("metric_denominators", {}).get("type_i", 0))
                 for outcome in outcome_values
             )
-            research_denominator = sum(
-                int(outcome.get("metric_denominators", {}).get("research", 0))
+            type_ii_denominator = sum(
+                int(outcome.get("metric_denominators", {}).get("type_ii", 0))
                 for outcome in outcome_values
             )
             value = (
-                (civilian_numerator / civilian_denominator
-                 + research_numerator / research_denominator) / 2.0
-                if civilian_denominator and research_denominator else None
+                (type_i_numerator / type_i_denominator
+                 + type_ii_numerator / type_ii_denominator) / 2.0
+                if type_i_denominator and type_ii_denominator else None
             )
-            numerator = {"civilian": civilian_numerator, "research": research_numerator}
-            denominator = {"civilian": civilian_denominator, "research": research_denominator}
+            numerator = {"type_i": type_i_numerator, "type_ii": type_ii_numerator}
+            denominator = {"type_i": type_i_denominator, "type_ii": type_ii_denominator}
         else:
             if name == "discovery_tracking_rate":
                 numerator_key = "discovery_tracking_numerator"
@@ -680,10 +685,10 @@ def _live_run(args) -> dict:
         "scenario_config": {
             "population": {
                 "total_count": config.ship.population.total_count,
-                "civilian_ratio": config.ship.population.civilian_ratio,
-                "research_ratio": config.ship.population.research_ratio,
+                "type_i_ratio": config.ship.population.type_i_ratio,
+                "type_ii_ratio": config.ship.population.type_ii_ratio,
             },
-            "target_ais_on_probability": config.ship.target_ais_on_probability,
+            "type_ii_ais_on_probability": config.ship.type_ii_ais_on_probability,
             "island_count_min": config.environment.island_count_min,
             "island_count_max": config.environment.island_count_max,
             "uav_count": config.uav.count,
@@ -743,6 +748,10 @@ def main() -> None:
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--live", action="store_true")
+    parser.add_argument(
+        "--fixture", action="store_true",
+        help="run the deterministic fixture transport instead of a live model",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/evaluations/mixed-maritime"))
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--transport", choices=("fixture", "live"), default=None)
@@ -751,6 +760,14 @@ def main() -> None:
         parser.error("--steps must be positive")
     if args.repeat < 1:
         parser.error("--repeat must be positive")
+    if args.fixture and args.live:
+        parser.error("--fixture cannot be combined with --live")
+    if args.fixture:
+        if args.transport is not None and args.transport != "fixture":
+            parser.error("--fixture requires fixture transport")
+        args.transport = "fixture"
+        if args.output is None:
+            args.output = args.output_dir / "report.json"
     if args.transport is not None:
         if args.live:
             parser.error("--live is only supported by the legacy single-episode interface")

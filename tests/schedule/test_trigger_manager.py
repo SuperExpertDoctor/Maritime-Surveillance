@@ -98,3 +98,33 @@ def test_urgent_information_delta_triggers_one_versioned_heavy_plan(sm):
     assert first.trigger_type == "heavy"
     assert first.information_version == 7
     assert second.trigger_type == "none"
+
+
+@pytest.mark.parametrize("event_type", ["ais_transmission_changed", "surveillance_stage_changed"])
+def test_vessel_information_events_trigger_heavy_replanning(sm, event_type):
+    sm.cycle = 1
+    tm = TriggerManager(sm)
+    tm.notify_event(event_type, time=7.0, vessel_id="Ship-1")
+
+    assert tm.check(7.0).trigger_type == "heavy"
+
+
+def test_information_delta_deduplication_includes_version(sm):
+    sm.cycle = 1
+    tm = TriggerManager(sm)
+    for version in (7, 8):
+        tm.notify_information_delta(InfoFieldDelta(
+            previous_version=version - 1,
+            version=version,
+            changed_bbox=(2, 2, 5, 5),
+            max_abs_value_delta=0.05,
+            value_changed=True,
+            crossed_candidate_threshold=False,
+            urgent=False,
+            reason_codes=("time_decay",),
+            cause_evidence_ids=("EV-1",),
+        ), time=float(version))
+
+    events = tm.pending_events_for_test()
+    assert [event["information_version"] for event in events] == [7, 8]
+    assert tm.check(8.0).information_version == 8

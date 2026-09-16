@@ -16,8 +16,16 @@ from tests.mission.test_contact_store import ais, visual
 def engine(monkeypatch):
     monkeypatch.setenv("LONGCAT_API_KEY", "t06-offline-fixture")
     config = ConfigLoader.load()
-    config.ship = replace(config.ship, target_ship_count=config.ship.initial_ship_count,
-                          target_ais_on_probability=0)
+    population = replace(
+        config.ship.population,
+        type_i_ratio=1.0,
+        type_ii_ratio=0.0,
+    )
+    config.ship = replace(
+        config.ship,
+        population=population,
+        type_ii_ais_on_probability=0.0,
+    )
     engine = SimulationEngine(config, seed=41)
     engine.ships = []
     engine.obstacles = []
@@ -27,6 +35,36 @@ def engine(monkeypatch):
     # No model decisions are needed to exercise contact/control lifecycle.
     monkeypatch.setattr(engine.allocator, "step", lambda t: {"trigger_type": "none"})
     return engine
+
+
+@pytest.fixture
+def stage_engine(monkeypatch):
+    monkeypatch.setenv("LONGCAT_API_KEY", "t05-stage-fixture")
+    engine = SimulationEngine(ConfigLoader.load(), seed=43)
+    monkeypatch.setattr(engine, "_update_obstacles", lambda: None)
+    monkeypatch.setattr(engine.allocator, "step", lambda t: {"trigger_type": "none"})
+    return engine
+
+
+def test_sar_detection_and_contact_loss_publish_type_ii_stage_changes(stage_engine):
+    ship = next(item for item in stage_engine.ships if item.vessel_class == "type_ii")
+    uav = stage_engine.uavs[0]
+
+    contact_id = stage_engine._handle_detection(uav, ship, 1.0)
+    detected = stage_engine.surveillance_stages.snapshot(ship.id)
+    assert detected.stage == "detected"
+    assert detected.revision == 1
+    assert any(
+        event["type"] == "surveillance_stage_changed"
+        and event["data"]["vessel_id"] == ship.id
+        and event["data"]["stage"] == "detected"
+        for event in stage_engine.allocator.sm.get_recent_events(0)
+    )
+
+    stage_engine._release_target_group(contact_id, 2.0, "target_lost")
+    cleared = stage_engine.surveillance_stages.snapshot(ship.id)
+    assert cleared.stage == "undetected"
+    assert cleared.revision == 2
 
 
 def start_tracking(engine, uav, cid, *, execute=True, reserve=True, current_time=.1):
@@ -244,7 +282,7 @@ def test_merge_into_cleared_contact_releases_alias_tracking(engine):
     sm.contacts.reserve(aid, "UAV-2", "P-clear")
     c = sm.contacts.snapshot(aid)
     sm.contacts.apply_assessment(Assessment(
-        "A1", aid, "P-clear", c.revision, 1, "civilian", .9,
+        "A1", aid, "P-clear", c.revision, 1, "type_i", .9,
         ("clear-1", "clear-2"), ("validated",), (), "call1"))
     engine._publish_contact_events(1)
     vid = sm.contacts.ingest_visual(visual("new-visual", 2, (10, 10)))

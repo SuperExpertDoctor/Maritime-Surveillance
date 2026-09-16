@@ -145,3 +145,48 @@ def test_replayed_scan_refresh_does_not_increment_version():
     assert first is not None
     assert second is None
     assert policy.version == 1
+
+
+def test_decay_accumulates_until_material_delta_then_versions():
+    policy = InformationUpdatePolicy(ConfigLoader.load())
+    policy.apply_batch([ScanRefresh((1, 1, 2, 2), "search")], 0.0)
+    version = policy.version
+
+    assert policy.advance_time(0.1) is None
+    delta = policy.advance_time(10.0)
+
+    assert delta is not None
+    assert delta.version == version + 1
+    assert delta.max_abs_value_delta >= 0.05
+
+
+def test_expiry_emits_dirty_bbox_and_reason():
+    policy = InformationUpdatePolicy(ConfigLoader.load())
+    evidence = EvidenceRecord(
+        evidence_id="EXP-1",
+        kind="passive_position",
+        source_id="SRC-1",
+        contact_id=None,
+        observed_at_min=0.0,
+        expires_at_min=2.0,
+        strength=1.0,
+        spatial=PointKernel((5.0, 5.0), 1.0),
+    )
+    policy.apply_batch([evidence], 0.0)
+
+    delta = policy.advance_time(2.0)
+
+    assert delta is not None
+    assert "evidence_expired" in delta.reason_codes
+    assert delta.cause_evidence_ids == ("EXP-1",)
+    assert delta.changed_bbox is not None
+
+
+def test_public_matrices_and_last_scan_time_are_policy_owned():
+    policy = InformationUpdatePolicy(ConfigLoader.load())
+    policy.apply_batch([ScanRefresh((2, 3, 4, 5), "track")], 7.0)
+
+    assert policy.info_matrix(7.0).shape == (30, 30)
+    assert policy.value_matrix(7.0).shape == (30, 30)
+    assert policy.last_scan_time[2, 3] == 7.0
+    assert policy.last_scan_time[3, 4] == 7.0

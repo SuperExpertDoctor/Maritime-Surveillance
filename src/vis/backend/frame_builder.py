@@ -71,7 +71,7 @@ def _assessment_snapshot(assessment) -> dict | None:
         "probe_id": assessment.probe_id,
         "history_revision": assessment.history_revision,
         "assessed_at_min": assessment.assessed_at_min,
-        "identity": assessment.identity,
+        "vessel_class": assessment.vessel_class,
         "confidence": assessment.confidence,
         "evidence_sample_ids": list(assessment.evidence_sample_ids),
         "reasons": list(assessment.reasons),
@@ -136,13 +136,12 @@ def _contact_snapshot(contact, *, realtime: bool) -> dict:
         "contact_id": contact.contact_id,
         "revision": contact.revision,
         "state": contact.state,
-        "identity": contact.identity,
-        "vessel_class": getattr(contact, "vessel_class", "unknown"),
-        "class_confidence": getattr(contact, "class_confidence", 0.0),
-        "class_evidence_ids": list(getattr(contact, "class_evidence_ids", ())),
-        "activity": getattr(contact, "activity", "unknown"),
-        "activity_confidence": getattr(contact, "activity_confidence", 0.0),
-        "activity_evidence_ids": list(getattr(contact, "activity_evidence_ids", ())),
+        "vessel_class": contact.vessel_class,
+        "class_confidence": contact.class_confidence,
+        "class_evidence_ids": list(contact.class_evidence_ids),
+        "activity": contact.activity,
+        "activity_confidence": contact.activity_confidence,
+        "activity_evidence_ids": list(contact.activity_evidence_ids),
         "ais_mmsi": contact.ais_mmsi,
         "first_seen_min": contact.first_seen_min,
         "last_seen_min": contact.last_seen_min,
@@ -409,15 +408,10 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "busy": False, "refueling_uav_ids": [],
         }]
 
-    scenario_vessels = []
-    if getattr(state, "editing_allowed", False):
-        for ship in ships or []:
-            scenario_vessels.append({
-                "scenario_entity_id": ship.id,
-                "revision": int(getattr(ship, "revision", 1)),
-                "position": list(getattr(ship, "float_position", (ship.position.col, ship.position.row))),
-                "vessel_class": getattr(ship, "vessel_class", "unknown"),
-            })
+    scenario_vessels = list(
+        state.get_vessel_inventory()
+        if hasattr(state, "get_vessel_inventory") else ()
+    )
 
     frame = {
         "schema_version": "mission-frame/v2",
@@ -461,8 +455,15 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         if hasattr(state, "get_intent_events") else [],
         "runtime_status": getattr(state, "runtime_status", "running"),
         "blocked_role": getattr(state, "blocked_role", None),
-        "editing_allowed": bool(getattr(state, "editing_allowed", False)),
-        "configured_vessel_count": getattr(state, "configured_vessel_count", len(ship_list)),
+        "vessel_mutation_allowed": bool(
+            getattr(
+                state, "vessel_mutation_allowed",
+                getattr(state, "editing_allowed", False),
+            )
+        ),
+        "initial_vessel_count": getattr(
+            state, "initial_vessel_count", len(scenario_vessels),
+        ),
         "actual_vessel_count": getattr(state, "actual_vessel_count", len(ship_list)),
         "information_version": int(getattr(state, "information_version", 0)),
         "evidence": [

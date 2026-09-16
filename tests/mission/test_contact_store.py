@@ -47,7 +47,7 @@ def test_ais_mmsi_and_packet_are_idempotent(store):
     cid = store.ingest_ais(ais(speed=18), 0.0)
     first = store.snapshot(cid)
     assert cid == "C0001"
-    assert first.identity == "unknown" and first.state == "pending"
+    assert first.vessel_class == "unknown" and first.state == "pending"
     assert first.estimated_velocity_cells_min == pytest.approx((18 * 1.852 / 120, 0))
     assert store.ingest_ais(ais(speed=18), 1.0) == cid
     assert store.snapshot(cid) == first
@@ -304,25 +304,49 @@ def test_lost_event_preserves_reservation_owner_before_clearing(store):
     assert store.snapshot(cid).active_probe_id is None
 
 
-def test_assessment_reservation_and_civilian_ais_cooldown(store):
+def test_assessment_reservation_and_type_i_ais_cooldown(store):
     cid = store.ingest_visual(visual())
     store.reserve(cid, "UAV-1", "P0001")
     store.reserve(cid, "UAV-1", "P0001")
     with pytest.raises(ValueError):
         store.reserve(cid, "UAV-2", "P0002")
-    assessment = contracts.Assessment("A1", cid, "P0001", 1, 1, "civilian", .9,
+    assessment = contracts.Assessment("A1", cid, "P0001", 1, 1, "type_i", .9,
                                       ("EO-1",), ("validated evidence",), (), "call1")
     with pytest.raises(ValueError):
         store.apply_assessment(replace(assessment, history_revision=0))
     store.apply_assessment(assessment)
     cleared = store.snapshot(cid)
-    assert cleared.identity == "civilian" and cleared.state == "cleared"
+    assert cleared.vessel_class == "type_i" and cleared.state == "cleared"
     assert cleared.assigned_uav_id is None and cleared.active_probe_id is None
     assert cleared.next_probe_not_before_min == 61
-    store.release(cid, 2, "civilian")
+    store.release(cid, 2, "type_i_released")
     assert store.snapshot(cid).cleared_at_min == 1
     with pytest.raises(ValueError):
         store.reserve(cid, "UAV-1", "P0002")
+
+
+def test_assessment_emits_canonical_type_events(store):
+    type_i_id = store.ingest_visual(visual("TYPE-I"))
+    store.reserve(type_i_id, "UAV-1", "P-TYPE-I")
+    type_i = contracts.Assessment(
+        "A-TYPE-I", type_i_id, "P-TYPE-I", 1, 1, "type_i", .9,
+        ("TYPE-I",), ("validated",), (), "call-type-i",
+    )
+    store.apply_assessment(type_i)
+    assert [event["type"] for event in store.events if event["type"].startswith("type_")] == [
+        "type_i_assessed", "type_i_released",
+    ]
+
+    type_ii_id = store.ingest_visual(visual("TYPE-II", position=(20.0, 20.0)))
+    store.reserve(type_ii_id, "UAV-2", "P-TYPE-II")
+    type_ii = contracts.Assessment(
+        "A-TYPE-II", type_ii_id, "P-TYPE-II", 1, 2, "type_ii", .9,
+        ("TYPE-II",), ("validated",), (), "call-type-ii",
+    )
+    store.apply_assessment(type_ii)
+    assert [event["type"] for event in store.events if event["type"].startswith("type_")] == [
+        "type_i_assessed", "type_i_released", "type_ii_assessed", "type_ii_confirmed",
+    ]
 
 
 def test_ordinary_ais_preserves_cleared_identity_after_merge(store):
@@ -332,10 +356,10 @@ def test_ordinary_ais_preserves_cleared_identity_after_merge(store):
     store.reserve(aid, "UAV-1", "P1")
     c = store.snapshot(aid)
     store.apply_assessment(contracts.Assessment("A1", aid, "P1", c.revision, 1,
-        "civilian", .9, ("EO-1", "EO-2"), ("validated",), (), "call1"))
+        "type_i", .9, ("EO-1", "EO-2"), ("validated",), (), "call1"))
     store.ingest_ais(ais(2), 2)
     assert store.snapshot(aid).state == "cleared"
-    assert store.snapshot(aid).identity == "civilian"
+    assert store.snapshot(aid).vessel_class == "type_i"
 
 
 def test_invalid_numeric_observations_do_not_mutate_store(store):

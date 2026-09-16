@@ -1,4 +1,4 @@
-"""LLM-backed contact identity assessment over validated observations only."""
+"""LLM-backed vessel-class assessment over validated observations only."""
 from __future__ import annotations
 
 from dataclasses import fields
@@ -15,7 +15,7 @@ from src.mission.trajectory_features import build_features, select_keypoints
 
 
 _PAYLOAD_KEYS = frozenset({
-    "schema_version", "contact_id", "probe_id", "history_revision", "identity",
+    "schema_version", "contact_id", "probe_id", "history_revision", "vessel_class",
     "confidence", "evidence_sample_ids", "reasons", "alternative_explanations",
 })
 _FEATURE_KEYS = tuple(field.name for field in fields(TrajectoryFeatures))
@@ -71,14 +71,14 @@ def validate_assessment_payload(payload: dict, contact: ContactSnapshot,
     revision = payload.get("history_revision")
     if type(revision) is not int or revision != contact.revision:
         errors.append("assessment history_revision is not current")
-    identity = payload.get("identity")
-    if identity not in ("unknown", "target", "civilian") or not isinstance(identity, str):
-        errors.append("assessment identity is invalid")
+    vessel_class = payload.get("vessel_class")
+    if vessel_class not in ("unknown", "type_i", "type_ii") or not isinstance(vessel_class, str):
+        errors.append("assessment vessel_class is invalid")
     confidence = payload.get("confidence")
     if (type(confidence) not in (int, float) or not math.isfinite(confidence)
             or not 0. <= confidence <= 1.):
         errors.append("assessment confidence must be finite and in [0, 1]")
-    elif identity != "unknown" and confidence < .8:
+    elif vessel_class != "unknown" and confidence < .8:
         errors.append("terminal assessment confidence is below threshold")
 
     evidence = payload.get("evidence_sample_ids")
@@ -94,7 +94,7 @@ def validate_assessment_payload(payload: dict, contact: ContactSnapshot,
             errors.append("evidence_sample_ids must be unique")
         if not set(evidence) <= eligible_ids:
             errors.append("evidence must reference current eligible visual evidence")
-        if identity != "unknown" and (
+        if vessel_class != "unknown" and (
                 not set(evidence) & baseline_ids or not set(evidence) & near_ids):
             errors.append("terminal assessment must cite baseline and near evidence")
 
@@ -116,7 +116,7 @@ class ContactAssessor:
                features: TrajectoryFeatures | None = None,
                now_min: float | None = None) -> Assessment | ContactAssessment | None:
         # The legacy four-argument call is still the gateway-backed contact
-        # identity workflow. A single evidence batch uses the new dual-
+        # class workflow. A single evidence batch uses the new dual-
         # dimension, observation-only assessment contract.
         if probe is None and features is None and now_min is None:
             return self.assess_dimensions(contact)
@@ -152,7 +152,7 @@ class ContactAssessor:
             probe_id=probe.probe_id,
             history_revision=contact.revision,
             assessed_at_min=now_min,
-            identity=payload["identity"],
+            vessel_class=payload["vessel_class"],
             confidence=float(payload["confidence"]),
             evidence_sample_ids=tuple(payload["evidence_sample_ids"]),
             reasons=tuple(payload["reasons"]),
@@ -164,7 +164,7 @@ class ContactAssessor:
     def assess_dimensions(evidence) -> ContactAssessment:
         """Classify vessel class and activity from validated evidence families.
 
-        This deterministic adapter is intentionally conservative: a research
+        This deterministic adapter is intentionally conservative: a type_ii
         signal can establish the vessel class, but activity requires two
         independent quality-gated families and at least one observed-motion
         family. AIS silence alone contributes to neither dimension.
@@ -192,7 +192,7 @@ class ContactAssessor:
             evidence_id = value(item, "evidence_id", "id", default="")
             family = str(value(item, "family", "kind", default=""))
             family = {
-                "research_assessment": "radiation_activity",
+                "type_ii_assessment": "radiation_activity",
                 "violation_assessment": "violation_activity",
                 "eo_class": "class",
                 "sar_class": "class",
@@ -205,7 +205,7 @@ class ContactAssessor:
                 confidence = max(0.0, min(1.0, float(confidence)))
             except (TypeError, ValueError):
                 confidence = 0.0
-            if explicit_class in ("civilian", "research"):
+            if explicit_class in ("type_i", "type_ii"):
                 class_candidates.append((explicit_class, confidence, evidence_id))
             if family in {"eo_class", "class"}:
                 class_ids.append(evidence_id)

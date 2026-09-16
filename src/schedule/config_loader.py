@@ -28,9 +28,9 @@ def allocate_population(total: int, ratios: dict[str, float]) -> dict[str, int]:
     """Allocate a population with largest-remainder rounding and stable ties."""
     if isinstance(total, bool) or not isinstance(total, int) or total < 0:
         raise ValueError("population total must be a non-negative integer")
-    order = ("civilian", "research")
+    order = ("type_i", "type_ii")
     if set(ratios) != set(order):
-        raise ValueError("population ratios must contain civilian and research")
+        raise ValueError("population ratios must contain type_i and type_ii")
     values = tuple(ratios[key] for key in order)
     if any(isinstance(value, bool) or not isinstance(value, (int, float))
            or not math.isfinite(value) or value < 0.0 for value in values):
@@ -133,9 +133,8 @@ class UAVConfig:
 
 @dataclass(frozen=True)
 class ShipConfig:
-    initial_ship_count: int
-    target_ship_count: int
-    target_ais_on_probability: float
+    population: PopulationConfig
+    type_ii_ais_on_probability: float
     speed_kn: float
     ais_update_interval_min: float
     ais_position_noise_cells: float
@@ -160,36 +159,6 @@ class ShipConfig:
     navigation_horizon_min: float
     integration_dt_min: float
     navigation_clearance_cells: float
-
-    def __post_init__(self) -> None:
-        population = None
-        if (
-            isinstance(self.initial_ship_count, int)
-            and not isinstance(self.initial_ship_count, bool)
-            and self.initial_ship_count >= 0
-            and isinstance(self.target_ship_count, int)
-            and not isinstance(self.target_ship_count, bool)
-            and 0 <= self.target_ship_count <= self.initial_ship_count
-        ):
-            research_ratio = (
-                self.target_ship_count / self.initial_ship_count
-                if self.initial_ship_count else 0.0
-            )
-            population = PopulationConfig(
-                total_count=self.initial_ship_count,
-                civilian_ratio=1.0 - research_ratio,
-                research_ratio=research_ratio,
-            )
-        object.__setattr__(self, "_population", population)
-
-    @property
-    def population(self) -> PopulationConfig:
-        if self._population is None:
-            # Keep validation errors anchored to the legacy fields for callers
-            # that construct an intentionally invalid compatibility config.
-            raise ValueError("ship population is invalid")
-        return self._population
-
 
 @dataclass
 class LLMConfig:
@@ -255,7 +224,11 @@ class ConfigLoader:
         return strict_dataclass(d, cls, cls.__name__)
 
     @staticmethod
-    def load(base_path: str = "configs") -> "AppConfig":
+    def load(
+        base_path: str = "configs",
+        *,
+        ship_path: str | os.PathLike[str] | None = None,
+    ) -> "AppConfig":
         def _read(name):
             return load_strict_yaml(os.path.join(base_path, name))
 
@@ -356,32 +329,23 @@ class ConfigLoader:
             ),
         )
 
-        ship_data = _read("ship.yaml")
+        ship_data = load_strict_yaml(ship_path) if ship_path is not None else _read("ship.yaml")
         population_data = ship_data.pop("population", None)
-        legacy_population_fields = {
-            "initial_ship_count", "target_ship_count",
-        } & set(ship_data)
-        if legacy_population_fields:
+        if population_data is None:
             raise ValueError(
-                "legacy ship population configuration requires migration: "
-                f"{sorted(legacy_population_fields)}; use population.total_count "
-                "and population ratios"
+                "ship.population is required; use total_count, type_i_ratio, "
+                "and type_ii_ratio"
             )
-        if population_data is not None:
-            population = ConfigLoader._alignment_dataclass(
-                population_data, PopulationConfig, "ship.population",
+        missing_population_fields = {
+            "type_i_ratio", "type_ii_ratio",
+        } - set(population_data)
+        if missing_population_fields:
+            raise ValueError(
+                "ship.population requires type_i_ratio and type_ii_ratio"
             )
-            allocation = allocate_population(
-                population.total_count,
-                {
-                    "civilian": population.civilian_ratio,
-                    "research": population.research_ratio,
-                },
-            )
-            ship_data.setdefault("initial_ship_count", population.total_count)
-            ship_data.setdefault("target_ship_count", allocation["research"])
-        else:
-            population = None
+        population = ConfigLoader._alignment_dataclass(
+            population_data, PopulationConfig, "ship.population",
+        )
         legacy_ship_fields = {
             "count_min",
             "max_groups",
@@ -401,8 +365,8 @@ class ConfigLoader:
         if legacy_ship_fields:
             raise ValueError(
                 "legacy ship configuration fields require migration: "
-                f"{sorted(legacy_ship_fields)}; use initial_ship_count and "
-                "target_ship_count"
+                f"{sorted(legacy_ship_fields)}; use population and "
+                "type_i/type_ii configuration"
             )
 
         uav_data = _read("uav.yaml")
@@ -417,17 +381,35 @@ class ConfigLoader:
             environment=ConfigLoader._dict_to_dataclass(env_data, EnvironmentConfig),
             grid=ConfigLoader._dict_to_dataclass(grid_data, GridConfig),
             uav=ConfigLoader._dict_to_dataclass(uav_data, UAVConfig),
-            ship=strict_dataclass(ship_data, ShipConfig, "ship"),
+            ship=strict_dataclass(
+                {"population": population, **ship_data}, ShipConfig, "ship"
+            ),
             llm=ConfigLoader._dict_to_dataclass(llm_params_data["cycles"], LLMConfig),
             sensor=ConfigLoader._load_sensor_config(base_path),
             common=ConfigLoader._dict_to_dataclass(_read("common.yaml") or {}, CommonConfig),
             control=control,
             mission=mission,
         )
-        if population is not None:
-            object.__setattr__(config.ship, "_population", population)
         validate_mission_config(config)
         return config
+
+    @staticmethod
+    def load_legacy_ship_config(
+        path: str | os.PathLike[str], base_path: str = "configs"
+    ) -> "AppConfig":
+        """Load an explicitly legacy ship file through the canonical loader."""
+        from src.mission.vessel_compat import normalize_legacy_ship_config
+
+        legacy = load_strict_yaml(path)
+        normalized = normalize_legacy_ship_config(legacy)
+        import tempfile
+        from pathlib import Path
+        import yaml
+
+        with tempfile.TemporaryDirectory() as directory:
+            normalized_path = Path(directory) / "ship.yaml"
+            normalized_path.write_text(yaml.safe_dump(normalized), encoding="utf-8")
+            return ConfigLoader.load(base_path, ship_path=normalized_path)
 
     @staticmethod
     def _alignment_dataclass(data: object, cls, name: str):

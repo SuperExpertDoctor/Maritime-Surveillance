@@ -70,9 +70,8 @@ def _heuristic_flow(factory, coverage_task, *, atomic=None):
 
 def test_event_transitions_are_exact_and_exclude_work_range_exhausted():
     assert EVENT_TRANSITIONS == {
-            "contact_assessed": OperationMode.TRACK,
-            "mission_task_released": OperationMode.HOLDING,
-            "civilian_released": OperationMode.HOLDING,
+            "type_ii_confirmed": OperationMode.TRACK,
+            "type_i_released": OperationMode.HOLDING,
             "target_lost": OperationMode.HOLDING,
         "duplicate_task_cancelled": OperationMode.HOLDING,
         "target_departed": OperationMode.HOLDING,
@@ -95,7 +94,7 @@ def test_target_found_does_not_take_over_an_existing_coverage_task(factory, cove
     assert pending_tasks["UAV-1"] is coverage_task
 
 
-def test_target_assessment_replaces_an_active_probe_with_tracking(factory, coverage_task):
+def test_type_ii_confirmation_replaces_an_active_probe_with_tracking(factory, coverage_task):
     flow, _, lease, controllers, pending_tasks, controller = _heuristic_flow(
         factory, coverage_task
     )
@@ -105,7 +104,7 @@ def test_target_assessment_replaces_an_active_probe_with_tracking(factory, cover
 
     transition = flow.handle(
         _event(
-            "contact_assessed", contact_id="C1", identity="target", probe_id="P1"
+            "type_ii_confirmed", contact_id="C1", vessel_class="type_ii", probe_id="P1"
         ),
         lease,
     )
@@ -119,7 +118,7 @@ def test_target_assessment_replaces_an_active_probe_with_tracking(factory, cover
     assert controller is not transition.controller
 
 
-def test_stale_target_assessment_cannot_replace_the_active_probe(
+def test_stale_type_ii_confirmation_cannot_replace_the_active_probe(
     factory, coverage_task
 ):
     flow, ownership, lease, controllers, pending_tasks, controller = _heuristic_flow(
@@ -132,7 +131,7 @@ def test_stale_target_assessment_cannot_replace_the_active_probe(
 
     transition = flow.handle(
         _event(
-            "contact_assessed", contact_id="C1", identity="target", probe_id="P1"
+            "type_ii_confirmed", contact_id="C1", vessel_class="type_ii", probe_id="P1"
         ),
         lease,
     )
@@ -183,6 +182,29 @@ def test_tracking_exit_without_saved_coverage_requests_assignment_and_holds(fact
     assert transition.current_lease.owner is ControlOwner.SYSTEM
     assert isinstance(transition.controller, SystemHoldingController)
     assert transition.request_assignment
+
+
+def test_type_i_release_replaces_active_tracking_with_holding(factory):
+    ownership = ControlOwnership(["UAV-1"])
+    lease = ownership.acquire(
+        "UAV-1", ControlOwner.HEURISTIC, "track:C1", 0.0
+    )
+    task = ControlTask("track:C1", OperationMode.TRACK, target_contact_id="C1")
+    controller = factory.create_heuristic("UAV-1", task)
+    controllers = {"UAV-1": controller}
+    pending_tasks = {"UAV-1": task}
+    flow = HeuristicTaskFlow(ownership, factory, controllers, pending_tasks)
+
+    transition = flow.handle(
+        _event("type_i_released", contact_id="C1", vessel_class="type_i"),
+        lease,
+    )
+
+    assert transition.consumed
+    assert transition.current_lease.owner is ControlOwner.SYSTEM
+    assert transition.request_assignment
+    assert transition.task is not None
+    assert transition.task.task_type is OperationMode.HOLDING
 
 
 @pytest.mark.parametrize("event_type", [*EVENT_TRANSITIONS, "route_blocked"])
@@ -236,7 +258,7 @@ def test_invalid_assessment_does_not_take_over_before_any_state_mutation(
     stop_calls = []
     controller.stop_task = stop_calls.append
 
-    transition = flow.handle(_event("contact_assessed", identity="target"), lease)
+    transition = flow.handle(_event("type_ii_confirmed", vessel_class="type_ii"), lease)
 
     assert ownership.current("UAV-1") is lease
     assert controllers["UAV-1"] is controller

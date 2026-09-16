@@ -260,9 +260,9 @@ def test_stale_or_unvalidated_route_cannot_move_ship_through_land():
     assert ship.pose != forged.poses[-1]
 
 
-@pytest.mark.parametrize("identity", ["civilian", "target"])
+@pytest.mark.parametrize("vessel_class", ["type_i", "type_ii"])
 @pytest.mark.parametrize("edge", ["left", "right", "top", "bottom"])
-def test_normal_departure_requires_crossing_own_exit_and_ignores_tracking(identity, edge):
+def test_normal_departure_requires_crossing_own_exit_and_ignores_tracking(vessel_class, edge):
     navigation()
     mask = np.zeros((12, 12), bool)
     endpoints = {"left": ((1., 6.), (0., 6.), math.pi),
@@ -272,7 +272,7 @@ def test_normal_departure_requires_crossing_own_exit_and_ignores_tracking(identi
     start, end, heading = endpoints[edge]
     route = ((*start, heading), (*end, heading))
     ships = [Ship(f"V{i}", GridCoord(1, 1), 18, cell_size_km=1,
-                  normal_route=route, truth_identity=identity) for i in range(2)]
+                  normal_route=route, vessel_class=vessel_class) for i in range(2)]
     assert hasattr(ships[0], "land_mask"), "ship must retain its real navigation chart"
     for ship in ships:
         ship.land_mask = mask
@@ -324,8 +324,17 @@ def test_population_binds_actual_map_navigator_and_dynamics_config():
     from src.control.heuristic.navigation import AStarNavigator
     from src.schedule.config_loader import ConfigLoader
     config = ConfigLoader.load()
-    config = replace(config, ship=replace(config.ship, initial_ship_count=1,
-                     target_ship_count=0, max_acceleration_kn_per_min=.75))
+    population = replace(
+        config.ship.population,
+        total_count=1,
+        type_i_ratio=1.0,
+        type_ii_ratio=0.0,
+    )
+    config = replace(config, ship=replace(
+        config.ship,
+        population=population,
+        max_acceleration_kn_per_min=.75,
+    ))
     mask = np.zeros((30, 30), bool)
     mask[:5, :] = True
     astar = AStarNavigator()

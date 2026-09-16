@@ -5,8 +5,14 @@ from dataclasses import asdict, dataclass, fields
 import math
 from pathlib import Path
 
-from src.mission.contracts import RedMotionParameters, RedPlan, Vec2
+from src.mission.contracts import (
+    RedMotionParameters,
+    RedPlan,
+    Vec2,
+    VesselClass,
+)
 from src.mission.llm_gateway import LLMGateway
+from src.mission.surveillance_stage import SurveillanceStage
 from src.schedule.config_loader import ShipConfig
 
 
@@ -51,11 +57,12 @@ class ThreatGate:
         return self._episode_revision
 
     def update(
-        self, ship_id: str, identity: str, min_distance_cells: float, now_min: float,
+        self, ship_id: str, vessel_class: VesselClass,
+        min_distance_cells: float, now_min: float,
     ) -> str:
         gate = self._ships.setdefault(ship_id, _GateState())
         previous_state = gate.state
-        if identity != "target":
+        if vessel_class != "type_ii":
             gate.state, gate.clear_since_min = "normal", None
         elif gate.state == "normal":
             if min_distance_cells < self.config.detect_uav_radius_cells:
@@ -76,21 +83,26 @@ class ThreatGate:
         return gate.state
 
     def observe_swept_distance(
-        self, ship_id: str, identity: str, min_distance_cells: float, now_min: float,
+        self, ship_id: str, vessel_class: VesselClass,
+        min_distance_cells: float, now_min: float,
     ) -> None:
-        self.update(ship_id, identity, min_distance_cells, now_min)
+        self.update(ship_id, vessel_class, min_distance_cells, now_min)
+
+    def remove_ship(self, ship_id: str) -> None:
+        """Forget runtime gate state for a vessel removed from the episode."""
+        self._ships.pop(ship_id, None)
 
 
 @dataclass(frozen=True)
 class RedShipSnapshot:
     ship_id: str
-    identity: str
+    vessel_class: VesselClass
+    surveillance_stage: SurveillanceStage
     position_cells: Vec2
     heading_deg: float
     speed_kn: float
     normal_tangent_deg: float
-    gate_state: str
-    ais_on: bool
+    ais_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -99,7 +111,7 @@ class RedSnapshot:
     sim_time_min: float
     ships: tuple[RedShipSnapshot, ...]
     uavs: tuple[tuple[str, Vec2, Vec2], ...]
-    active_ship_ids: tuple[str, ...]
+    active_signature: tuple[tuple[str, SurveillanceStage], ...]
     land_mask_version: int
 
 
@@ -109,6 +121,7 @@ class RedPlanInstallation:
 
     plan: RedPlan
     installed_at_min: float
+    active_signature: tuple[tuple[str, SurveillanceStage], ...]
 
     @property
     def expires_at_min(self) -> float:
@@ -143,33 +156,53 @@ def _validate_snapshot(snapshot: RedSnapshot) -> None:
         or not _finite_number(snapshot.sim_time_min) or snapshot.sim_time_min < 0
         or type(snapshot.land_mask_version) is not int or snapshot.land_mask_version < 0
         or not isinstance(snapshot.ships, tuple) or not isinstance(snapshot.uavs, tuple)
-        or not isinstance(snapshot.active_ship_ids, tuple)
-        or not all(_identifier(ship_id) for ship_id in snapshot.active_ship_ids)
+        or not isinstance(snapshot.active_signature, tuple)
     ):
         raise RedDecisionBlocked("invalid red snapshot metadata")
     ship_ids = []
-    eligible = set()
+    eligible = []
     for ship in snapshot.ships:
         if (
             not isinstance(ship, RedShipSnapshot) or not _identifier(ship.ship_id)
-            or ship.identity not in ("target", "civilian")
-            or ship.gate_state not in ("normal", "evasive", "recovering", "departed")
+            or ship.vessel_class not in ("type_i", "type_ii")
+            or ship.surveillance_stage not in (
+                "undetected", "detected", "probing", "tracking",
+            )
             or not _vec2(ship.position_cells) or not _finite_number(ship.heading_deg)
             or not _finite_number(ship.normal_tangent_deg)
             or not _finite_number(ship.speed_kn) or ship.speed_kn < 0
-            or type(ship.ais_on) is not bool
-            or (ship.identity == "civilian" and ship.gate_state in ("evasive", "recovering"))
+            or type(ship.ais_enabled) is not bool
+            or (
+                ship.vessel_class == "type_i"
+                and ship.surveillance_stage != "undetected"
+            )
         ):
             raise RedDecisionBlocked("invalid red snapshot ship")
         ship_ids.append(ship.ship_id)
-        if ship.identity == "target" and ship.gate_state in ("evasive", "recovering"):
-            eligible.add(ship.ship_id)
+        if (
+            ship.vessel_class == "type_ii"
+            and ship.surveillance_stage in ("detected", "probing", "tracking")
+        ):
+            eligible.append((ship.ship_id, ship.surveillance_stage))
+    signature = []
+    for item in snapshot.active_signature:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not _identifier(item[0])
+            or item[1] not in ("detected", "probing", "tracking")
+        ):
+            raise RedDecisionBlocked("invalid red active_signature")
+        signature.append(item)
+    expected_signature = tuple(sorted(eligible))
     if (
         len(ship_ids) != len(set(ship_ids))
-        or len(snapshot.active_ship_ids) != len(set(snapshot.active_ship_ids))
-        or set(snapshot.active_ship_ids) != eligible
+        or len(signature) != len(set(signature))
+        or tuple(signature) != expected_signature
     ):
-        raise RedDecisionBlocked("red snapshot active_ship_ids must exactly cover eligible targets")
+        raise RedDecisionBlocked(
+            "red snapshot active_signature must exactly cover active type_ii stages"
+        )
     uav_ids = []
     for uav in snapshot.uavs:
         if (
@@ -271,12 +304,13 @@ class RedCommander:
                 or abs(command["speed_kn"] - self.config.speed_kn) >= self.config.min_evasion_speed_delta_kn
             ):
                 errors.append(f"{prefix} must meet at least one minimum maneuver constraint")
+        active_ids = {ship_id for ship_id, _stage in snapshot.active_signature}
         if (
             len(command_ids) != len(commands)
             or len(command_ids) != len(set(command_ids))
-            or set(command_ids) != set(snapshot.active_ship_ids)
+            or set(command_ids) != active_ids
         ):
-            errors.append("commands must exactly cover active_ship_ids without duplicates")
+            errors.append("commands must exactly cover active_signature without duplicates")
         return tuple(errors)
 
     @property
@@ -287,6 +321,15 @@ class RedCommander:
     def _retire_installation(self) -> None:
         self._installation = None
         self._installation_episode_revision = None
+
+    def remove_ship(self, ship_id: str) -> None:
+        """Invalidate red state immediately when a vessel leaves the fleet."""
+        self.threat_gate.remove_ship(ship_id)
+        if (
+            self._installation is not None
+            and any(command.ship_id == ship_id for command in self._installation.plan.commands)
+        ):
+            self._retire_installation()
 
     def _sync_gate_revision(self) -> int:
         episode_revision = self.threat_gate.episode_revision
@@ -324,17 +367,19 @@ class RedCommander:
         self._last_snapshot = snapshot
         self._last_snapshot_episode_revision = episode_revision
         self._seen_snapshot_ids.add(snapshot.snapshot_id)
-        active = set(snapshot.active_ship_ids)
-        if not active:
+        active_signature = snapshot.active_signature
+        if not active_signature:
             self._retire_installation()
             self._mark_delivered(snapshot.snapshot_id, episode_revision)
             return None
         installed = self._installation
+        can_reuse = (
+            installed is not None
+            and installed.active_signature == active_signature
+            and snapshot.sim_time_min < installed.expires_at_min
+        )
         if installed is not None:
-            if (
-                {command.ship_id for command in installed.plan.commands} != active
-                or snapshot.sim_time_min >= installed.expires_at_min
-            ):
+            if not can_reuse:
                 self._retire_installation()
             elif (
                 self._last_request_at_min is not None
@@ -350,7 +395,7 @@ class RedCommander:
             validate=lambda payload: self._validate_plan(payload, snapshot),
         )
         if not result.success:
-            if self._installation is not None:
+            if can_reuse:
                 self._mark_delivered(snapshot.snapshot_id, episode_revision)
                 return self._installation.plan
             raise RedDecisionBlocked("; ".join(result.errors))
@@ -361,7 +406,9 @@ class RedCommander:
             commands=tuple(RedMotionParameters(**command) for command in payload["commands"]),
             notes=payload["notes"],
         )
-        self._installation = RedPlanInstallation(plan, snapshot.sim_time_min)
+        self._installation = RedPlanInstallation(
+            plan, snapshot.sim_time_min, active_signature,
+        )
         self._installation_episode_revision = episode_revision
         self._mark_delivered(snapshot.snapshot_id, episode_revision)
         return plan

@@ -1,5 +1,7 @@
 # LLM 动态任务重分配系统 — 设计文档
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 > 日期: 2026-07-30 | 状态: Draft
 
 ---
@@ -31,7 +33,7 @@ v3/
 │   ├── environment.yaml    # 海域尺寸、基地位置
 │   ├── grid.yaml           # 网格分辨率、衰减参数、态势阈值
 │   ├── uav.yaml            # UAV 机动属性（参考彩虹固定翼）
-│   ├── ship.yaml           # 舰船机动属性（参考宙斯盾驱逐舰）+ zigzag 参数
+│   ├── ship.yaml           # 船舶机动属性（参考宙斯盾驱逐舰）+ zigzag 参数
 │   ├── sensor.yaml         # 传感器参数（SAR、EO/IR、Radar/ESM）
 │   └── llm.yaml            # LLM 周期、模型、重试次数
 │
@@ -62,7 +64,7 @@ v3/
 │   │   └── state_manager.py    # 全局状态管理（UAV 状态机、区域状态、标记点）
 │   │
 │   ├── env/                  # 仿真环境
-│   │   ├── ship.py          # 舰船实体（zigzag 规避）
+│   │   ├── ship.py          # 船舶实体（zigzag 规避）
 │   │   ├── uav_entity.py    # UAV 实体（位置/油量/航路点）
 │   │   ├── base_station.py  # 基地（加油管理）
 │   │   └── sim_clock.py     # 仿真时钟
@@ -359,7 +361,7 @@ UAV 油尽:
 
 - 每个目标群一个跟踪区
 - 跟踪 UAV 数 = 跟踪区数
-- 目标群内多艘舰船共享一个跟踪区
+- 目标群内多艘船舶共享一个跟踪区
 
 ---
 

@@ -11,15 +11,21 @@ from src.mission.contracts import ship_rng_manifest
 from src.schedule.config_loader import ConfigLoader
 
 
-def _config(initial_count: int, target_count: int, ais_probability: float = 0.5):
+def _config(initial_count: int, type_ii_count: int, ais_probability: float = 0.5):
     config = ConfigLoader.load()
     return replace(
         config,
         ship=replace(
             config.ship,
-            initial_ship_count=initial_count,
-            target_ship_count=target_count,
-            target_ais_on_probability=ais_probability,
+            population=replace(
+                config.ship.population,
+                total_count=initial_count,
+                type_i_ratio=(initial_count - type_ii_count) / initial_count
+                if initial_count else 1.0,
+                type_ii_ratio=type_ii_count / initial_count
+                if initial_count else 0.0,
+            ),
+            type_ii_ais_on_probability=ais_probability,
         ),
     )
 
@@ -40,8 +46,8 @@ def _snapshot(ships):
     return [
         (
             ship.id,
-            ship.truth_identity,
-            ship.ais_mode,
+            ship.vessel_class,
+            ship.ais_enabled,
             ship.pose,
             ship.speed_kn,
             ship.ship_type,
@@ -52,22 +58,22 @@ def _snapshot(ships):
 
 
 @pytest.mark.parametrize(
-    ("initial_count", "target_count"),
+    ("initial_count", "type_ii_count"),
     ((0, 0), (1, 0), (1, 1), (8, 0), (8, 8), (8, 3)),
 )
-def test_population_has_exact_configured_identity_counts(initial_count, target_count):
+def test_population_has_exact_configured_class_counts(initial_count, type_ii_count):
     ships = _create_ship_population(
-        _config(initial_count, target_count),
+        _config(initial_count, type_ii_count),
         seed=713,
         land_mask=_water_mask(),
         navigator=AStarNavigator(),
     )
 
     assert len(ships) == initial_count
-    assert sum(ship.truth_identity == "target" for ship in ships) == target_count
-    assert sum(ship.truth_identity == "civilian" for ship in ships) == initial_count - target_count
+    assert sum(ship.vessel_class == "type_ii" for ship in ships) == type_ii_count
+    assert sum(ship.vessel_class == "type_i" for ship in ships) == initial_count - type_ii_count
     assert [ship.id for ship in ships] == [f"Ship-{index}" for index in range(1, initial_count + 1)]
-    assert all("target" not in ship.id.lower() and "civil" not in ship.id.lower() for ship in ships)
+    assert all("ship" in ship.id.lower() for ship in ships)
 
 
 def test_population_is_reproducible_and_each_ship_has_a_legal_independent_route():
@@ -119,15 +125,15 @@ def test_mainland_population_starts_with_clearance_and_stopping_room(clearance):
         assert ship._motion_time_min == pytest.approx(.3)
 
 
-def test_hidden_identity_randomness_does_not_change_normal_vessel_state():
-    civilian = _create_ship_population(_config(8, 0), 417, _water_mask(), AStarNavigator())
-    targets = _create_ship_population(_config(8, 8), 417, _water_mask(), AStarNavigator())
+def test_class_randomness_does_not_change_normal_vessel_state():
+    type_i_ships = _create_ship_population(_config(8, 0), 417, _water_mask(), AStarNavigator())
+    type_ii_ships = _create_ship_population(_config(8, 8), 417, _water_mask(), AStarNavigator())
 
-    assert [ship.id for ship in civilian] == [ship.id for ship in targets]
-    assert [ship.pose for ship in civilian] == [ship.pose for ship in targets]
-    assert [ship.normal_route for ship in civilian] == [ship.normal_route for ship in targets]
-    assert [ship.speed_kn for ship in civilian] == [ship.speed_kn for ship in targets]
-    assert [ship.ship_type for ship in civilian] == [ship.ship_type for ship in targets]
+    assert [ship.id for ship in type_i_ships] == [ship.id for ship in type_ii_ships]
+    assert [ship.pose for ship in type_i_ships] == [ship.pose for ship in type_ii_ships]
+    assert [ship.normal_route for ship in type_i_ships] == [ship.normal_route for ship in type_ii_ships]
+    assert [ship.speed_kn for ship in type_i_ships] == [ship.speed_kn for ship in type_ii_ships]
+    assert [ship.ship_type for ship in type_i_ships] == [ship.ship_type for ship in type_ii_ships]
 
 
 def test_population_raises_explicit_error_when_vessels_cannot_be_placed():
@@ -150,21 +156,21 @@ def test_legacy_group_id_is_only_a_read_only_contact_view():
         ship.group_id = "formation"
 
 
-def test_recorded_rng_manifest_replays_identity_and_target_ais_selection():
+def test_recorded_rng_manifest_replays_class_and_ais_selection():
     config = _config(8, 3)
     seed = 417
     manifest = ship_rng_manifest(seed)
     slots = list(range(8))
-    random.Random(manifest["ship_identity"]).shuffle(slots)
-    targets = set(slots[:3])
-    ais_rng = random.Random(manifest["ship_ais_mode"])
+    random.Random(manifest["ship_class"]).shuffle(slots)
+    type_ii_slots = set(slots[:3])
+    ais_rng = random.Random(manifest["ship_ais_enabled"])
     expected = [
-        ("target", "civilian" if ais_rng.random() < 0.5 else "silent")
-        if index in targets else ("civilian", "civilian")
+        ("type_ii", ais_rng.random() < 0.5)
+        if index in type_ii_slots else ("type_i", True)
         for index in range(8)
     ]
     ships = _create_ship_population(config, seed, _water_mask(), AStarNavigator())
-    assert [(ship.truth_identity, ship.ais_mode) for ship in ships] == expected
+    assert [(ship.vessel_class, ship.ais_enabled) for ship in ships] == expected
 
 
 def test_engine_uses_actual_land_and_islands_for_population(monkeypatch):

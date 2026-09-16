@@ -23,9 +23,8 @@ from src.schedule.state_manager import StateManager
 
 
 EVENT_TRANSITIONS = {
-    "contact_assessed": OperationMode.TRACK,
-    "mission_task_released": OperationMode.HOLDING,
-    "civilian_released": OperationMode.HOLDING,
+    "type_ii_confirmed": OperationMode.TRACK,
+    "type_i_released": OperationMode.HOLDING,
     "target_lost": OperationMode.HOLDING,
     "duplicate_task_cancelled": OperationMode.HOLDING,
     "target_departed": OperationMode.HOLDING,
@@ -102,22 +101,34 @@ class HeuristicTaskFlow:
             or event.event_type not in EVENT_TRANSITIONS
         ):
             return TaskTransition.unchanged(lease, controller, current_task)
-        if event.event_type == "contact_assessed" and (
+        if event.event_type == "type_ii_confirmed" and (
             current_task is None
             or current_task.task_type is not OperationMode.PROBE
-            or event.payload.get("identity") != "target"
-            or event.payload.get("contact_id") != current_task.target_contact_id
+            or event.payload.get("vessel_class") != "type_ii"
+            or not self._same_contact(
+                event.payload.get("contact_id"), current_task.target_contact_id
+            )
             or event.payload.get("probe_id") != current_task.probe_id
         ):
             return TaskTransition.unchanged(lease, controller, current_task)
-        if event.event_type == "mission_task_released" and (
-            current_task is None
-            or current_task.task_type is not OperationMode.PROBE
-            or event.payload.get("identity") != "civilian"
-            or event.payload.get("contact_id") != current_task.target_contact_id
-            or event.payload.get("probe_id") != current_task.probe_id
-        ):
-            return TaskTransition.unchanged(lease, controller, current_task)
+        if event.event_type == "type_i_released":
+            contact_matches = current_task is not None and self._same_contact(
+                event.payload.get("contact_id"), current_task.target_contact_id
+            )
+            probe_release = (
+                current_task is not None
+                and current_task.task_type is OperationMode.PROBE
+                and event.payload.get("vessel_class") == "type_i"
+                and event.payload.get("probe_id") == current_task.probe_id
+            )
+            tracking_release = (
+                current_task is not None
+                and current_task.task_type is OperationMode.TRACK
+                and event.payload.get("vessel_class") == "type_i"
+                and event.payload.get("probe_id") in (None, "")
+            )
+            if not contact_matches or not (probe_release or tracking_release):
+                return TaskTransition.unchanged(lease, controller, current_task)
 
         replacement_task, request_assignment = self._replacement_task(
             event, current_task
@@ -147,7 +158,7 @@ class HeuristicTaskFlow:
             self._controllers[lease.uav_id] = replacement
             self._pending_tasks[lease.uav_id] = replacement_task
             self._update_saved_coverage(event, current_task)
-            if event.event_type == "mission_task_released":
+            if event.event_type == "type_i_released":
                 self._release_contact_bindings(event, lease.uav_id)
             return current_lease
 
@@ -167,7 +178,7 @@ class HeuristicTaskFlow:
         event: ControlEvent,
         current_task: ControlTask | None,
     ) -> tuple[ControlTask, bool]:
-        if event.event_type == "contact_assessed":
+        if event.event_type == "type_ii_confirmed":
             assert current_task is not None
             contact_id = event.payload.get("contact_id")
             assert isinstance(contact_id, str)
@@ -205,18 +216,28 @@ class HeuristicTaskFlow:
             return
         contact_id = event.payload.get("contact_id")
         if not isinstance(contact_id, str) or not contact_id:
-            raise ValueError("mission_task_released requires a contact_id")
+            raise ValueError("type_i_released requires a contact_id")
         region = self._state_manager.get_track_region_for_group(contact_id)
         if region is not None:
             self._state_manager.release_track_region(
                 region.id, source_uav_id=uav_id, create_marker=False
             )
         self._state_manager.release_contact_reservation(
-            contact_id, uav_id, event.timestamp_min, "civilian"
+            contact_id, uav_id, event.timestamp_min, "type_i_released"
         )
         self._state_manager.clear_uav_assignment(uav_id)
         self._state_manager.add_event(
             "resource_available", {"uav_id": uav_id, "contact_id": contact_id}
+        )
+
+    def _same_contact(self, first: object, second: object) -> bool:
+        if not isinstance(first, str) or not isinstance(second, str):
+            return False
+        if self._state_manager is None:
+            return first == second
+        return (
+            self._state_manager.resolve_contact_id(first)
+            == self._state_manager.resolve_contact_id(second)
         )
 
     @staticmethod

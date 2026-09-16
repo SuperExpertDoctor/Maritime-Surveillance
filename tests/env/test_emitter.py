@@ -37,9 +37,9 @@ def test_emitter_reports_active_burst_without_revealing_position():
     assert not hasattr(emitter.current_burst_at(1.25), "position_cells")
 
 
-def test_civilian_ship_does_not_create_research_emitter():
+def test_type_i_ship_does_not_create_type_ii_emitter():
     from src.env.ship import Ship
     from src.schedule.datatypes import GridCoord
 
-    ship = Ship("Ship-3", GridCoord(10, 10), 10.0, truth_identity="civilian")
+    ship = Ship("Ship-3", GridCoord(10, 10), 10.0, vessel_class="type_i")
     assert ship.radar_emitter is None

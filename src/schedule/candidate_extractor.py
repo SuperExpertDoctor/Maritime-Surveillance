@@ -40,7 +40,7 @@ class CandidateExtractor:
             else np.asarray(snapshot.value, dtype=float)
         if V.shape != (cols, rows) or not np.isfinite(V).all():
             raise ValueError("scheduling_value must be a finite grid-sized matrix")
-        seen = np.isfinite(sm.info_field.last_scan_time)
+        seen = np.isfinite(sm.get_last_scan_matrix())
         searchable = sm.get_searchable_mask()
         occupied = np.zeros((cols, rows), dtype=bool)
         occupied |= np.asarray(getattr(sm, "obstacle_mask", occupied), dtype=bool)
@@ -158,7 +158,7 @@ class CandidateExtractor:
             V = V.copy()
         active_intents = tuple(intent for intent in intents if intent.lifecycle == "active")
         info = sm.get_info_matrix()
-        seen = np.isfinite(sm.info_field.last_scan_time)
+        seen = np.isfinite(sm.get_last_scan_matrix())
         searchable = sm.get_searchable_mask()
         searchable_cells = int(searchable.sum())
         unique_coverage = (
@@ -451,7 +451,7 @@ class CandidateExtractor:
 
         for report in sm.get_target_reports():
             contact = sm.contacts.snapshot(sm.resolve_contact_id(report.contact_id))
-            if (contact.identity == "civilian" or contact.state == "cleared"
+            if (contact.vessel_class == "type_i" or contact.state == "cleared"
                     or sm.current_time < contact.next_probe_not_before_min):
                 continue
             if report.contact_id in active_groups:

@@ -1,9 +1,9 @@
 """Evaluation-only truth snapshots and reproducible mission outcomes."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 import math
-from typing import Literal
+from typing import Literal, Mapping
 
 from src.mission.contracts import ContactSnapshot, IntentStatus, TaskRecord, Vec2
 
@@ -11,24 +11,24 @@ from src.mission.contracts import ContactSnapshot, IntentStatus, TaskRecord, Vec
 @dataclass(frozen=True)
 class VesselTruthSample:
     ship_id: str
-    identity: Literal["target", "civilian"]
+    vessel_class: Literal["type_i", "type_ii"]
     position_cells: Vec2
     departed: bool
-    ais_on: bool
+    ais_enabled: bool
     gate_state: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.ship_id, str) or not self.ship_id:
             raise ValueError("ship_id must be a non-empty string")
-        if self.identity not in {"target", "civilian"}:
-            raise ValueError("identity must be target or civilian")
+        if self.vessel_class not in {"type_i", "type_ii"}:
+            raise ValueError("vessel_class must be type_i or type_ii")
         if len(self.position_cells) != 2 or not all(
             isinstance(value, (int, float)) and math.isfinite(float(value))
             for value in self.position_cells
         ):
             raise ValueError("position_cells must be finite")
-        if not isinstance(self.departed, bool) or not isinstance(self.ais_on, bool):
-            raise TypeError("departed and ais_on must be bools")
+        if not isinstance(self.departed, bool) or not isinstance(self.ais_enabled, bool):
+            raise TypeError("departed and ais_enabled must be bools")
         if not isinstance(self.gate_state, str) or not self.gate_state:
             raise ValueError("gate_state must be a non-empty string")
         object.__setattr__(self, "position_cells", tuple(float(value) for value in self.position_cells))
@@ -71,10 +71,10 @@ class EpisodeOutcome:
     invalid_reasons: tuple[str, ...]
     unique_coverage_ratio: float
     intent_satisfaction_ratio: float | None
-    target_tracking_ratio: float | None
+    type_ii_tracking_ratio: float | None
     classification_accuracy: float | None
-    false_civilian_ratio: float | None
-    civilian_probe_uav_min: float
+    type_ii_misclassified_as_type_i_ratio: float | None
+    type_i_probe_uav_min: float
     total_uav_active_min: float
     mean_probe_wait_min: float | None
     task_switch_count: int
@@ -84,8 +84,8 @@ class EpisodeOutcome:
     unknown_contacts: int = 0
     terminal_classification_coverage: float | None = None
     classification_confusion: dict = field(default_factory=dict)
-    civilian_recall: float | None = None
-    research_recall: float | None = None
+    type_i_recall: float | None = None
+    type_ii_recall: float | None = None
     balanced_accuracy: float | None = None
     discovery_tracking_rate: float | None = None
     handoff_success_rate: float | None = None
@@ -101,7 +101,7 @@ class EpisodeOutcome:
             raise TypeError("valid must be bool")
         object.__setattr__(self, "invalid_reasons", tuple(self.invalid_reasons))
         for name in (
-            "unique_coverage_ratio", "civilian_probe_uav_min", "total_uav_active_min",
+            "unique_coverage_ratio", "type_i_probe_uav_min", "total_uav_active_min",
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0:
@@ -109,8 +109,8 @@ class EpisodeOutcome:
         if self.unique_coverage_ratio > 1.0:
             raise ValueError("unique_coverage_ratio must be in [0, 1]")
         for name in (
-            "intent_satisfaction_ratio", "target_tracking_ratio",
-            "classification_accuracy", "false_civilian_ratio",
+            "intent_satisfaction_ratio", "type_ii_tracking_ratio",
+            "classification_accuracy", "type_ii_misclassified_as_type_i_ratio",
             "terminal_classification_coverage", "score",
         ):
             value = getattr(self, name)
@@ -122,8 +122,17 @@ class EpisodeOutcome:
             raise ValueError("operational_failures must be nonnegative")
 
     @property
-    def civilian_probe_cost(self) -> float:
-        return self.civilian_probe_uav_min / max(self.total_uav_active_min, 1.0)
+    def type_i_probe_cost(self) -> float:
+        return self.type_i_probe_uav_min / max(self.total_uav_active_min, 1.0)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "EpisodeOutcome":
+        """Read new or historical outcome JSON at the compatibility boundary."""
+        from src.mission.vessel_compat import normalize_legacy_outcome_payload
+
+        normalized = normalize_legacy_outcome_payload(payload)
+        names = {item.name for item in fields(cls)}
+        return cls(**{name: normalized[name] for name in names if name in normalized})
 
 
 class OutcomeEvaluator:
@@ -139,13 +148,13 @@ class OutcomeEvaluator:
         self._coverage = 0.0
         self._intent_satisfied_min = 0.0
         self._intent_observed_min = 0.0
-        self._target_present_min: dict[str, float] = {}
-        self._target_tracking_min: dict[str, float] = {}
-        self._truth_identity: dict[str, str] = {}
+        self._type_ii_present_min: dict[str, float] = {}
+        self._type_ii_tracking_min: dict[str, float] = {}
+        self._truth_class: dict[str, str] = {}
         self._observed_vessels: set[str] = set()
         self._terminal_labels: dict[str, str] = {}
         self._terminal_label_times: dict[str, float] = {}
-        self._observed_contact_identity: dict[str, str] = {}
+        self._observed_contact_class: dict[str, str] = {}
         self._terminal_contact_ids: set[str] = set()
         self._probe_minutes = 0.0
         self._probe_waits: dict[str, float] = {}
@@ -156,8 +165,8 @@ class OutcomeEvaluator:
         self._ticks = 0
         self._finalized: EpisodeOutcome | None = None
         self._classification_matrix = {
-            "civilian": {"civilian": 0, "research": 0, "unknown": 0},
-            "research": {"civilian": 0, "research": 0, "unknown": 0},
+            "type_i": {"type_i": 0, "type_ii": 0, "unknown": 0},
+            "type_ii": {"type_i": 0, "type_ii": 0, "unknown": 0},
         }
         self._classification_recorded: set[str] = set()
         self._discovery_required: set[str] = set()
@@ -177,11 +186,9 @@ class OutcomeEvaluator:
     @staticmethod
     def _classification_label(value: str) -> str:
         normalized = str(value).strip().lower()
-        if normalized == "target":
-            return "research"
-        if normalized in {"civilian", "research", "unknown"}:
+        if normalized in {"type_i", "type_ii", "unknown"}:
             return normalized
-        raise ValueError("classification labels must be civilian, research, or unknown")
+        raise ValueError("classification labels must be type_i, type_ii, or unknown")
 
     def add_classification(self, *, truth: str, predicted: str, eligible: bool = True) -> None:
         """Record one eligible vessel classification, including unknown as an error."""
@@ -363,11 +370,11 @@ class OutcomeEvaluator:
                 self._classification_matrix[label][label] / denominators[label]
                 if denominators[label] else None
             )
-            for label in ("civilian", "research")
+            for label in ("type_i", "type_ii")
         }
         balanced = (
-            (recalls["civilian"] + recalls["research"]) / 2
-            if recalls["civilian"] is not None and recalls["research"] is not None else None
+            (recalls["type_i"] + recalls["type_ii"]) / 2
+            if recalls["type_i"] is not None and recalls["type_ii"] is not None else None
         )
         eligible_handoffs = [item for item in self._handoff_events.values() if item["eligible"]]
         handoff_success = (
@@ -399,8 +406,8 @@ class OutcomeEvaluator:
         return {
             "confusion_matrix": self._classification_matrix,
             "classification_denominators": denominators,
-            "civilian_recall": recalls["civilian"],
-            "research_recall": recalls["research"],
+            "type_i_recall": recalls["type_i"],
+            "type_ii_recall": recalls["type_ii"],
             "balanced_accuracy": balanced,
             "discovery_tracking_rate": (
                 len(self._discovery_success & self._discovery_required) / len(self._discovery_required)
@@ -424,10 +431,10 @@ class OutcomeEvaluator:
             "decision_latency_seconds": latency_summary,
             "operational_failures": self._operational_failures,
             "na_reasons": {
-                "civilian_recall": "no_eligible_civilian" if not denominators["civilian"] else None,
-                "research_recall": "no_eligible_research" if not denominators["research"] else None,
+                "type_i_recall": "no_eligible_type_i" if not denominators["type_i"] else None,
+                "type_ii_recall": "no_eligible_type_ii" if not denominators["type_ii"] else None,
                 "balanced_accuracy": "missing_class_denominator" if balanced is None else None,
-                "discovery_tracking_rate": "no_required_research_vessels" if not self._discovery_required else None,
+                "discovery_tracking_rate": "no_required_type_ii_vessels" if not self._discovery_required else None,
                 "handoff_success_rate": "no_eligible_handoff_interruptions" if not eligible_handoffs else None,
                 "continuous_observation_rate": "no_survey_minutes" if not survey_denominator else None,
             },
@@ -456,18 +463,18 @@ class OutcomeEvaluator:
 
         truth_by_id = {vessel.ship_id: vessel for vessel in tick.vessels}
         for vessel in tick.vessels:
-            self._truth_identity[vessel.ship_id] = vessel.identity
+            self._truth_class[vessel.ship_id] = vessel.vessel_class
             if not vessel.departed:
-                self._truth_identity[vessel.ship_id] = vessel.identity
-                self._target_present_min.setdefault(vessel.ship_id, 0.0)
-                if vessel.identity == "target":
-                    self._target_present_min[vessel.ship_id] += dt
+                self._truth_class[vessel.ship_id] = vessel.vessel_class
+                self._type_ii_present_min.setdefault(vessel.ship_id, 0.0)
+                if vessel.vessel_class == "type_ii":
+                    self._type_ii_present_min[vessel.ship_id] += dt
                     if vessel.gate_state == "survey":
                         self.add_survey_interval(vessel.ship_id, start, end)
 
         contact_by_id = {contact.contact_id: contact for contact in tick.contacts}
         for contact in tick.contacts:
-            self._observed_contact_identity[contact.contact_id] = contact.identity
+            self._observed_contact_class[contact.contact_id] = contact.vessel_class
 
         operations = {uav_id: operation.lower() for uav_id, operation in tick.uav_operations}
         active_tasks = {
@@ -491,14 +498,14 @@ class OutcomeEvaluator:
             contact = contact_by_id.get(contact_id)
             if contact is not None:
                 assessment = contact.last_assessment
-                identity = getattr(assessment, "identity", None)
-                if identity in {"target", "civilian"}:
-                    self._record_terminal_label(physical_ship_id, identity, tick.sim_time_min)
+                vessel_class = getattr(assessment, "vessel_class", None)
+                if vessel_class in {"type_ii", "type_i"}:
+                    self._record_terminal_label(physical_ship_id, vessel_class, tick.sim_time_min)
                     self._terminal_contact_ids.add(contact_id)
 
         for physical_ship_id in good_tracking:
-            self._target_tracking_min[physical_ship_id] = (
-                self._target_tracking_min.get(physical_ship_id, 0.0) + dt
+            self._type_ii_tracking_min[physical_ship_id] = (
+                self._type_ii_tracking_min.get(physical_ship_id, 0.0) + dt
             )
 
         if tick.intent_statuses:
@@ -514,7 +521,7 @@ class OutcomeEvaluator:
             if record.kind != "probe" or not record.contact_id:
                 continue
             contact = contact_by_id.get(record.contact_id)
-            if contact is None or contact.identity != "civilian" or record.started_at_min is None:
+            if contact is None or contact.vessel_class != "type_i" or record.started_at_min is None:
                 continue
             task_start = max(start, float(record.started_at_min))
             task_end = end if record.finished_at_min is None else min(end, float(record.finished_at_min))
@@ -539,32 +546,34 @@ class OutcomeEvaluator:
         return self._build_outcome()
 
     def _build_outcome(self) -> EpisodeOutcome:
-        target_ids = set(self._target_present_min)
-        target_denominator = sum(self._target_present_min.values())
+        type_ii_ids = set(self._type_ii_present_min)
+        type_ii_denominator = sum(self._type_ii_present_min.values())
         tracking_numerator = sum(
-            self._target_tracking_min.get(ship_id, 0.0)
-            for ship_id in target_ids
+            self._type_ii_tracking_min.get(ship_id, 0.0)
+            for ship_id in type_ii_ids
         )
-        target_tracking = (
-            tracking_numerator / target_denominator if target_denominator else None
+        type_ii_tracking = (
+            tracking_numerator / type_ii_denominator if type_ii_denominator else None
         )
 
         terminal_ids = {
             ship_id for ship_id in self._terminal_labels
-            if ship_id in self._truth_identity
+            if ship_id in self._truth_class
         }
         correct = sum(
-            self._terminal_labels[ship_id] == self._truth_identity[ship_id]
+            self._terminal_labels[ship_id] == self._truth_class[ship_id]
             for ship_id in terminal_ids
         )
         classification_accuracy = correct / len(terminal_ids) if terminal_ids else None
         observed_count = len(self._observed_vessels)
         terminal_coverage = len(terminal_ids) / observed_count if observed_count else None
-        false_target_ids = {
-            ship_id for ship_id in target_ids
-            if self._terminal_labels.get(ship_id) == "civilian"
+        false_type_i_ids = {
+            ship_id for ship_id in type_ii_ids
+            if self._terminal_labels.get(ship_id) == "type_i"
         }
-        false_civilian = len(false_target_ids) / len(target_ids) if target_ids else None
+        type_ii_misclassified_as_type_i = (
+            len(false_type_i_ids) / len(type_ii_ids) if type_ii_ids else None
+        )
         intent_ratio = (
             self._intent_satisfied_min / self._intent_observed_min
             if self._intent_observed_min else None
@@ -573,14 +582,14 @@ class OutcomeEvaluator:
         positive_components = [self._coverage]
         if intent_ratio is not None:
             positive_components.append(intent_ratio)
-        if target_tracking is not None:
-            positive_components.append(target_tracking)
+        if type_ii_tracking is not None:
+            positive_components.append(type_ii_tracking)
         if classification_accuracy is not None:
             positive_components.append(classification_accuracy)
         score = sum(positive_components) / len(positive_components)
         score -= 0.15 * self._probe_minutes / max(total_active, 1.0)
         unknown_contacts = sum(
-            identity == "unknown" for identity in self._observed_contact_identity.values()
+            vessel_class == "unknown" for vessel_class in self._observed_contact_class.values()
         )
         reasons = tuple(self._invalid_reasons)
         if self._ticks == 0:
@@ -592,9 +601,9 @@ class OutcomeEvaluator:
             reasons,
             self._coverage,
             intent_ratio,
-            target_tracking,
+            type_ii_tracking,
             classification_accuracy,
-            false_civilian,
+            type_ii_misclassified_as_type_i,
             self._probe_minutes,
             total_active,
             sum(self._probe_waits.values()) / len(self._probe_waits)
@@ -606,8 +615,8 @@ class OutcomeEvaluator:
             unknown_contacts,
             terminal_coverage,
             classification_confusion=metrics["confusion_matrix"],
-            civilian_recall=metrics["civilian_recall"],
-            research_recall=metrics["research_recall"],
+            type_i_recall=metrics["type_i_recall"],
+            type_ii_recall=metrics["type_ii_recall"],
             balanced_accuracy=metrics["balanced_accuracy"],
             discovery_tracking_rate=metrics["discovery_tracking_rate"],
             handoff_success_rate=metrics["handoff_success_rate"],
@@ -632,9 +641,9 @@ class OutcomeEvaluator:
         if previous_time is None or time >= previous_time:
             self._terminal_labels[physical_ship_id] = identity
             self._terminal_label_times[physical_ship_id] = time
-        if physical_ship_id not in self._classification_recorded and physical_ship_id in self._truth_identity:
+        if physical_ship_id not in self._classification_recorded and physical_ship_id in self._truth_class:
             self.add_classification(
-                truth=self._truth_identity[physical_ship_id],
+                truth=self._truth_class[physical_ship_id],
                 predicted=identity,
                 eligible=True,
             )

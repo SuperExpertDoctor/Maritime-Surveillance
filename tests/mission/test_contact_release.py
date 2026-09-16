@@ -18,7 +18,7 @@ from src.schedule.datatypes import GridCoord
 from src.schedule.state_manager import StateManager
 
 
-def test_civilian_release_clears_contact_region_and_uav_without_resuming_search():
+def test_type_i_release_clears_contact_region_and_uav_without_resuming_search():
     config = ConfigLoader.load()
     state = StateManager(config)
     contact_id = state.contacts.ingest_visual(
@@ -30,8 +30,8 @@ def test_civilian_release_clears_contact_region_and_uav_without_resuming_search(
     state.contacts.reserve(contact_id, "UAV-1", "P0001")
     contact = state.contacts.snapshot(contact_id)
     state.contacts.apply_assessment(Assessment(
-        "A0001", contact_id, "P0001", contact.revision, 1.0, "civilian", 0.9,
-        ("EO-1",), ("near observation supports civilian behavior",), (), "call-1",
+        "A0001", contact_id, "P0001", contact.revision, 1.0, "type_i", 0.9,
+        ("EO-1",), ("near observation supports type_i behavior",), (), "call-1",
     ))
     region = state.create_track_region(contact_id, GridCoord(10, 10))
     uav = state.get_uav("UAV-1")
@@ -59,8 +59,8 @@ def test_civilian_release_clears_contact_region_and_uav_without_resuming_search(
     flow._saved_coverage_tasks["UAV-1"] = coverage
 
     transition = flow.handle(ControlEvent(
-        1, 1.0, "mission_task_released", "assessment", "UAV-1",
-        {"contact_id": contact_id, "probe_id": "P0001", "identity": "civilian"},
+        1, 1.0, "type_i_released", "assessment", "UAV-1",
+        {"contact_id": contact_id, "probe_id": "P0001", "vessel_class": "type_i"},
     ), lease)
 
     assert state.contacts.snapshot(contact_id).assigned_uav_id is None

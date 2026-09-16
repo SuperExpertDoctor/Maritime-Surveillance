@@ -3,14 +3,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
-from typing import Optional
+from typing import Iterable, Mapping, Optional
 import math
 
 import numpy as np
 
 from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
-from src.schedule.info_field import InfoField
 from src.mission.information_update import InformationUpdatePolicy, ScanRefresh
 from src.mission.contact_store import ContactStore
 from src.mission.contracts import (
@@ -41,9 +40,14 @@ class StateManager:
         self.runtime_status = "running"
         self.blocked_role = None
         self.memory_version = "baseline"
+        self.vessel_mutation_allowed = True
+        self.editing_allowed = True
+        self.initial_vessel_count = config.ship.population.total_count
+        self.actual_vessel_count = 0
+        self._vessel_inventory: tuple[dict, ...] = ()
         self.lifecycle_mode = False
-        self.info_field = InfoField(config)
         self.information_policy = InformationUpdatePolicy(config)
+        self._last_information_delta = None
         self._uavs = [
             UAVState(
                 id=f"UAV-{index + 1}",
@@ -83,17 +87,27 @@ class StateManager:
 
     def step(self, current_time: float) -> None:
         self.current_time = current_time
-        self.info_field.update_decay(current_time)
+        self._last_information_delta = self.information_policy.advance_time(current_time)
         values = self.get_value_matrix()
+        scan_times = self.get_last_scan_matrix()
         for region in self._search_regions:
             b = region.bbox
-            scan_times = self.info_field.last_scan_time[
+            scan_patch = scan_times[
                 b.col_start:b.col_end, b.row_start:b.row_end
             ]
-            region.completion_pct = float(np.isfinite(scan_times).mean() * 100) if scan_times.size else 0.0
+            region.completion_pct = float(np.isfinite(scan_patch).mean() * 100) if scan_patch.size else 0.0
             region.avg_info = self.get_avg_info_in_bbox(b)
             patch = values[b.col_start:b.col_end, b.row_start:b.row_end]
             region.info_value = float(patch.mean()) if patch.size else 0.0
+
+    # Operator vessel read model ------------------------------------
+    def publish_vessel_inventory(self, items: Iterable[Mapping]) -> None:
+        """Publish a detached vessel inventory for operator-facing frames."""
+        self._vessel_inventory = tuple(deepcopy(dict(item)) for item in items)
+
+    def get_vessel_inventory(self) -> tuple[dict, ...]:
+        """Return a detached snapshot; callers cannot mutate authoritative state."""
+        return deepcopy(self._vessel_inventory)
 
     # UAV management -------------------------------------------------
     def get_all_uavs(self) -> list[UAVState]:
@@ -402,7 +416,7 @@ class StateManager:
         """Keep the surviving track geometry and canonicalize scheduler IDs."""
         cid = self.resolve_contact_id(event["contact_id"])
         if self.contacts.snapshot(cid).state == "cleared":
-            # The engine will release all bindings through civilian_released.
+            # The engine will release all bindings through type_i_released.
             return []
         owner = event["assigned_uav_id"]
         tracks = [region for region in self._track_regions
@@ -502,7 +516,6 @@ class StateManager:
                     source_uav_id=source_uav_id,
                 )
                 self._markers.append(marker)
-                self.info_field.add_marker(marker.position, self.current_time, marker.id)
             self._track_regions.remove(region)
             return
 
@@ -542,16 +555,17 @@ class StateManager:
         return [event for event in self._events if event["time"] >= since_time]
 
     # Information field facade -------------------------------------
-    def scan_bbox(self, bbox: BBox, current_time: float, is_track: bool = False) -> None:
-        self.info_field.scan_bbox(bbox, current_time, is_track)
-        self.information_policy.apply_batch(
+    def scan_bbox(self, bbox: BBox, current_time: float, is_track: bool = False):
+        return self.information_policy.apply_batch(
             [ScanRefresh(tuple(bbox), "track" if is_track else "search")],
             current_time,
         )
 
-    def scan_cell(self, coord: GridCoord, current_time: float, is_track: bool = False) -> None:
-        self.info_field.scan_cell(coord, current_time, is_track)
-        self.information_policy.apply_batch(
+    def scan_cell(self, coord: GridCoord, current_time: float, is_track: bool = False):
+        cols, rows = self.config.grid.resolution
+        if not (0 <= coord.col < cols and 0 <= coord.row < rows):
+            return None
+        return self.information_policy.apply_batch(
             [ScanRefresh((coord.col, coord.row, coord.col + 1, coord.row + 1),
                          "track" if is_track else "search")],
             current_time,
@@ -633,6 +647,10 @@ class StateManager:
         return self.information_policy.version
 
     @property
+    def last_information_delta(self):
+        return self._last_information_delta
+
+    @property
     def ais_updates(self):
         return self.information_policy.ais_updates
 
@@ -642,23 +660,13 @@ class StateManager:
         )
 
     def get_info_matrix(self):
-        policy_info = np.asarray(
-            self.information_policy.matrices(self.current_time)[0],
-            dtype=float,
-        )
-        return np.maximum(self.info_field.get_info_matrix(), policy_info)
+        return self.information_policy.info_matrix(self.current_time)
 
     def get_last_scan_matrix(self):
-        """Return scan timestamps without exposing the mutable information field."""
-        return self.info_field.last_scan_time.copy()
+        return self.information_policy.last_scan_time
 
     def get_value_matrix(self):
-        legacy_value = self.info_field.get_value_matrix(self.current_time)
-        policy_value = np.asarray(
-            self.information_policy.matrices(self.current_time)[3],
-            dtype=float,
-        )
-        return np.maximum(legacy_value, policy_value)
+        return self.information_policy.value_matrix(self.current_time)
 
     def get_searchable_mask(self) -> np.ndarray:
         """Return cells that can be searched under the operational rules."""
@@ -676,7 +684,7 @@ class StateManager:
     def get_coverage_stats(self) -> dict[str, float | int]:
         """Measure unique coverage over searchable sea cells only."""
         searchable = self.get_searchable_mask()
-        scanned = np.isfinite(self.info_field.last_scan_time) & searchable
+        scanned = np.isfinite(self.get_last_scan_matrix()) & searchable
         searchable_cells = int(searchable.sum())
         scanned_cells = int(scanned.sum())
         coverage_pct = (

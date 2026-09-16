@@ -15,7 +15,7 @@ contact:
   approach_timeout_min: 120.0
   probe_retry_cooldown_min: 10.0
   assessment_confidence_min: 0.8
-  civilian_recheck_cooldown_min: 60.0
+  type_i_recheck_cooldown_min: 60.0
   prompt_contact_limit: 20
   prompt_keypoints_per_contact: 12
 intent:
@@ -56,8 +56,8 @@ activity:
   min_reversal_count: 2
   radiation_window_min: 10.0
   min_distinct_bursts: 2
-  research_equipment_pd: 0.90
-  research_equipment_pfa: 0.05
+  type_ii_equipment_pd: 0.90
+  type_ii_equipment_pfa: 0.05
   deployed_equipment_pd: 0.85
   deployed_equipment_pfa: 0.05
 evasion:

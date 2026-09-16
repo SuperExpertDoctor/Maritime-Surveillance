@@ -29,8 +29,8 @@ def test_evidence_store_is_idempotent_and_supersedes_same_subject():
 def test_ais_registry_disable_is_keyed_by_mmsi_and_revision():
     registry = AisUpdateRegistry()
     assert registry.is_enabled("123") is True
-    state = registry.disable("123", now_min=2.0, reason="confirmed_civilian")
+    state = registry.disable("123", now_min=2.0, reason="confirmed_type_i")
     assert state.enabled is False
     assert state.revision == 1
     assert registry.is_enabled("123") is False
-    assert registry.disable("123", now_min=3.0, reason="confirmed_civilian") == state
+    assert registry.disable("123", now_min=3.0, reason="confirmed_type_i") == state

@@ -37,7 +37,7 @@ def test_v2_frame_publishes_contacts_and_runtime_state_without_truth_leaks(monke
     assert frame["contacts"]
     contact = frame["contacts"][0]
     assert {
-        "contact_id", "revision", "state", "identity", "ais_mmsi",
+        "contact_id", "revision", "state", "vessel_class", "ais_mmsi",
         "first_seen_min", "last_seen_min", "estimated_position",
         "estimated_velocity", "uncertainty_cells", "assigned_uav_id",
         "active_probe_id", "last_assessment", "cleared_at_min",
@@ -55,10 +55,9 @@ def test_v2_frame_publishes_contacts_and_runtime_state_without_truth_leaks(monke
     engine._handle_detection(engine.uavs[0], observed_ship, 1.0)
     observed = _frame(engine)
     public_ship = next(ship for ship in observed["ships"] if ship["id"] == observed_ship.id)
-    assert "is_military" not in public_ship
     assert "is_evasive" not in public_ship
     assert "discrimination" not in public_ship
-    assert "truth_identity" not in json.dumps(public_ship, sort_keys=True)
+    assert "environment_vessel_class" not in json.dumps(public_ship, sort_keys=True)
     assert any(item["contact_id"] for item in observed["contacts"])
 
 
@@ -77,3 +76,23 @@ def test_v2_frame_defaults_are_safe_for_old_or_empty_state():
     assert frame["runtime_status"] == "running"
     assert frame["blocked_role"] is None
     assert frame["memory_version"] == "baseline"
+
+
+def test_state_manager_vessel_inventory_is_a_deep_copied_operator_read_model():
+    state = StateManager(ConfigLoader.load())
+    item = {
+        "scenario_entity_id": "scenario-vessel-1",
+        "revision": 2,
+        "position": [4.0, 5.0],
+        "vessel_class": "type_ii",
+        "ais_enabled": False,
+        "ais_controllable": True,
+        "surveillance_stage": "detected",
+    }
+    state.publish_vessel_inventory([item])
+    item["position"][0] = 99
+
+    inventory = state.get_vessel_inventory()
+    inventory[0]["position"][0] = 88
+
+    assert state.get_vessel_inventory()[0]["position"] == [4.0, 5.0]

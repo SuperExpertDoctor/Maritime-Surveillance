@@ -1,5 +1,7 @@
 # UAV Control Strategy Interfaces
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 本文档说明 `src/control` 的控制策略接口、运行时契约和自定义控制器的集成方式。
 文档对应当前实现的 `control-observation/v1` 与 `control-command/v1` 契约。
 
@@ -161,14 +163,14 @@ class ControlObservation:
 | `searchable_mask` | 局部可搜索 mask，`bool` |
 | `planning_obstacle_mask` | 全局规划 mask，只含已发布的陆地和障碍物占用，`bool` |
 | `planning_map_version` | 全局规划 mask 的版本；变化后路径需要重新验证 |
-| `contacts` | 当前由传感器/状态管理器发布的目标估计，不是舰船真值 |
+| `contacts` | 当前由传感器/状态管理器发布的目标估计，不是船舶真值 |
 | `hazards` | 岛屿、雷暴等已发布危险物的几何和运动快照 |
 | `bases` | 基地位置、容量和已预留维护负载 |
 | `shared_uavs` | 其他 UAV 的公开状态，用于协同和避碰 |
 | `events` | 本 UAV 当前 tick 消费到的事件快照，事件只消费一次 |
 | `action_mask` | 当前控制权和观测资源允许的传感器、作业模式、目标 ID |
 
-`planning_obstacle_mask` 是全局规划数据，不是环境对象引用，也不包含舰船位置。
+`planning_obstacle_mask` 是全局规划数据，不是环境对象引用，也不包含船舶位置。
 `contacts` 中没有有效 contact 时，控制器不能自行猜测目标；必须使用空 contact 集合
 和 action mask 表达“当前没有可跟踪目标”。
 
@@ -918,7 +920,7 @@ assert decision.command.schema_version == "control-command/v1"
 红方计划或评估器真值。
 
 卫星 AIS 和 SAR/EO 测量先进入 `ContactStore`，身份只由已批准的 probe 任务产生的
-有效证据研判。`unknown` 接触不能被控制器当作 target 或 civilian；接触释放和任务
+有效证据研判。`unknown` 接触不能被控制器当作 target 或 type_i；接触释放和任务
 接力必须由全局任务调度批次提交，不能在控制器回调中直接恢复旧搜索。
 
 `mission-frame/v2` 的默认渲染层只显示 UAV、公开 contact snapshot、意图和运行状态。

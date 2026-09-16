@@ -25,16 +25,16 @@ def test_extract_returns_candidate_result(sm):
     assert isinstance(result, CandidateResult)
 
 
-@pytest.mark.parametrize("release_reason", ["civilian", "timeout"])
+@pytest.mark.parametrize("release_reason", ["type_i_released", "timeout"])
 def test_handoff_candidates_respect_contact_clearance_and_recheck_cooldown(sm, release_reason):
     from src.mission.contracts import Assessment
     from tests.mission.test_contact_store import ais, visual
 
     cid = sm.contacts.ingest_visual(visual(t=50, position=(15, 15)))
     sm.contacts.reserve(cid, "UAV-1", "P1")
-    if release_reason == "civilian":
+    if release_reason == "type_i_released":
         sm.contacts.apply_assessment(Assessment(
-            "A1", cid, "P1", 1, 50, "civilian", .9,
+            "A1", cid, "P1", 1, 50, "type_i", .9,
             ("EO-1",), ("validated visual evidence",), (), "call1"))
     else:
         sm.contacts.release(cid, 50, "timeout")
@@ -153,14 +153,14 @@ def test_irregular_obstacle_pocket_remains_schedulable(sm):
         obstacles,
         obstacle_grid_mask(obstacles, sm.config.grid.resolution),
     )
-    sm.info_field.last_scan_time[1:17, 1:29] = 0.0
+    sm.scan_bbox(BBox(1, 1, 17, 29), 0.0)
 
     result = CandidateExtractor().extract(sm)
 
     assert result.candidate_regions
     assert any(candidate["bbox"].col_start >= 15 for candidate in result.candidate_regions)
     assert all(
-        np.isneginf(sm.info_field.last_scan_time[
+        np.isneginf(sm.get_last_scan_matrix()[
             candidate["bbox"].col_start:candidate["bbox"].col_end,
             candidate["bbox"].row_start:candidate["bbox"].row_end,
         ]).any()

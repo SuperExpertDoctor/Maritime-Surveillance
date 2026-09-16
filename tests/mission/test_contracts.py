@@ -44,7 +44,7 @@ from src.mission.contracts import (
                 "probe_id",
                 "history_revision",
                 "assessed_at_min",
-                "identity",
+                    "vessel_class",
                 "confidence",
                 "evidence_sample_ids",
                 "reasons",
@@ -55,11 +55,11 @@ from src.mission.contracts import (
         (
             ContactSnapshot,
             (
-                "contact_id",
-                "revision",
-                "state",
-                "identity",
-                "ais_mmsi",
+                    "contact_id",
+                    "revision",
+                    "state",
+                    "vessel_class",
+                    "ais_mmsi",
                 "first_seen_min",
                 "last_seen_min",
                 "estimated_position_cells",
@@ -69,8 +69,13 @@ from src.mission.contracts import (
                 "active_probe_id",
                 "last_assessment",
                 "cleared_at_min",
-                "next_probe_not_before_min",
-                "samples",
+                    "next_probe_not_before_min",
+                    "samples",
+                    "class_confidence",
+                    "class_evidence_ids",
+                    "activity",
+                    "activity_confidence",
+                    "activity_evidence_ids",
             ),
         ),
         (
@@ -173,7 +178,7 @@ def test_contact_snapshot_does_not_expose_environment_truth():
         contact_id="C0001",
         revision=1,
         state="pending",
-        identity="unknown",
+        vessel_class="unknown",
         ais_mmsi="123456789",
         first_seen_min=1.0,
         last_seen_min=1.0,
@@ -192,14 +197,13 @@ def test_contact_snapshot_does_not_expose_environment_truth():
     prohibited = {
         "ship_id",
         "physical_ship_id",
-        "actual_military",
-        "truth_identity",
+        "vessel_class_truth",
         "is_evading",
         "red_motion_parameters",
     }
     assert prohibited.isdisjoint(serialized)
     with pytest.raises(FrozenInstanceError):
-        snapshot.identity = "target"
+        snapshot.vessel_class = "type_ii"
 
 
 def test_ship_truth_is_owned_by_the_environment_not_public_mission_contracts():
@@ -210,16 +214,17 @@ def test_ship_truth_is_owned_by_the_environment_not_public_mission_contracts():
 
     truth = ship_module.ShipTruth(
         ship_id="V0001",
-        identity="target",
-        ais_mode="silent",
+        vessel_class="type_ii",
+        ais_enabled=False,
         normal_route=((1.0, 2.0, 0.5), (2.0, 3.0, 0.75)),
     )
 
     assert asdict(truth) == {
         "ship_id": "V0001",
-        "identity": "target",
-        "ais_mode": "silent",
+        "vessel_class": "type_ii",
+        "ais_enabled": False,
         "normal_route": ((1.0, 2.0, 0.5), (2.0, 3.0, 0.75)),
+        "activity_schedule": (),
     }
     assert "Ship" not in vars(contracts)
     assert "SimulationEngine" not in vars(contracts)
@@ -229,6 +234,6 @@ def test_ship_identity_and_ais_rng_substreams_are_independent_and_recordable():
     manifest = ship_rng_manifest(42)
 
     assert manifest == ship_rng_manifest(42)
-    assert set(manifest) == {"ship_identity", "ship_ais_mode"}
-    assert manifest["ship_identity"] != manifest["ship_ais_mode"]
+    assert set(manifest) == {"ship_class", "ship_ais_enabled"}
+    assert manifest["ship_class"] != manifest["ship_ais_enabled"]
     assert all(isinstance(seed, int) for seed in manifest.values())

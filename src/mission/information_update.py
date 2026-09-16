@@ -36,9 +36,10 @@ _TTL = {
     "passive_bearing": (10.0, 3.0, 0.60),
     "passive_position": (15.0, 5.0, 1.00),
     "evasive_maneuver": (20.0, 8.0, 1.00),
-    "research_assessment": (60.0, 20.0, 0.85),
+    "type_ii_assessment": (60.0, 20.0, 0.85),
     "violation_assessment": (60.0, 20.0, 1.00),
     "handoff": (10.0, 5.0, 1.00),
+    "track_loss": (20.0, 8.0, 1.00),
 }
 
 
@@ -56,6 +57,8 @@ class InformationUpdatePolicy:
         self._recent_deltas: list[InfoFieldDelta] = []
         self._urgent_subjects: set[tuple] = set()
         self._passive_position_sources: dict[str, frozenset[str]] = {}
+        self._committed_value = self.matrices(0.0)[3]
+        self._committed_at_min = 0.0
 
     @property
     def version(self) -> int:
@@ -64,6 +67,12 @@ class InformationUpdatePolicy:
     @property
     def last_scan_time(self) -> np.ndarray:
         return self._last_scan_time.copy()
+
+    def info_matrix(self, now_min: float) -> np.ndarray:
+        return self._info_matrix(float(now_min)).copy()
+
+    def value_matrix(self, now_min: float) -> np.ndarray:
+        return self.matrices(float(now_min))[3].copy()
 
     def _weights(self) -> tuple[float, float, float]:
         update = getattr(self.config.mission, "information_update", None)
@@ -237,6 +246,76 @@ class InformationUpdatePolicy:
             min(rows, int(math.ceil(y + radius + 1))),
         )
 
+    @staticmethod
+    def _mask_bbox(mask: np.ndarray, cols: int, rows: int) -> tuple[int, int, int, int]:
+        coordinates = np.argwhere(mask)
+        if coordinates.size == 0:
+            return (0, 0, cols, rows)
+        c0, r0 = coordinates.min(axis=0)
+        c1, r1 = coordinates.max(axis=0) + 1
+        return (int(c0), int(r0), int(c1), int(r1))
+
+    def _commit_delta(
+        self,
+        before: np.ndarray,
+        after: np.ndarray,
+        now_min: float,
+        reasons: Iterable[str],
+        causes: Iterable[str],
+        *,
+        urgent: bool = False,
+    ) -> InfoFieldDelta | None:
+        difference = np.abs(after - before)
+        changed = difference > 1e-12
+        threshold = float(self.config.grid.candidate_value_threshold)
+        crossed = (before < threshold) != (after < threshold)
+        max_delta = float(np.max(difference)) if difference.size else 0.0
+        reason_codes = tuple(dict.fromkeys(reasons))
+        cause_ids = tuple(dict.fromkeys(causes))
+        should_publish = bool(
+            urgent
+            or max_delta >= 0.05
+            or np.any(crossed)
+            or "evidence_expired" in reason_codes
+        )
+        if not should_publish:
+            return None
+
+        previous_version = self._version
+        self._version += 1
+        self._committed_value = after.copy()
+        self._committed_at_min = float(now_min)
+        delta = InfoFieldDelta(
+            previous_version=previous_version,
+            version=self._version,
+            changed_bbox=self._mask_bbox(changed | crossed, self.cols, self.rows),
+            max_abs_value_delta=max_delta,
+            value_changed=bool(np.any(changed)),
+            crossed_candidate_threshold=bool(np.any(crossed)),
+            urgent=bool(urgent),
+            reason_codes=reason_codes,
+            cause_evidence_ids=cause_ids,
+        )
+        self._recent_deltas.append(delta)
+        self._recent_deltas[:] = self._recent_deltas[-20:]
+        return delta
+
+    def advance_time(self, now_min: float) -> InfoFieldDelta | None:
+        now_min = float(now_min)
+        if not math.isfinite(now_min) or now_min < 0.0:
+            raise ValueError("now_min must be finite and non-negative")
+        after = self.matrices(now_min)[3]
+        expired = self.evidence_store.expired_ids_since(
+            self._committed_at_min, now_min,
+        )
+        return self._commit_delta(
+            self._committed_value,
+            after,
+            now_min,
+            ("evidence_expired",) if expired else ("time_decay",),
+            expired,
+        )
+
     def apply_batch(self, facts: Iterable[object], now_min: float) -> InfoFieldDelta | None:
         facts = tuple(facts)
         active_subjects = {
@@ -264,10 +343,7 @@ class InformationUpdatePolicy:
                     fact.source_observation_ids
                 )
 
-        before = self.matrices(now_min)[3]
-        previous_version = self._version
         changed = False
-        changed_cells: list[tuple[int, int, int, int]] = []
         cause_ids: list[str] = []
         reason_codes: list[str] = []
         urgent = False
@@ -286,7 +362,6 @@ class InformationUpdatePolicy:
             scan_time[...] = now_min
             scan_kind[...] = desired_kind
             changed = True
-            changed_cells.append(clipped)
             reason_codes.append(f"scan_{scan.scan_kind}")
         for record in drafts:
             existing = self.evidence_store.get(record.evidence_id)
@@ -294,18 +369,12 @@ class InformationUpdatePolicy:
                 continue
             key = self.evidence_store.subject_key(record)
             is_new_urgent = record.kind in {
-                "evasive_maneuver", "passive_position", "research_assessment",
+                "evasive_maneuver", "passive_position", "type_ii_assessment",
                 "violation_assessment", "handoff",
             } and key not in self._urgent_subjects
             self.evidence_store.supersede(record, key)
             self._urgent_subjects.add(key)
             changed = True
-            changed_cells.append(self._support(
-                record,
-                getattr(getattr(self.config.mission, "information_update", None), "kernel_epsilon", 0.01),
-                self.cols,
-                self.rows,
-            ))
             cause_ids.append(record.evidence_id)
             reason_codes.append(record.kind)
             urgent = urgent or is_new_urgent
@@ -313,32 +382,14 @@ class InformationUpdatePolicy:
         if not changed:
             return None
         after = self.matrices(now_min)[3]
-        if changed_cells:
-            c0 = min(item[0] for item in changed_cells)
-            r0 = min(item[1] for item in changed_cells)
-            c1 = max(item[2] for item in changed_cells)
-            r1 = max(item[3] for item in changed_cells)
-        else:
-            c0, r0, c1, r1 = 0, 0, self.cols, self.rows
-        delta_patch = after[c0:c1, r0:r1] - before[c0:c1, r0:r1]
-        max_delta = float(np.max(np.abs(delta_patch))) if delta_patch.size else 0.0
-        threshold = float(self.config.grid.candidate_value_threshold)
-        crossed = bool(np.any((before[c0:c1, r0:r1] < threshold) != (after[c0:c1, r0:r1] < threshold)))
-        self._version += 1
-        delta = InfoFieldDelta(
-            previous_version=previous_version,
-            version=self._version,
-            changed_bbox=(c0, r0, c1, r1),
-            max_abs_value_delta=max_delta,
-            value_changed=max_delta > 1e-12,
-            crossed_candidate_threshold=crossed,
+        return self._commit_delta(
+            self._committed_value,
+            after,
+            now_min,
+            reason_codes,
+            cause_ids,
             urgent=urgent,
-            reason_codes=tuple(dict.fromkeys(reason_codes)),
-            cause_evidence_ids=tuple(dict.fromkeys(cause_ids)),
         )
-        self._recent_deltas.append(delta)
-        self._recent_deltas[:] = self._recent_deltas[-20:]
-        return delta
 
 
 __all__ = ["InformationUpdatePolicy", "ScanRefresh"]

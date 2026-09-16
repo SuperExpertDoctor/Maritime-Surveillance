@@ -76,10 +76,10 @@ def test_fixture_rounds_and_invalid_outcomes_do_not_support_a_candidate(tmp_path
 
 
 @pytest.mark.parametrize("summary", [
-    {"episode_id": "e1", "truth_identity": "target"},
+    {"episode_id": "e1", "environment_vessel_class": "type_ii"},
     {"episode_id": "e1", "physical_ship_id": "V1"},
     {"episode_id": "e1", "contact_id": "C0001"},
-    {"episode_id": "e1", "truth": {"identity": "target"}},
+    {"episode_id": "e1", "truth": {"vessel_class": "type_ii"}},
     {"episode_id": "e1", "selected_task_ids": ["Q1"]},
     {"episode_id": "e1", "preempt_uav_ids": ["UAV-1"]},
     {"episode_id": "e1", "advice": "```python\nprint('x')\n```"},

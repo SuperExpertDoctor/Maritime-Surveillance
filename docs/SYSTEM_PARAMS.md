@@ -1,5 +1,7 @@
 # 系统参数手册
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 > 所有参数定义与默认值。对应配置文件位于 `configs/` 目录。
 
 > **当前口径（2026-09-15）**：本文后续保留的基础环境与历史兼容参数仍用于回放和
@@ -12,7 +14,7 @@
 |------|:--:|------|
 | UAV 数量 | 10 | `uav.count`，由实际场景状态驱动 |
 | 船舶总数 | 8 | `ship.population.total_count` |
-| civilian/research 比例 | 0.625 / 0.375 | 最大余数法分配，结果为 5 / 3 |
+| type_i/type_ii 比例 | 0.625 / 0.375 | 最大余数法分配，结果为 5 / 3 |
 | 信息价值权重 | 0.45 / 0.35 / 0.20 | `V=clip(alpha*(1-I)+beta*S+gamma*A,0,1)` |
 | 人工编辑窗口 | `sim_time_min == 0` 且首步前 | 运行和回放均只读 |
 
@@ -126,7 +128,7 @@ idle ──→ transit ──→ searching ──→ returning ──→ refueli
 | 条带宽度 | 15 km（1.5 cells） | STARLite / CH-4 SAR |
 | 最大探测距离 | 60 km（6 cells） | 中位海况 SS3 |
 | 分辨率 | 3 m | Stripmap |
-| 检测概率 $P_d$ | 0.90 | 大型舰船（$>1000$ ton） |
+| 检测概率 $P_d$ | 0.90 | 大型船舶（$>1000$ ton） |
 | 虚警率 $P_{fa}$ | 0.002 | ATR 系统 + 近岸杂波修正 |
 | 工作模式 | Stripmap | 侧视，近距盲区 2.5 km |
 | 工作频段 | X-band（$\lambda \approx 0.03$ m） | 8–12 GHz |
@@ -153,14 +155,14 @@ $$P_d(\text{SNR}) = \frac{1}{1 + e^{-k(\text{SNR} - \text{SNR}_{\text{th}})}}$$
 | 检测概率 $P_d$ | 0.92 | 锁定跟踪置信度 |
 | 虚警率 $P_{fa}$ | 0.008 | 自动跟踪器（海浪反光/云雾） |
 | 安装方式 | 机腹转塔 | 360° 旋转 |
-| 8° FOV 地面幅宽 | 2.8 km @ 20 km | 覆盖单艘舰船足够 |
+| 8° FOV 地面幅宽 | 2.8 km @ 20 km | 覆盖单艘船舶足够 |
 
 **跟踪模式约束**：
 - UAV 保持在目标周围 $R_d = 1.8$ cells 盘旋
 - EO 转塔持续指向目标
 - 雷云遮挡 → EO 完全失效 → Level 3 紧急规避
 
-### 3.3 舰载搜索雷达（目标舰船）
+### 3.3 舰载搜索雷达（目标船舶）
 
 | 参数 | 值 |
 |------|:--:|
@@ -172,7 +174,7 @@ $$P_d(\text{SNR}) = \frac{1}{1 + e^{-k(\text{SNR} - \text{SNR}_{\text{th}})}}$$
 
 ---
 
-## 四、舰船目标
+## 四、船舶目标
 
 ### 4.1 目标数量与编队
 
@@ -258,9 +260,9 @@ $$P_d(\text{SNR}) = \frac{1}{1 + e^{-k(\text{SNR} - \text{SNR}_{\text{th}})}}$$
 
 | AIS 状态 | 判别结果 | 动作 |
 |------|:--:|------|
-| 无 AIS 信号 | **军舰**（关闭了 AIS） | 继续跟踪 |
-| AIS 位置偏差 > 2 cells | **军舰**（广播虚假 AIS） | 继续跟踪 |
-| AIS 位置偏差 ≤ 2 cells | **民船** | 放弃跟踪，释放 UAV |
+| 无 AIS 信号 | **II 类船舶**（关闭了 AIS） | 继续跟踪 |
+| AIS 位置偏差 > 2 cells | **II 类船舶**（广播虚假 AIS） | 继续跟踪 |
+| AIS 位置偏差 ≤ 2 cells | **I 类船舶** | 放弃跟踪，释放 UAV |
 
 ### 4.6 目标生命周期
 
@@ -270,7 +272,7 @@ $$P_d(\text{SNR}) = \frac{1}{1 + e^{-k(\text{SNR} - \text{SNR}_{\text{th}})}}$$
         ┌───────┼────────┐
         ▼       ▼        ▼
     AIS判别   雷云丢失   驶离边界
-   为民船     创建标记点  departed
+   为I 类船舶     创建标记点  departed
         │       │        │
         ▼       ▼        ▼
     释放UAV  继续搜索   释放UAV
@@ -380,8 +382,8 @@ $$V(c,r) = \alpha \cdot (1 - I) + \beta \cdot S(c,r) + \gamma \cdot A(c,r)$$
 | `target_found` | SAR/EO 发现新目标 |
 | `target_lost` | 目标脱离跟踪（含雷云 Level 3） |
 | `target_departed` | 目标驶离任务区域 |
-| `target_military` | AIS 判定为军舰 |
-| `civilian_released` | AIS 判定为民船，释放 UAV |
+| `type_ii_confirmed` | AIS 判定为II 类船舶 |
+| `type_i_released` | AIS 判定为I 类船舶，释放 UAV |
 | `uav_returned` | UAV 油尽返航 |
 | `lifecycle_completed` | UAV 全生命周期循环完成 |
 | `storm_spawned` | 新雷云生成 |

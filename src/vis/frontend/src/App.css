@@ -651,9 +651,9 @@ button {
   place-items: center;
 }
 
-.contact-state-dot.identity-unknown { color: var(--amber); }
-.contact-state-dot.identity-target { color: var(--danger); }
-.contact-state-dot.identity-civilian { color: var(--teal); }
+.contact-state-dot.vessel-class-unknown { color: var(--amber); }
+.contact-state-dot.vessel-class-type_ii { color: var(--danger); }
+.contact-state-dot.vessel-class-type_i { color: var(--teal); }
 
 .contact-copy {
   display: flex;
@@ -698,16 +698,16 @@ button {
   font: 700 11px/1 Consolas, monospace;
 }
 
-.identity-badge {
+.vessel-class-badge {
   padding: 3px 5px;
   border: 1px solid currentColor;
   border-radius: 2px;
   font-size: 8px;
 }
 
-.identity-unknown { color: var(--amber); }
-.identity-target { color: var(--danger); }
-.identity-civilian { color: var(--teal); }
+.vessel-class-unknown { color: var(--amber); }
+.vessel-class-type_ii { color: var(--danger); }
+.vessel-class-type_i { color: var(--teal); }
 
 .contact-detail dl {
   display: grid;
@@ -1246,6 +1246,74 @@ button {
 .vessel-command-status.rejected { color: var(--danger); border-color: #e1a0ad; }
 .vessel-command-status small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.selected-vessel-detail {
+  background: #f2f8f9;
+}
+
+.vessel-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.vessel-detail-grid div {
+  min-width: 0;
+}
+
+.vessel-detail-grid dt {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.vessel-detail-grid dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 700 10px/1.2 Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ais-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.ais-control button {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.ais-control button:hover:not(:disabled),
+.ais-control button.active {
+  border-color: #71afb5;
+  background: #e0f2f1;
+  color: var(--teal);
+}
+
+.ais-control button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
 .llm-status-row {
   display: flex;
   align-items: center;
@@ -1411,12 +1479,12 @@ button {
   background: var(--panel-hover);
 }
 
-.ais-table tr.ais-military td:last-child {
+.ais-table tr.ais-type-ii td:last-child {
   color: var(--danger);
   font-weight: 700;
 }
 
-.ais-table tr.ais-civilian td:last-child {
+.ais-table tr.ais-type-i td:last-child {
   color: var(--text-soft);
 }
 

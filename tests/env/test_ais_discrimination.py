@@ -37,14 +37,14 @@ def test_legacy_ais_identity_decision_paths_are_removed():
     assert not hasattr(AISDiscriminator, "discriminate_formation")
 
 
-@pytest.mark.parametrize("ais_mode", ["civilian", "silent"])
-def test_silent_or_consistent_ais_remains_unknown_until_validated_observation(engine, ais_mode):
-    ship = engine.ships[0]
+@pytest.mark.parametrize("ais_enabled", [True, False])
+def test_ais_state_remains_unknown_until_validated_observation(engine, ais_enabled):
+    ship = next(item for item in engine.ships if item.vessel_class == "type_ii")
     # Establish a claimed contact before silence; silence itself is not evidence.
-    ship.ais_mode = "civilian"
+    ship.set_ais_enabled(True)
     group_id = engine.allocator.sm.contacts.ingest_ais(generate_ais_signal(ship, 0), 0)
-    ship.ais_mode = ais_mode
-    assert engine.allocator.sm.contacts.snapshot(group_id).identity == "unknown"
+    ship.set_ais_enabled(ais_enabled)
+    assert engine.allocator.sm.contacts.snapshot(group_id).vessel_class == "unknown"
     center = ship.float_position  # sensor fixture geometry, never a blue lookup
     uav = engine.uavs[0]
     uav.position = GridCoord(int(round(center[0] - 1)), int(round(center[1])))
@@ -66,11 +66,7 @@ def test_silent_or_consistent_ais_remains_unknown_until_validated_observation(en
     assert engine.allocator.sm.get_track_region_for_group(group_id) is not None
     assert engine.allocator.sm.get_target_report(group_id) is not None
     assert any(s.source == "eo" for s in engine.allocator.sm.contacts.snapshot(group_id).samples)
-    assert engine.allocator.sm.contacts.snapshot(group_id).identity == "unknown"
-    assert ship.is_military is None
-    assert ship.discrimination is None
-    assert engine.ais_discriminations == 0
-    assert engine.civilian_releases == 0
+    assert engine.allocator.sm.contacts.snapshot(group_id).vessel_class == "unknown"
     assert not engine.allocator.sm.get_active_markers()
 
 
