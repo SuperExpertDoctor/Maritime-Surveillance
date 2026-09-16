@@ -296,12 +296,12 @@ class TaskCatalog:
             if intents and all(
                 hasattr(state, name)
                 for name in ("get_value_matrix", "get_searchable_mask")
-            ) and hasattr(getattr(state, "info_field", None), "last_scan_time"):
+            ) and callable(getattr(state, "get_last_scan_matrix", None)):
                 try:
                     scheduling_value = build_scheduling_value(
                         state.get_value_matrix(),
                         intents,
-                        state.info_field.last_scan_time,
+                        state.get_last_scan_matrix(),
                         now,
                         searchable_mask=state.get_searchable_mask(),
                     )

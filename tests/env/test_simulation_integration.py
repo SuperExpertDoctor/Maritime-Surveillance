@@ -219,13 +219,13 @@ def test_sar_requires_stable_straight_heading_before_writing_information():
     assert not uav.sar_imaging
     assert uav.sensor_mode == "off"
     engine._update_sensors_and_detections(engine.clock.time)
-    assert not np.isfinite(engine.allocator.sm.info_field.last_scan_time).any()
+    assert not np.isfinite(engine.allocator.sm.get_last_scan_matrix()).any()
 
     uav.heading_rad = uav.waypoints[start + 2][2]
     uav._update_scan_direction()
     assert uav.sar_imaging
     engine._update_sensors_and_detections(engine.clock.time)
-    assert np.isfinite(engine.allocator.sm.info_field.last_scan_time).any()
+    assert np.isfinite(engine.allocator.sm.get_last_scan_matrix()).any()
 
 
 def test_simulation_applies_phase_speed_control_to_shared_trackers():
@@ -514,8 +514,8 @@ def test_post_coverage_search_assignment_keeps_stale_revisit_swaths():
     ).candidate_regions[0]
     region = Region(id="S-revisit", bbox=candidate["bbox"], type="search")
     searchable = engine.allocator.sm.get_searchable_mask()
-    scan_times = engine.allocator.sm.info_field.last_scan_time
-    scan_times[searchable] = 1.0
+    cols, rows = engine.config.grid.resolution
+    engine.allocator.sm.scan_bbox(BBox(0, 0, cols, rows), 1.0)
     uav = engine.uavs[0]
 
     engine._assign_search_route(uav, region)
@@ -531,9 +531,7 @@ def test_freshness_patrol_assignment_revisits_before_global_coverage_target():
         engine.allocator.sm
     ).candidate_regions[0]
     region = Region(id="S-early-patrol", bbox=candidate["bbox"], type="search")
-    scan_times = engine.allocator.sm.info_field.last_scan_time
-    scan_times[region.bbox.col_start:region.bbox.col_end,
-               region.bbox.row_start:region.bbox.row_end] = 1.0
+    engine.allocator.sm.scan_bbox(region.bbox, 1.0)
     uav = engine.uavs[0]
 
     engine._assign_search_route(uav, region, allow_revisit=True)
@@ -574,7 +572,8 @@ def test_post_coverage_completion_waits_for_scheduler_before_revisit():
     state = engine.allocator.sm.get_uav(engine.uavs[0].id)
     state.assigned_region_id = region.id
     searchable = engine.allocator.sm.get_searchable_mask()
-    engine.allocator.sm.info_field.last_scan_time[searchable] = 1.0
+    cols, rows = engine.config.grid.resolution
+    engine.allocator.sm.scan_bbox(BBox(0, 0, cols, rows), 1.0)
     uav = engine.uavs[0]
     uav.status = "idle"
     uav.search_complete_pending = True
@@ -597,7 +596,8 @@ def test_freshness_patrol_caps_local_revisit_fleet_size():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     start = engine.config.uav.freshness_patrol_start_min
     searchable = engine.allocator.sm.get_searchable_mask()
-    engine.allocator.sm.info_field.last_scan_time[searchable] = 1.0
+    cols, rows = engine.config.grid.resolution
+    engine.allocator.sm.scan_bbox(BBox(0, 0, cols, rows), 1.0)
     selected = [
         engine._should_continue_freshness_patrol(uav, start)
         for uav in engine.uavs

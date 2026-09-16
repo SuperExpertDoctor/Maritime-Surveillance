@@ -11,6 +11,7 @@ class EvidenceStore:
         self._records: dict[str, EvidenceRecord] = {}
         self._superseded: set[str] = set()
         self._active_keys: dict[tuple, str] = {}
+        self._reported_expiries: set[str] = set()
 
     @staticmethod
     def subject_key(record: EvidenceRecord) -> tuple:
@@ -52,6 +53,20 @@ class EvidenceStore:
             and record.observed_at_min <= now_min
             and (now_min == float("inf") or now_min < record.expires_at_min)
         )
+
+    def expired_ids_since(self, since_min: float, now_min: float) -> tuple[str, ...]:
+        """Return each active expiry once, even when the clock is advanced repeatedly."""
+        if now_min < since_min:
+            raise ValueError("now_min must not precede since_min")
+        expired = tuple(
+            record.evidence_id
+            for key, record in sorted(self._records.items())
+            if key not in self._superseded
+            and record.expires_at_min <= now_min
+            and record.evidence_id not in self._reported_expiries
+        )
+        self._reported_expiries.update(expired)
+        return expired
 
     def expire(self, now_min: float) -> tuple[str, ...]:
         return tuple(

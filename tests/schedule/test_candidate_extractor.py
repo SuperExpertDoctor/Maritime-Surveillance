@@ -153,14 +153,14 @@ def test_irregular_obstacle_pocket_remains_schedulable(sm):
         obstacles,
         obstacle_grid_mask(obstacles, sm.config.grid.resolution),
     )
-    sm.info_field.last_scan_time[1:17, 1:29] = 0.0
+    sm.scan_bbox(BBox(1, 1, 17, 29), 0.0)
 
     result = CandidateExtractor().extract(sm)
 
     assert result.candidate_regions
     assert any(candidate["bbox"].col_start >= 15 for candidate in result.candidate_regions)
     assert all(
-        np.isneginf(sm.info_field.last_scan_time[
+        np.isneginf(sm.get_last_scan_matrix()[
             candidate["bbox"].col_start:candidate["bbox"].col_end,
             candidate["bbox"].row_start:candidate["bbox"].row_end,
         ]).any()

@@ -3934,7 +3934,7 @@ class SimulationEngine:
         direction: str | None = None,
     ) -> SearchRouteRequest:
         swath_width = self.config.sensor.sar.swath_km / self.config.grid.cell_size_km
-        scan_times = self.allocator.sm.info_field.last_scan_time
+        scan_times = self.allocator.sm.get_last_scan_matrix()
         coverage_pct = self.allocator.sm.get_coverage_stats()["coverage_pct"]
         numeric_id = int("".join(char for char in uav.id if char.isdigit()) or 0)
         return SearchRouteRequest(

@@ -43,6 +43,14 @@ def test_release_track_region_adds_marker(sm):
     assert markers[0].source_uav_id == "UAV-1"
 
 
+def test_release_track_region_marker_does_not_mutate_information_value(sm):
+    before = sm.get_value_matrix()
+    region = sm.create_track_region("G1", GridCoord(10, 10))
+    sm.release_track_region(region.id, source_uav_id="UAV-1")
+
+    assert np.array_equal(before, sm.get_value_matrix())
+
+
 def test_add_event(sm):
     """事件记录到事件流中。"""
     sm.add_event("target_found", {"group_id": "G1", "position": GridCoord(5, 5)})

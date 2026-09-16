@@ -571,7 +571,7 @@ class TaskAllocator:
             tuple(task.bbox)
             if task.bbox is not None
             else tuple(round(value, 6) for value in target),
-            np.isfinite(self.sm.info_field.last_scan_time).tobytes()
+            np.isfinite(self.sm.get_last_scan_matrix()).tobytes()
             if task.kind in _SEARCH_TASK_KINDS
             else None,
         )
@@ -612,7 +612,7 @@ class TaskAllocator:
                             self.sm.obstacle_mask, dtype=bool
                         ).copy(),
                         unscanned_mask=~np.isfinite(
-                            self.sm.info_field.last_scan_time
+                            self.sm.get_last_scan_matrix()
                         ),
                         allow_revisit=False,
                         seed=17,
