@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 import math
 import time
 
@@ -329,11 +330,30 @@ def test_scheduler_prompt_contains_complete_snapshot_and_returns_batch():
     class Gateway:
         def __init__(self):
             self.payload = None
+            self.call_log = [{
+                "call_id": "call-1",
+                "model": "LongCat-2.0",
+                "attempts": [],
+            }]
 
         def request_json(self, **kwargs):
             from src.mission.llm_gateway import ModelResult
 
             self.payload = kwargs["user_payload"]
+            self.call_log[0]["attempts"].append({
+                "attempt": 1,
+                "messages": [
+                    {"role": "system", "content": kwargs["system_prompt"]},
+                    {
+                        "role": "user",
+                        "content": json.dumps(kwargs["user_payload"], ensure_ascii=False),
+                    },
+                ],
+                "raw_output": json.dumps(
+                    _selection(snapshot, ["Q1"]), ensure_ascii=False,
+                ),
+                "errors": [],
+            })
             return ModelResult(
                 "call-1",
                 True,
@@ -343,7 +363,8 @@ def test_scheduler_prompt_contains_complete_snapshot_and_returns_batch():
             )
 
     gateway = Gateway()
-    batch = MissionScheduler(gateway=gateway).decide(snapshot)
+    scheduler = MissionScheduler(gateway=gateway)
+    batch = scheduler.decide(snapshot)
 
     assert batch == type(batch)(snapshot.snapshot_id, (Assignment("Q1", "U1", 2, None),), "call-1")
     serialized = gateway.payload["snapshot"]
@@ -353,6 +374,13 @@ def test_scheduler_prompt_contains_complete_snapshot_and_returns_batch():
     assert serialized["contacts"] == []
     assert serialized["intents"] == []
     assert serialized["planning_map_version"] == 7
+    trace = scheduler.selection_interaction()
+    assert trace["model"] == "LongCat-2.0"
+    assert trace["system_prompt"]
+    assert '"Q1"' in trace["user_prompt"]
+    assert '"Q1"' in trace["response"]
+    assert trace["validation"] == {"is_valid": True, "errors": []}
+    assert trace["attempts"][0]["response"] == trace["response"]
 
 
 def test_scheduler_rejects_response_after_absolute_deadline():

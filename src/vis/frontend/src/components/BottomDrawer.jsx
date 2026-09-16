@@ -29,7 +29,7 @@ export default function BottomDrawer({ frame, events = [], llmCycle, visible, on
   const drag = useRef(null);
 
   useEffect(() => {
-  if (activeTab !== 4 || config || configError) return;
+  if (activeTab !== 3 || config || configError) return;
     fetch("/api/config")
       .then((response) => {
         if (!response.ok) throw new Error();
@@ -69,8 +69,8 @@ export default function BottomDrawer({ frame, events = [], llmCycle, visible, on
         {activeTab === 0 && <TimelineTab events={events} />}
         {activeTab === 1 && <RegionTab frame={frame} />}
         {activeTab === 2 && <LLMTab llm={llmCycle} />}
-        {activeTab === 3 && <AisTab frame={frame} />}
-        {activeTab === 4 && <ParamsTab config={config} error={configError} />}
+        {activeTab === 3 && <ParamsTab config={config} error={configError} />}
+        {activeTab === 4 && <AisTab frame={frame} />}
       </div>
     </section>
   );

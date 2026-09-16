@@ -15,6 +15,8 @@ export default function useReplay(enabled) {
   const framesRef = useRef([]);
   const totalRef = useRef(0);
   const loadedOffsetsRef = useRef(new Set());
+  const loadGenerationRef = useRef(0);
+  const selectedFileRef = useRef("");
 
   useEffect(() => {
     if (!enabled) return;
@@ -29,16 +31,17 @@ export default function useReplay(enabled) {
   }, [enabled]);
 
   /** Fetch one chunk [offset, offset+CHUNK_SIZE) and merge into framesRef. */
-  const fetchChunk = useCallback(async (filename, offset) => {
+  const fetchChunk = useCallback(async (filename, offset, generation = loadGenerationRef.current) => {
     const key = `${filename}|${offset}`;
-    if (loadedOffsetsRef.current.has(key)) return;
-    loadedOffsetsRef.current.add(key);
+    if (generation !== loadGenerationRef.current || filename !== selectedFileRef.current) {
+      return false;
+    }
+    if (loadedOffsetsRef.current.has(key)) return true;
     const url = `/api/replay?file=${encodeURIComponent(filename)}&offset=${offset}&limit=${CHUNK_SIZE}`;
     const response = await fetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     if (data.error) throw new Error(data.error);
-
     // Merge chunk into the contiguous frames array
     const current = [...framesRef.current];
     for (let i = 0; i < data.frames.length; i += 1) {
@@ -53,17 +56,24 @@ export default function useReplay(enabled) {
     }
     framesRef.current = current;
     totalRef.current = data.total;
+    loadedOffsetsRef.current.add(key);
     setFrames([...current]);       // trigger React re-render
     setTotal(data.total);
+    setError("");
+    return true;
   }, []);
 
   const load = useCallback(async (filename) => {
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    selectedFileRef.current = filename;
     setSelectedFile(filename);
     setIsPlaying(false);
     setError("");
     if (!filename) {
       framesRef.current = [];
       loadedOffsetsRef.current.clear();
+      setLoading(false);
       setFrames([]);
       setTotal(0);
       setIndex(0);
@@ -77,13 +87,14 @@ export default function useReplay(enabled) {
     setTotal(0);
     setIndex(0);
     try {
-      await fetchChunk(filename, 0);
+      await fetchChunk(filename, 0, generation);
     } catch {
+      if (generation !== loadGenerationRef.current) return;
       framesRef.current = [];
       setFrames([]);
       setError("回放加载失败");
     } finally {
-      setLoading(false);
+      if (generation === loadGenerationRef.current) setLoading(false);
     }
   }, [fetchChunk]);
 
@@ -96,10 +107,15 @@ export default function useReplay(enabled) {
     }
     // Otherwise load the chunk that contains this index.
     const chunkOffset = Math.floor(safe / CHUNK_SIZE) * CHUNK_SIZE;
+    const generation = loadGenerationRef.current;
+    const filename = selectedFileRef.current || selectedFile;
+    if (!filename) return;
     try {
-      await fetchChunk(selectedFile, chunkOffset);
+      await fetchChunk(filename, chunkOffset, generation);
     } catch {
-      // Silently ignore — the error state is set in `load`.
+      if (generation === loadGenerationRef.current && filename === selectedFileRef.current) {
+        setError("回放加载失败");
+      }
     }
   }, [fetchChunk, selectedFile]);
 
@@ -111,10 +127,13 @@ export default function useReplay(enabled) {
   }, [ensureLoaded]);
 
   const loadAll = useCallback(async (onProgress) => {
-    if (!selectedFile || totalRef.current <= 0) return [];
+    const filename = selectedFileRef.current || selectedFile;
+    const generation = loadGenerationRef.current;
+    if (!filename || totalRef.current <= 0) return [];
     const totalChunks = Math.ceil(totalRef.current / CHUNK_SIZE);
     for (let chunk = 0; chunk < totalChunks; chunk += 1) {
-      await fetchChunk(selectedFile, chunk * CHUNK_SIZE);
+      const current = await fetchChunk(filename, chunk * CHUNK_SIZE, generation);
+      if (!current) throw new Error("Replay selection changed");
       onProgress?.((chunk + 1) / totalChunks);
     }
     const complete = framesRef.current.slice(0, totalRef.current);

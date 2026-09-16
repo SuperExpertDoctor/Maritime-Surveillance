@@ -757,6 +757,9 @@ class SimulationEngine:
             self.intent_commands.complete(result)
             self._record_intent_result(result)
             results.append(result)
+        # Keep the public read model coherent even when commands are applied
+        # while the clock is paused or directly at an API/test boundary.
+        self._evaluate_intent_statuses(now)
         return tuple(results)
 
     def apply_pending_runtime_commands(self) -> tuple[CommandResult, ...]:

@@ -270,10 +270,11 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await expect(page.locator(".region-table")).toBeVisible();
   await page.locator(".drawer-tabs > button").nth(2).click();
   await expect(page.locator(".llm-log")).toBeVisible();
+  await expect(page.locator(".llm-log")).toContainText("Fixture mission snapshot.");
   await page.locator(".drawer-tabs > button").nth(3).click();
-  await expect(page.locator(".ais-table")).toBeVisible();
-  await page.locator(".drawer-tabs > button").nth(4).click();
   await expect(page.locator(".params-grid")).toBeVisible();
+  await page.locator(".drawer-tabs > button").nth(4).click();
+  await expect(page.locator(".ais-table")).toBeVisible();
   await page.locator(".drawer-close").click();
   await expect(page.locator(".bottom-drawer")).toHaveCount(0);
 

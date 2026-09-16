@@ -125,6 +125,15 @@ def create_app(
     app.state.uav_entities = None  # wm UAV 实体列表
     app.state.obstacles = None
     app.state.bases = None
+    if engine is not None:
+        # The first WebSocket frame is sent before the simulation callback has
+        # published a snapshot.  Seed the read model from the live engine so
+        # that a newly connected dashboard sees the same world immediately.
+        app.state.ships = getattr(engine, "ships", None)
+        app.state.uav_entities = getattr(engine, "uavs", None)
+        app.state.obstacles = getattr(engine, "obstacles", None)
+        app.state.bases = getattr(engine, "bases", None)
+        app.state.current_cycle = int(getattr(state_manager, "cycle", 0))
     app.state._live_clients = set()
     app.state.event_loop = None
     app.state.replay_mode = bool(replay_mode)
