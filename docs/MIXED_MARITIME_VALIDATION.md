@@ -1,5 +1,7 @@
 # Mixed Maritime Validation
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 状态：需求对齐实现已接入；fixture 已验证，真实 LongCat 评估仍需由具备 API 配置的
 操作者显式运行。
 
@@ -63,7 +65,7 @@ npx playwright test tests/mixed-maritime.spec.js
 | V18 | 全量 Python 回归与前端 build/Playwright | Python `1199 passed`；build 通过；Playwright `7 passed` |
 | V19 | 被动/证据/版本/接力对齐 | `tests/mission/test_maritime_acceptance.py`、`tests/sensor/`、`tests/mission/test_information_update.py` |
 
-端到端 fixture 场景包括 `mixed-ais`、`all-civilian`、`silent-target`、
+端到端 fixture 场景包括 `mixed-ais`、`all-type_i`、`silent-target`、
 `disguised-target`、`island-confounder`、`no-resources`、`intent-overlap` 和
 `model-failure`。这些场景验证管线行为，不证明真实模型分类准确率。
 
@@ -92,9 +94,9 @@ python scripts/evaluate_mixed_maritime.py --config configs \
 python scripts/evaluate_mixed_maritime.py --scenario mixed-ais \
   --seed 42 --steps 120 --live \
   --output-dir outputs/evaluations/mixed-ais-live
-python scripts/evaluate_mixed_maritime.py --scenario all-civilian \
+python scripts/evaluate_mixed_maritime.py --scenario all-type_i \
   --seed 43 --steps 120 --live \
-  --output-dir outputs/evaluations/all-civilian-live
+  --output-dir outputs/evaluations/all-type_i-live
 python scripts/evaluate_mixed_maritime.py --scenario disguised-target \
   --seed 44 --steps 120 --live \
   --output-dir outputs/evaluations/disguised-target-live

@@ -1,5 +1,7 @@
 # Mixed Maritime Implementation Progress
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 日期：2026-09-15。分支：`feature/mixed-maritime-llm`。
 
 ## Task Status
@@ -25,7 +27,7 @@
 - 完整后端回归：`1125 passed`。
 - 新前端 Playwright：`3 passed`。
 - 前端 `npm run build`：通过。
-- 接触清除合并回归：`73 passed`；修复了旧 TRACK 任务在 `civilian_released` 后重新绑定已清除 alias 的问题。
+- 接触清除合并回归：`73 passed`；修复了旧 TRACK 任务在 `type_i_released` 后重新绑定已清除 alias 的问题。
 
 上述测试不代表真实 LongCat 分类准确率。真实 smoke 和 90 回合策略验证必须使用
 默认网关、真实 API 调用和独立输出目录；在当前记录中尚未执行，也没有激活任何策略

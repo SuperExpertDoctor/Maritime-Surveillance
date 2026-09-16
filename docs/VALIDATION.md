@@ -1,5 +1,7 @@
 # Validation Record
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 ## Current Mixed Maritime Track
 
 本文件后面的 GOAL/GOAL2 是历史验收记录，保留用于回溯，不代表当前
@@ -87,6 +89,6 @@ without a simulation, routing, or frame-serialization failure.
 | Browser acceptance | live/replay, 4 viewports | no runtime errors or overflow | Pass |
 
 The GOAL2 regression suite additionally covers capacity-induced holding,
-randomized coastal base placement, carrier escorts, civilian release without a
+randomized coastal base placement, carrier escorts, type_i release without a
 marker, target departure, square-storm avoidance, storm replacement, and the
 20-plus-20 position-based AIS discrimination batch.
