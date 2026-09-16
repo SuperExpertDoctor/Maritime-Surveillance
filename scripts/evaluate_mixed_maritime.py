@@ -391,6 +391,13 @@ class _FixtureGateway:
                 float(speed_lower), float(speed_upper),
             )
             phase_upper = float(constraints.get("phase_deg", [0.0, 360.0])[1])
+            active_ship_ids = snapshot.get("active_ship_ids")
+            if active_ship_ids is None:
+                active_ship_ids = [
+                    item[0]
+                    for item in snapshot.get("active_signature", ())
+                    if isinstance(item, (list, tuple)) and item
+                ]
             payload = {
                 "schema_version": "red-plan/v1",
                 "snapshot_id": snapshot.get("snapshot_id", snapshot_id),
@@ -404,7 +411,7 @@ class _FixtureGateway:
                         "zigzag_period_min": period,
                         "phase_deg": 0.0 if phase_upper > 0.0 else 0.0,
                     }
-                    for ship_id in snapshot.get("active_ship_ids", ())
+                    for ship_id in active_ship_ids
                 ],
                 "notes": "deterministic fixture red plan",
             }

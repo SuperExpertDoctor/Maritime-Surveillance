@@ -7,6 +7,7 @@ import time
 import json
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
+from functools import lru_cache
 
 from src.mission.contracts import (
     Assignment,
@@ -327,35 +328,50 @@ def _minimum_cost_matching(
         return {}
     if len(task_ids) > len(resources):
         return None
-    # Branch on the most constrained task first.  The result is projected back
-    # into model selection order so task priority remains visible to callers.
+    # Branch on the most constrained task first, then memoize each used-resource
+    # state.  The result is projected back into model selection order so task
+    # priority remains visible to callers.
     order = tuple(sorted(
         task_ids,
         key=lambda task_id: (len(options.get(task_id, ())), task_ids.index(task_id)),
     ))
-    best_cost = math.inf
-    best: dict[str, FeasibleEdge] | None = None
+    resource_ids = tuple(sorted(resources))
+    resource_bits = {uav_id: 1 << index for index, uav_id in enumerate(resource_ids)}
+    required_mask = 0
+    for uav_id in required_preempt_uav_ids:
+        bit = resource_bits.get(uav_id)
+        if bit is None:
+            return None
+        required_mask |= bit
 
-    def search(index: int, used: set[str], cost: float, chosen: dict[str, FeasibleEdge]):
-        nonlocal best_cost, best
-        if cost >= best_cost - 1e-12:
-            return
+    @lru_cache(maxsize=None)
+    def solve(index: int, used_mask: int):
         if index == len(order):
-            if not required_preempt_uav_ids <= used:
-                return
-            best_cost = cost
-            best = dict(chosen)
-            return
-        task_id = order[index]
-        for edge in options.get(task_id, ()):
-            if edge.uav_id in used:
-                continue
-            chosen[task_id] = edge
-            search(index + 1, {*used, edge.uav_id}, cost + edge.transit_time_min, chosen)
-            chosen.pop(task_id, None)
+            if required_mask & used_mask != required_mask:
+                return None
+            return 0.0, ()
 
-    search(0, set(), 0.0, {})
-    return best
+        task_id = order[index]
+        best_result = None
+        for edge in options.get(task_id, ()):
+            bit = resource_bits.get(edge.uav_id)
+            if bit is None or used_mask & bit:
+                continue
+            remainder = solve(index + 1, used_mask | bit)
+            if remainder is None:
+                continue
+            candidate = (
+                edge.transit_time_min + remainder[0],
+                ((task_id, edge),) + remainder[1],
+            )
+            if best_result is None or candidate[0] < best_result[0] - 1e-12:
+                best_result = candidate
+        return best_result
+
+    result = solve(0, 0)
+    if result is None:
+        return None
+    return {task_id: edge for task_id, edge in result[1]}
 
 
 def _actual_preempted(
@@ -735,9 +751,17 @@ class MissionScheduler:
         )
 
     def pair_selected_tasks(
-        self, selection: MissionSelection | dict, snapshot: MissionSnapshot
+        self,
+        selection: MissionSelection | dict,
+        snapshot: MissionSnapshot,
+        *,
+        visible_task_ids: frozenset[str] | None = None,
     ) -> tuple[Assignment, ...]:
-        errors = self.validate_selection(selection, snapshot)
+        errors = self.validate_selection(
+            selection,
+            snapshot,
+            visible_task_ids=visible_task_ids,
+        )
         if errors:
             raise ValueError("; ".join(errors))
         parsed, parse_errors = _selection_object(selection)
@@ -914,7 +938,11 @@ class MissionScheduler:
             self.last_selection_failure_category = "validation"
             return None
         try:
-            assignments = self.pair_selected_tasks(parsed, snapshot)
+            assignments = self.pair_selected_tasks(
+                parsed,
+                snapshot,
+                visible_task_ids=visible_task_ids,
+            )
         except ValueError as exc:
             self.last_selection_errors = (str(exc),)
             self.last_selection_failure_category = "validation"

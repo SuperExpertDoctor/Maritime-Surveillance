@@ -16,6 +16,7 @@ from src.mission.mission_scheduler import (
     MissionScheduler,
     MissionSnapshot,
     TaskRecord,
+    _minimum_cost_matching,
     pair_selected_tasks,
     validate_selection,
 )
@@ -149,6 +150,33 @@ def test_pairing_minimizes_total_transit_cost_instead_of_greedy_order():
              if edge.task_id == item.task_id and edge.uav_id == item.uav_id)
         for item in assignments
     ) == pytest.approx(3.5)
+
+
+@pytest.mark.timeout(5)
+def test_large_matching_finds_exact_minimum_without_exponential_search():
+    task_ids = tuple(f"Q{index}" for index in range(10))
+    resource_ids = tuple(f"U{index}" for index in range(10))
+    resources = {uav_id: _resource(uav_id) for uav_id in resource_ids}
+    options = {
+        task_id: tuple(
+            _edge(task_id, uav_id, 0.0 if uav_id == f"U{9 - int(task_id[1:])}" else 1.0)
+            for uav_id in resource_ids
+        )
+        for task_id in task_ids
+    }
+
+    matching = _minimum_cost_matching(
+        task_ids,
+        options,
+        resources,
+        required_preempt_uav_ids=frozenset({"U9"}),
+    )
+
+    assert matching is not None
+    assert {task_id: edge.uav_id for task_id, edge in matching.items()} == {
+        task_id: f"U{9 - int(task_id[1:])}" for task_id in task_ids
+    }
+    assert sum(edge.transit_time_min for edge in matching.values()) == pytest.approx(0.0)
 
 
 def test_selection_rejects_unknown_ids_duplicate_contacts_and_overlapping_searches():
