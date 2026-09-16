@@ -451,6 +451,8 @@ class SimulationEngine:
             "position": [float(ship.float_position[0]), float(ship.float_position[1])],
             "vessel_class": ship.vessel_class,
             "ais_enabled": ship.ais_enabled,
+            "ais_controllable": ship.vessel_class == "type_ii",
+            "surveillance_stage": self.surveillance_stages.snapshot(ship.id).stage,
         } for ship in self.ships)
 
     def apply_pending_vessel_commands(self) -> tuple[VesselCommandResult, ...]:
@@ -830,9 +832,12 @@ class SimulationEngine:
         """Copy lifecycle metadata into the immutable frame source."""
         self.allocator.sm.runtime_status = self._runtime_status
         self.allocator.sm.blocked_role = self._blocked_role
+        self.allocator.sm.vessel_mutation_allowed = self.vessel_mutation_allowed
         self.allocator.sm.editing_allowed = self.editing_allowed
-        self.allocator.sm.configured_vessel_count = self.config.ship.population.total_count
+        self.allocator.sm.initial_vessel_count = self.config.ship.population.total_count
         self.allocator.sm.actual_vessel_count = len(getattr(self, "ships", ()))
+        if hasattr(self, "surveillance_stages"):
+            self._publish_vessel_inventory()
         self.allocator.sm.memory_version = self.allocator.memory_version
         set_context = getattr(self.allocator.llm_client.gateway, "set_context", None)
         if callable(set_context):
@@ -841,6 +846,18 @@ class SimulationEngine:
                 self.allocator.memory_version,
                 float(self.clock.time),
             )
+
+    def _publish_vessel_inventory(self) -> None:
+        items = tuple({
+            "scenario_entity_id": ship.id,
+            "revision": self._vessel_revisions.get(ship.id, 1),
+            "position": [float(ship.float_position[0]), float(ship.float_position[1])],
+            "vessel_class": ship.vessel_class,
+            "ais_enabled": ship.ais_enabled,
+            "ais_controllable": ship.vessel_class == "type_ii",
+            "surveillance_stage": self.surveillance_stages.snapshot(ship.id).stage,
+        } for ship in self.ships)
+        self.allocator.sm.publish_vessel_inventory(items)
 
     def _set_runtime_state(self, status: str, blocked_role: str | None = None) -> None:
         self._runtime_status = status
@@ -1228,6 +1245,7 @@ class SimulationEngine:
         self._detect_and_resolve_path_conflicts(t)
         self._observe_evaluation(t)
         self._record_statuses()
+        self._publish_runtime_state()
         return result
 
     def retry_blocked_decision(self) -> None:

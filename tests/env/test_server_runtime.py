@@ -11,6 +11,7 @@ from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend import server
 from src.vis.backend.server import broadcast_frame_sync, create_app
+from src.vis.backend.frame_builder import build_frame
 
 
 class _FrameSink:
@@ -71,6 +72,30 @@ def test_initial_websocket_frame_includes_live_engine_entities():
     assert len(frame["obstacles"]) == len(engine.obstacles)
     assert len(frame["bases"]) == len(engine.bases)
     assert len(frame["scenario_vessels"]) == len(engine.ships)
+
+
+def test_live_frame_always_contains_runtime_vessel_inventory():
+    app, engine = _runtime_app()
+    engine.step()
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+
+    assert frame["vessel_mutation_allowed"] is True
+    assert {item["vessel_class"] for item in frame["scenario_vessels"]} <= {
+        "type_i", "type_ii",
+    }
+    assert all(type(item["ais_enabled"]) is bool for item in frame["scenario_vessels"])
+    assert all(
+        {"revision", "ais_controllable", "surveillance_stage"} <= set(item)
+        for item in frame["scenario_vessels"]
+    )
 
 
 def test_runtime_vessel_ais_patch_accepts_only_strict_boolean_payload():
@@ -228,6 +253,27 @@ def test_replay_total_refreshes_while_a_live_jsonl_file_is_growing(tmp_path, mon
 
     assert first["total"] == 1
     assert second["total"] == 2
+
+
+def test_replay_endpoint_normalizes_legacy_vessel_inventory(tmp_path, monkeypatch):
+    replay = tmp_path / "legacy.jsonl"
+    replay.write_text(
+        json.dumps({
+            "frame_id": 1,
+            "scenario_vessels": [{"vessel_class": "research", "ais_mode": "silent"}],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "OUTPUT_DIR", str(tmp_path))
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+
+    with TestClient(app) as client:
+        frame = client.get("/api/replay", params={"file": replay.name}).json()["frames"][0]
+
+    vessel = frame["scenario_vessels"][0]
+    assert vessel["vessel_class"] == "type_ii"
+    assert vessel["ais_enabled"] is False
+    assert vessel["surveillance_stage"] == "undetected"
 
 
 def test_mp4_export_reports_encoder_availability(monkeypatch):

@@ -409,15 +409,10 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "busy": False, "refueling_uav_ids": [],
         }]
 
-    scenario_vessels = []
-    if getattr(state, "editing_allowed", False):
-        for ship in ships or []:
-            scenario_vessels.append({
-                "scenario_entity_id": ship.id,
-                "revision": int(getattr(ship, "revision", 1)),
-                "position": list(getattr(ship, "float_position", (ship.position.col, ship.position.row))),
-                "vessel_class": getattr(ship, "vessel_class", "unknown"),
-            })
+    scenario_vessels = list(
+        state.get_vessel_inventory()
+        if hasattr(state, "get_vessel_inventory") else ()
+    )
 
     frame = {
         "schema_version": "mission-frame/v2",
@@ -461,8 +456,15 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         if hasattr(state, "get_intent_events") else [],
         "runtime_status": getattr(state, "runtime_status", "running"),
         "blocked_role": getattr(state, "blocked_role", None),
-        "editing_allowed": bool(getattr(state, "editing_allowed", False)),
-        "configured_vessel_count": getattr(state, "configured_vessel_count", len(ship_list)),
+        "vessel_mutation_allowed": bool(
+            getattr(
+                state, "vessel_mutation_allowed",
+                getattr(state, "editing_allowed", False),
+            )
+        ),
+        "initial_vessel_count": getattr(
+            state, "initial_vessel_count", len(scenario_vessels),
+        ),
         "actual_vessel_count": getattr(state, "actual_vessel_count", len(ship_list)),
         "information_version": int(getattr(state, "information_version", 0)),
         "evidence": [

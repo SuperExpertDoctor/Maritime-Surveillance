@@ -77,3 +77,23 @@ def test_v2_frame_defaults_are_safe_for_old_or_empty_state():
     assert frame["runtime_status"] == "running"
     assert frame["blocked_role"] is None
     assert frame["memory_version"] == "baseline"
+
+
+def test_state_manager_vessel_inventory_is_a_deep_copied_operator_read_model():
+    state = StateManager(ConfigLoader.load())
+    item = {
+        "scenario_entity_id": "scenario-vessel-1",
+        "revision": 2,
+        "position": [4.0, 5.0],
+        "vessel_class": "type_ii",
+        "ais_enabled": False,
+        "ais_controllable": True,
+        "surveillance_stage": "detected",
+    }
+    state.publish_vessel_inventory([item])
+    item["position"][0] = 99
+
+    inventory = state.get_vessel_inventory()
+    inventory[0]["position"][0] = 88
+
+    assert state.get_vessel_inventory()[0]["position"] == [4.0, 5.0]

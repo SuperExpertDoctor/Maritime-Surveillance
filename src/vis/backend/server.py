@@ -32,6 +32,7 @@ from src.mission.intent_commands import (
 )
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
+from src.vis.backend.replay_adapter import normalize_replay_frame
 
 OUTPUT_DIR = "outputs"
 _FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
@@ -227,8 +228,8 @@ def create_app(
                     if index >= offset + limit:
                         break
                     if line.strip():
-                        frames.append(json.loads(line))
-        except (json.JSONDecodeError, OSError) as exc:
+                        frames.append(normalize_replay_frame(json.loads(line)))
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
         return JSONResponse({

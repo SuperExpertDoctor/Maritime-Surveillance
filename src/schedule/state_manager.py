@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
-from typing import Optional
+from typing import Iterable, Mapping, Optional
 import math
 
 import numpy as np
@@ -40,6 +40,11 @@ class StateManager:
         self.runtime_status = "running"
         self.blocked_role = None
         self.memory_version = "baseline"
+        self.vessel_mutation_allowed = True
+        self.editing_allowed = True
+        self.initial_vessel_count = config.ship.population.total_count
+        self.actual_vessel_count = 0
+        self._vessel_inventory: tuple[dict, ...] = ()
         self.lifecycle_mode = False
         self.information_policy = InformationUpdatePolicy(config)
         self._last_information_delta = None
@@ -94,6 +99,15 @@ class StateManager:
             region.avg_info = self.get_avg_info_in_bbox(b)
             patch = values[b.col_start:b.col_end, b.row_start:b.row_end]
             region.info_value = float(patch.mean()) if patch.size else 0.0
+
+    # Operator vessel read model ------------------------------------
+    def publish_vessel_inventory(self, items: Iterable[Mapping]) -> None:
+        """Publish a detached vessel inventory for operator-facing frames."""
+        self._vessel_inventory = tuple(deepcopy(dict(item)) for item in items)
+
+    def get_vessel_inventory(self) -> tuple[dict, ...]:
+        """Return a detached snapshot; callers cannot mutate authoritative state."""
+        return deepcopy(self._vessel_inventory)
 
     # UAV management -------------------------------------------------
     def get_all_uavs(self) -> list[UAVState]:
