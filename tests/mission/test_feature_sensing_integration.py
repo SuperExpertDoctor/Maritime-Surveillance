@@ -3,9 +3,20 @@ from dataclasses import replace
 from scripts.evaluate_mixed_maritime import _FixtureGateway
 from scripts.replay_restoration_scenarios import build_scenario
 from src.env.emitter import EmitterState
-from src.mission.contracts import PassivePosition, VesselCommand
+from src.env.ais_signal import AISSignal
+from src.env.obstacle import Island
+from src.mission.contact_assessor import ContactAssessor
+from src.mission.contracts import (
+    PassivePosition,
+    ProbeSession,
+    VesselCommand,
+    VisualDetection,
+)
+from src.mission.evasion_detector import EvasionDetector
+from src.mission.trajectory_features import advance_probe
 from src.schedule.config_loader import ConfigLoader
 from src.env.simulation import SimulationEngine
+from src.vis.backend.frame_builder import build_frame
 
 
 class _AlwaysOnEmitter:
@@ -251,3 +262,175 @@ def test_information_prompt_exposes_bounded_fairness_metadata():
     assert prompt_ids <= {
         edge.task_id for edge in snapshot.feasible_edges
     }
+
+
+def test_contact_merge_probe_assessment_and_activity_reach_the_public_frame():
+    engine = build_scenario("contact-assessment", seed=42, transport="fixture")
+    store = engine.allocator.sm.contacts
+    uav_id = engine.uavs[0].id
+    contact_position = (27.0, 27.0)
+
+    visual_id = store.ingest_visual(VisualDetection(
+        "EO-MERGE-0", 0.0, "eo", uav_id, contact_position, (0.0, 0.0),
+        0.05, (27.0, 25.2), 1.8, "open_water",
+    ))
+    store.reserve(visual_id, uav_id, "P-MERGE")
+    mmsi = "AIS-MERGE-INTEGRATION"
+    store.ingest_ais(AISSignal(
+        mmsi, contact_position, 0.0, 0.0, "observed", "Cargo", 0.0,
+    ), 0.0)
+    store.ingest_ais(AISSignal(
+        mmsi, contact_position, 0.0, 0.0, "observed", "Cargo", 1.0,
+    ), 1.0)
+
+    contact_id = store.resolve(visual_id)
+    merged = store.snapshot(contact_id)
+    assert contact_id != visual_id
+    assert merged.assigned_uav_id == uav_id
+    assert merged.active_probe_id == "P-MERGE"
+    assert any(event["type"] == "contact_merged" for event in store.events)
+
+    probe = ProbeSession(
+        "P-MERGE", contact_id, uav_id, "baseline", 0.0, None, 0.0,
+        (), (), 0.0, None,
+    )
+    engine.allocator.sm.set_probe_session(probe)
+    for timestamp in range(1, 5):
+        store.ingest_visual(VisualDetection(
+            f"EO-BASE-{timestamp}", float(timestamp), "eo", uav_id,
+            contact_position, (0.0, 0.0), 0.05, (27.0, 25.2), 1.8,
+            "open_water",
+        ))
+        probe = advance_probe(
+            probe, store.snapshot(contact_id).samples, float(timestamp),
+            engine.config.mission.contact,
+        )
+        engine.allocator.sm.set_probe_session(probe)
+
+    for timestamp in range(5, 11):
+        store.ingest_visual(VisualDetection(
+            f"EO-NEAR-{timestamp}", float(timestamp), "eo", uav_id,
+            contact_position, (0.0, 0.0), 0.05, (27.0, 25.8), 1.2,
+            "open_water",
+        ))
+        probe = advance_probe(
+            probe, store.snapshot(contact_id).samples, float(timestamp),
+            engine.config.mission.contact,
+        )
+        engine.allocator.sm.set_probe_session(probe)
+
+    assert probe.phase == "awaiting_assessment"
+    assert probe.baseline_sample_ids and probe.near_sample_ids
+    empty_assessment = ContactAssessor.assess_dimensions(())
+    assert empty_assessment.vessel_class == "unknown"
+    assert empty_assessment.class_evidence_ids == ()
+    assert empty_assessment.activity == "unknown"
+
+    assessment = ContactAssessor.assess_dimensions((
+        {
+            "evidence_id": probe.baseline_sample_ids[0],
+            "family": "eo_class",
+            "vessel_class": "type_ii",
+            "strength": 0.95,
+        },
+        {
+            "evidence_id": probe.near_sample_ids[0],
+            "family": "eo_activity",
+            "strength": 0.95,
+        },
+        {
+            "evidence_id": "EVASION-MERGE-1",
+            "family": "radiation_activity",
+            "strength": 0.95,
+        },
+    ))
+    assert assessment.vessel_class == "type_ii"
+    assert assessment.activity == "confirmed_violation"
+    store.apply_dimension_assessment(
+        contact_id, assessment, assessed_at_min=10.0,
+        expected_revision=store.snapshot(contact_id).revision,
+    )
+
+    engine.allocator.sm.current_time = 10.0
+    frame = build_frame(
+        engine.allocator.sm,
+        cycle=0,
+        config=engine.config,
+        include_matrices=False,
+        ships=engine.ships,
+        uav_entities=engine.uavs,
+        obstacles=engine.obstacles,
+        bases=engine.bases,
+    )
+    public = next(item for item in frame["contacts"] if item["contact_id"] == contact_id)
+    assert public["vessel_class"] == "type_ii"
+    assert public["activity"] == "confirmed_violation"
+    assert public["class_evidence_ids"] == [probe.baseline_sample_ids[0]]
+    assert public["activity_evidence_ids"] == [probe.near_sample_ids[0], "EVASION-MERGE-1"]
+
+
+def test_observed_evasion_reaches_information_frame_but_forced_island_turn_does_not():
+    engine = build_scenario("contact-assessment", seed=42, transport="fixture")
+    sm = engine.allocator.sm
+    uav = engine.uavs[0]
+    uav.status = "tracking"
+    uav._col, uav._row = 10.0, 10.0
+    sm.current_time = 6.0
+    mmsi = "AIS-EVASION-INTEGRATION"
+    track = (
+        (0.0, (12.0, 10.0), mmsi),
+        (1.5, (13.0, 10.0), mmsi),
+        (2.9, (14.0, 10.0), mmsi),
+        (3.0, (14.2, 10.8), mmsi),
+        (4.5, (14.6, 11.4), mmsi),
+        (6.0, (15.0, 12.0), mmsi),
+    )
+    contact_id = sm.contacts.ingest_ais(
+        AISSignal(mmsi, (12.0, 10.0), 0.0, 0.0, "observed", "Cargo", 0.0),
+        0.0,
+    )
+    uav.target_group_id = contact_id
+    engine._ais_history[mmsi] = list(track)
+
+    engine._evaluate_evasion(6.0)
+    engine._evaluate_evasion(6.1)
+    records = sm.information_policy.evidence_store.all_records()
+    assert any(
+        record.kind == "evasive_maneuver" and record.contact_id == contact_id
+        for record in records
+    )
+    assert any(
+        event["type"] == "evasive_maneuver_detected"
+        and event["data"]["contact_id"] == contact_id
+        for event in sm.get_recent_events(0.0)
+    )
+
+    forced_detector = EvasionDetector(
+        engine.config.mission.evasion,
+        cell_size_km=engine.config.grid.cell_size_km,
+    )
+    observer_history = tuple({
+        "uav_id": uav.id,
+        "timestamp": float(index * 1.5),
+        "position": (10.0, 10.0),
+        "operation": "track",
+    } for index in range(5))
+    forced_island = Island((16.0, 12.0), size=2, id="island-forced-turn")
+    assert forced_detector.evaluate(
+        track, observer_history, now_min=6.0,
+        mission_boundary=(0.0, 0.0, 30.0, 30.0), obstacles=(forced_island,),
+        contact_id=contact_id,
+    ) == ()
+    assert forced_detector.evaluate(
+        track, observer_history, now_min=6.1,
+        mission_boundary=(0.0, 0.0, 30.0, 30.0), obstacles=(forced_island,),
+        contact_id=contact_id,
+    ) == ()
+
+    sm.current_time = 6.1
+    frame = build_frame(
+        sm, cycle=0, config=engine.config, include_matrices=False,
+        ships=engine.ships, uav_entities=engine.uavs,
+        obstacles=engine.obstacles, bases=engine.bases,
+    )
+    assert any(item["kind"] == "evasive_maneuver" for item in frame["evidence"])
