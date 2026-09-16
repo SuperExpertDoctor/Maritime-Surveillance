@@ -288,34 +288,72 @@ class _FixtureGateway:
     def _bounded(value, lower, upper) -> float:
         return float(max(lower, min(upper, value)))
 
+    @staticmethod
+    def _selection_payload(snapshot: dict, selected: list[str]) -> dict:
+        return {
+            "schema_version": "mission-selection/v1",
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "selected_task_ids": list(selected),
+            "preempt_uav_ids": [],
+            "defer_reason": None if selected else "fixture_no_feasible_task",
+            "notes": "deterministic fixture selection",
+            "information_version": int(snapshot.get("information_version", 0)),
+        }
+
+    def _build_decision_selection(
+        self, snapshot: dict, validate
+    ) -> tuple[dict, tuple[str, ...]]:
+        """Build a fixture selection through the same validator as production."""
+        candidates = [
+            item for item in snapshot.get("candidates", ())
+            if isinstance(item, dict)
+        ]
+        edge_ids = {
+            edge.get("task_id")
+            for edge in snapshot.get("feasible_edges", ())
+            if isinstance(edge, dict)
+        }
+        kind_rank = {"investigation": 0, "direction_search": 1, "search": 2}
+        visible = [
+            item for item in candidates if item.get("task_id") in edge_ids
+        ]
+        visible.sort(key=lambda item: (
+            kind_rank.get(item.get("kind"), 3),
+            0 if item.get("priority") == "high" else 1,
+            item.get("task_id", ""),
+        ))
+        selected: list[str] = []
+        final_errors: tuple[str, ...] = ()
+        max_rounds = max(1, len(visible))
+        for _ in range(max_rounds):
+            changed = False
+            for candidate in visible:
+                task_id = candidate["task_id"]
+                if task_id in selected:
+                    continue
+                proposed = [*selected, task_id]
+                proposed_payload = self._selection_payload(snapshot, proposed)
+                errors = tuple(validate(proposed_payload)) if validate else ()
+                if not errors or all(
+                    error.startswith("underutilized_feasible_work:")
+                    for error in errors
+                ):
+                    selected = proposed
+                    final_errors = errors
+                    changed = True
+                    break
+            if not changed or not final_errors:
+                break
+
+        payload = self._selection_payload(snapshot, selected)
+        final_errors = tuple(validate(payload)) if validate else ()
+        return payload, final_errors
+
     def request_json(self, *, role: str, snapshot_id: str, user_payload: dict,
                      validate, **_kwargs) -> ModelResult:
         if role == "decision_maker":
             snapshot = user_payload.get("snapshot", {})
-            candidates = list(snapshot.get("candidates", ()))
-            edge_ids = {
-                edge.get("task_id") for edge in snapshot.get("feasible_edges", ())
-            }
-            kind_rank = {"investigation": 0, "direction_search": 1, "search": 2}
-            candidates.sort(key=lambda item: (
-                kind_rank.get(item.get("kind"), 3),
-                0 if item.get("priority") == "high" else 1,
-                item.get("task_id", ""),
-            ))
-            selected = next(
-                (item["task_id"] for item in candidates
-                 if item.get("task_id") in edge_ids),
-                None,
-            )
-            payload = {
-                "schema_version": "mission-selection/v1",
-                "snapshot_id": snapshot.get("snapshot_id", snapshot_id),
-                "selected_task_ids": [selected] if selected else [],
-                "preempt_uav_ids": [],
-                "defer_reason": None if selected else "fixture_no_feasible_task",
-                "notes": "deterministic fixture selection",
-                "information_version": int(snapshot.get("information_version", 0)),
-            }
+            payload, errors = self._build_decision_selection(snapshot, validate)
         elif role == "contact_assessor":
             features = user_payload.get("features", {})
             sample_ids = list(dict.fromkeys(
@@ -372,7 +410,9 @@ class _FixtureGateway:
             }
         else:
             payload = {}
-        errors = tuple(validate(payload)) if validate is not None else ()
+            errors = ()
+        if role != "decision_maker":
+            errors = tuple(validate(payload)) if validate is not None else ()
         return self._result(role, snapshot_id, payload, errors)
 
     def request_text(self, *, role: str, snapshot_id: str, **_kwargs) -> ModelResult:

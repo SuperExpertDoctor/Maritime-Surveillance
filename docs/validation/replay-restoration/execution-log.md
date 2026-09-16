@@ -96,3 +96,25 @@ extension interface.
   `python -m pytest tests/mission/test_mission_scheduler.py tests/mission/test_prompt_window.py tests/mission/test_intent_candidates.py -q`
 - Gate result: `31 passed in 1.63s` (including the prompt-hidden selection
   regression).
+
+## T04 Model Boundary and Failure Visibility
+
+- Red evidence: the deterministic evaluation gateway selected only the first
+  feasible candidate, so T03 correctly rejected it as underutilized; mission
+  failures emitted only the legacy `decision_failed` event without a stable
+  failure category payload.
+- Kept the production `LLMGateway` correction limit unchanged and added the
+  structured `mission_selection_failed` event with snapshot ID, failure
+  category, validator error codes, and available-resource count. Existing
+  `decision_failed` retry behavior remains intact.
+- Restricted fixture expansion to the visible candidate payload. It iterates
+  at most one round per visible candidate, accepts only a clean selection or
+  errors consisting solely of `underutilized_feasible_work:*`, and performs a
+  final validator pass. The contact assessor remains explicitly `unknown` and
+  uses only supplied sample IDs.
+- Red-to-green tests:
+  `python -m pytest tests/mission/test_simulation_flow.py::test_failed_mission_decision_emits_failure_and_retries_after_one_minute tests/mission/test_evaluation_cli.py::test_fixture_gateway_expands_selection_until_validator_accepts -q`
+  -> `2 passed in 2.14s`.
+- Gate command:
+  `LONGCAT_API_KEY=offline-test python -m pytest tests/mission/test_llm_gateway.py tests/mission/test_failure_paths.py tests/mission/test_evaluation_cli.py tests/mission/test_mission_scheduler.py -q`
+- Gate result: `104 passed in 37.78s`. No live model or credential was used.

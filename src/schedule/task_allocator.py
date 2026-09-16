@@ -277,6 +277,15 @@ class TaskAllocator:
                 current_time,
                 reason=failure_reason or "decision_failed",
             )
+            self.sm.add_event("mission_selection_failed", {
+                "snapshot_id": snapshot.snapshot_id,
+                "failure_category": (
+                    self.mission_scheduler.last_selection_failure_category
+                    or "unknown"
+                ),
+                "error_codes": list(self.mission_scheduler.last_selection_errors),
+                "available_count": len(snapshot.available_uav_ids),
+            })
             self.sm.add_event("decision_failed", {
                 "cycle": self.sm.cycle,
                 "snapshot_id": snapshot.snapshot_id,

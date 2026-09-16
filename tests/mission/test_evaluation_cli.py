@@ -80,6 +80,45 @@ def test_fixture_gateway_supports_reviewer_interaction_logging():
     assert gateway.call_log[-1]["role"] == "reviewer"
 
 
+def test_fixture_gateway_expands_selection_until_validator_accepts():
+    from scripts.evaluate_mixed_maritime import _FixtureGateway
+
+    gateway = _FixtureGateway()
+    snapshot = {
+        "snapshot_id": "fixture-snapshot",
+        "information_version": 0,
+        "candidates": [
+            {"task_id": "S1", "kind": "search", "priority": "high"},
+            {"task_id": "S2", "kind": "search", "priority": "medium"},
+        ],
+        "feasible_edges": [
+            {"task_id": "S1", "uav_options": [{"uav_id": "U1"}]},
+            {"task_id": "S2", "uav_options": [{"uav_id": "U2"}]},
+        ],
+    }
+    payloads = []
+
+    def validate(payload):
+        payloads.append(payload)
+        return (
+            ("underutilized_feasible_work:S2",)
+            if payload["selected_task_ids"] != ["S1", "S2"]
+            else ()
+        )
+
+    result = gateway.request_json(
+        role="decision_maker",
+        snapshot_id="fixture-snapshot",
+        user_payload={"snapshot": snapshot},
+        validate=validate,
+    )
+
+    assert result.success
+    assert result.payload["selected_task_ids"] == ["S1", "S2"]
+    assert payloads
+    assert payloads[-1]["selected_task_ids"] == ["S1", "S2"]
+
+
 def test_alignment_report_aggregates_raw_planning_latency_samples(monkeypatch, tmp_path):
     import scripts.evaluate_mixed_maritime as evaluator
 

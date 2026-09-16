@@ -331,5 +331,17 @@ def test_failed_mission_decision_emits_failure_and_retries_after_one_minute():
     )
     assert failure["data"]["reason"] == "model_selection_unavailable"
     assert failure["data"]["retry_at_min"] == 2.0
+    selection_failure = next(
+        event
+        for event in engine.allocator.sm.get_recent_events(1.0)
+        if event["type"] == "mission_selection_failed"
+    )
+    assert {
+        "snapshot_id", "failure_category", "error_codes", "available_count",
+    } <= set(selection_failure["data"])
+    assert selection_failure["data"]["snapshot_id"] == result["snapshot_id"]
+    assert selection_failure["data"]["failure_category"] == "transport"
+    assert selection_failure["data"]["error_codes"] == ["model_selection_unavailable"]
+    assert "LONGCAT_API_KEY" not in str(selection_failure)
     assert engine.allocator.trigger_manager.check(1.99).trigger_type == "none"
     assert engine.allocator.trigger_manager.check(2.0).trigger_type == "heavy"
