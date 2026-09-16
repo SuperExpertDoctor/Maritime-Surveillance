@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { CircleDot, Eye, FileSearch, Radio, ShieldQuestion } from "lucide-react";
+import { uavDisplayState } from "../renderer/displayState";
 
 const VESSEL_CLASS_LABELS = {
   unknown: "待核查",
@@ -28,7 +29,11 @@ function sourceLabel(source) {
 
 export default function ContactPanel({ frame, selectedContactId, onSelectContact }) {
   const contacts = frame?.contacts || [];
+  const uavs = frame?.uavs || [];
   const selected = contacts.find((contact) => contact.contact_id === selectedContactId) || contacts[0];
+  const assignedUav = selected?.assigned_uav_id
+    ? uavs.find((uav) => uav.id === selected.assigned_uav_id)
+    : null;
   const samples = useMemo(() => (selected?.samples || []).slice(-8).reverse(), [selected]);
   const assessment = selected?.last_assessment;
 
@@ -44,6 +49,11 @@ export default function ContactPanel({ frame, selectedContactId, onSelectContact
         <>
           <div className="contact-list">
             {contacts.map((contact) => (
+              (() => {
+                const assigned = contact.assigned_uav_id
+                  ? uavs.find((uav) => uav.id === contact.assigned_uav_id)
+                  : null;
+                return (
               <button
                 type="button"
                 key={contact.contact_id}
@@ -52,9 +62,11 @@ export default function ContactPanel({ frame, selectedContactId, onSelectContact
                 aria-pressed={contact.contact_id === selected?.contact_id}
               >
                 <span className={`contact-state-dot vessel-class-${contact.vessel_class || "unknown"}`}><CircleDot size={15} /></span>
-                <span className="contact-copy"><strong>{contact.contact_id}</strong><small>{VESSEL_CLASS_LABELS[contact.vessel_class] || "待核查"} · {STATE_LABELS[contact.state] || contact.state}</small></span>
+                <span className="contact-copy"><strong>{contact.contact_id}</strong><small>{VESSEL_CLASS_LABELS[contact.vessel_class] || "待核查"} · {STATE_LABELS[contact.state] || contact.state}{assigned ? ` · ${uavDisplayState(assigned).label}` : ""}</small></span>
                 <span className="contact-seen">{contact.samples?.length || 0}</span>
               </button>
+                );
+              })()
             ))}
           </div>
           {selected && (
@@ -65,6 +77,7 @@ export default function ContactPanel({ frame, selectedContactId, onSelectContact
                 <div><dt>AIS 来源</dt><dd>{selected.ais_mmsi || "无"}</dd></div>
                 <div><dt>位置</dt><dd className="mono">{position(selected.estimated_position)}</dd></div>
                 <div><dt>观测次数</dt><dd>{selected.samples?.length || 0}</dd></div>
+                <div><dt>任务阶段</dt><dd>{assignedUav ? uavDisplayState(assignedUav).label : "未派工"}</dd></div>
               </dl>
               <div className="evidence-heading"><span><Eye size={13} />证据关键点</span><small>{samples.length}</small></div>
               <div className="evidence-list">

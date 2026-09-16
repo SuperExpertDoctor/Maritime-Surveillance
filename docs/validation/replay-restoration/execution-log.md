@@ -185,3 +185,30 @@ extension interface.
 - Coordinator and existing simulation integration regression:
   `LONGCAT_API_KEY=t07-offline-regression python -m pytest tests/control/test_route_snapshot.py tests/env/test_route_visual_frame.py tests/env/test_simulation_integration.py -q`
   -> `40 passed in 14.71s`.
+
+## T08 Visual Target, Phase, and Label Restoration
+
+- Red evidence: the frontend had no shared task-phase display contract, probe
+  baseline could be read as tracking by status, observed contacts used a
+  generic dot with inline text, and scenario vessels had no independent render
+  switch or label layout.
+- Added `uavDisplayState` with the task visual contract first and legacy status
+  fallback. A probe in `baseline` with `observation_started=false` is rendered
+  as `接近调查`; map labels, UAV sidebar rows/details, and contact details use
+  the same mapping.
+- Added a deterministic screen-space `layoutLabels` placer with priority,
+  eight fixed offsets, boundary/overlap checks, and selected-object leader
+  lines. Object text is drawn in one pass after symbols; hidden low-priority
+  text does not remove its clickable symbol.
+- Contacts remain the observation branch when present, legacy ships are used
+  only when contacts are absent, and scenario vessels are drawn/labeled only
+  when the explicit scene-truth switch is enabled. Initialization placement
+  temporarily reveals the layer without changing the user's persisted switch.
+  Unknown contacts use a neutral vessel symbol and zero velocity does not
+  fabricate a heading.
+- Red-to-green browser checks:
+  `npx playwright test tests/replay-restoration.spec.js --grep 'probe|contact|label|scenario'`
+  -> `3 passed`.
+- Gate checks:
+  `npx playwright test tests/mixed-maritime.spec.js --grep 'vessel|AIS|replay renders intent|operator can draw|drag geometry'`
+  -> `8 passed`; `npm run build` -> Vite build passed.
