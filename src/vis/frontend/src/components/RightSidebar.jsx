@@ -1,4 +1,4 @@
-import { Bot, CircleX, Crosshair, MousePointer2, Plane, Radar, Ship, Trash2, Waypoints } from "lucide-react";
+import { Bot, CircleX, Crosshair, MousePointer2, Plane, Radio, RadioTower, Radar, Ship, Trash2, Waypoints } from "lucide-react";
 import { UAV_STATUS_COLORS } from "../renderer/colors";
 import ContactPanel from "./ContactPanel";
 import IntentPanel from "./IntentPanel";
@@ -10,6 +10,19 @@ const STATUS_LABELS = {
   tracking: "跟踪",
   returning: "返航",
   refueling: "加油",
+};
+
+const VESSEL_CLASS_LABELS = {
+  type_i: "I 类",
+  type_ii: "II 类",
+  unknown: "未知",
+};
+
+const SURVEILLANCE_STAGE_LABELS = {
+  undetected: "未发现",
+  detected: "已发现",
+  probing: "递进侦察",
+  tracking: "持续跟踪",
 };
 
 export default function RightSidebar({
@@ -31,6 +44,7 @@ export default function RightSidebar({
   selectedScenarioVesselId,
   onSelectScenarioVessel,
   onDeleteVessel,
+  onSetVesselAis,
   vesselCommandStatus,
 }) {
   const uavs = frame?.uavs || [];
@@ -57,6 +71,8 @@ export default function RightSidebar({
   const selectedScenarioVessel = scenarioVessels.find(
     (vessel) => vessel.scenario_entity_id === selectedScenarioVesselId,
   );
+  const vesselCommandBusy = vesselCommandStatus?.status === "queued";
+  const canEditVessels = Boolean(editingAllowed) && !vesselCommandBusy;
 
   return (
     <aside className={`sidebar ${open ? "open" : ""}`} aria-label="编队状态">
@@ -77,44 +93,44 @@ export default function RightSidebar({
 
           <section className="sidebar-section vessel-editor" aria-label="初始化船舶编辑">
             <div className="section-heading">
-              <span><Ship size={15} />初始化船舶</span>
-              <small>{frame.actual_vessel_count ?? ships.length}/{frame.configured_vessel_count ?? ships.length}</small>
+              <span><Ship size={15} />场景船舶</span>
+              <small>{frame.actual_vessel_count ?? ships.length}/{frame.initial_vessel_count ?? ships.length}</small>
             </div>
             <div className="vessel-palette" role="group" aria-label="船舶组件库">
               <button
                 type="button"
-                className={vesselPlacement === "civilian" ? "vessel-tool active" : "vessel-tool"}
-                aria-pressed={vesselPlacement === "civilian"}
-                aria-label="民用船舶"
-                draggable={editingAllowed}
-                disabled={!editingAllowed}
-                onClick={() => onSelectVesselType?.(vesselPlacement === "civilian" ? null : "civilian")}
+                className={vesselPlacement === "type_i" ? "vessel-tool active" : "vessel-tool"}
+                aria-pressed={vesselPlacement === "type_i"}
+                aria-label="I 类船舶"
+                draggable={canEditVessels}
+                disabled={!canEditVessels}
+                onClick={() => onSelectVesselType?.(vesselPlacement === "type_i" ? null : "type_i")}
                 onDragStart={(event) => {
-                  event.dataTransfer.setData("application/x-vessel-class", "civilian");
-                  onSelectVesselType?.("civilian");
+                  event.dataTransfer.setData("application/x-vessel-class", "type_i");
+                  onSelectVesselType?.("type_i");
                 }}
-                title="选择后点击地图放置民用船舶"
+                title="选择后点击地图放置 I 类船舶"
               >
-                <Ship size={17} /><span>民用船舶</span>
+                <Ship size={17} /><span>I 类船舶</span>
               </button>
               <button
                 type="button"
-                className={vesselPlacement === "research" ? "vessel-tool active" : "vessel-tool"}
-                aria-pressed={vesselPlacement === "research"}
-                aria-label="科考船舶"
-                draggable={editingAllowed}
-                disabled={!editingAllowed}
-                onClick={() => onSelectVesselType?.(vesselPlacement === "research" ? null : "research")}
+                className={vesselPlacement === "type_ii" ? "vessel-tool active" : "vessel-tool"}
+                aria-pressed={vesselPlacement === "type_ii"}
+                aria-label="II 类船舶"
+                draggable={canEditVessels}
+                disabled={!canEditVessels}
+                onClick={() => onSelectVesselType?.(vesselPlacement === "type_ii" ? null : "type_ii")}
                 onDragStart={(event) => {
-                  event.dataTransfer.setData("application/x-vessel-class", "research");
-                  onSelectVesselType?.("research");
+                  event.dataTransfer.setData("application/x-vessel-class", "type_ii");
+                  onSelectVesselType?.("type_ii");
                 }}
-                title="选择后点击地图放置科考船舶"
+                title="选择后点击地图放置 II 类船舶"
               >
-                <Radar size={17} /><span>科考船舶</span>
+                <Radar size={17} /><span>II 类船舶</span>
               </button>
             </div>
-            {vesselPlacement && editingAllowed && (
+            {vesselPlacement && canEditVessels && (
               <div className="placement-status">
                 <MousePointer2 size={14} />
                 <span>地图上选择位置</span>
@@ -134,17 +150,18 @@ export default function RightSidebar({
                     )}
                   >
                     <span><Ship size={13} />{vessel.scenario_entity_id}</span>
-                    <small>{vessel.vessel_class === "research" ? "科考" : "民用"}</small>
+                    <small>{VESSEL_CLASS_LABELS[vessel.vessel_class] || "未知"} · {vessel.ais_enabled ? "AIS 开启" : "AIS 关闭"}</small>
                   </button>
                 ))}
               </div>
             )}
-            {selectedScenarioVessel && editingAllowed && (
+            {selectedScenarioVessel && canEditVessels && (
               <button type="button" className="delete-vessel-action" onClick={onDeleteVessel} aria-label="删除选中船舶">
                 <Trash2 size={14} />删除选中船舶
               </button>
             )}
-            {!editingAllowed && <p className="editor-note">首个仿真步后锁定；回放只读</p>}
+            {!editingAllowed && <p className="editor-note">当前场景只读；回放和已结束任务不可编辑</p>}
+            {vesselCommandBusy && <p className="editor-note">命令处理中，等待权威 frame 更新</p>}
             {vesselCommandStatus && (
               <div className={`vessel-command-status ${vesselCommandStatus.status}`} role="status">
                 <span>{vesselCommandStatus.message}</span>
@@ -152,6 +169,44 @@ export default function RightSidebar({
               </div>
             )}
           </section>
+
+          {selectedScenarioVessel && (
+            <section className="sidebar-section selected-vessel-detail" aria-label="选中船舶详情">
+              <div className="section-heading">
+                <span><Ship size={15} />{selectedScenarioVessel.scenario_entity_id}</span>
+                <small>REV {selectedScenarioVessel.revision}</small>
+              </div>
+              <dl className="vessel-detail-grid">
+                <div><dt>类别</dt><dd>{VESSEL_CLASS_LABELS[selectedScenarioVessel.vessel_class] || "未知"}</dd></div>
+                <div><dt>侦察阶段</dt><dd>{SURVEILLANCE_STAGE_LABELS[selectedScenarioVessel.surveillance_stage] || "未发现"}</dd></div>
+                <div><dt>位置</dt><dd className="mono">{selectedScenarioVessel.position?.map((value) => Number(value).toFixed(1)).join(", ") || "-"}</dd></div>
+                <div><dt>AIS</dt><dd>{selectedScenarioVessel.ais_enabled ? "开启" : "关闭"}</dd></div>
+              </dl>
+              <div className="ais-control" role="group" aria-label="AIS 开关">
+                <button
+                  type="button"
+                  className={selectedScenarioVessel.ais_enabled ? "active" : ""}
+                  aria-label="开启 AIS"
+                  aria-pressed={selectedScenarioVessel.ais_enabled}
+                  disabled={!selectedScenarioVessel.ais_controllable || !canEditVessels || selectedScenarioVessel.ais_enabled}
+                  onClick={() => onSetVesselAis?.(true)}
+                >
+                  <RadioTower size={14} />开启
+                </button>
+                <button
+                  type="button"
+                  className={!selectedScenarioVessel.ais_enabled ? "active" : ""}
+                  aria-label="关闭 AIS"
+                  aria-pressed={!selectedScenarioVessel.ais_enabled}
+                  disabled={!selectedScenarioVessel.ais_controllable || !canEditVessels || !selectedScenarioVessel.ais_enabled}
+                  onClick={() => onSetVesselAis?.(false)}
+                >
+                  <Radio size={14} />关闭
+                </button>
+              </div>
+              {!selectedScenarioVessel.ais_controllable && <p className="editor-note">I 类船舶 AIS 固定开启</p>}
+            </section>
+          )}
 
           <section className="sidebar-section">
             <div className="section-heading"><span>信息态势</span><small>{frame.searchable_cells || total || 900} CELLS</small></div>

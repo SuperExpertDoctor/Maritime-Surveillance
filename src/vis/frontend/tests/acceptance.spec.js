@@ -140,6 +140,9 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".connection-state")).toHaveClass(/connected/);
   await expect(page.locator("canvas")).toBeVisible();
+  await expect(page.getByRole("button", { name: "I 类船舶", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeEnabled();
+  await expect(page.locator(".vessel-editor .section-heading small")).toHaveText(/^\d+\/\d+$/);
   const config = await page.evaluate(() => fetch("/api/config").then((response) => response.json()));
   expect(config.environment.base_count).toBe(2);
   expect(config.environment.base_land_margin).toBe(0);
@@ -240,6 +243,7 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   expect(replayFile).toMatch(/^simulation_.*\.jsonl$/);
   await fileSelect.selectOption(replayFile);
   await expect(page.locator(".playback-readout").first()).toContainText("480");
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeDisabled();
 
   const readout = page.locator(".playback-readout").first();
   await page.locator(".transport-btn.primary").click();

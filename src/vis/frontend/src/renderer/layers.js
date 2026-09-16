@@ -464,7 +464,7 @@ export function drawScenarioVessels(ctx, vessels, cellSize, ox, oy, selectedId) 
     if (!Array.isArray(vessel.position) || vessel.position.length < 2) continue;
     const center = gridCenter(Number(vessel.position[0]), Number(vessel.position[1]), cellSize, ox, oy);
     const selected = vessel.scenario_entity_id === selectedId;
-    const color = vessel.vessel_class === "research" ? "#B45309" : "#0369A1";
+    const color = vessel.vessel_class === "type_ii" ? "#B45309" : "#0369A1";
     const radius = Math.max(4, cellSize * (selected ? 0.34 : 0.27));
     ctx.save();
     ctx.fillStyle = `${color}20`;

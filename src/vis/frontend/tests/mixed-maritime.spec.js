@@ -13,6 +13,9 @@ function frameFixture(mode = "live", overrides = {}) {
     runtime_status: "running",
     blocked_role: null,
     memory_version: "baseline",
+    vessel_mutation_allowed: true,
+    initial_vessel_count: 8,
+    actual_vessel_count: 8,
     total_steps: 10,
     coverage_pct: 0,
     searchable_cells: 840,
@@ -97,10 +100,12 @@ function frameFixture(mode = "live", overrides = {}) {
 
 async function installFrameSocket(page, fixture) {
   await page.addInitScript((nextFrame) => {
+    let activeSocket = null;
     class MockWebSocket {
       static OPEN = 1;
 
       constructor() {
+        activeSocket = this;
         this.readyState = 0;
         window.setTimeout(() => {
           this.readyState = MockWebSocket.OPEN;
@@ -117,6 +122,11 @@ async function installFrameSocket(page, fixture) {
       }
     }
     window.WebSocket = MockWebSocket;
+    window.__lastFixture = nextFrame;
+    window.__pushFrame = (frame) => {
+      window.__lastFixture = frame;
+      activeSocket?.onmessage?.({ data: JSON.stringify(frame) });
+    };
   }, fixture);
 }
 
@@ -189,7 +199,18 @@ test("operator can draw a focus area and observe queued then applied command", a
 });
 
 test("replay renders intent controls as read-only", async ({ page }) => {
-  const fixture = frameFixture("replay");
+  const fixture = frameFixture("replay", {
+    vessel_mutation_allowed: true,
+    scenario_vessels: [{
+      scenario_entity_id: "scenario-vessel-replay",
+      revision: 2,
+      position: [12, 8],
+      vessel_class: "type_ii",
+      ais_enabled: true,
+      ais_controllable: true,
+      surveillance_stage: "detected",
+    }],
+  });
   await installFrameSocket(page, frameFixture());
   await page.route("**/api/replay**", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ total: 1, frames: [fixture] }) });
@@ -206,6 +227,9 @@ test("replay renders intent controls as read-only", async ({ page }) => {
   await expect(page.locator(".intent-panel")).toContainText("回放只读");
   await expect(page.locator(".intent-panel .intent-form")).toHaveCount(0);
   await expect(page.locator('[aria-label="框选重点区"]')).toBeDisabled();
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeDisabled();
+  await page.getByRole("button", { name: /scenario-vessel-replay/ }).click();
+  await expect(page.getByRole("button", { name: "关闭 AIS" })).toBeDisabled();
 });
 
 test("replay retries a failed chunk and surfaces the recovered frame", async ({ page }) => {
@@ -287,16 +311,19 @@ test("replay can jump over unloaded chunks without a page error", async ({ page 
   expect(pageErrors).toEqual([]);
 });
 
-test("operator places a research vessel by click and deletes the selected scenario vessel", async ({ page }) => {
+test("operator places a type-II vessel by click and deletes the selected scenario vessel", async ({ page }) => {
   const fixture = frameFixture("live", {
-    editing_allowed: true,
-    configured_vessel_count: 8,
+    vessel_mutation_allowed: true,
+    initial_vessel_count: 8,
     actual_vessel_count: 8,
     scenario_vessels: [{
       scenario_entity_id: "scenario-vessel-9",
-      revision: 0,
+      revision: 4,
       position: [12, 8],
-      vessel_class: "research",
+      vessel_class: "type_ii",
+      ais_enabled: true,
+      ais_controllable: true,
+      surveillance_stage: "undetected",
     }],
   });
   await installFrameSocket(page, fixture);
@@ -329,8 +356,8 @@ test("operator places a research vessel by click and deletes the selected scenar
   });
   await page.goto("/");
 
-  await expect(page.getByRole("button", { name: "科考船舶" })).toBeEnabled();
-  await page.getByRole("button", { name: "科考船舶" }).click();
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeEnabled();
+  await page.getByRole("button", { name: "II 类船舶" }).click();
   const canvas = page.locator(".canvas-area canvas");
   const geometry = await page.evaluate(async () => {
     const { computeLayout } = await import("/src/renderer/geometry.js");
@@ -345,7 +372,7 @@ test("operator places a research vessel by click and deletes the selected scenar
     },
   });
   await expect.poll(() => posted).toHaveLength(1);
-  expect(posted[0].vessel_class).toBe("research");
+  expect(posted[0].vessel_class).toBe("type_ii");
   expect(posted[0].position_cells).toEqual([12.5, 8.5]);
 
   await page.getByRole("button", { name: /scenario-vessel-9/ }).click();
@@ -354,10 +381,130 @@ test("operator places a research vessel by click and deletes the selected scenar
 });
 
 test("vessel editing is disabled outside the initialization window", async ({ page }) => {
-  await installFrameSocket(page, frameFixture("live", { editing_allowed: false }));
+  await installFrameSocket(page, frameFixture("live", { vessel_mutation_allowed: false }));
   await page.goto("/");
-  await expect(page.getByRole("button", { name: "科考船舶" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "民用船舶" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "I 类船舶", exact: true })).toBeDisabled();
+});
+
+test("type-II AIS control sends the current revision and waits for an authoritative frame", async ({ page }) => {
+  const fixture = frameFixture("live", {
+    scenario_vessels: [{
+      scenario_entity_id: "scenario-vessel-ii",
+      revision: 4,
+      position: [12, 8],
+      vessel_class: "type_ii",
+      ais_enabled: true,
+      ais_controllable: true,
+      surveillance_stage: "detected",
+    }],
+  });
+  await installFrameSocket(page, fixture);
+  const patches = [];
+  await page.route("**/api/vessels/*/ais", async (route) => {
+    patches.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ command_id: "ais-command", status: "queued" }),
+    });
+  });
+  await page.route("**/api/vessel-commands/ais-command", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ command_id: "ais-command", status: "applied", error_code: null }),
+    });
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: /scenario-vessel-ii/ }).click();
+  const disable = page.getByRole("button", { name: "关闭 AIS" });
+  await expect(disable).toHaveAttribute("aria-pressed", "false");
+  await disable.click();
+  await expect.poll(() => patches).toHaveLength(1);
+  expect(patches[0]).toMatchObject({
+    episode_id: "episode-browser",
+    expected_revision: 4,
+    ais_enabled: false,
+  });
+  await expect(disable).toHaveAttribute("aria-pressed", "false");
+
+  await page.evaluate((nextFrame) => window.__pushFrame(nextFrame), {
+    ...fixture,
+    frame_id: 2,
+    scenario_vessels: [{
+      ...fixture.scenario_vessels[0],
+      revision: 5,
+      ais_enabled: false,
+    }],
+  });
+  await expect(page.getByRole("button", { name: "关闭 AIS" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "开启 AIS" })).toHaveAttribute("aria-pressed", "false");
+});
+
+test("runtime vessel palette stays enabled and the count follows authoritative frames", async ({ page }) => {
+  const fixture = frameFixture("live", {
+    sim_time_min: 10,
+    vessel_mutation_allowed: true,
+    actual_vessel_count: 8,
+  });
+  await installFrameSocket(page, fixture);
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "I 类船舶", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeEnabled();
+  await expect(page.locator(".vessel-editor .section-heading small")).toHaveText("8/8");
+
+  await page.evaluate((nextFrame) => window.__pushFrame(nextFrame), {
+    ...fixture,
+    frame_id: 2,
+    actual_vessel_count: 9,
+    scenario_vessels: [{
+      scenario_entity_id: "scenario-vessel-9",
+      revision: 1,
+      position: [12, 8],
+      vessel_class: "type_i",
+      ais_enabled: true,
+      ais_controllable: false,
+      surveillance_stage: "undetected",
+    }],
+  });
+  await expect(page.locator(".vessel-editor .section-heading small")).toHaveText("9/8");
+
+  await page.evaluate((nextFrame) => window.__pushFrame(nextFrame), {
+    ...fixture,
+    frame_id: 3,
+    actual_vessel_count: 8,
+    scenario_vessels: [],
+  });
+  await expect(page.locator(".vessel-editor .section-heading small")).toHaveText("8/8");
+});
+
+test("AIS revision conflict is visible and does not change the selected frame state", async ({ page }) => {
+  const fixture = frameFixture("live", {
+    scenario_vessels: [{
+      scenario_entity_id: "scenario-vessel-conflict",
+      revision: 7,
+      position: [12, 8],
+      vessel_class: "type_ii",
+      ais_enabled: true,
+      ais_controllable: true,
+      surveillance_stage: "detected",
+    }],
+  });
+  await installFrameSocket(page, fixture);
+  await page.route("**/api/vessels/*/ais", async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ error_code: "revision_conflict" }),
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /scenario-vessel-conflict/ }).click();
+  await page.getByRole("button", { name: "关闭 AIS" }).click();
+  await expect(page.locator(".vessel-command-status")).toContainText("revision_conflict");
+  await expect(page.getByRole("button", { name: "关闭 AIS" })).toHaveAttribute("aria-pressed", "false");
 });
 
 test("operator sees runtime command transition from queued to applied", async ({ page }) => {

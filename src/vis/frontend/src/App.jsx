@@ -31,7 +31,8 @@ export default function App() {
   const mp4Export = useMp4Export(replay, mapExporterRef);
   const frame = mode === "live" ? live.frame : replay.frame;
   const readOnly = mode === "replay";
-  const editingAllowed = mode === "live" && Boolean(frame?.editing_allowed);
+  const editingAllowed = mode === "live" && Boolean(frame?.vessel_mutation_allowed);
+  const vesselCommandBusy = vesselCommandStatus?.status === "queued";
 
   useEffect(() => {
     setSelectionMode(false);
@@ -109,67 +110,80 @@ export default function App() {
     throw new Error("command_timeout");
   };
 
-  const handlePlaceVessel = async (position, selectedType = vesselPlacement) => {
-    if (!editingAllowed || !selectedType || !frame?.episode_id) return;
-    const id = commandId();
+  const submitVesselCommand = async ({ url, method, body }, successMessage, onApplied) => {
+    const id = body.command_id;
     setVesselCommandStatus({ status: "queued", message: "船舶命令排队中", commandId: id });
     try {
-      const response = await fetch("/api/vessels", {
-        method: "POST",
+      const response = await fetch(url, {
+        method,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          episode_id: frame.episode_id,
-          command_id: id,
-          vessel_class: selectedType,
-          position_cells: position,
-        }),
+        body: JSON.stringify(body),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error_code || "vessel_create_failed");
       const applied = await pollVesselCommand(result.command_id || id);
       setVesselCommandStatus({
         status: applied.status,
-        message: applied.status === "applied" ? "船舶已加入场景" : "船舶命令被拒绝",
+        message: applied.status === "applied" ? successMessage : "船舶命令被拒绝",
         commandId: applied.command_id || id,
         errorCode: applied.error_code,
       });
-      setVesselPlacement(null);
+      if (applied.status === "applied") onApplied?.(applied);
     } catch (error) {
       setVesselCommandStatus({ status: "rejected", message: "船舶命令失败", errorCode: error.message });
     }
   };
 
+  const handlePlaceVessel = async (position, selectedType = vesselPlacement) => {
+    if (!editingAllowed || vesselCommandBusy || !selectedType || !frame?.episode_id) return;
+    const id = commandId();
+    await submitVesselCommand({
+      url: "/api/vessels",
+      method: "POST",
+      body: {
+        episode_id: frame.episode_id,
+        command_id: id,
+        vessel_class: selectedType,
+        position_cells: position,
+      },
+    }, "船舶已加入场景", () => setVesselPlacement(null));
+  };
+
   const handleDeleteVessel = async () => {
-    if (!editingAllowed || !selectedScenarioVesselId || !frame?.episode_id) return;
+    if (!editingAllowed || vesselCommandBusy || !selectedScenarioVesselId || !frame?.episode_id) return;
     const vessel = (frame.scenario_vessels || []).find(
       (item) => item.scenario_entity_id === selectedScenarioVesselId,
     );
     if (!vessel) return;
     const id = commandId();
-    setVesselCommandStatus({ status: "queued", message: "删除命令排队中", commandId: id });
-    try {
-      const response = await fetch(`/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}`, {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          episode_id: frame.episode_id,
-          command_id: id,
-          expected_revision: vessel.revision,
-        }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error_code || "vessel_delete_failed");
-      const applied = await pollVesselCommand(result.command_id || id);
-      setVesselCommandStatus({
-        status: applied.status,
-        message: applied.status === "applied" ? "船舶已删除" : "删除命令被拒绝",
-        commandId: applied.command_id || id,
-        errorCode: applied.error_code,
-      });
-      setSelectedScenarioVesselId(null);
-    } catch (error) {
-      setVesselCommandStatus({ status: "rejected", message: "删除命令失败", errorCode: error.message });
-    }
+    await submitVesselCommand({
+      url: `/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}`,
+      method: "DELETE",
+      body: {
+        episode_id: frame.episode_id,
+        command_id: id,
+        expected_revision: vessel.revision,
+      },
+    }, "船舶已删除", () => setSelectedScenarioVesselId(null));
+  };
+
+  const handleSetVesselAis = async (enabled) => {
+    if (!editingAllowed || vesselCommandBusy || !selectedScenarioVesselId || !frame?.episode_id) return;
+    const vessel = (frame.scenario_vessels || []).find(
+      (item) => item.scenario_entity_id === selectedScenarioVesselId,
+    );
+    if (!vessel?.ais_controllable || vessel.ais_enabled === enabled) return;
+    const id = commandId();
+    await submitVesselCommand({
+      url: `/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}/ais`,
+      method: "PATCH",
+      body: {
+        episode_id: frame.episode_id,
+        command_id: id,
+        expected_revision: vessel.revision,
+        ais_enabled: enabled,
+      },
+    }, enabled ? "AIS 已开启" : "AIS 已关闭");
   };
 
   const connectionLabel = {
@@ -285,10 +299,10 @@ export default function App() {
         onSelectionCommit={(bbox) => { setSelectedBBox(bbox); setSidebarOpen(true); }}
         onSelectContact={setSelectedContactId}
         selectedContactId={selectedContactId}
-        placementMode={Boolean(vesselPlacement && editingAllowed)}
+        placementMode={Boolean(vesselPlacement && editingAllowed && !vesselCommandBusy)}
         onPlaceVessel={handlePlaceVessel}
         onDropVessel={(vesselClass, position) => {
-          if (editingAllowed) {
+          if (editingAllowed && !vesselCommandBusy) {
             setVesselPlacement(vesselClass);
             handlePlaceVessel(position, vesselClass);
           }
@@ -315,6 +329,7 @@ export default function App() {
         selectedScenarioVesselId={selectedScenarioVesselId}
         onSelectScenarioVessel={setSelectedScenarioVesselId}
         onDeleteVessel={handleDeleteVessel}
+        onSetVesselAis={handleSetVesselAis}
         vesselCommandStatus={vesselCommandStatus}
       />
       <BottomDrawer
