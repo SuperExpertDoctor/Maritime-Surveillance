@@ -324,8 +324,17 @@ def test_population_binds_actual_map_navigator_and_dynamics_config():
     from src.control.heuristic.navigation import AStarNavigator
     from src.schedule.config_loader import ConfigLoader
     config = ConfigLoader.load()
-    config = replace(config, ship=replace(config.ship, initial_ship_count=1,
-                     target_ship_count=0, max_acceleration_kn_per_min=.75))
+    population = replace(
+        config.ship.population,
+        total_count=1,
+        type_i_ratio=1.0,
+        type_ii_ratio=0.0,
+    )
+    config = replace(config, ship=replace(
+        config.ship,
+        population=population,
+        max_acceleration_kn_per_min=.75,
+    ))
     mask = np.zeros((30, 30), bool)
     mask[:5, :] = True
     astar = AStarNavigator()

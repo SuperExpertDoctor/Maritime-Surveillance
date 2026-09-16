@@ -1629,38 +1629,41 @@ class SimulationEngine:
             for uav in self.uavs
         )
         ships = []
+        active_signature = []
         for ship in self.ships:
-            if ship.departed:
-                gate_state = "departed"
-            else:
+            if not ship.departed:
                 minimum_distance = min(
                     math.dist(ship.float_position, uav.float_position)
                     for uav in self.uavs
                 )
-                gate_state = self.red_commander.threat_gate.update(
-                    ship.id, ship.truth_identity, minimum_distance, current_time
+                self.red_commander.threat_gate.update(
+                    ship.id, ship.vessel_class, minimum_distance, current_time
                 )
+            stage = self.surveillance_stages.snapshot(ship.id).stage
             ships.append(
                 RedShipSnapshot(
                     ship_id=ship.id,
-                    identity=ship.truth_identity,
+                    vessel_class=ship.vessel_class,
+                    surveillance_stage=stage,
                     position_cells=(float(ship.float_position[0]), float(ship.float_position[1])),
                     heading_deg=float(math.degrees(ship.heading_rad)),
                     speed_kn=float(ship.speed_kn),
                     normal_tangent_deg=float(math.degrees(ship.normal_tangent_rad())),
-                    gate_state=gate_state,
-                    ais_on=ship.ais_mode == "civilian",
+                    ais_enabled=ship.ais_enabled,
                 )
             )
+            if (
+                not ship.departed
+                and ship.vessel_class == "type_ii"
+                and stage in ("detected", "probing", "tracking")
+            ):
+                active_signature.append((ship.id, stage))
         snapshot = RedSnapshot(
             snapshot_id=f"red-{self.reset_generation}-{self._red_snapshot_sequence}",
             sim_time_min=float(current_time),
             ships=tuple(ships),
             uavs=uavs,
-            active_ship_ids=tuple(
-                item.ship_id for item in ships
-                if item.identity == "target" and item.gate_state in ("evasive", "recovering")
-            ),
+            active_signature=tuple(sorted(active_signature)),
             land_mask_version=int(max((ship.navigator.map_version for ship in self.ships), default=0)),
         )
         try:
@@ -1673,7 +1676,12 @@ class SimulationEngine:
         self._set_runtime_state("running")
         commands = {} if plan is None else {command.ship_id: command for command in plan.commands}
         for ship in self.ships:
-            params = commands.get(ship.id) if ship.truth_identity == "target" else None
+            params = (
+                commands.get(ship.id)
+                if ship.vessel_class == "type_ii"
+                and any(item[0] == ship.id for item in snapshot.active_signature)
+                else None
+            )
             if params != ship._navigation_params:
                 ship.navigator.install(params, current_time)
 

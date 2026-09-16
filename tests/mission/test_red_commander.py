@@ -29,35 +29,35 @@ def ship_config():
 @pytest.mark.parametrize("distance,expected", [(1.49, "evasive"), (1.5, "normal"), (1.51, "normal")])
 def test_detect_threshold_is_strict(ship_config, distance, expected):
     gate = red_module().ThreatGate(ship_config)
-    assert gate.update("V1", "target", distance, 0.0) == expected
+    assert gate.update("V1", "type_ii", distance, 0.0) == expected
 
 
 @pytest.mark.parametrize("distance,expected", [(2.19, "evasive"), (2.2, "evasive"), (2.21, "recovering")])
 def test_clear_threshold_is_strict(ship_config, distance, expected):
     gate = red_module().ThreatGate(ship_config)
-    gate.update("V1", "target", 1.0, 0.0)
-    assert gate.update("V1", "target", distance, 1.0) == expected
+    gate.update("V1", "type_ii", 1.0, 0.0)
+    assert gate.update("V1", "type_ii", distance, 1.0) == expected
 
 
 @pytest.mark.parametrize("interruption", [1.0, 2.0, 2.2])
 def test_clear_hold_requires_five_continuous_minutes(ship_config, interruption):
     gate = red_module().ThreatGate(ship_config)
-    assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
-    assert gate.update("V1", "target", 3.0, 1.0) == "recovering"
-    assert gate.update("V1", "target", 3.0, 5.99) == "recovering"
-    assert gate.update("V1", "target", interruption, 6.0) == "evasive"
-    assert gate.update("V1", "target", 3.0, 7.0) == "recovering"
-    assert gate.update("V1", "target", 3.0, 11.99) == "recovering"
-    assert gate.update("V1", "target", 3.0, 12.0) == "normal"
+    assert gate.update("V1", "type_ii", 1.0, 0.0) == "evasive"
+    assert gate.update("V1", "type_ii", 3.0, 1.0) == "recovering"
+    assert gate.update("V1", "type_ii", 3.0, 5.99) == "recovering"
+    assert gate.update("V1", "type_ii", interruption, 6.0) == "evasive"
+    assert gate.update("V1", "type_ii", 3.0, 7.0) == "recovering"
+    assert gate.update("V1", "type_ii", 3.0, 11.99) == "recovering"
+    assert gate.update("V1", "type_ii", 3.0, 12.0) == "normal"
 
 
 def test_civilian_gate_is_always_normal_and_ship_states_are_independent(ship_config):
     gate = red_module().ThreatGate(ship_config)
-    assert gate.update("V1", "target", 0.0, 0.0) == "evasive"
+    assert gate.update("V1", "type_ii", 0.0, 0.0) == "evasive"
     for now, distance in enumerate([0.0, 1.0, 3.0, math.inf]):
-        assert gate.update("V2", "civilian", distance, float(now)) == "normal"
-    assert gate.update("V3", "target", 2.0, 0.0) == "normal"
-    assert gate.update("V1", "target", 2.0, 4.0) == "evasive"
+        assert gate.update("V2", "type_i", distance, float(now)) == "normal"
+    assert gate.update("V3", "type_ii", 2.0, 0.0) == "normal"
+    assert gate.update("V1", "type_ii", 2.0, 4.0) == "evasive"
 
 
 @pytest.mark.parametrize(
@@ -84,18 +84,18 @@ def test_swept_flyby_survives_until_next_main_frame(ship_config):
     red = red_module()
     gate = red.ThreatGate(ship_config)
     distance = red.swept_min_distance_cells((0, 0), (0, 0), (-3, 0), (3, 0))
-    assert gate.update("V1", "target", 3.0, 0.0) == "normal"
-    assert gate.observe_swept_distance("V1", "target", distance, 0.1) is None
-    assert gate.update("V1", "target", 3.0, 1.0) == "recovering"
-    gate.observe_swept_distance("V1", "target", 2.2, 5.9)
-    assert gate.update("V1", "target", 3.0, 6.0) == "recovering"
-    assert gate.update("V1", "target", 3.0, 10.99) == "recovering"
-    assert gate.update("V1", "target", 3.0, 11.0) == "normal"
+    assert gate.update("V1", "type_ii", 3.0, 0.0) == "normal"
+    assert gate.observe_swept_distance("V1", "type_ii", distance, 0.1) is None
+    assert gate.update("V1", "type_ii", 3.0, 1.0) == "recovering"
+    gate.observe_swept_distance("V1", "type_ii", 2.2, 5.9)
+    assert gate.update("V1", "type_ii", 3.0, 6.0) == "recovering"
+    assert gate.update("V1", "type_ii", 3.0, 10.99) == "recovering"
+    assert gate.update("V1", "type_ii", 3.0, 11.0) == "normal"
 
 
-@pytest.mark.parametrize("identity", ["target", "civilian"])
-def test_set_tracked_changes_only_compatibility_flag(identity):
-    ship = Ship("V1", GridCoord(3, 4), 18.0, truth_identity=identity)
+@pytest.mark.parametrize("vessel_class", ["type_ii", "type_i"])
+def test_set_tracked_changes_only_compatibility_flag(vessel_class):
+    ship = Ship("V1", GridCoord(3, 4), 18.0, vessel_class=vessel_class)
     original = deepcopy(vars(ship))
     for tracked in (True, False, True):
         ship.set_tracked(tracked)
@@ -105,33 +105,37 @@ def test_set_tracked_changes_only_compatibility_flag(identity):
 @pytest.mark.parametrize("state,distance", [("normal", 3.0), ("evasive", 1.0), ("recovering", 3.0)])
 def test_tracking_does_not_change_gate_or_clear_timer(ship_config, state, distance):
     gate = red_module().ThreatGate(ship_config)
-    ship = Ship("V1", GridCoord(3, 4), 18.0, truth_identity="target")
+    ship = Ship("V1", GridCoord(3, 4), 18.0, vessel_class="type_ii")
     if state != "normal":
-        gate.update(ship.id, ship.truth_identity, 1.0, 0.0)
-    assert gate.update(ship.id, ship.truth_identity, distance, 1.0) == state
+        gate.update(ship.id, ship.vessel_class, 1.0, 0.0)
+    assert gate.update(ship.id, ship.vessel_class, distance, 1.0) == state
     for tracked in (False, True):
         ship.set_tracked(tracked)
-        assert gate.update(ship.id, ship.truth_identity, distance, 2.0) == state
+        assert gate.update(ship.id, ship.vessel_class, distance, 2.0) == state
     if state == "recovering":
-        assert gate.update(ship.id, ship.truth_identity, distance, 6.0) == "normal"
+        assert gate.update(ship.id, ship.vessel_class, distance, 6.0) == "normal"
 
 
 def snapshot(snapshot_id="S1", now=0.0, active=("V1", "V2")):
     red = red_module()
     ships = tuple(
         red.RedShipSnapshot(
-            ship_id=ship_id, identity=identity, position_cells=(float(i), 4.0),
+            ship_id=ship_id,
+            vessel_class=vessel_class,
+            surveillance_stage="detected" if ship_id in active else "undetected",
+            position_cells=(float(i), 4.0),
             heading_deg=30.0, speed_kn=18.0, normal_tangent_deg=20.0,
-            gate_state="evasive" if ship_id in active else "normal", ais_on=True,
+            ais_enabled=True,
         )
-        for i, (ship_id, identity) in enumerate(
-            [("V1", "target"), ("V2", "target"), ("V3", "target"), ("C1", "civilian")]
+        for i, (ship_id, vessel_class) in enumerate(
+            [("V1", "type_ii"), ("V2", "type_ii"), ("V3", "type_ii"), ("C1", "type_i")]
         )
     )
     return red.RedSnapshot(
         snapshot_id=snapshot_id, sim_time_min=now, ships=ships,
         uavs=(("U1", (2.0, 4.0), (-1.0, 0.0)),),
-        active_ship_ids=active, land_mask_version=1,
+        active_signature=tuple(sorted((ship_id, "detected") for ship_id in active)),
+        land_mask_version=1,
     )
 
 
@@ -167,7 +171,7 @@ def test_snapshots_are_frozen_contracts():
     with pytest.raises(FrozenInstanceError):
         current.sim_time_min = 4.0
     with pytest.raises(FrozenInstanceError):
-        current.ships[0].gate_state = "normal"
+        current.ships[0].surveillance_stage = "undetected"
 
 
 def test_two_targets_in_one_frame_receive_one_centralized_plan(scripted_transport, ship_config):
@@ -182,7 +186,7 @@ def test_two_targets_in_one_frame_receive_one_centralized_plan(scripted_transpor
     assert len(transport.calls) == len(gateway.call_log) == 1
     assert transport.calls[0]["role"] == "red_commander"
     context = json.loads(transport.calls[0]["messages"][1]["content"])
-    assert context["snapshot"]["active_ship_ids"] == ["V1", "V2"]
+    assert context["snapshot"]["active_signature"] == [["V1", "detected"], ["V2", "detected"]]
     assert len(context["snapshot"]["ships"]) == 4
     assert context["snapshot"]["uavs"] == [["U1", [2.0, 4.0], [-1.0, 0.0]]]
     assert commander.installation.plan is plan
@@ -235,14 +239,10 @@ def test_active_set_change_batches_a_new_complete_plan(scripted_transport, ship_
     assert len(transport.calls) == 2
 
 
-def test_recovering_remains_active_without_restarting_plan(scripted_transport, ship_config):
+def test_same_stage_remains_active_without_restarting_plan(scripted_transport, ship_config):
     commander, _, transport = commander_with(scripted_transport, ship_config, [plan_payload()])
     first = commander.decide(snapshot())
     current = snapshot("S2", 1.0)
-    current = replace(current, ships=tuple(
-        replace(ship, gate_state="recovering") if ship.ship_id in current.active_ship_ids else ship
-        for ship in current.ships
-    ))
     assert commander.decide(current) is first
     assert len(transport.calls) == 1
 
@@ -328,7 +328,7 @@ def test_commands_exactly_cover_active_targets(scripted_transport, ship_config, 
 
 def test_unknown_command_field_is_rejected(scripted_transport, ship_config):
     payload = plan_payload()
-    payload["commands"][1]["ais_on"] = False
+    payload["commands"][1]["ais_enabled"] = False
     commander, _, _ = commander_with(scripted_transport, ship_config, [payload] * 3)
     with pytest.raises(red_module().RedDecisionBlocked):
         commander.decide(snapshot())
@@ -375,7 +375,7 @@ def test_invalid_batch_can_be_corrected_without_partial_install(scripted_transpo
     assert len(transport.calls) == 2
     correction = json.loads(transport.calls[1]["messages"][-1]["content"])
     assert correction["errors"]
-    assert "active_ship_ids" in str(correction["errors"])
+    assert "active_signature" in str(correction["errors"])
 
 
 def test_prompt_states_schema_authority_motion_semantics_and_config_limits(scripted_transport, ship_config):
@@ -383,7 +383,7 @@ def test_prompt_states_schema_authority_motion_semantics_and_config_limits(scrip
     commander, _, transport = commander_with(scripted_transport, config, [plan_payload(valid_for_min=2.0)])
     commander.decide(snapshot())
     system, user = transport.calls[0]["messages"]
-    for required in ("red-plan/v1", "active_ship_ids", "normal_tangent_deg", "phase_deg", "civilian", "normal", "commands", "valid_for_min"):
+    for required in ("red-plan/v1", "active_signature", "normal_tangent_deg", "phase_deg", "type_i", "undetected", "commands", "valid_for_min"):
         assert required in system["content"]
     constraints = json.loads(user["content"])["constraints"]
     assert constraints["heading_offset_deg"] == [-75.0, 75.0]
@@ -479,16 +479,16 @@ def test_between_frame_clear_and_reentry_cannot_reuse_old_installation(
         [plan_payload(), plan_payload("S2")],
         threat_gate=gate,
     )
-    assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
-    assert gate.update("V2", "target", 1.0, 0.0) == "evasive"
+    assert gate.update("V1", "type_ii", 1.0, 0.0) == "evasive"
+    assert gate.update("V2", "type_ii", 1.0, 0.0) == "evasive"
     first = commander.decide(snapshot())
 
-    gate.observe_swept_distance("V1", "target", 3.0, 0.1)
-    assert gate.update("V1", "target", 3.0, 0.1) == "recovering"
-    gate.observe_swept_distance("V1", "target", 3.0, 0.6)
-    assert gate.update("V1", "target", 3.0, 0.6) == "normal"
-    gate.observe_swept_distance("V1", "target", 1.0, 0.7)
-    assert gate.update("V1", "target", 1.0, 0.7) == "evasive"
+    gate.observe_swept_distance("V1", "type_ii", 3.0, 0.1)
+    assert gate.update("V1", "type_ii", 3.0, 0.1) == "recovering"
+    gate.observe_swept_distance("V1", "type_ii", 3.0, 0.6)
+    assert gate.update("V1", "type_ii", 3.0, 0.6) == "normal"
+    gate.observe_swept_distance("V1", "type_ii", 1.0, 0.7)
+    assert gate.update("V1", "type_ii", 1.0, 0.7) == "evasive"
 
     second = commander.decide(snapshot("S2", 1.0))
     assert second is not first
@@ -509,12 +509,12 @@ def test_gate_revision_blocks_replay_of_original_active_snapshot_before_model_ca
         threat_gate=gate,
     )
     current = snapshot(active=("V1",))
-    assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
+    assert gate.update("V1", "type_ii", 1.0, 0.0) == "evasive"
     commander.decide(current)
 
-    gate.observe_swept_distance("V1", "target", 3.0, 0.1)
-    gate.observe_swept_distance("V1", "target", 3.0, 0.6)
-    gate.observe_swept_distance("V1", "target", 1.0, 0.7)
+    gate.observe_swept_distance("V1", "type_ii", 3.0, 0.1)
+    gate.observe_swept_distance("V1", "type_ii", 3.0, 0.6)
+    gate.observe_swept_distance("V1", "type_ii", 1.0, 0.7)
 
     with pytest.raises(red_module().RedDecisionBlocked, match="gate revision"):
         commander.decide(current)
@@ -529,14 +529,14 @@ def test_gate_revision_blocks_replay_of_delivered_empty_snapshot(
     commander, gateway, transport = commander_with(
         scripted_transport, config, [plan_payload(active=("V1",))], threat_gate=gate,
     )
-    assert gate.update("V1", "target", 1.0, 0.0) == "evasive"
+    assert gate.update("V1", "type_ii", 1.0, 0.0) == "evasive"
     commander.decide(snapshot(active=("V1",)))
-    gate.observe_swept_distance("V1", "target", 3.0, 0.1)
-    gate.observe_swept_distance("V1", "target", 3.0, 0.6)
+    gate.observe_swept_distance("V1", "type_ii", 3.0, 0.1)
+    gate.observe_swept_distance("V1", "type_ii", 3.0, 0.6)
     cleared = snapshot("clear", 0.6, ())
     assert commander.decide(cleared) is None
 
-    gate.observe_swept_distance("V1", "target", 1.0, 0.7)
+    gate.observe_swept_distance("V1", "type_ii", 1.0, 0.7)
     with pytest.raises(red_module().RedDecisionBlocked, match="gate revision"):
         commander.decide(cleared)
     assert len(gateway.call_log) == len(transport.calls) == 1
@@ -609,17 +609,17 @@ def test_blocked_same_snapshot_can_be_retried_after_resume(scripted_transport, s
 
 
 @pytest.mark.parametrize("mutation", [
-    lambda s: replace(s, active_ship_ids=("V1",)),
-    lambda s: replace(s, active_ship_ids=("V1", "V2", "V2")),
-    lambda s: replace(s, active_ship_ids=("V1", "V2", "C1")),
-    lambda s: replace(s, active_ship_ids=("V1", "V2", "V3")),
-    lambda s: replace(s, active_ship_ids=("V1", "V2", "departed")),
-    lambda s: replace(s, active_ship_ids=("V1", ["V2"])),
+    lambda s: replace(s, active_signature=(("V1", "detected"),)),
+    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("V2", "detected"))),
+    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("C1", "detected"))),
+    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("V3", "detected"))),
+    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("departed", "detected"))),
+    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", ["detected"]))),
     lambda s: replace(s, ships=(*s.ships, s.ships[0])),
-    lambda s: replace(s, ships=(replace(s.ships[0], identity="civilian"), *s.ships[1:])),
-    lambda s: replace(s, ships=(replace(s.ships[0], gate_state="normal"), *s.ships[1:])),
-    lambda s: replace(s, ships=(replace(s.ships[0], gate_state="departed"), *s.ships[1:])),
-    lambda s: replace(s, ships=(replace(s.ships[0], identity="unknown"), *s.ships[1:])),
+    lambda s: replace(s, ships=(replace(s.ships[0], vessel_class="type_i"), *s.ships[1:])),
+    lambda s: replace(s, ships=(replace(s.ships[0], surveillance_stage="invalid"), *s.ships[1:])),
+    lambda s: replace(s, ships=(replace(s.ships[0], surveillance_stage="invalid"), *s.ships[1:])),
+    lambda s: replace(s, ships=(replace(s.ships[0], vessel_class="unknown"), *s.ships[1:])),
     lambda s: replace(s, snapshot_id=""),
     lambda s: replace(s, sim_time_min=math.nan),
     lambda s: replace(s, sim_time_min=True),
@@ -629,13 +629,13 @@ def test_blocked_same_snapshot_can_be_retried_after_resume(scripted_transport, s
     lambda s: replace(s, ships=(replace(s.ships[0], heading_deg=math.nan), *s.ships[1:])),
     lambda s: replace(s, ships=(replace(s.ships[0], normal_tangent_deg=True), *s.ships[1:])),
     lambda s: replace(s, ships=(replace(s.ships[0], speed_kn=-1), *s.ships[1:])),
-    lambda s: replace(s, ships=(replace(s.ships[0], ais_on=1), *s.ships[1:])),
+    lambda s: replace(s, ships=(replace(s.ships[0], ais_enabled=1), *s.ships[1:])),
     lambda s: replace(s, uavs=(("U1", (0.0, 0.0), (math.nan, 0.0)),)),
     lambda s: replace(s, uavs=(*s.uavs, s.uavs[0])),
 ])
 def test_invalid_snapshot_is_blocked_before_model_call(scripted_transport, ship_config, mutation):
     commander, gateway, transport = commander_with(scripted_transport, ship_config, [])
-    with pytest.raises(red_module().RedDecisionBlocked, match="snapshot"):
+    with pytest.raises(red_module().RedDecisionBlocked, match="snapshot|signature"):
         commander.decide(mutation(snapshot()))
     assert transport.calls == gateway.call_log == []
     assert commander.installation is None
@@ -645,7 +645,7 @@ def test_changed_snapshot_authority_is_checked_even_when_plan_unexpired(scripted
     commander, _, transport = commander_with(scripted_transport, ship_config, [plan_payload()])
     commander.decide(snapshot())
     current = snapshot("S2", 1.0)
-    current = replace(current, ships=(replace(current.ships[0], identity="civilian"), *current.ships[1:]))
+    current = replace(current, ships=(replace(current.ships[0], vessel_class="type_i"), *current.ships[1:]))
     with pytest.raises(red_module().RedDecisionBlocked):
         commander.decide(current)
     assert len(transport.calls) == 1
