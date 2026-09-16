@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 from types import MappingProxyType
 
 import numpy as np
@@ -201,6 +202,87 @@ class ControlTask:
     target_contact_id: str | None = None
     probe_id: str | None = None
     recovery_plan: RecoveryPlan | None = None
+
+
+_ROUTE_STATUSES = frozenset(
+    {"ready", "pending", "guidance_only", "unavailable", "cleared"}
+)
+
+
+@dataclass(frozen=True)
+class ControlRouteSnapshot:
+    task_id: str | None
+    task_type: str
+    phase: str
+    target_contact_id: str | None
+    route: tuple[Pose, ...]
+    next_index: int
+    route_revision: int
+    planning_map_version: int | None
+    status: str
+
+    def __post_init__(self) -> None:
+        for name in ("task_type", "phase"):
+            value = getattr(self, name)
+            if isinstance(value, Enum):
+                value = value.value
+                object.__setattr__(self, name, value)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if self.task_id is not None and (
+            not isinstance(self.task_id, str) or not self.task_id
+        ):
+            raise ValueError("task_id must be a non-empty string or None")
+        if self.target_contact_id is not None and (
+            not isinstance(self.target_contact_id, str) or not self.target_contact_id
+        ):
+            raise ValueError(
+                "target_contact_id must be a non-empty string or None"
+            )
+        if self.status not in _ROUTE_STATUSES:
+            raise ValueError(f"status must be one of {sorted(_ROUTE_STATUSES)}")
+        if isinstance(self.next_index, bool) or not isinstance(self.next_index, int):
+            raise ValueError("next_index must be an integer")
+        if isinstance(self.route_revision, bool) or not isinstance(self.route_revision, int):
+            raise ValueError("route_revision must be an integer")
+        if self.route_revision < 0:
+            raise ValueError("route_revision must be non-negative")
+        if self.planning_map_version is not None and (
+            isinstance(self.planning_map_version, bool)
+            or not isinstance(self.planning_map_version, int)
+            or self.planning_map_version < 0
+        ):
+            raise ValueError(
+                "planning_map_version must be a non-negative integer or None"
+            )
+        normalized_route = []
+        for pose in self.route:
+            if not isinstance(pose, (tuple, list)) or len(pose) != 3:
+                raise ValueError("route poses must be finite triples")
+            normalized_pose = tuple(float(value) for value in pose)
+            if not all(math.isfinite(value) for value in normalized_pose):
+                raise ValueError("route poses must be finite triples")
+            normalized_route.append(normalized_pose)
+        if not 0 <= self.next_index <= len(normalized_route):
+            raise ValueError("next_index must be between zero and route length")
+        object.__setattr__(self, "route", tuple(normalized_route))
+
+
+@dataclass(frozen=True)
+class UavRouteSnapshot:
+    episode_id: str
+    generation: int
+    route: ControlRouteSnapshot
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.episode_id, str):
+            raise ValueError("episode_id must be a string")
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise ValueError("generation must be an integer")
+        if self.generation < 0:
+            raise ValueError("generation must be non-negative")
+        if not isinstance(self.route, ControlRouteSnapshot):
+            raise TypeError("route must be a ControlRouteSnapshot")
 
 
 @dataclass(frozen=True)

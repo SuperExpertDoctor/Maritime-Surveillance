@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from typing import Iterable, Mapping, Optional
 import math
 
@@ -18,6 +18,7 @@ from src.mission.contracts import (
     ProbeSession,
     VisualDetection,
 )
+from src.control.common.contracts import UavRouteSnapshot
 
 
 _OPERATION_BY_STATUS = {
@@ -77,6 +78,7 @@ class StateManager:
         self._legacy_sample_counter = 0
         self._contact_event_cursor = 0
         self._probe_sessions: dict[str, ProbeSession] = {}
+        self._control_routes: dict[str, UavRouteSnapshot] = {}
         self._passive_positions: dict[str, PassivePosition] = {}
         self._passive_observations: dict[str, PassiveBearingObservation] = {}
         self.obstacles: list = []
@@ -215,6 +217,53 @@ class StateManager:
 
     def clear_probe_session(self, probe_id: str) -> None:
         self._probe_sessions.pop(probe_id, None)
+
+    def set_control_route(self, uav_id: str, snapshot: UavRouteSnapshot) -> None:
+        """Publish the newest immutable route envelope for one UAV."""
+        if self.get_uav(uav_id) is None:
+            raise KeyError(f"unknown UAV: {uav_id}")
+        if not isinstance(snapshot, UavRouteSnapshot):
+            raise TypeError("snapshot must be a UavRouteSnapshot")
+        if self.episode_id and snapshot.episode_id != self.episode_id:
+            raise ValueError("route snapshot episode mismatch")
+        if not self.episode_id:
+            self.episode_id = snapshot.episode_id
+        previous = self._control_routes.get(uav_id)
+        if previous is not None:
+            if previous.episode_id != snapshot.episode_id:
+                raise ValueError("route snapshot episode regressed")
+            if snapshot.generation < previous.generation:
+                raise ValueError("route snapshot generation regressed")
+            if snapshot.generation == previous.generation:
+                previous_revision = previous.route.route_revision
+                incoming_revision = snapshot.route.route_revision
+                if (
+                    previous.route.status == "cleared"
+                    and snapshot.route.status != "cleared"
+                    and incoming_revision <= previous_revision
+                ):
+                    raise ValueError("cleared route cannot be revived")
+                if (
+                    snapshot.route.status != "cleared"
+                    and incoming_revision < previous_revision
+                ):
+                    raise ValueError("route snapshot revision regressed")
+                if incoming_revision < previous_revision:
+                    snapshot = UavRouteSnapshot(
+                        snapshot.episode_id,
+                        snapshot.generation,
+                        replace(
+                            snapshot.route,
+                            route_revision=previous_revision,
+                        ),
+                    )
+        self._control_routes[uav_id] = snapshot
+
+    def get_control_route(self, uav_id: str) -> UavRouteSnapshot | None:
+        return self._control_routes.get(uav_id)
+
+    def clear_control_routes(self) -> None:
+        self._control_routes.clear()
 
     # Environment ----------------------------------------------------
     def set_environment_obstacles(self, obstacles: list, mask) -> None:

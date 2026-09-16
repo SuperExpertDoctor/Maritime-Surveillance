@@ -16,12 +16,14 @@ from src.control.common.contracts import (
     ControlMode,
     ControlObservation,
     ControlOwner,
+    ControlRouteSnapshot,
     ControlTask,
     ControllerContext,
     ControllerEventRequest,
     OperationMode,
     RecoveryPlan,
     StopReason,
+    UavRouteSnapshot,
 )
 from src.control.common.executor import ExecutionResult, UAVDynamicsExecutor
 from src.control.common.factory import ControlFactory
@@ -561,6 +563,57 @@ class ControlCoordinator:
             context = getattr(controller, "context", None)
             task = getattr(context, "task", None)
             return task if isinstance(task, ControlTask) else pending
+
+    def route_snapshot(self, uav_id: str) -> UavRouteSnapshot:
+        """Read the current controller route without planning or advancing it."""
+        self._require_uav(uav_id)
+        with self._lock:
+            lease = self.ownership.current(uav_id)
+            controller = self._controllers.get(uav_id)
+            task = self._pending_tasks.get(uav_id)
+            if task is None and controller is not None:
+                context = getattr(controller, "context", None)
+                candidate = getattr(context, "task", None)
+                if isinstance(candidate, ControlTask):
+                    task = candidate
+            operation = self._operation_modes[uav_id]
+            if controller is None:
+                route = ControlRouteSnapshot(
+                    task.task_id if task is not None else None,
+                    task.task_type.value if task is not None else operation.value,
+                    "cleared",
+                    task.target_contact_id if task is not None else None,
+                    (),
+                    0,
+                    0,
+                    None,
+                    "cleared",
+                )
+            else:
+                exported = controller.route_snapshot()
+                if exported is None:
+                    route = ControlRouteSnapshot(
+                        task.task_id if task is not None else None,
+                        task.task_type.value if task is not None else operation.value,
+                        "unavailable",
+                        task.target_contact_id if task is not None else None,
+                        (),
+                        0,
+                        0,
+                        None,
+                        "unavailable",
+                    )
+                elif isinstance(exported, ControlRouteSnapshot):
+                    route = exported
+                else:
+                    raise ControlCoordinatorError(
+                        "controller route_snapshot must return ControlRouteSnapshot or None"
+                    )
+            return UavRouteSnapshot(
+                self.state_manager.episode_id,
+                lease.generation,
+                route,
+            )
 
     def controller(self, uav_id: str) -> ControllerBase | None:
         """Return the installed controller for integration diagnostics."""

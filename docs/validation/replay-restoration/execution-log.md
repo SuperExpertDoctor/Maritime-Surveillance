@@ -118,3 +118,22 @@ extension interface.
 - Gate command:
   `LONGCAT_API_KEY=offline-test python -m pytest tests/mission/test_llm_gateway.py tests/mission/test_failure_paths.py tests/mission/test_evaluation_cli.py tests/mission/test_mission_scheduler.py -q`
 - Gate result: `104 passed in 37.78s`. No live model or credential was used.
+
+## T05 Immutable Route Snapshot Contract
+
+- Red evidence: controllers had no common route export, and StateManager had
+  no episode/generation/revision boundary for cached route data.
+- Added frozen `ControlRouteSnapshot` and `UavRouteSnapshot` contracts with
+  finite nested poses, bounded next indexes, non-negative revisions/generations,
+  and explicit ready/pending/guidance-only/unavailable/cleared statuses.
+- Added the optional `ControllerBase.route_snapshot()` default, a locked
+  `ControlCoordinator.route_snapshot()` that wraps the current StateManager
+  episode and lease generation, and monotonic StateManager route publication.
+  Cleared snapshots retain the revision floor so an old route cannot revive.
+- Red-to-green command:
+  `python -m pytest tests/control/test_route_snapshot.py -q`
+  -> `4 passed` after the stale-cleared error correction.
+- Gate command:
+  `python -m pytest tests/control/test_route_snapshot.py tests/control/test_base_classes.py tests/control/test_coordinator.py tests/control/test_ownership.py -q`
+- Gate result: `39 passed in 1.09s`. Snapshot reads do not call navigation or
+  execution and learning controllers remain unforced.
