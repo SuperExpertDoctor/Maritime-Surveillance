@@ -11,6 +11,7 @@ from src.control.common.contracts import (
     ActionSpec,
     ControlDecision,
     ControlObservation,
+    ControlRouteSnapshot,
     ControlTask,
     ControllerEventRequest,
     ObservationSpec,
@@ -19,7 +20,12 @@ from src.control.common.contracts import (
     StopReason,
 )
 from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
-from src.control.heuristic.base import HeuristicControllerBase, RouteFollower, _wrap_pi
+from src.control.heuristic.base import (
+    HeuristicControllerBase,
+    RouteFollower,
+    _wrap_pi,
+    next_route_index,
+)
 from src.control.heuristic.navigation import AStarNavigator
 from src.utils.coverage_planner import CoveragePath, CoveragePlanner
 
@@ -88,6 +94,9 @@ class CoverageController(HeuristicControllerBase):
         self.route: tuple[tuple[float, float, float], ...] = ()
         self.scan_ranges: tuple[tuple[int, int], ...] = ()
         self.planning_map_version: int | None = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._completion_event_emitted = False
 
     @property
@@ -113,6 +122,9 @@ class CoverageController(HeuristicControllerBase):
         self.route = ()
         self.scan_ranges = ()
         self.planning_map_version = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._completion_event_emitted = False
         self._plan_route(observation)
 
@@ -122,6 +134,8 @@ class CoverageController(HeuristicControllerBase):
 
     def stop_task(self, reason: StopReason) -> None:
         del reason
+        self._stopped = True
+        self._route_status = "cleared"
         # This controller owns no external resources.  Completion remains tied
         # to RouteFollower consuming the final pose, so stopping is idempotent.
 
@@ -192,6 +206,7 @@ class CoverageController(HeuristicControllerBase):
         if observation.planning_map_version == self.planning_map_version:
             return
         assert self.follower is not None
+        self._route_status = "pending"
         unflown = self.route[self.follower.index + 1 :]
         current_pose = (
             *observation.self_state.position,
@@ -271,6 +286,8 @@ class CoverageController(HeuristicControllerBase):
         self.scan_ranges = scan_ranges
         self.follower = RouteFollower(self.route)
         self.planning_map_version = planning_map_version
+        self._route_revision += 1
+        self._route_status = "ready"
 
     def _update_phase(self, observation: ControlObservation) -> None:
         assert self.follower is not None
@@ -323,6 +340,33 @@ class CoverageController(HeuristicControllerBase):
             raise InvalidControlCommand("operation mode is absent from action mask")
         if sensor_mode not in observation.action_mask.allowed_sensor_modes:
             raise InvalidControlCommand("sensor mode is absent from action mask")
+
+    def route_snapshot(self) -> ControlRouteSnapshot:
+        task = self.task
+        route = (
+            self.route
+            if self._route_status == "ready" and not self._stopped
+            else ()
+        )
+        follower = self.follower if route else None
+        status = self._route_status
+        if task is None:
+            status = "unavailable"
+        elif self._stopped:
+            status = "cleared"
+        elif not route and status == "ready":
+            status = "pending"
+        return ControlRouteSnapshot(
+            task.task_id if task is not None else None,
+            OperationMode.COVERAGE.value,
+            self.phase.value,
+            None,
+            route,
+            next_route_index(follower),
+            self._route_revision,
+            self.planning_map_version if route else None,
+            status,
+        )
 
 
 __all__ = [

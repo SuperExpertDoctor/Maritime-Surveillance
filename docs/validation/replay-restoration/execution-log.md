@@ -137,3 +137,25 @@ extension interface.
   `python -m pytest tests/control/test_route_snapshot.py tests/control/test_base_classes.py tests/control/test_coordinator.py tests/control/test_ownership.py -q`
 - Gate result: `39 passed in 1.09s`. Snapshot reads do not call navigation or
   execution and learning controllers remain unforced.
+
+## T06 Authoritative Heuristic Routes
+
+- Red evidence: all five heuristic controller families inherited the optional
+  `None` route export; Probe also had no route immediately after `start_task`.
+  The real-navigation test initially could not observe an authoritative route.
+- Added the shared `next_route_index` conversion, immutable route exports for
+  Coverage, Probe, Tracking, Return, and Holding, monotonic route revisions,
+  and explicit pending/guidance-only/unavailable/cleared status transitions.
+  Probe now plans its baseline standoff route from the current contact
+  observation during `start_task`; route planning still uses only the existing
+  navigator and contact estimate.
+- Tracking exports the active avoidance follower before the approach follower;
+  steady LGVF feedback is `guidance_only`. Return exports its reserved recovery
+  path, while Holding has an explicit empty guidance-only snapshot. Stopped or
+  invalidated routes cannot remain `ready`.
+- Added a non-horizontal real `AStarNavigator` plus `UAVDynamicsExecutor`
+  integration test. It checks finite poses, heading change, decreasing contact
+  distance, and arrival within the baseline standoff envelope.
+- Gate command:
+  `python -m pytest tests/control/heuristic/test_coverage.py tests/control/heuristic/test_probe.py tests/control/heuristic/test_tracking.py tests/control/heuristic/test_navigation.py tests/mission/test_probe_navigation_integration.py -q`
+- Gate result: `71 passed in 1.15s`.

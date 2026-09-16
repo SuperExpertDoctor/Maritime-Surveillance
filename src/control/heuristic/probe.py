@@ -7,10 +7,15 @@ from collections.abc import Sequence
 
 from src.control.common.contracts import (
     ActionSpec, ContactObservation, ControlCommand, ControlDecision,
-    ControlObservation, ControlTask, ControllerEventRequest, ObservationSpec,
-    OperationMode, SensorMode, StopReason,
+    ControlObservation, ControlRouteSnapshot, ControlTask,
+    ControllerEventRequest, ObservationSpec, OperationMode, SensorMode,
+    StopReason,
 )
-from src.control.heuristic.base import HeuristicControllerBase, RouteFollower
+from src.control.heuristic.base import (
+    HeuristicControllerBase,
+    RouteFollower,
+    next_route_index,
+)
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.control.heuristic.tracking import plan_contact_orbit_entry
 from src.mission.config import ContactConfig
@@ -37,6 +42,10 @@ class ProbeController(HeuristicControllerBase):
         self._route: RouteFollower | None = None
         self._route_phase: str | None = None
         self._route_contact_key: tuple[tuple[float, float], tuple[float, float], float] | None = None
+        self._planning_map_version: int | None = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._reported_phases: set[str] = set()
         self._blocked = False
         self._timeout_reported = False
@@ -60,9 +69,30 @@ class ProbeController(HeuristicControllerBase):
         self._route = None
         self._route_phase = None
         self._route_contact_key = None
+        self._planning_map_version = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._reported_phases.clear()
         self._blocked = False
         self._timeout_reported = False
+        contact = self._contact(observation.contacts)
+        if contact is None:
+            self._route_status = "unavailable"
+            return
+        try:
+            self._set_route(
+                self._plan_route(
+                    observation,
+                    contact,
+                    self._config.baseline_standoff_cells,
+                ),
+                observation.planning_map_version,
+            )
+            self._route_phase = "baseline"
+            self._route_contact_key = self._contact_key(observation, contact)
+        except (PathNotFoundError, ValueError):
+            self._route_status = "unavailable"
 
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.task is None:
@@ -70,12 +100,18 @@ class ProbeController(HeuristicControllerBase):
         probe = observation.probe
         contact = self._contact(observation.contacts)
         if probe is None or contact is None or not self._matches(probe, contact):
+            if contact is None:
+                self._route_status = "unavailable"
             return ControlDecision(self._holding_command(observation))
         if probe.phase == "finished":
+            self._route_status = "cleared"
             return self._finished_decision(observation, probe.completed_reason)
         if probe.phase == "awaiting_assessment":
+            self._route_phase = probe.phase
+            self._route_status = "guidance_only"
             return ControlDecision(self._awaiting_assessment_command(observation))
         if self._blocked:
+            self._route_status = "unavailable"
             return ControlDecision(self._holding_command(observation))
 
         phase, standoff = self._phase_and_standoff(probe.phase)
@@ -86,7 +122,10 @@ class ProbeController(HeuristicControllerBase):
                 or self._route is None
                 or self._route_contact_key != contact_key
             ):
-                self._route = self._plan_route(observation, contact, standoff)
+                self._set_route(
+                    self._plan_route(observation, contact, standoff),
+                    observation.planning_map_version,
+                )
                 self._route_phase = probe.phase
                 self._route_contact_key = contact_key
             if self._at_standoff(observation, contact, standoff):
@@ -94,7 +133,7 @@ class ProbeController(HeuristicControllerBase):
                 entry = plan_contact_orbit_entry(
                     self.tracker, self._pose(observation), target_position, standoff
                 )
-                self._route = RouteFollower(entry)
+                self._set_route(entry, observation.planning_map_version)
                 self._route_phase = probe.phase
                 self._route_contact_key = contact_key
                 command = self._route.next_command(
@@ -108,6 +147,8 @@ class ProbeController(HeuristicControllerBase):
                 events = ()
         except (PathNotFoundError, ValueError) as exc:
             self._blocked = True
+            self._route = None
+            self._route_status = "unavailable"
             return self._blocked_decision(observation, str(exc))
         targeted = ControlCommand(
             command.turn_rate_rad_min, command.speed_cells_min, command.sensor_mode,
@@ -121,7 +162,9 @@ class ProbeController(HeuristicControllerBase):
 
     def stop_task(self, reason: StopReason) -> None:
         del reason
+        self._stopped = True
         self._route = None
+        self._route_status = "cleared"
 
     def _plan_route(self, observation: ControlObservation, contact: ContactObservation, standoff: float) -> RouteFollower:
         target_position = self._predicted_contact_position(observation, contact)
@@ -130,6 +173,18 @@ class ProbeController(HeuristicControllerBase):
             observation.planning_obstacle_mask, self.r_min, observation.planning_map_version,
         )
         return RouteFollower(path)
+
+    def _set_route(
+        self,
+        follower: RouteFollower | Sequence[Sequence[float]],
+        planning_map_version: int,
+    ) -> None:
+        self._route = (
+            follower if isinstance(follower, RouteFollower) else RouteFollower(follower)
+        )
+        self._planning_map_version = planning_map_version
+        self._route_revision += 1
+        self._route_status = "ready"
 
     def _contact_key(
         self, observation: ControlObservation, contact: ContactObservation
@@ -159,6 +214,7 @@ class ProbeController(HeuristicControllerBase):
         return min(dt_min, float(self._config.max_sample_gap_min))
 
     def _blocked_decision(self, observation: ControlObservation, reason: str) -> ControlDecision:
+        self._route_status = "unavailable"
         events: tuple[ControllerEventRequest, ...] = ()
         if "blocked" not in self._reported_phases:
             self._reported_phases.add("blocked")
@@ -232,6 +288,33 @@ class ProbeController(HeuristicControllerBase):
             raise ValueError("operation mode is absent from action mask")
         if command.sensor_mode not in observation.action_mask.allowed_sensor_modes:
             raise ValueError("sensor mode is absent from action mask")
+
+    def route_snapshot(self) -> ControlRouteSnapshot:
+        task = self.task
+        route = (
+            self._route.poses
+            if self._route is not None
+            and self._route_status == "ready"
+            and not self._stopped
+            else ()
+        )
+        follower = self._route if route else None
+        status = self._route_status
+        if task is None:
+            status = "unavailable"
+        elif self._stopped:
+            status = "cleared"
+        return ControlRouteSnapshot(
+            task.task_id if task is not None else None,
+            OperationMode.PROBE.value,
+            self._route_phase or "pending",
+            task.target_contact_id if task is not None else None,
+            route,
+            next_route_index(follower),
+            self._route_revision,
+            self._planning_map_version if route else None,
+            status,
+        )
 
 
 __all__ = ["ProbeController"]
