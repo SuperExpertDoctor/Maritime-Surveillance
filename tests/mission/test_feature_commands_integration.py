@@ -1,7 +1,12 @@
+import math
+
 from fastapi.testclient import TestClient
 
+from scripts.evaluate_mixed_maritime import _FixtureGateway
 from scripts.replay_restoration_scenarios import build_scenario
-from src.mission.contracts import IntentCommand, VisualDetection
+from src.env.simulation import SimulationEngine
+from src.mission.contracts import IntentCommand, VesselCommand, VisualDetection
+from src.schedule.config_loader import ConfigLoader
 from src.vis.backend.server import create_app
 
 
@@ -177,3 +182,142 @@ def test_replay_intent_write_is_rejected_by_the_real_api():
         )
     assert response.status_code == 409
     assert response.json()["error_code"] == "replay_read_only"
+
+
+def _free_position(engine):
+    cols, rows = engine.config.grid.resolution
+    for col in range(2, cols - 2):
+        for row in range(2, rows - 2):
+            position = (col + 0.5, row + 0.5)
+            if engine.ship_land_mask[col, row] or engine.obstacle_mask[col, row]:
+                continue
+            if any(math.dist(position, ship.float_position) < 1.0 for ship in engine.ships):
+                continue
+            return position
+    raise AssertionError("fixture has no free water position")
+
+
+class _InvalidRedGateway(_FixtureGateway):
+    def request_json(self, *, role, snapshot_id, user_payload, validate, **kwargs):
+        if role != "red_commander":
+            return super().request_json(
+                role=role,
+                snapshot_id=snapshot_id,
+                user_payload=user_payload,
+                validate=validate,
+                **kwargs,
+            )
+        payload = {
+            "schema_version": "red-plan/v1",
+            "snapshot_id": snapshot_id,
+            "valid_for_min": 1.0,
+            "commands": [],
+            "notes": "invalid fixture plan",
+        }
+        errors = tuple(validate(payload)) if validate else ()
+        return self._result(role, snapshot_id, payload, errors)
+
+
+def test_runtime_vessel_lifecycle_and_red_motion_share_the_real_engine_boundary():
+    engine = build_scenario("vessel-red-lifecycle", seed=42, transport="fixture")
+    target = next(ship for ship in engine.ships if ship.vessel_class == "type_ii")
+    engine.surveillance_stages.set_fact(target.id, "sar", True, 0.0, "t11f-detected")
+    before = target.float_position
+
+    engine.step()
+
+    assert engine.runtime_status == "running"
+    assert engine.clock.time == 1.0
+    assert target.float_position != before
+    assert target._navigation_params is not None
+
+    created_command = VesselCommand(
+        command_id="t11f-create",
+        episode_id=engine.episode_id,
+        operation="create",
+        vessel_class="type_ii",
+        position_cells=_free_position(engine),
+    )
+    engine.vessel_commands.enqueue(created_command)
+    created = engine.apply_pending_vessel_commands()[0]
+    assert created.status == "applied"
+    created_ship = next(ship for ship in engine.ships if ship.id == created.vessel_id)
+    engine._ais_force_refresh_ids.add(created_ship.id)
+    engine._refresh_ais_signals(2.0)
+    signal = created_ship.ais_signal
+    assert signal is not None
+    assert engine._ais_history[signal.mmsi]
+
+    before_disable = tuple(engine._ais_history[signal.mmsi])
+    disable = VesselCommand(
+        command_id="t11f-disable-ais",
+        episode_id=engine.episode_id,
+        operation="set_ais",
+        vessel_id=created_ship.id,
+        expected_revision=created.revision,
+        ais_enabled=False,
+    )
+    engine.vessel_commands.enqueue(disable)
+    disabled = engine.apply_pending_vessel_commands()[0]
+    assert disabled.status == "applied"
+    engine._refresh_ais_signals(3.0)
+    assert created_ship.ais_signal is None
+    assert tuple(engine._ais_history[signal.mmsi]) == before_disable
+
+    wrong_episode = VesselCommand(
+        command_id="t11f-wrong-episode",
+        episode_id="other-episode",
+        operation="delete",
+        vessel_id=created_ship.id,
+        expected_revision=disabled.revision,
+    )
+    engine.vessel_commands.enqueue(wrong_episode)
+    wrong = engine.apply_pending_vessel_commands()[0]
+    assert wrong.status == "rejected"
+    assert wrong.error_code == "episode_conflict"
+    assert any(ship.id == created_ship.id for ship in engine.ships)
+
+    delete = VesselCommand(
+        command_id="t11f-delete",
+        episode_id=engine.episode_id,
+        operation="delete",
+        vessel_id=created_ship.id,
+        expected_revision=disabled.revision,
+    )
+    engine.vessel_commands.enqueue(delete)
+    removed = engine.apply_pending_vessel_commands()[0]
+    assert removed.status == "applied"
+    assert created_ship.id not in {ship.id for ship in engine.ships}
+    assert created_ship.id not in engine._ship_position_history
+    assert created_ship.id not in engine._emitter_track_ids
+    assert not any(
+        probe.uav_id == created_ship.id for probe in engine.allocator.sm.get_probe_sessions()
+    )
+    assert any(
+        event["type"] == "vessel_removed"
+        and event["data"]["vessel_id"] == created_ship.id
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )
+
+
+def test_invalid_red_response_pauses_before_motion_or_clock_progress():
+    engine = SimulationEngine(
+        ConfigLoader.load(),
+        seed=42,
+        llm_gateway=_InvalidRedGateway(),
+        episode_id="t11f-invalid-red",
+    )
+    target = next(ship for ship in engine.ships if ship.vessel_class == "type_ii")
+    engine.surveillance_stages.set_fact(target.id, "sar", True, 0.0, "t11f-detected")
+    before = tuple(ship.float_position for ship in engine.ships)
+
+    engine.step()
+
+    assert engine.runtime_status == "paused_model"
+    assert engine.blocked_role == "red_commander"
+    assert engine.clock.time == 0.0
+    assert tuple(ship.float_position for ship in engine.ships) == before
+    assert any(
+        event["type"] == "red_decision_blocked"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )
