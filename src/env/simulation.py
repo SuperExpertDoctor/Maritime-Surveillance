@@ -839,12 +839,25 @@ class SimulationEngine:
         if hasattr(self, "surveillance_stages"):
             self._publish_vessel_inventory()
         self.allocator.sm.memory_version = self.allocator.memory_version
+        self._publish_control_routes()
         set_context = getattr(self.allocator.llm_client.gateway, "set_context", None)
         if callable(set_context):
             set_context(
                 self.episode_id,
                 self.allocator.memory_version,
                 float(self.clock.time),
+            )
+
+    def _publish_control_routes(self) -> None:
+        """Publish immutable controller route envelopes for frame readers."""
+        coordinator = getattr(self, "control_coordinator", None)
+        if coordinator is None:
+            return
+        state = self.allocator.sm
+        for uav in getattr(self, "uavs", ()):
+            state.set_control_route(
+                uav.id,
+                coordinator.route_snapshot(uav.id),
             )
 
     def _publish_vessel_inventory(self) -> None:
@@ -1630,6 +1643,7 @@ class SimulationEngine:
             "selection_call_id": batch.selection_call_id,
             "task_ids": [assignment.task_id for assignment in batch.assignments],
         })
+        self._publish_control_routes()
         return True
 
     def _prepare_red_decision(self, current_time: float) -> None:
@@ -1746,6 +1760,7 @@ class SimulationEngine:
             return False
 
         self._record_control_tick(uav, tick)
+        self._publish_control_routes()
         fuel_low = (
             uav.fuel_remaining_pct <= 0.08
             and uav.status not in ("returning", "idle", "refueling")

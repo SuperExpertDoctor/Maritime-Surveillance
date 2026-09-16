@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from threading import RLock
 from typing import TypeVar
@@ -605,6 +605,19 @@ class ControlCoordinator:
                     )
                 elif isinstance(exported, ControlRouteSnapshot):
                     route = exported
+                    if task is not None and route.task_id is None:
+                        route = replace(
+                            route,
+                            task_id=task.task_id,
+                            task_type=task.task_type.value,
+                            target_contact_id=task.target_contact_id,
+                            status=(
+                                "pending"
+                                if route.status == "unavailable"
+                                and not route.route
+                                else route.status
+                            ),
+                        )
                 else:
                     raise ControlCoordinatorError(
                         "controller route_snapshot must return ControlRouteSnapshot or None"

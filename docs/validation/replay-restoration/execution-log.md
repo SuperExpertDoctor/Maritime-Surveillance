@@ -159,3 +159,29 @@ extension interface.
 - Gate command:
   `python -m pytest tests/control/heuristic/test_coverage.py tests/control/heuristic/test_probe.py tests/control/heuristic/test_tracking.py tests/control/heuristic/test_navigation.py tests/mission/test_probe_navigation_integration.py -q`
 - Gate result: `71 passed in 1.15s`.
+
+## T07 Route and Sensor Frame Publication
+
+- Red evidence: the frame builder had no route sampling helpers, reported an
+  empty transit route as `1.0`, and serialized only the legacy entity tails;
+  runtime state also had no published controller envelope.
+- Added bounded endpoint-preserving route sampling, current-pose plus
+  unconsumed-route serialization, `visual_schema_version`, task phase/source
+  metadata, ProbeSession-backed `observation_started`, and stale
+  episode/generation diagnostics. Explicit controller `cleared`,
+  `unavailable`, and `guidance_only` states do not fall back to entity paths;
+  historical frames still use the legacy fallback when no envelope exists.
+- Added Coordinator pending-task enrichment so the first successful assignment
+  frame retains its task identity before the controller executes its first
+  tick. Simulation publishes envelopes at initialization, runtime boundaries,
+  successful assignment, and after every successful control tick; reset uses
+  the fresh StateManager cache.
+- Red-to-green command:
+  `python -m pytest tests/env/test_route_visual_frame.py -q`
+  -> `8 passed in 0.80s`.
+- Gate command:
+  `LONGCAT_API_KEY=t07-offline-regression python -m pytest tests/env/test_route_visual_frame.py tests/env/test_mixed_frame.py tests/env/test_frame_publisher.py tests/mission/test_sensor_modes.py tests/env/test_sensors_and_obstacles.py -q`
+- Gate result: `24 passed in 1.20s`.
+- Coordinator and existing simulation integration regression:
+  `LONGCAT_API_KEY=t07-offline-regression python -m pytest tests/control/test_route_snapshot.py tests/env/test_route_visual_frame.py tests/env/test_simulation_integration.py -q`
+  -> `40 passed in 14.71s`.

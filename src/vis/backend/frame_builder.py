@@ -6,6 +6,35 @@ from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 
 
+def sample_route_overview(poses, limit):
+    """Sample a complete route while preserving its endpoints."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 2:
+        raise ValueError("route overview limit must be at least two")
+    poses = tuple(poses)
+    if len(poses) <= limit:
+        return [list(pose) for pose in poses]
+    indices = [
+        round(index * (len(poses) - 1) / (limit - 1))
+        for index in range(limit)
+    ]
+    return [list(poses[index]) for index in indices]
+
+
+def remaining_route(position_pose, poses, next_index, limit):
+    """Return the current pose followed by the next unconsumed route points."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("remaining route limit must be positive")
+    if isinstance(next_index, bool) or not isinstance(next_index, int):
+        raise ValueError("next route index must be an integer")
+    poses = tuple(poses)
+    if not 0 <= next_index <= len(poses):
+        raise ValueError("next route index must be between zero and route length")
+    return [
+        list(position_pose),
+        *[list(pose) for pose in poses[next_index:next_index + limit - 1]],
+    ]
+
+
 def _heading_from_motion(trail, fallback_deg: float) -> float:
     """Prefer the measured direction of travel over a planned heading."""
     points = list(trail or [])
@@ -24,9 +53,11 @@ def _transit_progress(entity) -> float | None:
     if getattr(entity, "status", None) != "transit":
         return None
     waypoints = getattr(entity, "waypoints", ())
+    if not waypoints:
+        return None
     transit_end = min(int(getattr(entity, "_transit_end_index", 0)), len(waypoints) - 1)
     if transit_end <= 0:
-        return 1.0
+        return None
 
     total = sum(math.dist(waypoints[index - 1][:2], waypoints[index][:2]) for index in range(1, transit_end + 1))
     if total <= 1e-9:
@@ -39,6 +70,131 @@ def _transit_progress(entity) -> float | None:
     segment_length = math.dist(segment_start, segment_end)
     completed += min(math.dist(segment_start, entity.float_position), segment_length)
     return max(0.0, min(1.0, completed / total))
+
+
+def _enum_value(value):
+    return getattr(value, "value", value)
+
+
+def _probe_observation_started(state, uav_id: str, route) -> bool | None:
+    """Resolve probe observation state from the public session read model."""
+    if route.task_type != "probe":
+        return None
+    sessions = (
+        state.get_probe_sessions()
+        if hasattr(state, "get_probe_sessions") else ()
+    )
+    session = next(
+        (
+            item for item in sessions
+            if item.uav_id == uav_id
+            and item.contact_id == route.target_contact_id
+        ),
+        None,
+    )
+    if session is None:
+        return False
+    if route.phase == "closing":
+        return False
+    if route.phase == "baseline":
+        return session.baseline_started_at_min is not None
+    if route.phase in {"near", "awaiting_assessment", "finished"}:
+        return True
+    return session.baseline_started_at_min is not None
+
+
+def _legacy_task_visual(uav, *, source: str, route_status: str) -> dict:
+    """Build compatibility metadata when a frame predates route snapshots."""
+    operation_mode = _enum_value(getattr(uav, "operation_mode", None)) or "idle"
+    return {
+        "task_id": None,
+        "task_type": operation_mode,
+        "phase": _enum_value(getattr(uav, "status", None)) or "idle",
+        "contact_id": getattr(uav, "target_group_id", None),
+        "generation": int(getattr(uav, "controller_generation", 0)),
+        "route_revision": 0,
+        "planning_map_version": None,
+        "route_status": route_status,
+        "route_source": source,
+        "observation_started": None,
+    }
+
+
+def _route_visual_data(state, uav, entity, *, planned_limit: int,
+                       mission_limit: int) -> tuple[list, list, dict, str | None]:
+    """Return bounded route fields from the authoritative or legacy source."""
+    snapshot = (
+        state.get_control_route(uav.id)
+        if hasattr(state, "get_control_route") else None
+    )
+    expected_episode = getattr(state, "episode_id", "")
+    expected_generation = int(getattr(uav, "controller_generation", 0))
+    if snapshot is not None:
+        if (
+            snapshot.episode_id != expected_episode
+            or snapshot.generation != expected_generation
+        ):
+            return (
+                [],
+                [],
+                _legacy_task_visual(
+                    uav, source="none", route_status="unavailable",
+                ),
+                "stale_controller_snapshot",
+            )
+
+        route = snapshot.route
+        task_visual = {
+            "task_id": route.task_id,
+            "task_type": route.task_type,
+            "phase": route.phase,
+            "contact_id": route.target_contact_id,
+            "generation": snapshot.generation,
+            "route_revision": route.route_revision,
+            "planning_map_version": route.planning_map_version,
+            "route_status": route.status,
+            "route_source": "controller",
+            "observation_started": _probe_observation_started(
+                state, uav.id, route,
+            ),
+        }
+        if route.status != "ready":
+            return [], [], task_visual, None
+        mission = sample_route_overview(route.route, mission_limit)
+        if route.next_index >= len(route.route):
+            return [], mission, task_visual, None
+        current_pose = (
+            [
+                float(entity.float_position[0]),
+                float(entity.float_position[1]),
+                float(entity.heading_rad),
+            ]
+            if entity is not None
+            else [
+                float(u.position.col),
+                float(u.position.row),
+                math.radians(float(u.heading_deg)),
+            ]
+        )
+        return (
+            remaining_route(
+                current_pose, route.route, route.next_index, planned_limit,
+            ),
+            mission,
+            task_visual,
+            None,
+        )
+
+    legacy_planned = list(getattr(entity, "planned_path", ()) if entity else ())
+    legacy_mission = list(getattr(entity, "mission_route", ()) if entity else ())
+    source = "legacy" if legacy_planned or legacy_mission else "none"
+    status = "ready" if source == "legacy" else "unavailable"
+    return (
+        [list(pose) for pose in legacy_planned[-planned_limit:]],
+        [list(pose) for pose in legacy_mission[-mission_limit:]],
+        _legacy_task_visual(uav, source=source, route_status=status),
+        None,
+    )
 
 
 def _sample_snapshot(sample) -> dict:
@@ -242,7 +398,14 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         mission_limit = 200 if realtime else 800
         trail = [list(point) for point in entity.trail[-trail_limit:]] if entity else []
         fallback_heading = entity.heading_deg if entity is not None else u.heading_deg
-        uavs.append({
+        planned_path, mission_route, task_visual, route_diagnostic = _route_visual_data(
+            state,
+            u,
+            entity,
+            planned_limit=planned_limit,
+            mission_limit=mission_limit,
+        )
+        uav_frame = {
             "id": u.id,
             "status": u.status,
             "position": position,
@@ -261,8 +424,9 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "operation_mode": u.operation_mode,
             "controller_generation": u.controller_generation,
             "safety_intervened": bool(u.safety_intervened),
-            "planned_path": [list(pose) for pose in entity.planned_path[-planned_limit:]] if entity else [],
-            "mission_route": [list(pose) for pose in entity.mission_route[-mission_limit:]] if entity else [],
+            "planned_path": planned_path,
+            "mission_route": mission_route,
+            "task_visual": task_visual,
             "home_base_grid": list(entity.home_base_grid) if entity else [u.position.col, u.position.row],
             "transit_progress": _transit_progress(entity) if entity else None,
             "trail": trail,
@@ -283,6 +447,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "eo_fov": eo_fov,
             "avoidance_level": entity.avoidance_level if entity else 0,
             "avoidance_path": [list(pose) for pose in entity.avoidance_path] if entity else [],
+        }
+        if route_diagnostic is not None:
+            uav_frame["route_diagnostic"] = route_diagnostic
+        uavs.append({
+            **uav_frame,
         })
 
     # 搜索区域
@@ -415,6 +584,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
 
     frame = {
         "schema_version": "mission-frame/v2",
+        "visual_schema_version": "mission-visual/v1",
         "frame_id": step,
         "cycle": cycle,
         "timestamp": _format_time(state.current_time),
