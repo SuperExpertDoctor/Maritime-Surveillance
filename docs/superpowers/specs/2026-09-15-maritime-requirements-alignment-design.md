@@ -622,7 +622,7 @@ cost(u,t) = transit_time
 | AIS 已禁用价值更新 | 接收并写接触历史；跳过新 `ais_position`，但仍允许航迹逃逸检测；记录 skipped reason |
 | 信息更新批次含非法记录 | 整批不提交，版本不变；记录精确 evidence ID 和原因 |
 | 候选 cell 不可调度 | 显式发布原因；不得伪造候选或静默删除 |
-| LLM 超时/非法输出 | 调度器在 snapshot 冻结时建立 2.0 秒绝对 deadline，并为校验/匹配预留 0.2 秒；网关最多首次请求 + 2 次纠错且共用该 deadline，transport timeout 不得侵占后处理预留；任一阶段超时都不形成新 AssignmentBatch，保持已提交任务，发出 `decision_failed`，1 仿真分钟后重触发；不生成规则替代决策 |
+| LLM 超时/非法输出 | 调度器在 snapshot 冻结时建立配置化绝对 deadline；默认/fixture 使用 2.0 秒并为校验/匹配预留 0.2 秒，生产真实 LongCat 路由使用 30.0 秒并预留 0.5 秒（实测完整响应约 6–20 秒）。网关最多首次请求 + 2 次纠错且共用该 deadline，transport timeout 不得侵占后处理预留；任一阶段超时都不形成新 AssignmentBatch，保持已提交任务，发出 `decision_failed`，1 仿真分钟后重触发；不生成规则替代决策 |
 | 接力无可用 UAV | 任务保持 handoff_required，证据继续衰减/扩张，下一触发周期重试 |
 | 船舶边界无安全路线 | 制动或保持最后合法姿态，发出故障事件；绝不越界 |
 | 编辑命令失败 | 原场景不变，命令返回稳定错误码 |
@@ -668,7 +668,7 @@ AIS-on 逃逸航迹 -> evasive_maneuver evidence -> V 局部数值上升
 | I 类船舶/II 类船舶区分率 | 在首步前场景中存在且 episode 有效运行至少 30 分钟的全部船舶 | 使用 balanced accuracy=`(type_i recall + type_ii recall)/2`；证据不足而保持 unknown 或误判均计错，不以“获得充分证据”筛分母 |
 | 接力成功率 | 因燃油、航程或安全原因中断且当时存在至少一架可行后继 UAV 的观察事件 | 后继 UAV 在 5 分钟内提交接力任务并在 10 分钟内恢复有效 EO lock；同一中断只计一次 |
 | 持续观察率 | 评价器按隐藏真值统计的全部II 类船舶 `survey` 违规活动分钟并集；该真值只用于离线记分，不回灌算法 | 违规活动分钟中至少一架 UAV 有有效 EO lock 的分钟并集 / 全部违规活动分钟并集；换机重叠不重复计时；未发现或仍 unknown 的船仍贡献完整分母 |
-| 在线规划响应 | 每次 heavy/light 触发，包括超时和非法输出 | `decision_finished_wall - snapshot_frozen_wall`，结束点是合法 AssignmentBatch 形成或本轮明确失败返回；包含 API、校验和应用级重试；分别报告 p50/p95/max，验收要求每次非故障注入样本 <=2.0s |
+| 在线规划响应 | 每次 heavy/light 触发，包括超时和非法输出 | `decision_finished_wall - snapshot_frozen_wall`，结束点是合法 AssignmentBatch 形成或本轮明确失败返回；包含 API、校验和应用级重试；fixture/本地网关非故障样本要求 <=2.0s，真实 LongCat 按生产 30.0 秒 deadline 分别报告 p50/p95/max |
 
 85% 阈值分别用于前三项和持续观察率，不用多个指标相乘生成一个模糊总分。配置/模型故障、场景初始化失败单列 operational failure，不从分母中悄悄删除。真实 LLM 与固定 fixture 的结果分别标注。
 

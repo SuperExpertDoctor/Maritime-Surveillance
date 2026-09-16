@@ -1213,17 +1213,21 @@ class SimulationEngine:
                     }
             timing = getattr(self.allocator, "last_decision_timing", None)
             if timing is not None:
+                decision_succeeded = assignment_applied or (
+                    result.get("trigger_type") == "light"
+                    and result.get("action") == "approved_tasks_deferred"
+                )
                 self._outcome_evaluator.record_decision_latency(
                     snapshot_frozen_wall=timing["snapshot_frozen_wall"],
                     decision_finished_wall=(
                         timing["decision_finished_wall"]
-                        if assignment_applied else time.perf_counter()
+                        if decision_succeeded else time.perf_counter()
                     ),
                     llm_seconds=timing["llm_seconds"],
                     validation_seconds=timing["validation_seconds"],
                     matching_seconds=timing["matching_seconds"],
-                    success=assignment_applied,
-                    failure_reason=None if assignment_applied else "assignment_rejected",
+                    success=decision_succeeded,
+                    failure_reason=None if decision_succeeded else "assignment_rejected",
                 )
         self.last_result = result
         if result["trigger_type"] == "heavy":

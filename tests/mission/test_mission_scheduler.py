@@ -386,6 +386,103 @@ def test_scheduler_prompt_contains_complete_snapshot_and_returns_batch():
     assert trace["attempts"][0]["response"] == trace["response"]
 
 
+def test_scheduler_prompt_compacts_large_feasible_edge_graph():
+    tasks = [_task(f"Q{index}") for index in range(1, 13)]
+    resources = [_resource("U1"), _resource("U2")]
+    edges = [
+        _edge(task.task_id, resource.uav_id, float(index + 1))
+        for index, task in enumerate(tasks)
+        for resource in resources
+    ]
+    snapshot = _snapshot(tasks, resources, edges, available=("U1", "U2"))
+
+    scheduler = MissionScheduler(
+        max_tasks_in_prompt=4,
+        selection_provider=lambda current, _payload: _selection(current, ["Q1"]),
+    )
+    assert scheduler.decide(snapshot) is not None
+
+    prompt_edges = scheduler.last_selection_payload["snapshot"]["feasible_edges"]
+
+    assert prompt_edges
+    assert len(prompt_edges) <= 4
+    assert all("route_cache_key" not in edge for edge in prompt_edges)
+    assert all(
+        set(edge) == {"task_id", "uav_options"}
+        for edge in prompt_edges
+    )
+    assert all(
+        set(option) == {"uav_id", "transit_time_min", "total_range_cells"}
+        for edge in prompt_edges
+        for option in edge["uav_options"]
+    )
+    assert next(edge for edge in prompt_edges if edge["task_id"] == "Q1") == {
+        "task_id": "Q1",
+        "uav_options": [
+            {"uav_id": "U1", "transit_time_min": 1.0, "total_range_cells": 12.0},
+            {"uav_id": "U2", "transit_time_min": 1.0, "total_range_cells": 12.0},
+        ],
+    }
+
+
+def test_scheduler_prompt_filters_overlapping_search_candidates():
+    tasks = [
+        _task("Q1", bbox=(1, 1, 5, 5)),
+        _task("Q2", bbox=(3, 3, 7, 7)),
+        _task("Q3", bbox=(9, 9, 13, 13)),
+    ]
+    snapshot = _snapshot(
+        tasks,
+        [_resource("U1")],
+        [_edge(task.task_id, "U1", 1.0) for task in tasks],
+        available=("U1",),
+    )
+
+    scheduler = MissionScheduler(
+        max_tasks_in_prompt=2,
+        selection_provider=lambda current, _payload: _selection(current, ["Q1"]),
+    )
+    assert scheduler.decide(snapshot) is not None
+
+    prompt_snapshot = scheduler.last_selection_payload["snapshot"]
+    prompt_candidates = prompt_snapshot["candidates"]
+    prompt_ids = {candidate["task_id"] for candidate in prompt_candidates}
+
+    assert "Q1" in prompt_ids
+    assert "Q2" not in prompt_ids
+    assert "Q3" in prompt_ids
+    assert set(prompt_snapshot["prompt_sources"]) <= prompt_ids
+    assert set(prompt_snapshot["prompt_skip_cycles"]) <= prompt_ids
+    assert {
+        edge["task_id"] for edge in prompt_snapshot["feasible_edges"]
+    } <= prompt_ids
+    assert "Q2" not in {
+        edge["task_id"] for edge in prompt_snapshot["feasible_edges"]
+    }
+    assert prompt_snapshot["prompt_geometry_filtered"] is True
+
+
+def test_scheduler_prompt_distinguishes_count_truncation_from_geometry_filter():
+    tasks = [_task(f"Q{index}") for index in range(1, 4)]
+    snapshot = _snapshot(
+        tasks,
+        [_resource("U1")],
+        [_edge(task.task_id, "U1", 1.0) for task in tasks],
+        available=("U1",),
+    )
+
+    scheduler = MissionScheduler(
+        max_tasks_in_prompt=2,
+        selection_provider=lambda current, _payload: _selection(current, ["Q1"]),
+    )
+    assert scheduler.decide(snapshot) is not None
+
+    prompt_snapshot = scheduler.last_selection_payload["snapshot"]
+
+    assert prompt_snapshot["candidates_truncated"] is True
+    assert prompt_snapshot["prompt_geometry_filtered"] is False
+
+
 def test_scheduler_rejects_response_after_absolute_deadline():
     task = _task("Q1", kind="probe", contact_id="C1")
     snapshot = _snapshot(

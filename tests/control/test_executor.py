@@ -63,6 +63,21 @@ def test_executor_updates_legacy_state_trail_and_command_audit_fields(uav):
     assert uav.last_applied_command is command
 
 
+def test_executor_maps_probe_operation_to_tracking_status(uav):
+    command = ControlCommand(
+        turn_rate_rad_min=0.0,
+        speed_cells_min=0.25,
+        sensor_mode=SensorMode.OFF,
+        operation_mode=OperationMode.PROBE,
+        target_contact_id="C1",
+    )
+
+    result = UAVDynamicsExecutor().execute(uav, command, dt_min=1.0)
+
+    assert result.command is command
+    assert uav.status == "tracking"
+
+
 def test_executor_preserves_distinct_requested_and_safety_applied_commands(uav):
     requested = ControlCommand(
         turn_rate_rad_min=1.0,

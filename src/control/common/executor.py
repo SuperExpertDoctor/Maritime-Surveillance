@@ -13,6 +13,10 @@ _STATUS_BY_OPERATION = {
     OperationMode.IDLE: "idle",
     OperationMode.TRANSIT: "transit",
     OperationMode.COVERAGE: "searching",
+    # The public UAV status vocabulary has no separate probing state; keep
+    # active probe motion visible as contact work while preserving PROBE in the
+    # control command and scheduler state.
+    OperationMode.PROBE: "tracking",
     OperationMode.TRACK: "tracking",
     OperationMode.RETURN: "returning",
     OperationMode.HOLDING: "holding",

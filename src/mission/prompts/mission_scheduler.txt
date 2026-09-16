@@ -13,8 +13,12 @@ Return exactly one JSON object with this schema:
 Select only supplied candidate task IDs. Search candidates already contain a
 legal rectangle; never invent a bbox. Probe and track tasks reference the
 supplied contact ID through the task record and have no search geometry.
+Never select two supplied search candidates whose rectangles overlap.
 Respect feasible_edges, remaining range, UAV generations, active tasks, map
-version, contact state, intent status, and reviewer summary. Existing approved
+version, contact state, intent status, and reviewer summary. For large snapshots
+feasible_edges may be a compact per-task summary with per-UAV transit and total
+range options; the server retains and checks the complete legal edge graph after
+your selection. Existing approved
 or executing tasks remain in force unless an explicitly legal ordinary search
 UAV is preempted for a new probe or track. Returning, refueling, safety, active
 probe, and valid tracking work must not be preempted.

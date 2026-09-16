@@ -975,7 +975,12 @@ class MissionScheduler:
                 self.max_tasks_in_prompt,
                 cycle=max(0, int(snapshot.sim_time_min)),
             )
-            full["candidates"] = [_jsonable(task) for task in window.tasks]
+            window_ids = {task.task_id for task in window.tasks}
+            ordered_tasks = [
+                *window.tasks,
+                *(task for task in prompt_candidates if task.task_id not in window_ids),
+            ]
+            full["candidates"] = [_jsonable(task) for task in ordered_tasks]
             for candidate in full["candidates"]:
                 if "_information_version" in candidate:
                     candidate["information_version"] = candidate.pop("_information_version")
@@ -987,6 +992,41 @@ class MissionScheduler:
         else:
             full["candidates_truncated"] = False
             full["candidate_count"] = len(candidates)
+        candidates_before_filter = full.get("candidates", ())
+        full["candidates"], geometry_filtered = _filter_prompt_candidates(
+            candidates_before_filter, self.max_tasks_in_prompt,
+        )
+        full["candidates_truncated"] = bool(
+            full.get("candidates_truncated")
+            or len(full["candidates"]) < len(candidates_before_filter)
+        )
+        full["prompt_geometry_filtered"] = geometry_filtered
+        prompt_task_ids = {
+            candidate.get("task_id")
+            for candidate in full.get("candidates", ())
+            if isinstance(candidate, dict) and candidate.get("task_id")
+        }
+        for metadata_key in ("prompt_sources", "prompt_skip_cycles"):
+            metadata = full.get(metadata_key)
+            if isinstance(metadata, dict):
+                full[metadata_key] = {
+                    task_id: value
+                    for task_id, value in metadata.items()
+                    if task_id in prompt_task_ids
+                }
+        prompt_edges = [
+            edge
+            for edge in full.get("feasible_edges", ())
+            if isinstance(edge, dict) and edge.get("task_id") in prompt_task_ids
+        ]
+        if len(snapshot.feasible_edges) > self.max_tasks_in_prompt * 2:
+            full["feasible_edges"] = _compact_prompt_edges(
+                prompt_edges, prompt_task_ids,
+            )
+            full["feasible_edges_compacted"] = True
+        else:
+            full["feasible_edges"] = prompt_edges
+            full["feasible_edges_compacted"] = False
         strategy_context = _strategy_context(snapshot)
         memories = ()
         if self.strategy_memory_store is not None:
@@ -1000,6 +1040,63 @@ class MissionScheduler:
             "instructions": self.system_prompt,
             "snapshot": full,
         }
+
+
+def _compact_prompt_edges(edges: list[dict], task_ids: set[str]) -> list[dict]:
+    """Keep model-facing route facts small; validation still uses full edges."""
+    grouped: dict[str, list[dict]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict) or edge.get("task_id") not in task_ids:
+            continue
+        grouped.setdefault(edge["task_id"], []).append(edge)
+
+    compacted = []
+    for task_id in sorted(grouped):
+        options = grouped[task_id]
+        compacted.append({
+            "task_id": task_id,
+            "uav_options": [
+                {
+                    "uav_id": edge["uav_id"],
+                    "transit_time_min": edge["transit_time_min"],
+                    "total_range_cells": (
+                        edge["mission_range_cells"]
+                        + edge["return_range_cells"]
+                        + edge["reserve_range_cells"]
+                    ),
+                }
+                for edge in sorted(options, key=lambda item: item["uav_id"])
+            ],
+        })
+    return compacted
+
+
+def _filter_prompt_candidates(
+    candidates: list[dict], limit: int,
+) -> tuple[list[dict], bool]:
+    """Avoid presenting mutually overlapping search rectangles to the model."""
+    selected: list[dict] = []
+    selected_bboxes: list[tuple[float, float, float, float]] = []
+    filtered = False
+    for candidate in candidates:
+        bbox = candidate.get("bbox") if isinstance(candidate, dict) else None
+        normalized = None
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            try:
+                normalized = tuple(float(value) for value in bbox)
+            except (TypeError, ValueError):
+                normalized = None
+        if normalized is not None and any(
+            _overlap(normalized, existing) for existing in selected_bboxes
+        ):
+            filtered = True
+            continue
+        selected.append(candidate)
+        if normalized is not None:
+            selected_bboxes.append(normalized)
+        if len(selected) >= limit:
+            break
+    return selected, filtered
 
 
 __all__ = [

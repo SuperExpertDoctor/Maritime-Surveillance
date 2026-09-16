@@ -147,6 +147,31 @@ def test_dynamic_obstacle_replans_remaining_return_route():
     assert any(event["type"] == "route_replanned" for event in events)
 
 
+def test_deferred_light_pairing_is_not_recorded_as_operational_failure(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+
+    def defer_light_pairing(*_args, **_kwargs):
+        engine.allocator.last_decision_timing = {
+            "snapshot_frozen_wall": 1.0,
+            "decision_finished_wall": 1.1,
+            "llm_seconds": 0.0,
+            "validation_seconds": 0.1,
+            "matching_seconds": 0.1,
+        }
+        return {
+            "trigger_type": "light",
+            "action": "approved_tasks_deferred",
+        }, None
+
+    monkeypatch.setattr(engine.allocator, "mission_step", defer_light_pairing)
+
+    engine.step()
+
+    outcome = engine.summary()["episode_outcome"]
+    assert outcome["decision_latency_seconds"]["failures"] == 0
+    assert outcome["operational_failures"] == 0
+
+
 def test_every_initial_candidate_has_a_safe_executable_route():
     engine = SimulationEngine(ConfigLoader.load())
     candidates = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions
