@@ -19,8 +19,8 @@ def test_config_loader_reads_merged_environment_and_llm_parameters():
     # Retaining prior runs is required for replay after a new live run starts.
     assert config.common.clear_outputs_before_run is False
     assert config.environment.base_position == (2, 14)
-    assert config.ship.initial_ship_count == 8
-    assert config.ship.target_ship_count == 3
+    assert config.ship.population.total_count == 8
+    assert config.ship.population.type_ii_ratio == pytest.approx(0.375)
     assert config.mission.contact.near_standoff_cells == 1.2
     assert config.mission.scheduling.allow_probe_preempt_search is True
 

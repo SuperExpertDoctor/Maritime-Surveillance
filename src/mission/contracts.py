@@ -8,15 +8,15 @@ from typing import Literal
 
 Vec2 = tuple[float, float]
 Rect = tuple[int, int, int, int]
-Identity = Literal["unknown", "target", "civilian"]
-VesselClass = Literal["unknown", "civilian", "research"]
+Identity = Literal["unknown", "type_ii", "type_i"]
+VesselClass = Literal["unknown", "type_i", "type_ii"]
 ActivityState = Literal[
     "unknown", "normal", "suspected_violation", "confirmed_violation"
 ]
 EvidenceKind = Literal[
     "ais_position", "sar_contact", "eo_class", "eo_activity",
     "passive_bearing", "passive_position", "evasive_maneuver",
-    "research_assessment", "violation_assessment", "handoff",
+    "type_ii_assessment", "type_i_assessment", "track_loss", "handoff",
 ]
 ContactState = Literal[
     "pending",
@@ -29,7 +29,7 @@ ContactState = Literal[
     "departed",
 ]
 
-SHIP_RNG_STREAMS = ("ship_identity", "ship_ais_mode")
+SHIP_RNG_STREAMS = ("ship_class", "ship_ais_enabled")
 
 
 def ship_rng_manifest(episode_seed: int) -> dict[str, int]:
@@ -256,26 +256,29 @@ class AisUpdateState:
     enabled: bool
     revision: int
     changed_at_min: float
-    reason: Literal["unclassified", "confirmed_civilian"]
+    reason: Literal["unclassified", "confirmed_type_i"]
 
 
 @dataclass(frozen=True)
 class VesselCommand:
     command_id: str
     episode_id: str
-    operation: Literal["create", "delete"]
-    vessel_id: str | None
-    expected_revision: int | None
-    vessel_class: Literal["civilian", "research"] | None
-    position_cells: Vec2 | None
+    operation: Literal["create", "delete", "set_ais"]
+    vessel_id: str | None = None
+    expected_revision: int | None = None
+    vessel_class: VesselClass | None = None
+    position_cells: Vec2 | None = None
+    ais_enabled: bool | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.command_id, str) or not self.command_id:
             raise ValueError("command_id must be non-empty")
         if not isinstance(self.episode_id, str) or not self.episode_id:
             raise ValueError("episode_id must be non-empty")
-        if self.operation not in ("create", "delete"):
+        if self.operation not in ("create", "delete", "set_ais"):
             raise ValueError("invalid vessel command operation")
+        if self.ais_enabled is not None and type(self.ais_enabled) is not bool:
+            raise ValueError("ais_enabled must be bool")
 
 
 @dataclass(frozen=True)
@@ -304,7 +307,7 @@ class ContactAssessment:
     activity_evidence_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if self.vessel_class not in ("unknown", "civilian", "research"):
+        if self.vessel_class not in ("unknown", "type_i", "type_ii"):
             raise ValueError("invalid vessel_class")
         if self.activity not in ("unknown", "normal", "suspected_violation", "confirmed_violation"):
             raise ValueError("invalid activity")

@@ -41,15 +41,15 @@ class PopulationConfig:
     """Actual vessel population and its deterministic class proportions."""
 
     total_count: int
-    civilian_ratio: float
-    research_ratio: float
+    type_i_ratio: float
+    type_ii_ratio: float
 
     def __post_init__(self) -> None:
         if isinstance(self.total_count, bool) or not isinstance(self.total_count, int):
             raise ValueError("population.total_count: expected integer")
         if self.total_count < 0:
             raise ValueError("population.total_count: expected integer >= 0")
-        ratios = (self.civilian_ratio, self.research_ratio)
+        ratios = (self.type_i_ratio, self.type_ii_ratio)
         if any(isinstance(value, bool) or not isinstance(value, (int, float))
                or not math.isfinite(value) for value in ratios):
             raise ValueError("population ratios: expected finite numbers")
@@ -57,6 +57,33 @@ class PopulationConfig:
             raise ValueError("population ratios: expected values in [0, 1]")
         if abs(math.fsum(ratios) - 1.0) > 1e-9:
             raise ValueError("population ratios must sum to 1")
+
+    def allocate(self) -> dict[str, int]:
+        """Allocate classes with stable largest-remainder tie ordering."""
+        order = ("type_i", "type_ii")
+        quotas = {
+            key: self.total_count * ratio
+            for key, ratio in zip(order, (self.type_i_ratio, self.type_ii_ratio))
+        }
+        result = {key: math.floor(quotas[key]) for key in order}
+        remaining = self.total_count - sum(result.values())
+        ranked = sorted(
+            order,
+            key=lambda key: (-(quotas[key] - result[key]), order.index(key)),
+        )
+        for key in ranked[:remaining]:
+            result[key] += 1
+        return result
+
+    @property
+    def civilian_ratio(self) -> float:
+        """Deprecated read adapter; removed after the migration boundary."""
+        return self.type_i_ratio
+
+    @property
+    def research_ratio(self) -> float:
+        """Deprecated read adapter; removed after the migration boundary."""
+        return self.type_ii_ratio
 
 
 @dataclass(frozen=True)
@@ -399,17 +426,13 @@ def validate_mission_config(config: "AppConfig") -> None:
     scheduling = config.mission.scheduling
     evolution = config.mission.evolution
 
-    initial_count = _integer(ship.initial_ship_count, "ship.initial_ship_count")
-    target_count = _integer(ship.target_ship_count, "ship.target_ship_count")
-    if target_count > initial_count:
-        raise ValueError("ship.target_ship_count must not exceed initial_ship_count")
     population = ship.population
     cols, rows = config.grid.resolution
     if population.total_count > cols * rows:
         raise ValueError("population.total_count exceeds grid capacity")
 
     _probability(
-        ship.target_ais_on_probability, "ship.target_ais_on_probability"
+        ship.type_ii_ais_on_probability, "ship.type_ii_ais_on_probability"
     )
     _probability(ship.turn_speed_loss_fraction, "ship.turn_speed_loss_fraction")
     for name in (

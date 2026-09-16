@@ -229,6 +229,6 @@ def test_ship_identity_and_ais_rng_substreams_are_independent_and_recordable():
     manifest = ship_rng_manifest(42)
 
     assert manifest == ship_rng_manifest(42)
-    assert set(manifest) == {"ship_identity", "ship_ais_mode"}
-    assert manifest["ship_identity"] != manifest["ship_ais_mode"]
+    assert set(manifest) == {"ship_class", "ship_ais_enabled"}
+    assert manifest["ship_class"] != manifest["ship_ais_enabled"]
     assert all(isinstance(seed, int) for seed in manifest.values())

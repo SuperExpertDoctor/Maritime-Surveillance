@@ -33,9 +33,8 @@ def test_ship_and_mission_config_fields_match_design():
     config = ConfigLoader.load()
 
     assert tuple(field.name for field in fields(config.ship)) == (
-        "initial_ship_count",
-        "target_ship_count",
-        "target_ais_on_probability",
+        "population",
+        "type_ii_ais_on_probability",
         "speed_kn",
         "ais_update_interval_min",
         "ais_position_noise_cells",
@@ -123,14 +122,22 @@ def test_loaded_ship_config_is_immutable():
     config = ConfigLoader.load()
 
     with pytest.raises(FrozenInstanceError):
-        config.ship.initial_ship_count = 9
+        config.ship.population = config.ship.population
 
 
-def test_zero_initial_ships_is_valid_when_target_count_is_zero():
+def test_zero_population_is_valid_when_all_ratios_are_type_i():
     config = ConfigLoader.load()
     config = replace(
         config,
-        ship=replace(config.ship, initial_ship_count=0, target_ship_count=0),
+        ship=replace(
+            config.ship,
+            population=replace(
+                config.ship.population,
+                total_count=0,
+                type_i_ratio=1.0,
+                type_ii_ratio=0.0,
+            ),
+        ),
     )
 
     validate_mission_config(config)
@@ -140,7 +147,10 @@ def test_population_total_cannot_exceed_grid_capacity():
     config = ConfigLoader.load()
     config = replace(
         config,
-        ship=replace(config.ship, initial_ship_count=1000, target_ship_count=0),
+        ship=replace(
+            config.ship,
+            population=replace(config.ship.population, total_count=1000),
+        ),
     )
 
     with pytest.raises(ValueError, match="population.total_count"):
@@ -175,33 +185,42 @@ def test_activity_region_and_survey_speed_stay_inside_operational_bounds():
         validate_mission_config(config)
 
 
-def test_target_ship_count_cannot_exceed_initial_ship_count():
+def test_population_ratios_must_sum_to_one():
+    config = ConfigLoader.load()
+    with pytest.raises(ValueError, match="sum to 1"):
+        replace(
+            config,
+            ship=replace(
+                config.ship,
+                population=replace(
+                    config.ship.population,
+                    type_i_ratio=0.5,
+                    type_ii_ratio=0.6,
+                ),
+            ),
+        )
+
+
+def test_boolean_population_count_is_rejected():
+    config = ConfigLoader.load()
+    with pytest.raises(ValueError, match="population.total_count.*integer"):
+        replace(
+            config,
+            ship=replace(
+                config.ship,
+                population=replace(config.ship.population, total_count=True),
+            ),
+        )
+
+
+def test_negative_type_ii_ais_probability_is_rejected():
     config = ConfigLoader.load()
     config = replace(
         config,
-        ship=replace(config.ship, initial_ship_count=2, target_ship_count=3),
+        ship=replace(config.ship, type_ii_ais_on_probability=-0.01),
     )
 
-    with pytest.raises(ValueError, match="target_ship_count"):
-        validate_mission_config(config)
-
-
-def test_boolean_initial_ship_count_is_rejected():
-    config = ConfigLoader.load()
-    config = replace(config, ship=replace(config.ship, initial_ship_count=True))
-
-    with pytest.raises(ValueError, match="initial_ship_count.*integer"):
-        validate_mission_config(config)
-
-
-def test_negative_target_ais_probability_is_rejected():
-    config = ConfigLoader.load()
-    config = replace(
-        config,
-        ship=replace(config.ship, target_ais_on_probability=-0.01),
-    )
-
-    with pytest.raises(ValueError, match="target_ais_on_probability"):
+    with pytest.raises(ValueError, match="type_ii_ais_on_probability"):
         validate_mission_config(config)
 
 
@@ -365,10 +384,14 @@ def test_legacy_ship_population_fields_have_an_explicit_migration_error(tmp_path
     ship_path = config_dir / "ship.yaml"
     ship_data = yaml.safe_load(ship_path.read_text(encoding="utf-8"))
     ship_data.pop("population")
-    ship_data.update(initial_ship_count=8, target_ship_count=3)
+    ship_data["population"] = {
+        "total_count": 8,
+        "civilian_ratio": 0.625,
+        "research_ratio": 0.375,
+    }
     ship_path.write_text(yaml.safe_dump(ship_data), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="ship population.*initial_ship_count"):
+    with pytest.raises(ValueError, match="type_i_ratio"):
         ConfigLoader.load(str(config_dir))
 
 
