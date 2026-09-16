@@ -1,5 +1,6 @@
 ﻿from dataclasses import dataclass, field
 import math
+from copy import deepcopy
 
 from src.mission.contracts import InfoFieldDelta
 from src.schedule.state_manager import StateManager
@@ -21,6 +22,7 @@ class TriggerManager:
         self._last_light_time: float = 0.0
         self._heavy_retry_at: float | None = None
         self._heavy_retry_reason: str = "decision_failed"
+        self._last_checked_events: tuple[dict, ...] = ()
 
     def notify_event(self, event_type: str, time: float, **kwargs) -> None:
         # Dedup: skip duplicate (event_type, uav_id) within a 5-min window
@@ -48,6 +50,7 @@ class TriggerManager:
         cause_ids = tuple(delta.cause_evidence_ids)
         if any(
             event["type"] == "information_delta"
+            and event.get("information_version") == delta.version
             and event.get("cause_evidence_ids") == cause_ids
             for event in self._pending_events
         ):
@@ -63,6 +66,10 @@ class TriggerManager:
             "reason_codes": tuple(delta.reason_codes),
             "cause_evidence_ids": cause_ids,
         })
+
+    def pending_events_for_test(self) -> tuple[dict, ...]:
+        """Expose a read-only event view for end-to-end trigger assertions."""
+        return tuple(deepcopy((*self._last_checked_events, *self._pending_events)))
 
     def check(self, current_time: float) -> TriggerDecision:
         """检查是否需要触发，返回决策。"""
@@ -100,6 +107,7 @@ class TriggerManager:
     def _check_events(self, current_time: float) -> TriggerDecision:
         """处理 pending 事件，返回基于事件的决策。"""
         if not self._pending_events:
+            self._last_checked_events = ()
             return TriggerDecision("none")
 
         # 过滤 5min 内的事件
@@ -108,6 +116,7 @@ class TriggerManager:
         # All queued events are either processed now or stale; neither should
         # be reconsidered on the next simulation step.
         self._pending_events = []
+        self._last_checked_events = tuple(recent)
 
         if not recent:
             return TriggerDecision("none")
@@ -135,6 +144,8 @@ class TriggerManager:
             "storm_spawned",
             "storm_dissipated",
             "handoff_required",
+            "ais_transmission_changed",
+            "surveillance_stage_changed",
         }
         # Light: incremental adjustments handled by Hungarian pairing only
         light_types = {
@@ -156,6 +167,7 @@ class TriggerManager:
                     event.get("max_abs_value_delta", 0.0) >= 0.05
                     or event.get("crossed_candidate_threshold")
                 )
+                or "evidence_expired" in event.get("reason_codes", ())
             )
         ]
         heavy_count = sum(1 for e in recent if e["type"] in heavy_types) + len(info_heavy)

@@ -1173,6 +1173,9 @@ class SimulationEngine:
         self._advance_probe_sessions(t)
         self._update_lifecycle_mode(t)
         self._process_refuelling(t)
+        self._publish_information_delta(
+            sm.information_policy.advance_time(t), t,
+        )
         self._sync_state_from_entities()
 
         if self.allocator.uses_legacy_scheduler():
@@ -2086,10 +2089,7 @@ class SimulationEngine:
                     ),
                 )
                 delta = sm.apply_information_facts([fact], current_time)
-                if delta is not None:
-                    self.allocator.trigger_manager.notify_information_delta(
-                        delta, time=current_time,
-                    )
+                self._publish_information_delta(delta, current_time)
             self._outcome_evaluator.register_handoff(
                 attempt.handoff_id,
                 at_min=current_time,
@@ -2374,17 +2374,29 @@ class SimulationEngine:
                 ship.set_tracked(False)
                 self.departed_ship_count += 1
 
+    def _publish_information_delta(self, delta, at_min: float) -> None:
+        if delta is not None:
+            self.allocator.trigger_manager.notify_information_delta(
+                delta, time=at_min,
+            )
+
     def _refresh_ais_signals(self, current_time: float) -> None:
-        """Ingest satellite AIS globally, including the initial t=0 broadcasts."""
+        """Ingest satellite AIS globally, including forced runtime refreshes."""
         interval = self.config.ship.ais_update_interval_min
-        if current_time - getattr(self, "_last_ais_update", float("-inf")) < interval:
+        last_update = getattr(self, "_last_ais_update", float("-inf"))
+        regular_due = current_time - last_update >= interval
+        forced_ids = set(self._ais_force_refresh_ids)
+        if not regular_due and not forced_ids:
             return
         ais_facts: list[EvidenceRecord] = []
         for ship in self.ships:
+            if not regular_due and ship.id not in forced_ids:
+                continue
             if not ship.departed:
                 signal = generate_ais_signal(ship, current_time)
                 ship.set_ais_signal(signal)
                 if signal is not None:
+                    self._ais_force_refresh_ids.discard(ship.id)
                     contact_id = self.allocator.sm.contacts.ingest_ais(signal, current_time)
                     self._vessel_contact_ids[ship.id].add(contact_id)
                     self._ais_history[signal.mmsi].append((
@@ -2417,13 +2429,11 @@ class SimulationEngine:
                                     ),
                                 ),
                             ))
-        self._last_ais_update = current_time
+        if regular_due:
+            self._last_ais_update = current_time
         if ais_facts:
             delta = self.allocator.sm.apply_information_facts(ais_facts, current_time)
-            if delta is not None:
-                self.allocator.trigger_manager.notify_information_delta(
-                    delta, time=current_time,
-                )
+            self._publish_information_delta(delta, current_time)
         self._publish_contact_events(current_time)
 
     @staticmethod
@@ -2555,10 +2565,7 @@ class SimulationEngine:
             if facts:
                 sm.record_passive_observations(tuple(observations))
                 delta = sm.apply_information_facts(facts, sample_time)
-                if delta is not None:
-                    self.allocator.trigger_manager.notify_information_delta(
-                        delta, time=sample_time,
-                    )
+                self._publish_information_delta(delta, sample_time)
                 for activity in activity_facts:
                     sm.add_event("radiation_activity_evidence", {
                         "evidence_id": activity.evidence_id,
@@ -2683,10 +2690,7 @@ class SimulationEngine:
             )
             for fact in facts:
                 delta = sm.apply_information_facts([fact], current_time)
-                if delta is not None:
-                    self.allocator.trigger_manager.notify_information_delta(
-                        delta, time=current_time,
-                    )
+                self._publish_information_delta(delta, current_time)
                 sm.add_event("evasive_maneuver_detected", {
                     "fact_id": fact.fact_id,
                     "evasion_episode_id": fact.evasion_episode_id,
@@ -2837,7 +2841,10 @@ class SimulationEngine:
                 )
                 uav.sar_footprint = footprint
                 for cell in footprint:
-                    sm.scan_cell(cell, current_time, is_track=False)
+                    self._publish_information_delta(
+                        sm.scan_cell(cell, current_time, is_track=False),
+                        current_time,
+                    )
                 footprint_set = set(footprint)
                 for ship in self.ships:
                     if ship.departed or ship.position not in footprint_set:
@@ -3092,8 +3099,14 @@ class SimulationEngine:
                 uav.float_position[1] + measurement.distance_cells * math.sin(bearing))
             self.allocator.sm.contacts.ingest_visual(
                 self._visual_detection(uav, estimate, current_time, "eo"))
-            self.allocator.sm.scan_cell(
-                GridCoord(*(int(round(v)) for v in estimate)), current_time, True)
+            self._publish_information_delta(
+                self.allocator.sm.scan_cell(
+                    GridCoord(*(int(round(v)) for v in estimate)),
+                    current_time,
+                    True,
+                ),
+                current_time,
+            )
             contact_id = self.allocator.sm.resolve_contact_id(uav.target_group_id)
             for attempt in self.handoff_manager.attempts():
                 if (

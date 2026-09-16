@@ -192,6 +192,11 @@ class TaskAllocator:
         """Run one unified scheduling decision without mutating mission state."""
         self.last_decision_timing = None
         self.sm.step(current_time)
+        if self.sm.last_information_delta is not None:
+            self.trigger_manager.notify_information_delta(
+                self.sm.last_information_delta,
+                time=current_time,
+            )
         new_memory = self.reviewer.step(current_time, self.sm)
         if new_memory:
             self.llm_client.set_reviewer_memory(new_memory)
@@ -771,6 +776,11 @@ class TaskAllocator:
     def step(self, current_time: float) -> dict:
         """Advance one frame and return a summary of actions taken."""
         self.sm.step(current_time)
+        if self.sm.last_information_delta is not None:
+            self.trigger_manager.notify_information_delta(
+                self.sm.last_information_delta,
+                time=current_time,
+            )
 
         # Reviewer update: periodically generate long-term memory
         new_memory = self.reviewer.step(current_time, self.sm)
