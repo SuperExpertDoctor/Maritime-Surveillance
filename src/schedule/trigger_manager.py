@@ -127,7 +127,10 @@ class TriggerManager:
             "contact_merged",
             "contact_lost",
             "assessment_changed",
-            "contact_assessed",
+            "type_i_assessed",
+            "type_ii_assessed",
+            "type_i_released",
+            "type_ii_confirmed",
             "resource_available",
             "mission_task_released",
             "intent_changed",
@@ -138,8 +141,6 @@ class TriggerManager:
             "lifecycle_completed",
             # GOAL2: tracking resource released — need LLM to re-plan regions
             "target_departed",
-            "civilian_released",
-            "target_military",
             # GOAL2: dynamic environment — storms may open/block searchable area
             "storm_spawned",
             "storm_dissipated",

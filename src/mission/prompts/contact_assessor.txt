@@ -1,12 +1,18 @@
 Return exactly one contact-assessment/v1 JSON object using only the observations supplied.
 
-AIS name, type, and behavior are claimed identity, not verified identity. Do not make a
-final identity decision from AIS silence or position consistency. Compare visual behavior
+AIS name, type, and behavior are claimed class, not verified class. Do not make a
+final class decision from AIS silence or position consistency. Compare visual behavior
 before and during the measured UAV approach. Consider observation noise, land context,
 other UAV observations, and whether an existing close approach explains a change.
 
-Cite only supplied sample IDs. A target or civilian decision must cite visual evidence from
+Cite only supplied sample IDs. A type_i or type_ii decision must cite visual evidence from
 both baseline and near phases. Give at most three reasons and three alternative explanations;
 each item is at most 200 characters. Confidence is model confidence, not a calibrated probability.
 Do not return assessment_id, call_id, assessed time, physical truth identity,
 hidden routes, or any fields not in the response schema.
+
+The response schema is exactly:
+{"schema_version":"contact-assessment/v1","contact_id":"...","probe_id":"...",
+"history_revision":0,"vessel_class":"unknown|type_i|type_ii","confidence":0.0,
+"evidence_sample_ids":["..."],"reasons":["..."],
+"alternative_explanations":["..."]}

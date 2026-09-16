@@ -15,7 +15,7 @@ class PromptBuilder:
             assessment = c.last_assessment
             payload.append({
                 "contact_id": c.contact_id, "revision": c.revision,
-                "state": c.state, "identity": c.identity, "ais_mmsi": c.ais_mmsi,
+                "state": c.state, "vessel_class": c.vessel_class, "ais_mmsi": c.ais_mmsi,
                 "first_seen_min": c.first_seen_min, "last_seen_min": c.last_seen_min,
                 "estimated_position_cells": c.estimated_position_cells,
                 "estimated_velocity_cells_min": c.estimated_velocity_cells_min,
@@ -28,7 +28,7 @@ class PromptBuilder:
                     "contact_id": assessment.contact_id, "probe_id": assessment.probe_id,
                     "history_revision": assessment.history_revision,
                     "assessed_at_min": assessment.assessed_at_min,
-                    "identity": assessment.identity, "confidence": assessment.confidence,
+                    "vessel_class": assessment.vessel_class, "confidence": assessment.confidence,
                     "evidence_sample_ids": assessment.evidence_sample_ids,
                     "reasons": assessment.reasons,
                     "alternative_explanations": assessment.alternative_explanations,

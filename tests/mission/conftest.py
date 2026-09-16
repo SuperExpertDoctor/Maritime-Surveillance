@@ -73,12 +73,17 @@ class ScenarioFactory:
         if scenario == "all-civilian":
             config = replace(
                 config,
-                ship=replace(config.ship, target_ship_count=0),
+                ship=replace(
+                    config.ship,
+                    population=replace(
+                        config.ship.population, type_i_ratio=1.0, type_ii_ratio=0.0,
+                    ),
+                ),
             )
         elif scenario == "silent-target":
             config = replace(
                 config,
-                ship=replace(config.ship, target_ais_on_probability=0.0),
+                ship=replace(config.ship, type_ii_ais_on_probability=0.0),
             )
         elif scenario == "island-confounder":
             config = replace(

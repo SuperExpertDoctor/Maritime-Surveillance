@@ -13,12 +13,12 @@ from src.mission.outcome_evaluator import (
 )
 
 
-def _contact(contact_id, *, identity="unknown", state="pending", assessment=None):
+def _contact(contact_id, *, vessel_class="unknown", state="pending", assessment=None):
     return ContactSnapshot(
         contact_id,
         1,
         state,
-        identity,
+        vessel_class,
         None,
         0.0,
         10.0,
@@ -34,14 +34,14 @@ def _contact(contact_id, *, identity="unknown", state="pending", assessment=None
     )
 
 
-def _assessment(contact_id, identity):
+def _assessment(contact_id, vessel_class):
     return Assessment(
         f"A-{contact_id}",
         contact_id,
         f"P-{contact_id}",
         2,
         5.0,
-        identity,
+        vessel_class,
         0.9,
         (f"sample-{contact_id}",),
         ("observed motion",),
@@ -66,16 +66,16 @@ def _tick(*, time, dt, vessels, operations=(), tasks=(), contacts=(), links=(), 
 
 def test_tracking_uses_actual_dt_and_classification_does_not_repair_a_wrong_alias():
     evaluator = OutcomeEvaluator("episode-eval-01")
-    target_1 = VesselTruthSample("V1", "target", (10.0, 10.0), False, False, "normal")
-    target_2 = VesselTruthSample("V2", "target", (12.0, 10.0), False, False, "normal")
-    assessed_target = _assessment("C1", "target")
+    target_1 = VesselTruthSample("V1", "type_ii", (10.0, 10.0), False, False, "normal")
+    target_2 = VesselTruthSample("V2", "type_ii", (12.0, 10.0), False, False, "normal")
+    assessed_target = _assessment("C1", "type_ii")
 
     evaluator.observe(_tick(
         time=5.0,
         dt=5.0,
         vessels=(target_1, target_2),
         operations=(("U1", "tracking"),),
-        contacts=(_contact("C1", identity="target", state="tracking", assessment=assessed_target),),
+        contacts=(_contact("C1", vessel_class="type_ii", state="tracking", assessment=assessed_target),),
         links=(("U1", "C1", "V1"),),
     ))
     evaluator.observe(_tick(
@@ -83,12 +83,12 @@ def test_tracking_uses_actual_dt_and_classification_does_not_repair_a_wrong_alia
         dt=5.0,
         vessels=(target_1, target_2),
         operations=(("U1", "holding"),),
-        contacts=(_contact("C1", identity="target", state="tracking", assessment=assessed_target),),
+        contacts=(_contact("C1", vessel_class="type_ii", state="tracking", assessment=assessed_target),),
     ))
 
     outcome = evaluator.finalize()
 
-    assert outcome.target_tracking_ratio == pytest.approx(0.25)
+    assert outcome.type_ii_tracking_ratio == pytest.approx(0.25)
     assert outcome.classification_accuracy == pytest.approx(1.0)
     assert outcome.observed_vessels == 1
     assert outcome.terminal_classification_coverage == pytest.approx(1.0)
@@ -99,7 +99,7 @@ def test_unknown_contacts_are_reported_and_never_count_as_correct():
     evaluator.observe(_tick(
         time=10.0,
         dt=10.0,
-        vessels=(VesselTruthSample("V1", "target", (5.0, 5.0), False, False, "normal"),),
+        vessels=(VesselTruthSample("V1", "type_ii", (5.0, 5.0), False, False, "normal"),),
         operations=(("U1", "searching"),),
         contacts=(_contact("C1"),),
     ))
@@ -133,16 +133,16 @@ def test_probe_cost_and_intent_satisfaction_only_count_executed_time():
     evaluator.observe(_tick(
         time=10.0,
         dt=10.0,
-        vessels=(VesselTruthSample("V1", "civilian", (5.0, 5.0), False, True, "normal"),),
+        vessels=(VesselTruthSample("V1", "type_i", (5.0, 5.0), False, True, "normal"),),
         operations=(("U1", "searching"),),
         tasks=(task,),
-        contacts=(_contact("C1", identity="civilian", state="cleared"),),
+        contacts=(_contact("C1", vessel_class="type_i", state="cleared"),),
         statuses=(status,),
     ))
 
     outcome = evaluator.finalize()
 
-    assert outcome.civilian_probe_uav_min == pytest.approx(8.0)
+    assert outcome.type_i_probe_uav_min == pytest.approx(8.0)
     assert outcome.total_uav_active_min == pytest.approx(10.0)
     assert outcome.mean_probe_wait_min == pytest.approx(2.0)
     assert outcome.intent_satisfaction_ratio == pytest.approx(1.0)
@@ -150,15 +150,41 @@ def test_probe_cost_and_intent_satisfaction_only_count_executed_time():
 
 def test_unknown_classification_counts_as_error_in_balanced_accuracy():
     evaluator = OutcomeEvaluator("episode-eval-metrics-01")
-    evaluator.add_classification(truth="research", predicted="unknown", eligible=True)
-    evaluator.add_classification(truth="civilian", predicted="civilian", eligible=True)
+    evaluator.add_classification(truth="type_ii", predicted="unknown", eligible=True)
+    evaluator.add_classification(truth="type_i", predicted="type_i", eligible=True)
 
     summary = evaluator.summary()
 
-    assert summary["research_recall"] == 0.0
-    assert summary["civilian_recall"] == 1.0
+    assert summary["type_ii_recall"] == 0.0
+    assert summary["type_i_recall"] == 1.0
     assert summary["balanced_accuracy"] == pytest.approx(0.5)
-    assert summary["classification_denominators"] == {"civilian": 1, "research": 1}
+    assert summary["classification_denominators"] == {"type_i": 1, "type_ii": 1}
+
+
+def test_type_metrics_have_unambiguous_names():
+    evaluator = OutcomeEvaluator("episode-type-metrics")
+    evaluator.add_classification(truth="type_ii", predicted="type_i", eligible=True)
+    evaluator.add_classification(truth="type_i", predicted="type_i", eligible=True)
+
+    summary = evaluator.summary()
+
+    assert summary["type_ii_recall"] == 0.0
+    assert summary["type_i_recall"] == 1.0
+    assert summary["classification_denominators"] == {"type_i": 1, "type_ii": 1}
+
+
+def test_new_episode_json_contains_no_old_metric_keys():
+    from src.mission.episode_logger import EpisodeLogger
+
+    outcome = OutcomeEvaluator("episode-json-contract").finalize()
+    payload = EpisodeLogger.serialize_outcome(outcome)
+
+    assert payload["type_ii_tracking_ratio"] is None
+    assert payload["type_ii_misclassified_as_type_i_ratio"] is None
+    assert payload["type_i_probe_cost"] == 0.0
+    assert "target_tracking_ratio" not in payload
+    assert "false_civilian_ratio" not in payload
+    assert "civilian_probe_uav_min" not in payload
 
 
 def test_zero_denominator_is_na_not_success():

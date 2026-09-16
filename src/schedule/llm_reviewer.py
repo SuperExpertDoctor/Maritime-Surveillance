@@ -108,9 +108,9 @@ class LLMReviewer:
                     "score": outcome.score,
                     "unique_coverage_ratio": outcome.unique_coverage_ratio,
                     "intent_satisfaction_ratio": outcome.intent_satisfaction_ratio,
-                    "target_tracking_ratio": outcome.target_tracking_ratio,
+                    "type_ii_tracking_ratio": outcome.type_ii_tracking_ratio,
                     "classification_accuracy": outcome.classification_accuracy,
-                    "civilian_probe_uav_min": outcome.civilian_probe_uav_min,
+                    "type_i_probe_uav_min": outcome.type_i_probe_uav_min,
                     "mean_probe_wait_min": outcome.mean_probe_wait_min,
                 }
                 for outcome in outcomes

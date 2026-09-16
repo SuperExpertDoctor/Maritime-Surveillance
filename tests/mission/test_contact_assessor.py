@@ -42,12 +42,21 @@ def observed():
 def response(contact, probe, features, **changes):
     payload = dict(schema_version="contact-assessment/v1", contact_id=contact.contact_id,
                    probe_id=probe.probe_id, history_revision=contact.revision,
-                   identity="civilian", confidence=.85,
+                   vessel_class="type_i", confidence=.85,
                    evidence_sample_ids=[features.baseline_sample_ids[0], features.near_sample_ids[-1]],
-                   reasons=["Visual course remains steady before and during measured UAV approach."],
-                   alternative_explanations=["A target could also maintain its course."])
+                   reasons=["Visual behavior remains steady before and during measured UAV approach."],
+                   alternative_explanations=["A type II vessel could also maintain its course."])
     payload.update(changes)
     return payload
+
+
+def test_assessment_payload_uses_canonical_vessel_class(observed):
+    _, contact, probe, features = observed
+    payload = response(contact, probe, features)
+
+    assert "vessel_class" in payload
+    assert "identity" not in payload
+    assert api().validate_assessment_payload(payload, contact, probe, features) == ()
 
 
 def make_assessor(scripted_transport, config, responses):
@@ -56,13 +65,13 @@ def make_assessor(scripted_transport, config, responses):
     return api().ContactAssessor(gateway=gateway, config=config), gateway, transport
 
 
-@pytest.mark.parametrize("identity", ["target", "civilian", "unknown"])
-def test_same_ais_can_yield_each_identity_through_gateway(observed, scripted_transport, identity):
+@pytest.mark.parametrize("vessel_class", ["type_ii", "type_i", "unknown"])
+def test_same_ais_can_yield_each_class_through_gateway(observed, scripted_transport, vessel_class):
     store, contact, probe, features = observed
-    payload = response(contact, probe, features, identity=identity)
+    payload = response(contact, probe, features, vessel_class=vessel_class)
     assessor, gateway, transport = make_assessor(scripted_transport, store.config, [json.dumps(payload)])
     result = assessor.assess(contact, probe, features, 11.)
-    assert result.identity == identity and result.confidence == .85
+    assert result.vessel_class == vessel_class and result.confidence == .85
     assert result.assessment_id and result.assessed_at_min == 11.
     assert result.model_call_id == gateway.call_log[0]["call_id"]
     assert result.evidence_sample_ids == tuple(payload["evidence_sample_ids"])
@@ -72,14 +81,14 @@ def test_same_ais_can_yield_each_identity_through_gateway(observed, scripted_tra
     assert transport.calls[0]["max_tokens"] == 2048
     store.apply_assessment(result)
     current = store.snapshot(contact.contact_id)
-    assert current.identity == identity
-    assert (current.state == "cleared") == (identity == "civilian")
-    if identity == "unknown":
+    assert current.vessel_class == vessel_class
+    assert (current.state == "cleared") == (vessel_class == "type_i")
+    if vessel_class == "unknown":
         assert current.assigned_uav_id == "U1" and current.cleared_at_min is None
 
 
 @pytest.mark.parametrize("changes", [
-    {"identity": "military"}, {"identity": []}, {"confidence": True},
+    {"vessel_class": "military"}, {"vessel_class": []}, {"confidence": True},
     {"confidence": math.nan}, {"confidence": math.inf}, {"confidence": -.1},
     {"confidence": 1.1}, {"confidence": .79}, {"confidence": "0.9"},
     {"schema_version": "v0"}, {"contact_id": "foreign"}, {"probe_id": "foreign"},
@@ -90,7 +99,7 @@ def test_same_ais_can_yield_each_identity_through_gateway(observed, scripted_tra
     {"reasons": "because"}, {"alternative_explanations": ["a"] * 4},
     {"alternative_explanations": ["x" * 201]},
     {"assessment_id": "model-invented"}, {"call_id": "model-invented"},
-    {"assessed_at_min": 0.}, {"truth_identity": "civilian"},
+    {"assessed_at_min": 0.}, {"truth_identity": "type_i"},
 ])
 def test_strict_response_schema_rejects_invalid_payload(observed, changes):
     _, contact, probe, features = observed
@@ -100,7 +109,7 @@ def test_strict_response_schema_rejects_invalid_payload(observed, changes):
 
 def test_unknown_low_confidence_and_text_boundaries_are_valid(observed):
     _, contact, probe, features = observed
-    payload = response(contact, probe, features, identity="unknown", confidence=0.,
+    payload = response(contact, probe, features, vessel_class="unknown", confidence=0.,
                        reasons=["x" * 200] * 3, alternative_explanations=["y" * 200] * 3)
     assert api().validate_assessment_payload(payload, contact, probe, features) == ()
     for key in tuple(payload):
@@ -169,9 +178,9 @@ def test_final_decisions_must_cite_both_visual_phases(observed, phase):
     _, contact, probe, features = observed
     ids = ([s.sample_id for s in contact.samples if s.source == "ais"] if phase == "ais"
            else list(getattr(features, f"{phase}_sample_ids")))
-    for identity in ("target", "civilian"):
+    for vessel_class in ("type_ii", "type_i"):
         assert api().validate_assessment_payload(
-            response(contact, probe, features, identity=identity, evidence_sample_ids=ids),
+            response(contact, probe, features, vessel_class=vessel_class, evidence_sample_ids=ids),
             contact, probe, features)
 
 
@@ -188,13 +197,13 @@ def test_failure_keeps_unknown_and_revision_is_not_retried(observed, scripted_tr
     assert store.snapshot(contact.contact_id).cleared_at_min is None
 
 
-def test_gateway_corrects_rejected_civilian_before_returning_unknown(observed, scripted_transport):
+def test_gateway_corrects_rejected_type_i_before_returning_unknown(observed, scripted_transport):
     store, contact, probe, features = observed
     invalid = response(contact, probe, features, evidence_sample_ids=["foreign"])
-    valid = response(contact, probe, features, identity="unknown", confidence=.3)
+    valid = response(contact, probe, features, vessel_class="unknown", confidence=.3)
     assessor, gateway, _ = make_assessor(scripted_transport, store.config,
                                        [json.dumps(invalid), json.dumps(valid)])
-    assert assessor.assess(contact, probe, features, 11.).identity == "unknown"
+    assert assessor.assess(contact, probe, features, 11.).vessel_class == "unknown"
     assert gateway.call_log[0]["validation_errors"]
 
 
@@ -252,8 +261,8 @@ def test_prompt_has_explicit_observation_allowlists_and_no_internal_fields(obser
 def test_prompt_uses_bounded_current_evidence_without_prior_conclusions(observed, scripted_transport):
     store, contact, probe, features = observed
     prior = Assessment("A-old", contact.contact_id, probe.probe_id, contact.revision - 1, 9.,
-                       "target", .99, (features.baseline_sample_ids[0],),
-                       ("prior target conclusion",), ("prior civilian alternative",), "call-old")
+                       "type_ii", .99, (features.baseline_sample_ids[0],),
+                       ("prior type_ii conclusion",), ("prior type_i alternative",), "call-old")
     contact = replace(contact, last_assessment=prior)
     config = replace(store.config, prompt_keypoints_per_contact=3)
     assessor, _, _ = make_assessor(scripted_transport, config, [])
@@ -267,8 +276,8 @@ def test_prompt_uses_bounded_current_evidence_without_prior_conclusions(observed
         replace(contact, samples=tuple(reversed(contact.samples))), probe, features)
     assert history == reversed_payload["uav_approach_history"]
     assert {sample["sample_id"] for sample in history} <= eligible_ids
-    assert "prior target conclusion" not in json.dumps(payload)
-    assert "prior civilian alternative" not in json.dumps(payload)
+    assert "prior type_ii conclusion" not in json.dumps(payload)
+    assert "prior type_i alternative" not in json.dumps(payload)
 
 
 def test_payload_rejects_excess_or_noneligible_visual_evidence(observed):

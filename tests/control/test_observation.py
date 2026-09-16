@@ -23,8 +23,13 @@ def engine(monkeypatch):
     config = ConfigLoader.load()
     # Keep the original no-broadcast fixture; global AIS is tested separately.
     from dataclasses import replace
-    config.ship = replace(config.ship, target_ship_count=config.ship.initial_ship_count,
-                          target_ais_on_probability=0.0)
+    config.ship = replace(
+        config.ship,
+        population=replace(
+            config.ship.population, type_i_ratio=0.0, type_ii_ratio=1.0,
+        ),
+        type_ii_ais_on_probability=0.0,
+    )
     return SimulationEngine(config, seed=17)
 
 

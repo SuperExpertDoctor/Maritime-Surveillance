@@ -93,7 +93,7 @@ class ValidationReport:
     holdout_episode_pairs: tuple[tuple[str, str], ...]
     mean_score_gain: float | None
     component_deltas: dict[str, float]
-    false_civilian_delta: float | None
+    type_ii_misclassified_as_type_i_delta: float | None
     passed: bool
     reasons: tuple[str, ...]
 
@@ -106,7 +106,7 @@ class ValidationReport:
         for pair in (*self.validation_episode_pairs, *self.holdout_episode_pairs):
             if len(pair) != 2 or not all(isinstance(item, str) and item for item in pair):
                 raise ValueError("episode pairs must contain two non-empty IDs")
-        for name in ("mean_score_gain", "false_civilian_delta"):
+        for name in ("mean_score_gain", "type_ii_misclassified_as_type_i_delta"):
             value = getattr(self, name)
             if value is not None and not _finite(float(value)):
                 raise ValueError(f"{name} must be finite or None")
@@ -177,7 +177,7 @@ class StrategyMemoryStore:
             metrics["mean_score"] = _mean(score_values)
         for name, values in (
             ("intent_satisfaction_ratio", (item.intent_satisfaction_ratio for item in outcomes)),
-            ("target_tracking_ratio", (item.target_tracking_ratio for item in outcomes)),
+            ("type_ii_tracking_ratio", (item.type_ii_tracking_ratio for item in outcomes)),
             ("classification_accuracy", (item.classification_accuracy for item in outcomes)),
             ("mean_probe_wait_min", (item.mean_probe_wait_min for item in outcomes)),
         ):
@@ -311,7 +311,7 @@ class StrategyMemoryStore:
                 tuple(tuple(pair) for pair in record.get("holdout_episode_pairs", ())),
                 record.get("mean_score_gain"),
                 record.get("component_deltas", {}),
-                record.get("false_civilian_delta"),
+                record.get("type_ii_misclassified_as_type_i_delta"),
                 bool(record["passed"]),
                 tuple(record.get("reasons", ())),
             )
@@ -515,7 +515,7 @@ def evaluate_paired_outcomes(
     deltas: dict[str, float] = {}
     for name in (
         "unique_coverage_ratio", "intent_satisfaction_ratio",
-        "target_tracking_ratio", "classification_accuracy",
+        "type_ii_tracking_ratio", "classification_accuracy",
     ):
         values = [
             getattr(right, name) - getattr(left, name)
@@ -533,14 +533,20 @@ def evaluate_paired_outcomes(
     if accuracy_missing:
         reasons.append("classification_metric_missing")
 
-    false_deltas = [
-        right.false_civilian_ratio - left.false_civilian_ratio
+    type_ii_misclassification_deltas = [
+        right.type_ii_misclassified_as_type_i_ratio
+        - left.type_ii_misclassified_as_type_i_ratio
         for left, right in valid_pairs
-        if left.false_civilian_ratio is not None and right.false_civilian_ratio is not None
+        if (left.type_ii_misclassified_as_type_i_ratio is not None
+            and right.type_ii_misclassified_as_type_i_ratio is not None)
     ]
-    false_civilian_delta = _mean(false_deltas) if false_deltas else None
-    if false_civilian_delta is not None and false_civilian_delta > 1e-12:
-        reasons.append("false_civilian_regression")
+    type_ii_misclassified_as_type_i_delta = (
+        _mean(type_ii_misclassification_deltas)
+        if type_ii_misclassification_deltas else None
+    )
+    if (type_ii_misclassified_as_type_i_delta is not None
+            and type_ii_misclassified_as_type_i_delta > 1e-12):
+        reasons.append("type_ii_misclassification_regression")
 
     coverage_pairs = [
         (left.terminal_classification_coverage, right.terminal_classification_coverage)
@@ -558,7 +564,7 @@ def evaluate_paired_outcomes(
         reasons.append("terminal_coverage_missing")
 
     cost_deltas = [
-        right.civilian_probe_cost - left.civilian_probe_cost
+        right.type_i_probe_cost - left.type_i_probe_cost
         for left, right in valid_pairs
     ]
     wait_deltas = [
@@ -587,7 +593,7 @@ def evaluate_paired_outcomes(
         holdout_episode_pairs=holdout_pairs,
         mean_score_gain=mean_score_gain,
         component_deltas=deltas,
-        false_civilian_delta=false_civilian_delta,
+        type_ii_misclassified_as_type_i_delta=type_ii_misclassified_as_type_i_delta,
         passed=not reasons,
         reasons=tuple(reasons),
     )

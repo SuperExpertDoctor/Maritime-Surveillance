@@ -391,12 +391,17 @@ class Assessment:
     probe_id: str
     history_revision: int
     assessed_at_min: float
-    identity: Identity
+    vessel_class: Identity
     confidence: float
     evidence_sample_ids: tuple[str, ...]
     reasons: tuple[str, ...]
     alternative_explanations: tuple[str, ...]
     model_call_id: str
+
+    @property
+    def identity(self) -> Identity:
+        """Temporary read alias removed once all runtime callers use vessel_class."""
+        return self.vessel_class
 
 
 @dataclass(frozen=True)
@@ -448,13 +453,17 @@ class ContactSnapshot:
     ) -> None:
         legacy_class = {
             "unknown": "unknown",
-            "civilian": "civilian",
-            "target": "research",
+            "type_i": "type_i",
+            "type_ii": "type_ii",
+            # Kept only while old snapshot inputs are being migrated.
+            "civilian": "type_i",
+            "research": "type_ii",
+            "target": "type_ii",
         }[self.identity]
         resolved_class = vessel_class if vessel_class is not None else (
             self._vessel_class or legacy_class
         )
-        if resolved_class not in ("unknown", "civilian", "research"):
+        if resolved_class not in ("unknown", "type_i", "type_ii"):
             raise ValueError("invalid vessel_class")
         resolved_class_confidence = (
             float(class_confidence)

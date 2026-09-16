@@ -18,6 +18,14 @@ _LEGACY_CLASS = {
     "target": "type_ii",
 }
 
+_LEGACY_OUTCOME_KEYS = {
+    "target_tracking_ratio": "type_ii_tracking_ratio",
+    "false_civilian_ratio": "type_ii_misclassified_as_type_i_ratio",
+    "civilian_probe_uav_min": "type_i_probe_uav_min",
+    "civilian_recall": "type_i_recall",
+    "research_recall": "type_ii_recall",
+}
+
 
 def normalize_legacy_vessel_class(value: str) -> VesselClass:
     if not isinstance(value, str):
@@ -62,8 +70,21 @@ def normalize_legacy_ship_config(mapping: Mapping[str, object]) -> dict:
     return result
 
 
+def normalize_legacy_outcome_payload(mapping: Mapping[str, object]) -> dict:
+    """Map historical outcome keys once, before constructing EpisodeOutcome."""
+    result = deepcopy(dict(mapping))
+    for old_key, new_key in _LEGACY_OUTCOME_KEYS.items():
+        if old_key in result:
+            if new_key in result and result[new_key] != result[old_key]:
+                raise ValueError(f"outcome contains both {old_key} and {new_key}")
+            result.setdefault(new_key, result[old_key])
+            result.pop(old_key, None)
+    return result
+
+
 __all__ = [
     "normalize_legacy_ais_enabled",
+    "normalize_legacy_outcome_payload",
     "normalize_legacy_ship_config",
     "normalize_legacy_vessel_class",
 ]

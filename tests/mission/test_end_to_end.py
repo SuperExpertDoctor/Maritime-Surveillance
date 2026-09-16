@@ -73,6 +73,7 @@ def test_intent_command_is_applied_only_at_the_simulation_boundary(scenario_fact
 def test_model_failure_pauses_before_any_clock_or_motion_progress(scenario_factory):
     engine = scenario_factory.engine("model-failure", seed=42)
     target = next(ship for ship in engine.ships if ship.truth_identity == "target")
+    engine.surveillance_stages.set_fact(target.id, "sar", True, 0.0, "fixture-sar")
     target._col = float(engine.uavs[0].float_position[0])
     target._row = float(engine.uavs[0].float_position[1])
     before = tuple(ship.float_position for ship in engine.ships)

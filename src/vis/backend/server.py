@@ -547,10 +547,10 @@ def create_app(
             "ship": {
                 "population": {
                     "total_count": cfg.ship.population.total_count,
-                    "civilian_ratio": cfg.ship.population.civilian_ratio,
-                    "research_ratio": cfg.ship.population.research_ratio,
+                    "type_i_ratio": cfg.ship.population.type_i_ratio,
+                    "type_ii_ratio": cfg.ship.population.type_ii_ratio,
                 },
-                "target_ais_on_probability": cfg.ship.target_ais_on_probability,
+                "type_ii_ais_on_probability": cfg.ship.type_ii_ais_on_probability,
                 "speed_kn": cfg.ship.speed_kn,
                 "ais_update_interval_min": cfg.ship.ais_update_interval_min,
                 "ais_position_noise_cells": cfg.ship.ais_position_noise_cells,

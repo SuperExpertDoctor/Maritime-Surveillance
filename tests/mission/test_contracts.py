@@ -44,7 +44,7 @@ from src.mission.contracts import (
                 "probe_id",
                 "history_revision",
                 "assessed_at_min",
-                "identity",
+                    "vessel_class",
                 "confidence",
                 "evidence_sample_ids",
                 "reasons",
@@ -210,16 +210,17 @@ def test_ship_truth_is_owned_by_the_environment_not_public_mission_contracts():
 
     truth = ship_module.ShipTruth(
         ship_id="V0001",
-        identity="target",
-        ais_mode="silent",
+        vessel_class="type_ii",
+        ais_enabled=False,
         normal_route=((1.0, 2.0, 0.5), (2.0, 3.0, 0.75)),
     )
 
     assert asdict(truth) == {
         "ship_id": "V0001",
-        "identity": "target",
-        "ais_mode": "silent",
+        "vessel_class": "type_ii",
+        "ais_enabled": False,
         "normal_route": ((1.0, 2.0, 0.5), (2.0, 3.0, 0.75)),
+        "activity_schedule": (),
     }
     assert "Ship" not in vars(contracts)
     assert "SimulationEngine" not in vars(contracts)

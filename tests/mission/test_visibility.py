@@ -112,7 +112,7 @@ def test_hidden_class_count_gate_and_trail_cannot_change_blue_payload(engine):
     engine._sync_state_from_entities()
     assert blue() == before
     encoded = json.dumps(builder.contact_payload(sm))
-    for forbidden in ("ship_id", "vessel_class", "ais_enabled", "gate_state", "is_evading", "trail"):
+    for forbidden in ("ship_id", "ais_enabled", "gate_state", "is_evading", "trail"):
         assert forbidden not in encoded
 
 

@@ -91,8 +91,8 @@ def test_catalog_keeps_probe_track_and_search_candidates_with_stable_ids(state):
     catalog = TaskCatalog(candidate_extractor=source)
     contacts = (
         _contact("C0001"),
-        _contact("C0002", state="tracking", identity="target", first_seen=1.0),
-        _contact("C0003", state="cleared", identity="civilian"),
+        _contact("C0002", state="tracking", identity="type_ii", first_seen=1.0),
+        _contact("C0003", state="cleared", identity="type_i"),
     )
 
     first = catalog.build(state, contacts, (_intent(),), now_min=10.0)

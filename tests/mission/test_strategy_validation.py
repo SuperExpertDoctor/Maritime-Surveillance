@@ -13,7 +13,7 @@ def _outcome(
     episode_id,
     *,
     score=0.7,
-    false_civilian=0.0,
+    type_ii_misclassified_as_type_i=0.0,
     coverage=0.7,
     intent=0.8,
     tracking=0.6,
@@ -29,7 +29,7 @@ def _outcome(
         intent,
         tracking,
         accuracy,
-        false_civilian,
+        type_ii_misclassified_as_type_i,
         1.0,
         10.0,
         2.0,
@@ -56,17 +56,17 @@ def _memory():
     )
 
 
-def test_false_civilian_regression_rejects_even_when_score_improves():
+def test_type_ii_misclassification_regression_rejects_even_when_score_improves():
     baseline = (_outcome("baseline-1"), _outcome("baseline-2"))
     candidate = (
-        _outcome("candidate-1", score=0.85, false_civilian=0.01),
-        _outcome("candidate-2", score=0.85, false_civilian=0.01),
+        _outcome("candidate-1", score=0.85, type_ii_misclassified_as_type_i=0.01),
+        _outcome("candidate-2", score=0.85, type_ii_misclassified_as_type_i=0.01),
     )
 
     report = evaluate_paired_outcomes(baseline, candidate, {"phase": "validation"})
 
     assert not report.passed
-    assert "false_civilian_regression" in report.reasons
+    assert "type_ii_misclassification_regression" in report.reasons
 
 
 def test_holdout_score_regression_rejects():
@@ -158,12 +158,12 @@ def test_successful_report_can_activate_and_rollback_only_at_a_version_boundary(
         (
             replace(
                 _outcome("candidate-1", score=0.85, coverage=0.85, intent=0.85, tracking=0.62),
-                civilian_probe_uav_min=0.5,
+                type_i_probe_uav_min=0.5,
                 mean_probe_wait_min=1.0,
             ),
             replace(
                 _outcome("candidate-2", score=0.85, coverage=0.85, intent=0.85, tracking=0.62),
-                civilian_probe_uav_min=0.5,
+                type_i_probe_uav_min=0.5,
                 mean_probe_wait_min=1.0,
             ),
         ),

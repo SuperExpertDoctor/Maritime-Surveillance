@@ -133,16 +133,17 @@ def evaluate(steps: int = 480, seed: int = 42) -> dict:
     airborne_observation_minutes = searching_minutes + tracking_minutes
     refuel_counts = np.asarray([base.refuel_count for base in engine.bases], dtype=float)
     mean_refuels = float(refuel_counts.mean()) if refuel_counts.size else 0.0
-    classified = [ship for ship in engine.ships if ship.discrimination is not None]
-    correct_classifications = sum(
-        bool(ship.discrimination.get("is_military") == ship.actual_military)
-        for ship in classified
-    )
     summary = engine.summary()
     episode_outcome = summary.get("episode_outcome", {})
-    legacy_ais_accuracy = (
-        correct_classifications / len(classified) * 100.0
-        if classified else None
+    confusion = episode_outcome.get("classification_confusion", {})
+    classified_ships = sum(
+        int(sum(row.values())) for row in confusion.values()
+        if isinstance(row, dict)
+    )
+    classification_accuracy = episode_outcome.get("classification_accuracy")
+    ais_accuracy_pct = (
+        float(classification_accuracy) * 100.0
+        if classification_accuracy is not None else None
     )
     final_metrics = _timeliness_metrics(engine)
     final_metrics.update({
@@ -168,22 +169,18 @@ def evaluate(steps: int = 480, seed: int = 42) -> dict:
             float(np.mean(completed_sortie_searches)), 3,
         ) if completed_sortie_searches else 0.0,
         "completed_search_sorties": len(completed_sortie_searches),
-        # Keep the historical key for consumers of this script.  It is not
-        # the evidence-based mixed-maritime classification metric.
-        "ais_accuracy_pct": round(legacy_ais_accuracy, 3)
-        if legacy_ais_accuracy is not None else 0.0,
-        "legacy_ais_accuracy_pct": round(legacy_ais_accuracy, 3)
-        if legacy_ais_accuracy is not None else None,
-        "ais_accuracy_definition": "legacy position/discrimination metric",
-        "classified_ships": len(classified),
+        "ais_accuracy_pct": round(ais_accuracy_pct, 3)
+        if ais_accuracy_pct is not None else 0.0,
+        "ais_accuracy_definition": "terminal type_i/type_ii assessment accuracy",
+        "classified_ships": classified_ships,
         "mixed_maritime_classification_accuracy": episode_outcome.get(
             "classification_accuracy"
         ),
         "mixed_maritime_terminal_classification_coverage": episode_outcome.get(
             "terminal_classification_coverage"
         ),
-        "mixed_maritime_false_civilian_ratio": episode_outcome.get(
-            "false_civilian_ratio"
+        "mixed_maritime_type_ii_misclassified_as_type_i_ratio": episode_outcome.get(
+            "type_ii_misclassified_as_type_i_ratio"
         ),
     })
     return {

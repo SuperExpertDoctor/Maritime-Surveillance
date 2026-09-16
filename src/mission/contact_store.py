@@ -181,7 +181,7 @@ class ContactStore:
             )
         state = contact.state
         if state == "lost":
-            state = "cleared" if contact.identity == "civilian" else "pending"
+            state = "cleared" if contact.vessel_class == "type_i" else "pending"
         updated = replace(
             contact,
             revision=max(1, contact.revision + 1),
@@ -212,7 +212,7 @@ class ContactStore:
                     f"RADIATION-ACTIVITY:{position.emitter_track_id}:"
                     f"{position.burst_id}"
                 ),
-                kind="research_assessment",
+                kind="type_ii_assessment",
                 source_id=position.emitter_track_id,
                 contact_id=contact_id,
                 observed_at_min=position.observed_at_min,
@@ -407,7 +407,7 @@ class ContactStore:
         c = replace(c, revision=c.revision + 1, samples=samples,
                     first_seen_min=min(c.first_seen_min, sample.observed_at_min),
                     last_seen_min=max(c.last_seen_min, sample.observed_at_min),
-                    state=("cleared" if c.identity == "civilian" else "pending")
+                    state=("cleared" if c.vessel_class == "type_i" else "pending")
                     if c.state == "lost" and self._now - sample.observed_at_min <= self.config.stale_after_min
                     else c.state)
         self._contacts[c.contact_id] = self._estimate(c)
@@ -453,11 +453,17 @@ class ContactStore:
                          last_seen_min=max(a.last_seen_min, v.last_seen_min),
                          state=assessed.state if assessed.last_assessment else owner.state,
                          identity=assessed.identity, last_assessment=assessed.last_assessment,
+                         vessel_class=assessed.vessel_class,
+                         class_confidence=assessed.class_confidence,
+                         class_evidence_ids=assessed.class_evidence_ids,
+                         activity=assessed.activity,
+                         activity_confidence=assessed.activity_confidence,
+                         activity_evidence_ids=assessed.activity_evidence_ids,
                          cleared_at_min=assessed.cleared_at_min,
                          next_probe_not_before_min=max(a.next_probe_not_before_min, v.next_probe_not_before_min),
                          assigned_uav_id=owner.assigned_uav_id, active_probe_id=owner.active_probe_id,
                          samples=self._trim(tuple(replace(s, contact_id=aid) for s in (*a.samples, *v.samples))))
-        if merged.identity == "civilian":
+        if merged.vessel_class == "type_i":
             merged = replace(merged, state="cleared", assigned_uav_id=None, active_probe_id=None)
         self._contacts[aid] = self._estimate(merged)
         del self._contacts[vid]
@@ -518,37 +524,59 @@ class ContactStore:
             return
         sample_ids = {s.sample_id for s in c.samples}
         if (assessment.history_revision != c.revision or assessment.probe_id != c.active_probe_id
-                or not assessment.probe_id or assessment.identity not in ("unknown", "civilian", "target")
+                or not assessment.probe_id or assessment.vessel_class not in ("unknown", "type_i", "type_ii")
                 or not math.isfinite(assessment.confidence) or not 0 <= assessment.confidence <= 1
                 or not set(assessment.evidence_sample_ids) <= sample_ids):
             raise ValueError("assessment does not match current contact history/probe")
         self._finite_time(assessment.assessed_at_min)
-        if assessment.identity != "unknown" and (
+        if assessment.vessel_class != "unknown" and (
                 assessment.confidence < self.config.assessment_confidence_min
                 or not any(s.source != "ais" and s.sample_id in assessment.evidence_sample_ids
                            for s in c.samples)):
             raise ValueError("terminal assessment requires confident visual evidence")
         dimension_class = {
-            "civilian": "civilian",
-            "target": "research",
-        }.get(assessment.identity)
+            "type_i": "type_i",
+            "type_ii": "type_ii",
+        }.get(assessment.vessel_class)
         c = replace(
             c,
-            identity=assessment.identity,
+            identity=assessment.vessel_class,
             last_assessment=assessment,
-            _vessel_class=dimension_class or c.vessel_class,
-            _class_confidence=(
+            vessel_class=dimension_class or c.vessel_class,
+            class_confidence=(
                 assessment.confidence if dimension_class else c.class_confidence
             ),
         )
-        if assessment.identity == "civilian":
+        if assessment.vessel_class == "type_i":
             c = replace(c, state="cleared", cleared_at_min=assessment.assessed_at_min,
                         next_probe_not_before_min=assessment.assessed_at_min + self.config.civilian_recheck_cooldown_min)
-        elif assessment.identity == "target":
+        elif assessment.vessel_class == "type_ii":
             c = replace(c, state="tracking")
         self._contacts[c.contact_id] = c
-        if c.state == "cleared":
-            self.release(c.contact_id, assessment.assessed_at_min, "civilian")
+        if assessment.vessel_class in ("type_i", "type_ii"):
+            event_prefix = assessment.vessel_class
+            self._event(
+                f"{event_prefix}_assessed",
+                contact_id=c.contact_id,
+                assessed_at_min=assessment.assessed_at_min,
+                vessel_class=assessment.vessel_class,
+                confidence=assessment.confidence,
+            )
+        if assessment.vessel_class == "type_i":
+            self.release(c.contact_id, assessment.assessed_at_min, "type_i_released")
+            self._event(
+                "type_i_released",
+                contact_id=c.contact_id,
+                assessed_at_min=assessment.assessed_at_min,
+                vessel_class="type_i",
+            )
+        elif assessment.vessel_class == "type_ii":
+            self._event(
+                "type_ii_confirmed",
+                contact_id=c.contact_id,
+                assessed_at_min=assessment.assessed_at_min,
+                vessel_class="type_ii",
+            )
 
     def apply_dimension_assessment(
         self,
@@ -585,12 +613,12 @@ class ContactStore:
             raise ValueError("activity assessment confidence is below threshold")
         updated = replace(
             contact,
-            _vessel_class=assessment.vessel_class,
-            _class_confidence=assessment.class_confidence,
-            _class_evidence_ids=assessment.class_evidence_ids,
-            _activity=assessment.activity,
-            _activity_confidence=assessment.activity_confidence,
-            _activity_evidence_ids=assessment.activity_evidence_ids,
+            vessel_class=assessment.vessel_class,
+            class_confidence=assessment.class_confidence,
+            class_evidence_ids=assessment.class_evidence_ids,
+            activity=assessment.activity,
+            activity_confidence=assessment.activity_confidence,
+            activity_evidence_ids=assessment.activity_evidence_ids,
         )
         if assessment.activity in {"suspected_violation", "confirmed_violation"}:
             updated = replace(updated, state="tracking")

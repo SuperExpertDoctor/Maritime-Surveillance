@@ -91,7 +91,7 @@ class TaskCatalog:
     def _is_probe_candidate(contact: ContactSnapshot, now: float) -> bool:
         return (
             contact.state == "pending"
-            and contact.identity == "unknown"
+            and contact.vessel_class == "unknown"
             and contact.assigned_uav_id is None
             and contact.active_probe_id is None
             and now >= contact.next_probe_not_before_min
@@ -101,7 +101,7 @@ class TaskCatalog:
     def _is_track_candidate(contact: ContactSnapshot) -> bool:
         return (
             (
-                contact.identity == "target"
+                contact.vessel_class == "type_ii"
                 or getattr(contact, "activity", "unknown")
                 in {"suspected_violation", "confirmed_violation"}
             )

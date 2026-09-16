@@ -29,6 +29,7 @@ class BlockedGateway:
 def test_red_failure_does_not_advance_clock_or_move_vessels(monkeypatch):
     engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=BlockedGateway())
     target = next(ship for ship in engine.ships if ship.truth_identity == "target")
+    engine.surveillance_stages.set_fact(target.id, "sar", True, 0.0, "fixture-sar")
     uav = engine.uavs[0]
     target._col = float(uav.position.col)
     target._row = float(uav.position.row)
@@ -45,6 +46,7 @@ def test_red_failure_does_not_advance_clock_or_move_vessels(monkeypatch):
 def test_valid_red_plan_is_installed_before_ship_motion():
     engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=BlockedGateway())
     target = next(ship for ship in engine.ships if ship.truth_identity == "target")
+    engine.surveillance_stages.set_fact(target.id, "sar", True, 0.0, "fixture-sar")
     uav = engine.uavs[0]
     target._navigation_params = None
     uav._col, uav._row = target.float_position

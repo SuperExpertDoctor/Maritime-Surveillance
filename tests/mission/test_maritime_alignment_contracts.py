@@ -24,13 +24,13 @@ from src.schedule.config_loader import (
 
 
 def test_largest_remainder_population_is_deterministic():
-    assert allocate_population(3, {"civilian": 0.5, "research": 0.5}) == {
-        "civilian": 2,
-        "research": 1,
+    assert allocate_population(3, {"type_i": 0.5, "type_ii": 0.5}) == {
+        "type_i": 2,
+        "type_ii": 1,
     }
-    assert allocate_population(20, {"civilian": 0.7, "research": 0.3}) == {
-        "civilian": 14,
-        "research": 6,
+    assert allocate_population(20, {"type_i": 0.7, "type_ii": 0.3}) == {
+        "type_i": 14,
+        "type_ii": 6,
     }
 
 
@@ -48,7 +48,7 @@ def test_alignment_config_sections_are_loaded_with_hardened_defaults():
 
 def test_alignment_config_rejects_boolean_numeric_values():
     with pytest.raises(ValueError):
-        PopulationConfig(total_count=True, civilian_ratio=0.5, research_ratio=0.5)
+        PopulationConfig(total_count=True, type_i_ratio=0.5, type_ii_ratio=0.5)
 
 
 def test_passive_contract_does_not_have_range_or_power_fields():
@@ -123,16 +123,16 @@ def test_information_snapshot_stores_immutable_field_matrices():
     assert snapshot.value == ((0.45,),)
 
 
-def test_research_class_does_not_imply_violation():
+def test_type_ii_class_does_not_imply_violation():
     result = ContactAssessor.assess_dimensions(({
         "evidence_id": "rad-1",
         "family": "eo_class",
-        "vessel_class": "research",
+        "vessel_class": "type_ii",
         "passes_quality_gate": True,
         "strength": 1.0,
     },))
 
-    assert result.vessel_class == "research"
+    assert result.vessel_class == "type_ii"
     assert result.activity != "confirmed_violation"
 
 
@@ -153,7 +153,7 @@ def test_contact_snapshot_retains_dual_dimension_estimates_across_replace():
     snapshot = ContactSnapshot(
         "C-DIM", 1, "pending", "unknown", None, 0.0, 0.0, (4.0, 5.0),
         None, 0.2, None, None, None, None, 0.0, (),
-        vessel_class="research",
+        vessel_class="type_ii",
         class_confidence=0.9,
         class_evidence_ids=("EO-CLASS-1",),
         activity="suspected_violation",
@@ -164,7 +164,7 @@ def test_contact_snapshot_retains_dual_dimension_estimates_across_replace():
     from dataclasses import replace
 
     updated = replace(snapshot, state="tracking")
-    assert updated.vessel_class == "research"
+    assert updated.vessel_class == "type_ii"
     assert updated.class_evidence_ids == ("EO-CLASS-1",)
     assert updated.activity == "suspected_violation"
 
@@ -229,7 +229,7 @@ def test_two_distinct_passive_bursts_emit_one_radiation_activity_fact():
     evidence = store.drain_radiation_activity_evidence()
 
     assert len(evidence) == 1
-    assert evidence[0].kind == "research_assessment"
+    assert evidence[0].kind == "type_ii_assessment"
     assert evidence[0].source_id == "EM-RAD"
     assert evidence[0].contact_id == contact_id
     assert store.drain_radiation_activity_evidence() == ()

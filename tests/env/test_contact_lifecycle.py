@@ -282,7 +282,7 @@ def test_merge_into_cleared_contact_releases_alias_tracking(engine):
     sm.contacts.reserve(aid, "UAV-2", "P-clear")
     c = sm.contacts.snapshot(aid)
     sm.contacts.apply_assessment(Assessment(
-        "A1", aid, "P-clear", c.revision, 1, "civilian", .9,
+        "A1", aid, "P-clear", c.revision, 1, "type_i", .9,
         ("clear-1", "clear-2"), ("validated",), (), "call1"))
     engine._publish_contact_events(1)
     vid = sm.contacts.ingest_visual(visual("new-visual", 2, (10, 10)))

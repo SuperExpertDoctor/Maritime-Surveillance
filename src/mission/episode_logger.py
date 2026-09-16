@@ -8,6 +8,7 @@ blue-role stream; they are not a replacement for the role-specific builders.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -58,6 +59,17 @@ class EpisodeLogger:
         self._manifest: dict | None = None
         self._record_counts: dict[str, int] = {}
         self._finished = False
+
+    @staticmethod
+    def serialize_outcome(outcome) -> dict:
+        """Serialize only the current outcome contract, including derived cost."""
+        if not is_dataclass(outcome):
+            raise TypeError("outcome must be a dataclass instance")
+        payload = asdict(outcome)
+        cost = getattr(outcome, "type_i_probe_cost", None)
+        if cost is not None:
+            payload["type_i_probe_cost"] = cost
+        return payload
 
     @property
     def episode_id(self) -> str | None:

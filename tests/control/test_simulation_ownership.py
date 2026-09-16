@@ -45,8 +45,13 @@ def test_default_simulation_starts_heuristic_leases_after_real_scheduler_tick():
     from dataclasses import replace
     config = ConfigLoader.load()
     # Isolate fleet search ownership from T06's initial global AIS candidates.
-    config.ship = replace(config.ship, target_ship_count=config.ship.initial_ship_count,
-                          target_ais_on_probability=0.0)
+    config.ship = replace(
+        config.ship,
+        population=replace(
+            config.ship.population, type_i_ratio=0.0, type_ii_ratio=1.0,
+        ),
+        type_ii_ais_on_probability=0.0,
+    )
     engine = SimulationEngine(config, seed=9)
     _install_deterministic_llm(engine)
 

@@ -25,16 +25,16 @@ def test_extract_returns_candidate_result(sm):
     assert isinstance(result, CandidateResult)
 
 
-@pytest.mark.parametrize("release_reason", ["civilian", "timeout"])
+@pytest.mark.parametrize("release_reason", ["type_i_released", "timeout"])
 def test_handoff_candidates_respect_contact_clearance_and_recheck_cooldown(sm, release_reason):
     from src.mission.contracts import Assessment
     from tests.mission.test_contact_store import ais, visual
 
     cid = sm.contacts.ingest_visual(visual(t=50, position=(15, 15)))
     sm.contacts.reserve(cid, "UAV-1", "P1")
-    if release_reason == "civilian":
+    if release_reason == "type_i_released":
         sm.contacts.apply_assessment(Assessment(
-            "A1", cid, "P1", 1, 50, "civilian", .9,
+            "A1", cid, "P1", 1, 50, "type_i", .9,
             ("EO-1",), ("validated visual evidence",), (), "call1"))
     else:
         sm.contacts.release(cid, 50, "timeout")

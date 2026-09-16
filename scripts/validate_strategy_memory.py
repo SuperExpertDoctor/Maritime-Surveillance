@@ -260,9 +260,9 @@ def _merge_phase_reports(validation, holdout):
             holdout.mean_score_gain, holdout_count,
         ),
         component_deltas=deltas,
-        false_civilian_delta=_weighted_optional(
-            validation.false_civilian_delta, validation_count,
-            holdout.false_civilian_delta, holdout_count,
+        type_ii_misclassified_as_type_i_delta=_weighted_optional(
+            validation.type_ii_misclassified_as_type_i_delta, validation_count,
+            holdout.type_ii_misclassified_as_type_i_delta, holdout_count,
         ),
         passed=validation.passed and holdout.passed and not reasons,
         reasons=reasons,

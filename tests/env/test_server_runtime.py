@@ -211,8 +211,13 @@ def test_api_config_exposes_control_strategy_contract():
     assert payload["uav"]["count"] == config.uav.count
     assert "count_max" not in payload["uav"]
     assert payload["ship"]["population"]["total_count"] == config.ship.population.total_count
+    assert payload["ship"]["population"]["type_i_ratio"] == config.ship.population.type_i_ratio
+    assert payload["ship"]["population"]["type_ii_ratio"] == config.ship.population.type_ii_ratio
+    assert "civilian_ratio" not in payload["ship"]["population"]
+    assert "research_ratio" not in payload["ship"]["population"]
     assert "initial_ship_count" not in payload["ship"]
     assert "target_ship_count" not in payload["ship"]
+    assert payload["ship"]["type_ii_ais_on_probability"] == config.ship.type_ii_ais_on_probability
     assert payload["sensor"]["passive"]["detection_range_cells"] == 10.0
     assert payload["mission_alignment"]["information_update"]["value_alpha"] == 0.45
 

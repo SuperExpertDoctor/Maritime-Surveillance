@@ -1375,12 +1375,12 @@ class SimulationEngine:
                 if contact.state in {"cleared", "lost", "departed"}:
                     return False
                 if candidate.kind == "track" and not (
-                    contact.identity == "target"
+                    contact.vessel_class == "type_ii"
                     or getattr(contact, "activity", "unknown")
                     in {"suspected_violation", "confirmed_violation"}
                 ):
                     return False
-                if candidate.kind == "probe" and contact.identity != "unknown":
+                if candidate.kind == "probe" and contact.vessel_class != "unknown":
                     return False
                 target = contact.estimated_position_cells
                 radius = (
@@ -2628,7 +2628,9 @@ class SimulationEngine:
                     self._queue_control_event("duplicate_task_cancelled", uav.id, current_time, event)
             elif (event["type"] == "contact_merged"
                   and sm.contacts.snapshot(event["contact_id"]).state == "cleared"):
-                self._release_target_group(event["contact_id"], current_time, "civilian_released")
+                self._release_target_group(event["contact_id"], current_time, "type_i_released")
+            elif event["type"] == "type_i_released":
+                self._release_target_group(event["contact_id"], current_time, "type_i_released")
             elif event["type"] == "contact_merged":
                 cid = sm.resolve_contact_id(event["contact_id"])
                 tasks = [(uav.id, self.control_coordinator.active_task(uav.id))
@@ -2665,9 +2667,14 @@ class SimulationEngine:
                     event["contact_id"], current_time, "contact_lost",
                 )
                 self._release_target_group(event["contact_id"], current_time, "target_lost")
-            if event["type"] in ("contact_created", "contact_merged", "contact_lost"):
+            if event["type"] in (
+                "contact_created", "contact_merged", "contact_lost",
+                "type_i_assessed", "type_ii_assessed",
+                "type_i_released", "type_ii_confirmed",
+            ):
                 self.allocator.trigger_manager.notify_event(
-                    event["type"], time=current_time, contact_id=event["contact_id"])
+                    event["type"], time=current_time,
+                    **{key: value for key, value in event.items() if key != "type"})
 
     def _evaluate_evasion(self, current_time: float) -> None:
         """Derive AIS evasion facts from observed tracks, never from truth."""
@@ -2943,7 +2950,7 @@ class SimulationEngine:
                 sm.contacts.apply_assessment(assessment)
             except (TypeError, ValueError):
                 continue
-            if assessment.identity == "civilian":
+            if assessment.vessel_class == "type_i":
                 assessed_contact = sm.contacts.snapshot(assessment.contact_id)
                 if assessed_contact.ais_mmsi:
                     ais_state = sm.ais_updates.disable(
@@ -3025,23 +3032,17 @@ class SimulationEngine:
                     record,
                     status="completed",
                     finished_at_min=current_time,
-                    release_reason=f"assessment:{assessment.identity}",
+                    release_reason=f"assessment:{assessment.vessel_class}",
                     assigned_uav_id=None,
                 )
         sm.add_event("assessment_applied", {
             "assessment_id": assessment.assessment_id,
             "contact_id": assessment.contact_id,
             "probe_id": assessment.probe_id,
-            "identity": assessment.identity,
+            "vessel_class": assessment.vessel_class,
             "history_revision": assessment.history_revision,
         })
-        self.allocator.trigger_manager.notify_event(
-            "assessment_changed",
-            time=current_time,
-            contact_id=assessment.contact_id,
-            identity=assessment.identity,
-        )
-        if assessment.identity == "target":
+        if assessment.vessel_class == "type_ii":
             track_task = ControlTask(
                 f"track:{assessment.contact_id}",
                 OperationMode.TRACK,
@@ -3063,25 +3064,25 @@ class SimulationEngine:
             )
             if self.control_coordinator.has_controller(probe.uav_id):
                 self._queue_control_event(
-                    "contact_assessed",
+                    "type_ii_confirmed",
                     probe.uav_id,
                     current_time,
                     {
                         "contact_id": assessment.contact_id,
                         "probe_id": assessment.probe_id,
-                        "identity": assessment.identity,
+                        "vessel_class": "type_ii",
                     },
                 )
-        elif assessment.identity == "civilian":
+        elif assessment.vessel_class == "type_i":
             if self.control_coordinator.has_controller(probe.uav_id):
                 self._queue_control_event(
-                    "mission_task_released",
+                    "type_i_released",
                     probe.uav_id,
                     current_time,
                     {
                         "contact_id": assessment.contact_id,
                         "probe_id": assessment.probe_id,
-                        "identity": assessment.identity,
+                        "vessel_class": "type_i",
                     },
                 )
         sm.clear_probe_session(probe.probe_id)
@@ -3196,7 +3197,7 @@ class SimulationEngine:
                     task_record,
                     status=(
                         "completed"
-                        if event_type == "civilian_released"
+                        if event_type == "type_i_released"
                         else "blocked"
                     ),
                     assigned_uav_id=None,
@@ -3214,7 +3215,12 @@ class SimulationEngine:
                     event_type,
                     uav.id,
                     current_time,
-                    {"group_id": group_id, "contact_id": group_id},
+                    {
+                        "group_id": group_id,
+                        "contact_id": group_id,
+                        "vessel_class": "type_i",
+                        "probe_id": None,
+                    },
                 )
         self.allocator.trigger_manager.notify_event(
             event_type, time=current_time, group_id=group_id,
@@ -3287,10 +3293,10 @@ class SimulationEngine:
         vessel_samples = tuple(
             VesselTruthSample(
                 ship.id,
-                ship.truth_identity,
+                ship.vessel_class,
                 tuple(ship.float_position),
                 bool(ship.departed),
-                ship.ais_mode == "civilian",
+                ship.ais_enabled,
                 (
                     "departed" if ship.departed
                     else "survey" if ship.activity_state_at(current_time) == "survey"

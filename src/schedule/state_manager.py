@@ -416,7 +416,7 @@ class StateManager:
         """Keep the surviving track geometry and canonicalize scheduler IDs."""
         cid = self.resolve_contact_id(event["contact_id"])
         if self.contacts.snapshot(cid).state == "cleared":
-            # The engine will release all bindings through civilian_released.
+            # The engine will release all bindings through type_i_released.
             return []
         owner = event["assigned_uav_id"]
         tracks = [region for region in self._track_regions

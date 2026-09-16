@@ -105,7 +105,7 @@ class AisUpdateRegistry:
         mmsi: str,
         *,
         now_min: float,
-        reason: str = "confirmed_civilian",
+        reason: str = "confirmed_type_i",
         expected_revision: int | None = None,
     ) -> AisUpdateState:
         current = self.state(mmsi)
@@ -118,7 +118,7 @@ class AisUpdateRegistry:
             enabled=False,
             revision=current.revision + 1,
             changed_at_min=float(now_min),
-            reason="confirmed_civilian",
+            reason="confirmed_type_i",
         )
         self._states[mmsi] = updated
         return updated
