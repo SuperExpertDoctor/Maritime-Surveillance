@@ -68,6 +68,7 @@ export default function App() {
     if (mode !== "replay") return [];
     const unique = new Map();
     replay.frames.slice(0, replay.index + 1).forEach((item) => {
+      if (!item) return;
       (item.events || []).forEach((event) => {
         const key = `${event.time}|${event.type}|${JSON.stringify(event.data)}`;
         unique.set(key, event);

@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 import os
 import time
+import json
+from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 
 from src.mission.contracts import (
@@ -673,6 +675,7 @@ class MissionScheduler:
         self.prompt_window = PromptWindow()
         self.strategy_memory_store = strategy_memory_store
         self.last_selection_payload: dict | None = None
+        self.last_selection_response: dict | None = None
         self.last_selection_call_id: str | None = None
         self.last_selection_success = False
         self.last_selection_errors: tuple[str, ...] = ()
@@ -790,6 +793,7 @@ class MissionScheduler:
             raise ValueError("deadline_monotonic must be a finite number")
         payload = self._prompt_payload(snapshot)
         self.last_selection_payload = payload
+        self.last_selection_response = None
         self.last_selection_call_id = None
         self.last_selection_success = False
         self.last_selection_errors = ()
@@ -823,6 +827,7 @@ class MissionScheduler:
             self._fail_selection("model_selection_unavailable", "transport")
             return None
         self.last_selection_call_id = call_id
+        self.last_selection_response = response
         self.last_selection_success = bool(success)
         self.last_selection_failure_category = failure_category
         if self._deadline_expired(deadline_monotonic):
@@ -875,6 +880,81 @@ class MissionScheduler:
         self.last_selection_success = False
         self.last_selection_errors = (error,)
         self.last_selection_failure_category = category
+
+    def selection_interaction(self) -> dict:
+        """Return the complete, redacted decision trace for the public frame."""
+        call = None
+        call_id = self.last_selection_call_id
+        logs = getattr(self.gateway, "call_log", ()) if self.gateway is not None else ()
+        if call_id:
+            for candidate in reversed(logs):
+                if isinstance(candidate, dict) and candidate.get("call_id") == call_id:
+                    call = deepcopy(candidate)
+                    break
+        if call is None:
+            call = {}
+        redact_log = getattr(self.gateway, "redact_log", None)
+        if callable(redact_log):
+            call = redact_log(call)
+
+        attempts = []
+        for original in call.get("attempts", ()):
+            if not isinstance(original, dict):
+                continue
+            attempt = deepcopy(original)
+            attempt["response"] = attempt.get("raw_output") or ""
+            attempts.append(attempt)
+
+        system_prompt = self.system_prompt
+        user_prompt = json.dumps(
+            self.last_selection_payload or {}, ensure_ascii=False, allow_nan=False,
+        )
+        if attempts:
+            messages = attempts[0].get("messages") or []
+            if len(messages) > 0 and isinstance(messages[0], dict):
+                system_prompt = messages[0].get("content") or system_prompt
+            if len(messages) > 1 and isinstance(messages[1], dict):
+                user_prompt = messages[1].get("content") or user_prompt
+
+        response = ""
+        for attempt in reversed(attempts):
+            if attempt.get("response"):
+                response = attempt["response"]
+                break
+        if not response and self.last_selection_response is not None:
+            response = json.dumps(
+                _jsonable(self.last_selection_response),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+
+        model = call.get("model")
+        if not model and self.gateway is not None:
+            resolve_binding = getattr(self.gateway, "resolve_binding", None)
+            if callable(resolve_binding):
+                try:
+                    model = resolve_binding("decision_maker").get("model")
+                except Exception:
+                    model = None
+        interaction = {
+            "call_id": call_id,
+            "model": model or "unknown",
+            "attempts": attempts,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "response": response,
+            "validation": {
+                "is_valid": bool(self.last_selection_success),
+                "errors": list(self.last_selection_errors),
+            },
+            "success": bool(self.last_selection_success),
+            "errors": list(self.last_selection_errors),
+            "failure_category": self.last_selection_failure_category,
+        }
+        for key in ("episode_id", "snapshot_id", "sim_time_min", "memory_version"):
+            if key in call:
+                interaction[key] = call[key]
+        return interaction
 
     def _prompt_payload(self, snapshot: MissionSnapshot) -> dict:
         full = _jsonable(snapshot)

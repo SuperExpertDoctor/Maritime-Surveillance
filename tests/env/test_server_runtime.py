@@ -4,6 +4,8 @@ import json
 
 from fastapi.testclient import TestClient
 
+from src.env.simulation import SimulationEngine
+from src.mission.llm_gateway import ModelResult
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_logger import FrameLogger
@@ -17,6 +19,14 @@ class _FrameSink:
 
     def write(self, frame):
         self.frames.append(frame)
+
+
+class _OfflineGateway:
+    def request_json(self, **_kwargs):
+        return ModelResult("offline", False, None, ("offline",), "transport")
+
+    def request_text(self, **_kwargs):
+        return ModelResult("offline-text", False, None, ("offline",), "transport")
 
 
 def test_sync_broadcast_uses_the_running_server_event_loop():
@@ -35,6 +45,58 @@ def test_sync_broadcast_uses_the_running_server_event_loop():
 
     assert len(sink.frames) == 1
     assert sink.frames[0]["frame_id"] == 0
+
+
+def test_initial_websocket_frame_includes_live_engine_entities():
+    config = ConfigLoader.load()
+    engine = SimulationEngine(config, seed=42, llm_gateway=_OfflineGateway())
+    app = create_app(config, engine.allocator.sm, engine=engine)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/live") as websocket:
+            frame = websocket.receive_json()
+
+    assert len(frame["uavs"]) == len(engine.uavs)
+    assert len(frame["obstacles"]) == len(engine.obstacles)
+    assert len(frame["bases"]) == len(engine.bases)
+    assert len(frame["scenario_vessels"]) == len(engine.ships)
+
+
+def test_applied_intent_is_present_in_the_next_websocket_frame():
+    config = ConfigLoader.load()
+    engine = SimulationEngine(
+        config,
+        seed=42,
+        llm_gateway=_OfflineGateway(),
+        episode_id="websocket-intent-flow",
+    )
+    app = create_app(config, engine.allocator.sm, engine=engine)
+    app.state.frame_logger = _FrameSink()
+    payload = {
+        "episode_id": engine.episode_id,
+        "command_id": "websocket-intent-1",
+        "label": "websocket flow",
+        "bbox": [6, 6, 12, 12],
+        "mode": "search_priority",
+        "priority": "high",
+        "weight": 1.0,
+        "valid_duration_min": 20.0,
+        "revisit_interval_min": None,
+    }
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/live") as websocket:
+            websocket.receive_json()
+            response = client.post("/api/intents", json=payload)
+            assert response.status_code == 202
+            engine.apply_pending_intent_commands()
+            future = broadcast_frame_sync(app)
+            assert future is not None
+            future.result(timeout=5)
+            frame = websocket.receive_json()
+
+    assert [intent["label"] for intent in frame["intents"]] == ["websocket flow"]
+    assert frame["intent_statuses"][0]["intent_id"] == frame["intents"][0]["intent_id"]
 
 
 def test_api_config_exposes_control_strategy_contract():

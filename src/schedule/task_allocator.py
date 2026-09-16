@@ -234,12 +234,37 @@ class TaskAllocator:
             "matching_seconds": 0.0,
             "failure_reason": failure_reason,
         }
-        interaction = {
-            "call_id": self.mission_scheduler.last_selection_call_id,
-            "success": self.mission_scheduler.last_selection_success,
-            "errors": list(self.mission_scheduler.last_selection_errors),
-            "failure_category": self.mission_scheduler.last_selection_failure_category,
-        }
+        interaction = self.mission_scheduler.selection_interaction()
+        prompt_payload = self.mission_scheduler.last_selection_payload or {}
+        prompt_snapshot = prompt_payload.get("snapshot") or {}
+        interaction.update({
+            "snapshot_id": snapshot.snapshot_id,
+            "information_version": snapshot.information_version,
+            "candidate_count": len(snapshot.candidates),
+            "trigger_type": decision.trigger_type,
+            "trigger_reason": decision.reason,
+            "affected_uav_ids": sorted(decision.affected_uavs),
+            "trigger_information_version": decision.information_version,
+            "prompt_candidate_ids": [
+                candidate.get("task_id")
+                for candidate in prompt_snapshot.get("candidates", [])
+                if isinstance(candidate, dict) and candidate.get("task_id")
+            ],
+            "prompt_sources": prompt_snapshot.get("prompt_sources", {}),
+            "prompt_skip_cycles": prompt_snapshot.get("prompt_skip_cycles", {}),
+            "prompt_fairness_bound_cycles": prompt_snapshot.get(
+                "prompt_fairness_bound_cycles"
+            ),
+            "timing": {
+                "elapsed_before_snapshot_seconds": self.last_decision_timing[
+                    "elapsed_before_snapshot_seconds"
+                ],
+                "llm_seconds": self.last_decision_timing["llm_seconds"],
+                "validation_seconds": self.last_decision_timing["validation_seconds"],
+                "matching_seconds": self.last_decision_timing["matching_seconds"],
+                "total_seconds": decision_finished_wall - wall_started,
+            },
+        })
         self.trigger_manager.mark_triggered("heavy", current_time)
         self.sm.cycle += 1
         if batch is None:

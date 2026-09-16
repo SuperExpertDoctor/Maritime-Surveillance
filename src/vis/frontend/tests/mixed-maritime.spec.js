@@ -208,6 +208,85 @@ test("replay renders intent controls as read-only", async ({ page }) => {
   await expect(page.locator('[aria-label="框选重点区"]')).toBeDisabled();
 });
 
+test("replay retries a failed chunk and surfaces the recovered frame", async ({ page }) => {
+  await installFrameSocket(page, frameFixture());
+  let chunkRequests = 0;
+  await page.route("**/api/replay**", async (route) => {
+    const offset = Number(new URL(route.request().url()).searchParams.get("offset") || 0);
+    if (offset === 120) {
+      chunkRequests += 1;
+      if (chunkRequests === 1) {
+        await route.fulfill({ status: 503, body: "temporarily unavailable" });
+        return;
+      }
+    }
+    const frames = Array.from({ length: 120 }, (_, index) => frameFixture("replay", {
+      frame_id: offset + index + 1,
+      sim_time_min: offset + index,
+    }));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ total: 240, frames }),
+    });
+  });
+  await page.route("**/api/replay/list", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ files: ["retry.jsonl"] }),
+    });
+  });
+
+  await page.goto("/");
+  await page.locator(".mode-switch button").nth(1).click();
+  const fileSelect = page.locator(".file-select");
+  await fileSelect.selectOption("retry.jsonl");
+  const readout = page.locator(".playback-readout").first();
+  await expect(readout).toContainText("1 / 240");
+
+  await page.locator(".timeline-control input").fill("150");
+  await expect(page.locator(".connection-state")).toContainText("回放加载失败");
+  await page.locator(".timeline-control input").fill("149");
+  await expect(readout).toContainText("150 / 240");
+  await page.locator(".timeline-control input").fill("150");
+  await expect(readout).toContainText("151 / 240");
+  expect(chunkRequests).toBe(2);
+});
+
+test("replay can jump over unloaded chunks without a page error", async ({ page }) => {
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await installFrameSocket(page, frameFixture());
+  await page.route("**/api/replay**", async (route) => {
+    const offset = Number(new URL(route.request().url()).searchParams.get("offset") || 0);
+    const frames = Array.from({ length: 120 }, (_, index) => frameFixture("replay", {
+      frame_id: offset + index + 1,
+      sim_time_min: offset + index,
+    }));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ total: 480, frames }),
+    });
+  });
+  await page.route("**/api/replay/list", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ files: ["sparse.jsonl"] }),
+    });
+  });
+
+  await page.goto("/");
+  await page.locator(".mode-switch button").nth(1).click();
+  await page.locator(".file-select").selectOption("sparse.jsonl");
+  await expect(page.locator(".playback-readout").first()).toContainText("1 / 480");
+  await page.locator(".timeline-control input").fill("360");
+  await expect(page.locator(".playback-readout").first()).toContainText("361 / 480");
+  expect(pageErrors).toEqual([]);
+});
+
 test("operator places a research vessel by click and deletes the selected scenario vessel", async ({ page }) => {
   const fixture = frameFixture("live", {
     editing_allowed: true,
@@ -279,4 +358,42 @@ test("vessel editing is disabled outside the initialization window", async ({ pa
   await page.goto("/");
   await expect(page.getByRole("button", { name: "科考船舶" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "民用船舶" })).toBeDisabled();
+});
+
+test("operator sees runtime command transition from queued to applied", async ({ page }) => {
+  await installFrameSocket(page, frameFixture("live", {
+    runtime_status: "paused_model",
+    blocked_role: "red_commander",
+  }));
+  let commandId = null;
+  let pollCount = 0;
+  await page.route("**/api/runtime/retry", async (route) => {
+    commandId = route.request().postDataJSON().command_id;
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ command_id: commandId, status: "queued" }),
+    });
+  });
+  await page.route("**/api/intent-commands/*", async (route) => {
+    pollCount += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        command_id: commandId,
+        status: pollCount === 1 ? "queued" : "applied",
+        intent: null,
+        error_code: null,
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.locator(".connection-state")).toHaveClass(/connected/);
+  await page.getByRole("button", { name: "重试" }).click();
+  await expect(page.locator(".command-note")).toContainText("待应用");
+  await expect.poll(() => page.locator(".command-note").textContent()).toContain("已应用");
+  expect(commandId).toBeTruthy();
+  expect(pollCount).toBeGreaterThan(1);
 });

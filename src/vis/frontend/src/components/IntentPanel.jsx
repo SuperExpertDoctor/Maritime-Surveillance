@@ -72,6 +72,29 @@ export default function IntentPanel({ frame, readOnly = false, selection, onClea
     };
   }, [command]);
 
+  useEffect(() => {
+    if (!runtimeCommand?.command_id || runtimeCommand.status !== "queued") return undefined;
+    let stopped = false;
+    let timer;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/intent-commands/${encodeURIComponent(runtimeCommand.command_id)}`);
+        if (!response.ok) throw new Error("运行命令状态不可用");
+        const next = await response.json();
+        if (stopped) return;
+        setRuntimeCommand(next);
+        if (next.status === "queued") timer = window.setTimeout(poll, 700);
+      } catch (pollError) {
+        if (!stopped) setError(pollError.message || "运行命令状态不可用");
+      }
+    };
+    timer = window.setTimeout(poll, 250);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [runtimeCommand]);
+
   const updateDraft = (field, value) => setDraft((current) => ({ ...current, [field]: value }));
 
   const clearDraft = () => {

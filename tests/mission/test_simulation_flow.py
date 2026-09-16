@@ -116,6 +116,16 @@ def test_failed_mission_decision_emits_failure_and_retries_after_one_minute():
 
     assert returned_batch is None
     assert result["action"] == "mission_selection_unavailable"
+    trace = result["llm_cycle"]
+    assert {
+        "system_prompt", "user_prompt", "response", "attempts",
+        "validation", "information_version", "trigger_reason",
+        "prompt_candidate_ids", "timing",
+    } <= set(trace)
+    assert trace["success"] is False
+    assert trace["validation"]["errors"] == ["model_selection_unavailable"]
+    assert trace["user_prompt"]
+    assert trace["timing"]["total_seconds"] >= 0.0
     failure = next(
         event
         for event in engine.allocator.sm.get_recent_events(1.0)
