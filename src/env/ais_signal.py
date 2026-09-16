@@ -41,8 +41,7 @@ def _stable_number(value: str) -> int:
 
 def generate_ais_signal(ship: "Ship", timestamp: float) -> AISSignal | None:
     """Generate a public AIS report without consulting hidden vessel identity."""
-    mode = getattr(ship, "ais_mode", "civilian")
-    if mode == "silent":
+    if not ship.ais_enabled:
         return None
     serial = _stable_number(ship.id)
     phase = serial * 0.017 + float(timestamp) * 0.11

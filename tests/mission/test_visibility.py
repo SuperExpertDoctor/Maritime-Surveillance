@@ -34,11 +34,12 @@ def test_global_ais_is_ingested_at_zero_even_with_far_uavs(engine):
     assert all(c.last_seen_min == 1 for c in sm.contacts.list_snapshots())
 
 
-def test_silent_ships_without_sar_or_eo_never_create_contacts(engine):
+def test_ais_disabled_ships_without_sar_or_eo_never_create_contacts(engine):
     sm = engine.allocator.sm
     assert hasattr(sm, "contacts"), "StateManager must own ContactStore"
     before = sm.contacts.list_snapshots()
-    engine.ships.append(SimpleNamespace(id="hidden-extra", ais_mode="silent", departed=False,
+    engine.ships.append(SimpleNamespace(id="hidden-extra", vessel_class="type_ii",
+                                        ais_enabled=False, departed=False,
                                         set_ais_signal=lambda signal: None))
     engine._refresh_ais_signals(0)  # cadence already ingested
     engine._update_sensors_and_detections(0)
@@ -85,7 +86,7 @@ def test_target_report_contract_uses_contact_id():
     assert "group_id" not in {f.name for f in fields(TargetReport)}
 
 
-def test_hidden_identity_count_gate_and_trail_cannot_change_blue_payload(engine):
+def test_hidden_class_count_gate_and_trail_cannot_change_blue_payload(engine):
     sm = engine.allocator.sm
     assert hasattr(sm, "contacts"), "StateManager must own ContactStore"
     builder = PromptBuilder()
@@ -97,15 +98,21 @@ def test_hidden_identity_count_gate_and_trail_cannot_change_blue_payload(engine)
             json.dumps((contacts, prompts), sort_keys=True).encode()).hexdigest()
     before = blue()
     for ship in engine.ships:
-        ship.truth = replace(ship.truth, identity="civilian" if ship.truth_identity == "target" else "target")
+        ship.truth = replace(
+            ship.truth,
+            vessel_class="type_i" if ship.vessel_class == "type_ii" else "type_ii",
+            ais_enabled=True,
+        )
         ship.gate_state = "evasiveness-secret"
         ship._col, ship._row = 29.123456, 29.654321
         ship.trail.append((29.123456, 29.654321))
-    engine.ships.extend([SimpleNamespace(truth_identity="target", is_evading=True)] * 3)
+    engine.ships.extend([
+        SimpleNamespace(vessel_class="type_ii", ais_enabled=True, is_evading=True)
+    ] * 3)
     engine._sync_state_from_entities()
     assert blue() == before
     encoded = json.dumps(builder.contact_payload(sm))
-    for forbidden in ("ship_id", "actual_military", "truth_identity", "gate_state", "is_evading", "trail"):
+    for forbidden in ("ship_id", "vessel_class", "ais_enabled", "gate_state", "is_evading", "trail"):
         assert forbidden not in encoded
 
 

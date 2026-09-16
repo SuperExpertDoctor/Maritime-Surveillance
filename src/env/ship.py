@@ -1,7 +1,7 @@
 """Independent maritime vessels and deterministic population generation."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import math
@@ -15,7 +15,7 @@ from src.env.dubins import Pose
 from src.env.obstacle import Island
 from src.env.ship_navigation import MotionDynamics, MotionState, ShipNavigator, ShipRoute
 from src.env.emitter import RadarEmitter
-from src.mission.contracts import ship_rng_manifest
+from src.mission.contracts import VesselClass, ship_rng_manifest
 from src.schedule.config_loader import allocate_population
 from src.schedule.datatypes import GridCoord
 
@@ -23,41 +23,51 @@ if TYPE_CHECKING:
     from src.schedule.config_loader import AppConfig
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class ShipTruth:
     """Environment/evaluation-only vessel truth."""
 
     ship_id: str
-    identity: Literal["target", "civilian"]
-    ais_mode: Literal["civilian", "silent"]
+    vessel_class: VesselClass
+    ais_enabled: bool
     normal_route: tuple[Pose, ...]
-    def __init__(
-        self,
-        ship_id: str,
-        identity: Literal["target", "civilian"],
-        ais_mode: Literal["civilian", "silent"],
-        normal_route: tuple[Pose, ...],
-        vessel_class: Literal["unknown", "civilian", "research"] = "unknown",
-        activity_schedule: tuple[tuple[float, float], ...] = (),
-    ) -> None:
-        object.__setattr__(self, "ship_id", ship_id)
-        object.__setattr__(self, "identity", identity)
-        object.__setattr__(self, "ais_mode", ais_mode)
-        object.__setattr__(self, "normal_route", normal_route)
-        # Runtime-only alignment fields are adapters on the environment truth;
-        # dataclasses.asdict intentionally keeps the historical four-field
-        # evaluator contract stable.
-        object.__setattr__(self, "vessel_class", vessel_class)
-        object.__setattr__(self, "activity_schedule", tuple(activity_schedule))
+    activity_schedule: tuple[tuple[float, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.vessel_class not in ("unknown", "type_i", "type_ii"):
+            raise ValueError("invalid vessel_class")
+        if type(self.ais_enabled) is not bool:
+            raise TypeError("ais_enabled must be bool")
+        if self.vessel_class == "type_i" and not self.ais_enabled:
+            raise ValueError("type_i_ais_required")
+        object.__setattr__(self, "normal_route", tuple(self.normal_route))
+        object.__setattr__(self, "activity_schedule", tuple(self.activity_schedule))
+
+    # These read adapters keep older evaluator fixtures usable until T13.
+    @property
+    def identity(self) -> Literal["unknown", "target", "civilian"]:
+        return {
+            "unknown": "unknown",
+            "type_i": "civilian",
+            "type_ii": "target",
+        }[self.vessel_class]
+
+    @property
+    def ais_mode(self) -> Literal["civilian", "silent"]:
+        return "civilian" if self.ais_enabled else "silent"
 
 
 def _replace_truth(truth: ShipTruth, **changes) -> ShipTruth:
     return ShipTruth(
         changes.get("ship_id", truth.ship_id),
-        changes.get("identity", truth.identity),
-        changes.get("ais_mode", truth.ais_mode),
-        changes.get("normal_route", truth.normal_route),
         changes.get("vessel_class", truth.vessel_class),
+        changes.get(
+            "ais_enabled",
+            truth.ais_enabled
+            if "ais_mode" not in changes
+            else changes["ais_mode"] == "civilian",
+        ),
+        changes.get("normal_route", truth.normal_route),
         changes.get("activity_schedule", truth.activity_schedule),
     )
 
@@ -98,8 +108,8 @@ class Ship:
         speed_kn: float,
         cell_size_km: float = 10.0,
         *,
-        truth_identity: Literal["target", "civilian"] = "civilian",
-        ais_mode: Literal["civilian", "silent"] = "civilian",
+        truth_identity: Literal["target", "civilian"] | None = None,
+        ais_mode: Literal["civilian", "silent"] | None = None,
         normal_route: tuple[Pose, ...] = (),
         ais_position_noise_cells: float = 0.05,
         base_heading: float | None = None,
@@ -114,7 +124,8 @@ class Ship:
         integration_dt_min: float = .1,
         navigation_clearance_cells: float = .1,
         radar_emitter=None,
-        vessel_class: Literal["unknown", "civilian", "research"] | None = None,
+        vessel_class: VesselClass | None = None,
+        ais_enabled: bool | None = None,
         activity_schedule: tuple[tuple[float, float], ...] = (),
         patrol_route: tuple[Pose, ...] = (),
     ) -> None:
@@ -127,11 +138,17 @@ class Ship:
         if not route:
             route = ((float(initial_position.col), float(initial_position.row), heading),)
         resolved_vessel_class = vessel_class or (
-            "research" if truth_identity == "target" else "civilian"
+            "type_ii" if truth_identity == "target" else "type_i"
         )
+        if ais_enabled is None:
+            ais_enabled = ais_mode != "silent" if ais_mode is not None else True
+        if type(ais_enabled) is not bool:
+            raise TypeError("ais_enabled must be bool")
+        if resolved_vessel_class == "type_i" and not ais_enabled:
+            raise ValueError("type_i_ais_required")
         self.truth = ShipTruth(
-            ship_id, truth_identity, ais_mode, route,
-            resolved_vessel_class, tuple(activity_schedule),
+            ship_id, resolved_vessel_class, ais_enabled, route,
+            tuple(activity_schedule),
         )
         self.id = ship_id
         self.ship_id = ship_id
@@ -214,8 +231,19 @@ class Ship:
         return self.truth.identity
 
     @property
-    def vessel_class(self) -> Literal["unknown", "civilian", "research"]:
+    def vessel_class(self) -> VesselClass:
         return self.truth.vessel_class
+
+    @property
+    def ais_enabled(self) -> bool:
+        return self.truth.ais_enabled
+
+    def set_ais_enabled(self, enabled: bool) -> None:
+        if type(enabled) is not bool:
+            raise TypeError("ais_enabled must be bool")
+        if self.vessel_class == "type_i" and not enabled:
+            raise ValueError("type_i_ais_required")
+        self.truth = replace(self.truth, ais_enabled=enabled)
 
     @property
     def activity(self) -> Literal["unknown"]:
@@ -225,7 +253,7 @@ class Ship:
 
     def activity_state_at(self, at_min: float) -> Literal["transit", "survey"]:
         """Return hidden environment activity for evaluator-side use only."""
-        if self.vessel_class != "research":
+        if self.vessel_class != "type_ii":
             return "transit"
         for start_min, duration_min in self.truth.activity_schedule:
             if float(start_min) <= float(at_min) < float(start_min) + float(duration_min):
@@ -250,7 +278,7 @@ class Ship:
 
     @ais_mode.setter
     def ais_mode(self, value: Literal["civilian", "silent"]) -> None:
-        self.truth = _replace_truth(self.truth, ais_mode=value)
+        self.set_ais_enabled(value == "civilian")
 
     @property
     def normal_route(self) -> tuple[Pose, ...]:
@@ -454,20 +482,14 @@ def create_ship_population(
         raise ValueError("land_mask must be a two-dimensional grid")
     population = config.ship.population
     count = population.total_count
-    target_count = allocate_population(
-        count,
-        {
-            "civilian": population.civilian_ratio,
-            "research": population.research_ratio,
-        },
-    )["research"]
+    type_ii_count = population.allocate()["type_ii"]
 
     manifest = ship_rng_manifest(seed)
     slots = list(range(count))
-    identity_rng = random.Random(manifest["ship_identity"])
-    identity_rng.shuffle(slots)
-    target_slots = set(slots[:target_count])
-    ais_rng = random.Random(manifest["ship_ais_mode"])
+    class_rng = random.Random(manifest["ship_class"])
+    class_rng.shuffle(slots)
+    type_ii_slots = set(slots[:type_ii_count])
+    ais_rng = random.Random(manifest["ship_ais_enabled"])
     activity_seed = int.from_bytes(
         hashlib.sha256(f"{int(seed)}:ship_activity".encode("ascii")).digest()[:8],
         "big",
@@ -491,8 +513,12 @@ def create_ship_population(
 
     for ship_index in range(count):
         ship_id = f"Ship-{ship_index + 1}"
-        identity = "target" if ship_index in target_slots else "civilian"
-        vessel_class = "research" if identity == "target" else "civilian"
+        vessel_class = "type_ii" if ship_index in type_ii_slots else "type_i"
+        ais_enabled = (
+            True
+            if vessel_class == "type_i"
+            else ais_rng.random() < config.ship.type_ii_ais_on_probability
+        )
         for _attempt in range(200):
             if not spawn_cells or not exits:
                 continue
@@ -515,7 +541,6 @@ def create_ship_population(
                 GridCoord(int(candidate[0]), int(candidate[1])),
                 config.ship.speed_kn,
                 cell_size_km=config.grid.cell_size_km,
-                truth_identity=identity,
                 normal_route=tuple(planned),
                 ais_position_noise_cells=config.ship.ais_position_noise_cells,
                 max_turn_rate_deg_min=config.ship.max_turn_rate_deg_min,
@@ -529,9 +554,10 @@ def create_ship_population(
                 integration_dt_min=config.ship.integration_dt_min,
                 navigation_clearance_cells=config.ship.navigation_clearance_cells,
                 vessel_class=vessel_class,
+                ais_enabled=ais_enabled,
                 patrol_route=tuple(planned) + tuple(reversed(planned[:-1])),
             )
-            if vessel_class == "research":
+            if vessel_class == "type_ii":
                 start_low, start_high = config.mission.activity.schedule_start_min
                 duration_low, duration_high = config.mission.activity.schedule_duration_min
                 schedule = (
@@ -564,8 +590,6 @@ def create_ship_population(
             break
         else:
             raise PopulationPlacementError(ship_index, 200)
-        if identity == "target" and ais_rng.random() >= config.ship.target_ais_on_probability:
-            ship.ais_mode = "silent"
         ships.append(ship)
     return ships
 
