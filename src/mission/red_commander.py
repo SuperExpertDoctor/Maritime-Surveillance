@@ -80,6 +80,10 @@ class ThreatGate:
     ) -> None:
         self.update(ship_id, identity, min_distance_cells, now_min)
 
+    def remove_ship(self, ship_id: str) -> None:
+        """Forget runtime gate state for a vessel removed from the episode."""
+        self._ships.pop(ship_id, None)
+
 
 @dataclass(frozen=True)
 class RedShipSnapshot:
@@ -287,6 +291,15 @@ class RedCommander:
     def _retire_installation(self) -> None:
         self._installation = None
         self._installation_episode_revision = None
+
+    def remove_ship(self, ship_id: str) -> None:
+        """Invalidate red state immediately when a vessel leaves the fleet."""
+        self.threat_gate.remove_ship(ship_id)
+        if (
+            self._installation is not None
+            and any(command.ship_id == ship_id for command in self._installation.plan.commands)
+        ):
+            self._retire_installation()
 
     def _sync_gate_revision(self) -> int:
         episode_revision = self.threat_gate.episode_revision

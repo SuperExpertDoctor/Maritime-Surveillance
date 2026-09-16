@@ -187,14 +187,32 @@ class HandoffManager:
                 failed.append(self._attempts[handoff_id])
         return tuple(failed)
 
-    def _fail(self, handoff_id: str, reason: str) -> None:
+    def fail_for_contact(
+        self, contact_id: str, at_min: float, reason: str,
+    ) -> tuple[HandoffAttempt, ...]:
+        """Fail all live handoffs for a removed or invalidated contact."""
+        at = _time(at_min, "at_min")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("reason must be a non-empty string")
+        failed = []
+        for attempt in self.attempts():
+            if attempt.contact_id != contact_id:
+                continue
+            if attempt.state not in {"required", "pending"}:
+                continue
+            failed.append(self._fail(attempt.handoff_id, reason))
+        return tuple(failed)
+
+    def _fail(self, handoff_id: str, reason: str) -> HandoffAttempt:
         attempt = self._attempts[handoff_id]
-        self._attempts[handoff_id] = replace(
+        failed = replace(
             attempt, state="failed", failure_reason=reason
         )
+        self._attempts[handoff_id] = failed
         self._contacts[attempt.contact_id] = replace(
             self._contacts[attempt.contact_id], status="handoff_required"
         )
+        return failed
 
 
 __all__ = ["ContactTaskState", "HandoffEvidence", "HandoffManager"]

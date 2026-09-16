@@ -89,3 +89,24 @@ def test_bearing_only_handoff_does_not_fabricate_a_point(system):
     evidence = system.evidence(handoff.handoff_id)
     assert evidence.mean is None
     assert evidence.direction == pytest.approx((2.0, 1.0))
+
+
+def test_fail_for_contact_only_fails_live_attempts_and_keeps_evidence(system):
+    first = system.require(
+        "C1", source_uav_id="U1", required_at_min=10.0,
+        last_position=(10.0, 10.0), last_observed_at_min=10.0,
+    )
+    system.commit_assignment(first.handoff_id, "U2", 11.0)
+    succeeded = system.require(
+        "C1", source_uav_id="U1", required_at_min=12.0,
+        last_position=(11.0, 10.0), last_observed_at_min=12.0,
+    )
+    assert succeeded.handoff_id == first.handoff_id
+    evidence = system.evidence(first.handoff_id)
+
+    failed = system.fail_for_contact("C1", 13.0, "vessel_removed")
+
+    assert [attempt.handoff_id for attempt in failed] == [first.handoff_id]
+    assert system.attempts()[0].state == "failed"
+    assert system.attempts()[0].failure_reason == "vessel_removed"
+    assert system.evidence(first.handoff_id) == evidence

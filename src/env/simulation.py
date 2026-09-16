@@ -9,7 +9,7 @@ from uuid import uuid4
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 
@@ -115,6 +115,15 @@ from src.utils.search_route_planner import (
 _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
 
 
+@dataclass(frozen=True)
+class _VesselRemovalPlan:
+    vessel_id: str
+    revision: int
+    contact_ids: tuple[str, ...]
+    assigned_uav_ids: tuple[str, ...]
+    handoff_ids: tuple[str, ...]
+
+
 class SimulationEngine:
     def __init__(
         self,
@@ -140,7 +149,6 @@ class SimulationEngine:
         )
         self._vessel_revisions: dict[str, int] = {}
         self._next_scenario_vessel_number = 1
-        self._editing_allowed = True
         base_positions = self._generate_base_positions()
         self.bases = [
             BaseStation(
@@ -226,6 +234,8 @@ class SimulationEngine:
             cell_size_km=config.grid.cell_size_km,
         )
         self._ais_history: dict[str, list[tuple[float, tuple[float, float], str]]] = defaultdict(list)
+        self._ais_force_refresh_ids: set[str] = set()
+        self._vessel_contact_ids: dict[str, set[str]] = defaultdict(set)
         self._evasion_observer_history: list[dict] = []
 
         self.uavs = [
@@ -429,13 +439,12 @@ class SimulationEngine:
         return self.vessel_commands.get(command_id)
 
     def scenario_vessels(self) -> tuple[dict, ...]:
-        if not self.editing_allowed:
-            raise RuntimeError("editing_closed")
         return tuple({
             "scenario_entity_id": ship.id,
             "revision": self._vessel_revisions.get(ship.id, 1),
             "position": [float(ship.float_position[0]), float(ship.float_position[1])],
             "vessel_class": ship.vessel_class,
+            "ais_enabled": ship.ais_enabled,
         } for ship in self.ships)
 
     def apply_pending_vessel_commands(self) -> tuple[VesselCommandResult, ...]:
@@ -447,10 +456,10 @@ class SimulationEngine:
                     command.command_id, "rejected", command.vessel_id, None,
                     "episode_conflict",
                 )
-            elif not self.editing_allowed:
+            elif not self.vessel_mutation_allowed:
                 result = VesselCommandResult(
                     command.command_id, "rejected", command.vessel_id, None,
-                    "editing_closed",
+                    "mutation_closed",
                 )
             else:
                 try:
@@ -465,34 +474,227 @@ class SimulationEngine:
                             self._emitter_track_ids[vessel.id] = (
                                 f"EMITTER-{vessel.id}"
                             )
+                        self.allocator.sm.add_event("vessel_created", {
+                            "vessel_id": vessel.id,
+                            "vessel_class": vessel.vessel_class,
+                            "position": list(vessel.float_position),
+                            "ais_enabled": vessel.ais_enabled,
+                        })
                         result = VesselCommandResult(
                             command.command_id, "applied", vessel.id, 1, None,
                         )
+                    elif command.operation == "set_ais":
+                        result = self._apply_set_ais(command)
                     else:
-                        vessel = next(
-                            (item for item in self.ships if item.id == command.vessel_id),
-                            None,
-                        )
-                        revision = self._vessel_revisions.get(command.vessel_id, 0)
-                        if vessel is None:
-                            raise ValueError("vessel_not_found")
-                        if revision != command.expected_revision:
-                            raise ValueError("revision_conflict")
-                        self.ships.remove(vessel)
-                        self._vessel_revisions.pop(vessel.id, None)
-                        self._ship_position_history.pop(vessel.id, None)
-                        self._emitter_track_ids.pop(vessel.id, None)
+                        removal = self._plan_vessel_removal(command)
+                        self._commit_vessel_removal(removal)
                         result = VesselCommandResult(
-                            command.command_id, "applied", vessel.id, revision + 1, None,
+                            command.command_id, "applied", removal.vessel_id,
+                            removal.revision + 1, None,
                         )
                 except ValueError as exc:
                     code = str(exc)
+                    current_revision = self._vessel_revisions.get(command.vessel_id)
                     result = VesselCommandResult(
-                        command.command_id, "rejected", command.vessel_id, None, code,
+                        command.command_id, "rejected", command.vessel_id,
+                        current_revision, code,
                     )
             self.vessel_commands.complete(result)
             results.append(result)
         return tuple(results)
+
+    def _require_vessel_revision(self, vessel_id: str, expected_revision: int) -> Ship:
+        vessel = next((item for item in self.ships if item.id == vessel_id), None)
+        if vessel is None:
+            raise ValueError("vessel_not_found")
+        revision = self._vessel_revisions.get(vessel_id, 0)
+        if revision != expected_revision:
+            raise ValueError("revision_conflict")
+        return vessel
+
+    def _apply_set_ais(self, command: VesselCommand) -> VesselCommandResult:
+        if type(command.ais_enabled) is not bool:
+            raise ValueError("ais_enabled must be bool")
+        vessel = self._require_vessel_revision(
+            command.vessel_id, command.expected_revision,
+        )
+        vessel.set_ais_enabled(command.ais_enabled)
+        revision = command.expected_revision + 1
+        self._vessel_revisions[vessel.id] = revision
+        if command.ais_enabled:
+            self._ais_force_refresh_ids.add(vessel.id)
+        else:
+            vessel.set_ais_signal(None)
+        self.allocator.trigger_manager.notify_event(
+            "ais_transmission_changed",
+            time=self.clock.time,
+            vessel_id=vessel.id,
+            ais_enabled=command.ais_enabled,
+        )
+        self.allocator.sm.add_event("ais_transmission_changed", {
+            "vessel_id": vessel.id,
+            "ais_enabled": command.ais_enabled,
+            "revision": revision,
+        })
+        return VesselCommandResult(
+            command.command_id, "applied", vessel.id, revision, None,
+        )
+
+    def _plan_vessel_removal(self, command: VesselCommand) -> _VesselRemovalPlan:
+        vessel = self._require_vessel_revision(
+            command.vessel_id, command.expected_revision,
+        )
+        sm = self.allocator.sm
+        contact_ids: set[str] = set()
+        for contact_id, physical_id in self._evaluation_contact_links.items():
+            if physical_id == vessel.id:
+                contact_ids.add(sm.resolve_contact_id(contact_id))
+        contact_ids.update(
+            sm.resolve_contact_id(contact_id)
+            for contact_id in self._vessel_contact_ids.get(vessel.id, ())
+        )
+        try:
+            contact_ids.add(sm.resolve_contact_id(vessel.id))
+        except (KeyError, TypeError):
+            pass
+        signal = vessel.ais_signal
+        for contact in sm.contacts.list_snapshots():
+            if contact.contact_id == vessel.id or (
+                signal is not None and contact.ais_mmsi == signal.mmsi
+            ):
+                contact_ids.add(contact.contact_id)
+        contact_ids.update(
+            sm.resolve_contact_id(item.contact_id)
+            for item in sm.get_probe_sessions()
+            if item.contact_id in contact_ids
+        )
+
+        assigned_uav_ids: set[str] = set()
+        for uav in self.uavs:
+            task = self.control_coordinator.active_task(uav.id)
+            if (
+                uav.target_group_id in contact_ids
+                or (task is not None and task.target_contact_id in contact_ids)
+            ):
+                assigned_uav_ids.add(uav.id)
+        for record in self._mission_task_records.values():
+            if record.contact_id in contact_ids and record.assigned_uav_id:
+                assigned_uav_ids.add(record.assigned_uav_id)
+
+        handoff_ids = tuple(sorted(
+            attempt.handoff_id
+            for attempt in self.handoff_manager.attempts()
+            if sm.resolve_contact_id(attempt.contact_id) in contact_ids
+            and attempt.state in {"required", "pending"}
+        ))
+        return _VesselRemovalPlan(
+            vessel.id,
+            self._vessel_revisions[vessel.id],
+            tuple(sorted(contact_ids)),
+            tuple(sorted(assigned_uav_ids)),
+            handoff_ids,
+        )
+
+    def _commit_vessel_removal(self, plan: _VesselRemovalPlan) -> None:
+        """Commit a preflighted removal without a fallible validation call."""
+        now = float(self.clock.time)
+        sm = self.allocator.sm
+        contact_ids = set(plan.contact_ids)
+        probe_ids = {
+            probe.probe_id
+            for probe in sm.get_probe_sessions()
+            if sm.resolve_contact_id(probe.contact_id) in contact_ids
+        }
+
+        # Release every task binding before removing the physical vessel.
+        for uav_id in plan.assigned_uav_ids:
+            uav = next((item for item in self.uavs if item.id == uav_id), None)
+            task = self.control_coordinator.active_task(uav_id)
+            if task is not None and (
+                task.target_contact_id in contact_ids or task.probe_id in probe_ids
+            ):
+                record = self._mission_task_records.get(task.task_id)
+                if record is not None:
+                    self._mission_task_records[task.task_id] = replace(
+                        record,
+                        status="blocked",
+                        assigned_uav_id=None,
+                        finished_at_min=now,
+                        release_reason="vessel_removed",
+                    )
+            for record_id, record in tuple(self._mission_task_records.items()):
+                if record.contact_id in contact_ids and record.assigned_uav_id == uav_id:
+                    self._mission_task_records[record_id] = replace(
+                        record,
+                        status="blocked",
+                        assigned_uav_id=None,
+                        finished_at_min=now,
+                        release_reason="vessel_removed",
+                    )
+            self._coordinator_tasks.pop(uav_id, None)
+            self._tracking_started_at.pop(uav_id, None)
+            self._ais_tracking_started_at.pop(uav_id, None)
+            self._ais_measurements.pop(uav_id, None)
+            if uav is not None:
+                uav.target_group_id = None
+                uav.assigned_region = None
+                uav.status = "idle"
+                uav.sensor_mode = "off"
+            sm.clear_uav_assignment(uav_id)
+            if self.control_coordinator.has_controller(uav_id):
+                lease = self.control_coordinator.current_lease(uav_id)
+                if lease.owner in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+                    self.control_coordinator.ownership.release_to_system(lease, now)
+                if self.control_coordinator.current_lease(uav_id).owner is ControlOwner.SYSTEM:
+                    self.control_coordinator.assign_system_task(
+                        uav_id,
+                        ControlTask(f"holding:vessel-removed:{uav_id}:{now}", OperationMode.HOLDING),
+                        current_time=now,
+                    )
+                self.control_coordinator.operation_registry._release_binding(uav_id)
+
+        # Invalidate handoffs while their contact references are still resolvable.
+        for contact_id in sorted(contact_ids):
+            failed = self.handoff_manager.fail_for_contact(
+                contact_id, now, "vessel_removed",
+            )
+            for attempt in failed:
+                sm.add_event("handoff_failed", {
+                    "handoff_id": attempt.handoff_id,
+                    "contact_id": attempt.contact_id,
+                    "failure_reason": attempt.failure_reason,
+                })
+
+        for probe in sm.get_probe_sessions():
+            if sm.resolve_contact_id(probe.contact_id) in contact_ids:
+                sm.clear_probe_session(probe.probe_id)
+        for region in tuple(sm.get_track_regions()):
+            if (
+                region.target_group_id is not None
+                and sm.resolve_contact_id(region.target_group_id) in contact_ids
+            ):
+                sm.release_track_region(region.id, create_marker=False)
+        for contact_id in sorted(contact_ids):
+            try:
+                sm.contacts.release(contact_id, now, "vessel_removed")
+            except KeyError:
+                pass
+        for contact_id, physical_id in tuple(self._evaluation_contact_links.items()):
+            if physical_id == plan.vessel_id or sm.resolve_contact_id(contact_id) in contact_ids:
+                self._evaluation_contact_links.pop(contact_id, None)
+
+        self.red_commander.remove_ship(plan.vessel_id)
+        self._ais_force_refresh_ids.discard(plan.vessel_id)
+        self._vessel_contact_ids.pop(plan.vessel_id, None)
+        self.ships[:] = [ship for ship in self.ships if ship.id != plan.vessel_id]
+        self._vessel_revisions.pop(plan.vessel_id, None)
+        self._ship_position_history.pop(plan.vessel_id, None)
+        self._emitter_track_ids.pop(plan.vessel_id, None)
+        sm.add_event("vessel_removed", {
+            "vessel_id": plan.vessel_id,
+            "revision": plan.revision + 1,
+            "contact_ids": list(plan.contact_ids),
+        })
 
     def _create_scenario_vessel(self, command: VesselCommand) -> Ship:
         x, y = map(float, command.position_cells)
@@ -506,7 +708,6 @@ class SimulationEngine:
         if any(math.dist((x, y), ship.float_position) < 1.0 for ship in self.ships):
             raise ValueError("vessel_spacing_conflict")
         vessel_id = f"scenario-vessel-{self._next_scenario_vessel_number}"
-        self._next_scenario_vessel_number += 1
         side = 1.0
         waypoints = (
             (x, y, 0.0),
@@ -515,7 +716,7 @@ class SimulationEngine:
             (x, min(rows - margin - 0.01, y + side), math.pi),
         )
         emitter = None
-        if command.vessel_class == "research":
+        if command.vessel_class == "type_ii":
             emitter_seed = int.from_bytes(
                 hashlib.sha256(
                     f"{self.seed}:{command.command_id}:manual-emitter".encode("ascii")
@@ -527,13 +728,11 @@ class SimulationEngine:
                 seed=emitter_seed,
                 config=self.config.sensor.emitter,
             )
-        return Ship(
+        vessel = Ship(
             vessel_id,
             GridCoord(int(math.floor(x)), int(math.floor(y))),
             self.config.ship.speed_kn,
             cell_size_km=self.config.grid.cell_size_km,
-            truth_identity="target" if command.vessel_class == "research" else "civilian",
-            ais_mode="civilian",
             normal_route=waypoints,
             patrol_route=waypoints,
             ais_position_noise_cells=self.config.ship.ais_position_noise_cells,
@@ -549,7 +748,10 @@ class SimulationEngine:
             navigation_clearance_cells=self.config.ship.navigation_clearance_cells,
             radar_emitter=emitter,
             vessel_class=command.vessel_class,
+            ais_enabled=True,
         )
+        self._next_scenario_vessel_number += 1
+        return vessel
 
     @property
     def blocked_role(self) -> str | None:
@@ -2104,6 +2306,7 @@ class SimulationEngine:
                 ship.set_ais_signal(signal)
                 if signal is not None:
                     contact_id = self.allocator.sm.contacts.ingest_ais(signal, current_time)
+                    self._vessel_contact_ids[ship.id].add(contact_id)
                     self._ais_history[signal.mmsi].append((
                         float(signal.timestamp),
                         tuple(signal.reported_position),

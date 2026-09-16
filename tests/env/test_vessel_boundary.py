@@ -46,7 +46,14 @@ def test_patrol_route_is_deterministic_and_does_not_depend_on_truth_class():
     from dataclasses import replace
     config_research = replace(
         config_research,
-        ship=replace(config_research.ship, target_ship_count=config.ship.initial_ship_count),
+        ship=replace(
+            config_research.ship,
+            population=replace(
+                config_research.ship.population,
+                type_i_ratio=0.0,
+                type_ii_ratio=1.0,
+            ),
+        ),
     )
     research = create_ship_population(config_research, 31, mask, AStarNavigator())
     assert [ship.patrol_route for ship in civilian] == [ship.patrol_route for ship in research]
