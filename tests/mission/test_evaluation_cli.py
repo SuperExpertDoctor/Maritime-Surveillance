@@ -161,3 +161,49 @@ def test_alignment_report_aggregates_raw_planning_latency_samples(monkeypatch, t
     assert latency["p95"] == pytest.approx(2.285)
     assert latency["max"] == pytest.approx(2.4)
     assert latency["non_fault_samples_over_2s"] == 0
+
+
+def test_alignment_report_prefers_canonical_metric_denominators(monkeypatch, tmp_path):
+    import scripts.evaluate_mixed_maritime as evaluator
+
+    def fake_episode(config, *, scenario, seed, repeat, steps, transport):
+        return {
+            "scenario": scenario,
+            "seed": seed,
+            "repeat": repeat,
+            "status": "finished",
+            "latency": {"count": 0, "p50": None, "p95": None, "max": None},
+            "latency_samples": (),
+            "non_fault_latency_samples": (),
+            "outcome": {"metric_denominators": {
+                "discovery_tracking_numerator": 1,
+                "discovery_tracking_denominator": 2,
+                "handoff_success_numerator": 2,
+                "handoff_success_denominator": 4,
+                "handoff": 99,
+                "continuous_observation_numerator_min": 3,
+                "continuous_observation_denominator_min": 6,
+                "continuous_observation_min": 99,
+            }},
+            "audit": {
+                "boundary_violations": 0,
+                "candidate_uncovered_without_reason": 0,
+                "trace_breaks": 0,
+                "cross_version_decisions": 0,
+            },
+        }
+
+    monkeypatch.setattr(evaluator, "_run_batch_episode", fake_episode)
+    report = evaluator._batch_report(type("Args", (), {
+        "config": Path("configs"),
+        "scenario": "mixed-ais",
+        "seed": 101,
+        "seeds": (101,),
+        "repeat": 1,
+        "steps": 1,
+        "transport": "fixture",
+        "output": tmp_path / "canonical.json",
+    })())
+
+    assert report["metrics"]["handoff_success_rate"]["denominator"] == 4
+    assert report["metrics"]["continuous_observation_rate"]["denominator"] == 6

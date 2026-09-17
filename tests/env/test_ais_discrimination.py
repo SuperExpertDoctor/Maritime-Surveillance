@@ -51,6 +51,7 @@ def test_ais_state_remains_unknown_until_validated_observation(engine, ais_enabl
     uav._col, uav._row = center[0] - 1.8, center[1]
     uav.heading_rad = 0.0
     uav.status = "tracking"
+    uav.sensor_mode = "eo"
     uav.target_group_id = group_id
     track = engine.allocator.sm.create_track_region(group_id, GridCoord(int(center[0]), int(center[1])))
     track.assigned_uav_id = uav.id

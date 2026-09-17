@@ -40,6 +40,14 @@ def _stable_hash(value) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _metric_denominator(outcome: dict, *keys: str) -> float:
+    denominators = outcome.get("metric_denominators", {})
+    for key in keys:
+        if key in denominators:
+            return float(denominators[key] or 0.0)
+    return 0.0
+
+
 def _git_commit() -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -651,19 +659,22 @@ def _batch_report(args) -> dict:
         else:
             if name == "discovery_tracking_rate":
                 numerator_key = "discovery_tracking_numerator"
-                denominator_key = "discovery_tracking_denominator"
+                denominator_keys = ("discovery_tracking_denominator",)
             elif name == "handoff_success_rate":
                 numerator_key = "handoff_success_numerator"
-                denominator_key = "handoff"
+                denominator_keys = ("handoff_success_denominator", "handoff")
             else:
                 numerator_key = "continuous_observation_numerator_min"
-                denominator_key = "continuous_observation_min"
+                denominator_keys = (
+                    "continuous_observation_denominator_min",
+                    "continuous_observation_min",
+                )
             numerator = sum(
                 float(outcome.get("metric_denominators", {}).get(numerator_key, 0.0))
                 for outcome in outcome_values
             )
             denominator = sum(
-                float(outcome.get("metric_denominators", {}).get(denominator_key, 0.0))
+                _metric_denominator(outcome, *denominator_keys)
                 for outcome in outcome_values
             )
             value = numerator / denominator if denominator else None
