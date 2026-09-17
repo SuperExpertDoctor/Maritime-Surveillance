@@ -5,6 +5,7 @@ import math
 from src.mission.config import (
     ActivityConfig,
     ContactConfig,
+    CoverageConfig,
     EmitterConfig,
     EvasionConfig,
     EvolutionConfig,
@@ -241,7 +242,7 @@ class ConfigLoader:
         mission_data = _read("mission.yaml")
         mission_fields = {
             "contact", "intent", "scheduling", "evolution", "activity",
-            "evasion", "information_update",
+            "evasion", "information_update", "coverage",
         }
         unknown_mission_fields = set(mission_data) - mission_fields
         if unknown_mission_fields:
@@ -293,6 +294,9 @@ class ConfigLoader:
                 evolution_data,
                 EvolutionConfig,
                 "mission.evolution",
+            ),
+            coverage=ConfigLoader._coverage_dataclass(
+                mission_data.get("coverage", {}), "mission.coverage"
             ),
         )
         for name, value in alignment_configs.items():
@@ -428,6 +432,17 @@ class ConfigLoader:
                 tuple(bbox) for bbox in normalized["regulated_bboxes"]
             )
         return strict_dataclass(normalized, cls, name)
+
+    @staticmethod
+    def _coverage_dataclass(data: object, name: str) -> CoverageConfig:
+        if not isinstance(data, dict):
+            raise ValueError(f"{name}: expected mapping")
+        normalized = dict(data)
+        if "windows_min" in normalized:
+            windows = normalized["windows_min"]
+            if isinstance(windows, (list, tuple)):
+                normalized["windows_min"] = tuple(windows)
+        return strict_dataclass(normalized, CoverageConfig, name)
 
     @staticmethod
     def _load_sensor_config(base_path: str) -> SensorConfig:

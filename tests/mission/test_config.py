@@ -65,6 +65,7 @@ def test_ship_and_mission_config_fields_match_design():
         "intent",
         "scheduling",
         "evolution",
+        "coverage",
     )
     assert tuple(field.name for field in fields(config.mission.contact)) == (
         "history_window_min",
@@ -116,6 +117,103 @@ def test_ship_and_mission_config_fields_match_design():
         "minimum_score_gain",
         "maximum_component_regression",
     )
+    assert tuple(field.name for field in fields(config.mission.coverage)) == (
+        "windows_min",
+        "primary_window_min",
+        "min_search_uav_fraction",
+        "ordinary_prompt_reserve",
+        "geometry_candidate_budget",
+        "no_progress_timeout_min",
+        "align_timeout_min",
+        "max_stall_replans",
+        "max_consecutive_decision_failures",
+    )
+    assert config.mission.activity.regulated_bboxes == ((8, 8, 22, 22),)
+    assert config.mission.evasion.enabled is True
+    assert config.mission.information_update.planning_deadline_seconds == 30.0
+
+
+def test_coverage_configuration_defaults_and_explicit_values(tmp_path: Path):
+    config = ConfigLoader.load()
+    assert config.mission.coverage.windows_min == (30, 60, 120)
+    assert config.mission.coverage.primary_window_min == 60
+    assert config.mission.coverage.min_search_uav_fraction == 0.4
+    assert config.mission.coverage.ordinary_prompt_reserve == 8
+    assert config.mission.coverage.geometry_candidate_budget == 120
+    assert config.mission.coverage.no_progress_timeout_min == 10.0
+    assert config.mission.coverage.align_timeout_min == 8.0
+    assert config.mission.coverage.max_stall_replans == 2
+    assert config.mission.coverage.max_consecutive_decision_failures == 3
+
+    config_dir = _copy_configs(tmp_path)
+    mission_path = config_dir / "mission.yaml"
+    mission_data = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    mission_data.pop("coverage", None)
+    mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
+    assert ConfigLoader.load(str(config_dir)).mission.coverage == config.mission.coverage
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("windows_min", [30, 30, 120], "windows_min"),
+        ("primary_window_min", True, "primary_window_min"),
+        ("primary_window_min", 90, "primary_window_min"),
+        ("min_search_uav_fraction", True, "min_search_uav_fraction"),
+        ("ordinary_prompt_reserve", True, "ordinary_prompt_reserve"),
+        ("geometry_candidate_budget", 1, "geometry_candidate_budget"),
+        ("no_progress_timeout_min", True, "no_progress_timeout_min"),
+        ("no_progress_timeout_min", 0, "no_progress_timeout_min"),
+        ("align_timeout_min", True, "align_timeout_min"),
+        ("align_timeout_min", float("inf"), "finite"),
+        ("max_stall_replans", True, "max_stall_replans"),
+        ("max_stall_replans", -1, "max_stall_replans"),
+        ("max_consecutive_decision_failures", True, "max_consecutive_decision_failures"),
+        ("max_consecutive_decision_failures", 0, "max_consecutive_decision_failures"),
+    ],
+)
+def test_coverage_configuration_rejects_invalid_values(
+    tmp_path: Path, field_name: str, value: object, message: str
+):
+    config_dir = _copy_configs(tmp_path)
+    mission_path = config_dir / "mission.yaml"
+    mission_data = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    mission_data["coverage"][field_name] = value
+    mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        ConfigLoader.load(str(config_dir))
+
+
+def test_coverage_configuration_rejects_unknown_fields(tmp_path: Path):
+    config_dir = _copy_configs(tmp_path)
+    mission_path = config_dir / "mission.yaml"
+    mission_data = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    mission_data["coverage"]["unexpected"] = 1
+    mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mission.coverage.*unknown.*unexpected"):
+        ConfigLoader.load(str(config_dir))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("ordinary_prompt_reserve", 41, "ordinary_prompt_reserve"),
+        ("geometry_candidate_budget", 39, "geometry_candidate_budget"),
+    ],
+)
+def test_coverage_configuration_respects_prompt_capacity(
+    tmp_path: Path, field_name: str, value: int, message: str
+):
+    config_dir = _copy_configs(tmp_path)
+    mission_path = config_dir / "mission.yaml"
+    mission_data = yaml.safe_load(mission_path.read_text(encoding="utf-8"))
+    mission_data["coverage"][field_name] = value
+    mission_path.write_text(yaml.safe_dump(mission_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        ConfigLoader.load(str(config_dir))
 
 
 def test_loaded_ship_config_is_immutable():

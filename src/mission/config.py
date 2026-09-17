@@ -279,11 +279,52 @@ class EvolutionConfig:
 
 
 @dataclass(frozen=True)
+class CoverageConfig:
+    windows_min: tuple[int, ...] = (30, 60, 120)
+    primary_window_min: int = 60
+    min_search_uav_fraction: float = 0.4
+    ordinary_prompt_reserve: int = 8
+    geometry_candidate_budget: int = 120
+    no_progress_timeout_min: float = 10.0
+    align_timeout_min: float = 8.0
+    max_stall_replans: int = 2
+    max_consecutive_decision_failures: int = 3
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.windows_min, tuple):
+            raise ValueError("coverage.windows_min: expected sequence")
+        if any(isinstance(value, bool) or not isinstance(value, int)
+               for value in self.windows_min):
+            raise ValueError("coverage.windows_min: expected integer values")
+        if self.windows_min != (30, 60, 120):
+            raise ValueError("coverage.windows_min must be exactly (30, 60, 120)")
+        _integer(self.primary_window_min, "coverage.primary_window_min", minimum=1)
+        if self.primary_window_min not in self.windows_min:
+            raise ValueError("coverage.primary_window_min must be in windows_min")
+        fraction = finite_number(
+            self.min_search_uav_fraction, "coverage.min_search_uav_fraction"
+        )
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError("coverage.min_search_uav_fraction must be in (0, 1]")
+        _integer(self.ordinary_prompt_reserve, "coverage.ordinary_prompt_reserve", minimum=1)
+        _integer(self.geometry_candidate_budget, "coverage.geometry_candidate_budget", minimum=1)
+        _positive(self.no_progress_timeout_min, "coverage.no_progress_timeout_min")
+        _positive(self.align_timeout_min, "coverage.align_timeout_min")
+        _integer(self.max_stall_replans, "coverage.max_stall_replans")
+        _integer(
+            self.max_consecutive_decision_failures,
+            "coverage.max_consecutive_decision_failures",
+            minimum=1,
+        )
+
+
+@dataclass(frozen=True)
 class MissionConfig:
     contact: ContactConfig
     intent: IntentConfig
     scheduling: SchedulingConfig
     evolution: EvolutionConfig
+    coverage: CoverageConfig = field(default_factory=CoverageConfig, kw_only=True)
 
     def __post_init__(self) -> None:
         # Keep the four-field legacy dataclass shape while exposing the new
@@ -414,6 +455,7 @@ def validate_mission_config(config: "AppConfig") -> None:
     intent = config.mission.intent
     scheduling = config.mission.scheduling
     evolution = config.mission.evolution
+    coverage = config.mission.coverage
 
     population = ship.population
     cols, rows = config.grid.resolution
@@ -596,6 +638,17 @@ def validate_mission_config(config: "AppConfig") -> None:
         minimum=1,
     )
 
+    if coverage.ordinary_prompt_reserve > scheduling.max_tasks_in_prompt:
+        raise ValueError(
+            "coverage.ordinary_prompt_reserve must not exceed "
+            "mission.scheduling.max_tasks_in_prompt"
+        )
+    if coverage.geometry_candidate_budget < scheduling.max_tasks_in_prompt:
+        raise ValueError(
+            "coverage.geometry_candidate_budget must be at least "
+            "mission.scheduling.max_tasks_in_prompt"
+        )
+
     _boolean(evolution.enabled, "mission.evolution.enabled")
     for name in (
         "max_active_memories",
@@ -624,6 +677,7 @@ def validate_mission_config(config: "AppConfig") -> None:
 __all__ = [
     "ActivityConfig",
     "ContactConfig",
+    "CoverageConfig",
     "EmitterConfig",
     "EvasionConfig",
     "EvolutionConfig",

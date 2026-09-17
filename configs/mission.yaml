@@ -43,6 +43,16 @@ evolution:
   repeats_per_seed: 3
   minimum_score_gain: 0.02
   maximum_component_regression: 0.02
+coverage:
+  windows_min: [30, 60, 120]
+  primary_window_min: 60
+  min_search_uav_fraction: 0.4
+  ordinary_prompt_reserve: 8
+  geometry_candidate_budget: 120
+  no_progress_timeout_min: 10.0
+  align_timeout_min: 8.0
+  max_stall_replans: 2
+  max_consecutive_decision_failures: 3
 activity:
   regulated_bboxes: [[8, 8, 22, 22]]
   schedule_start_min: [30.0, 120.0]
