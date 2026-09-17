@@ -264,6 +264,8 @@ test("real replay artifacts drive event-timed visual evidence", async ({ page },
 
   const replayFile = files.find((file) => /v07.*frames/i.test(file)) || files[0];
   expect(replayFile).toMatch(/frames\.jsonl$/i);
+  const sarFile = files.find((file) => /v06.*frames/i.test(file));
+  expect(sarFile).toMatch(/frames\.jsonl$/i);
   const firstChunkResponse = await page.request.get(
     `/api/replay?file=${encodeURIComponent(replayFile)}&offset=0&limit=120`,
   );
@@ -281,6 +283,16 @@ test("real replay artifacts drive event-timed visual evidence", async ({ page },
     const secondChunk = await secondChunkResponse.json();
     replayFrames.push(...secondChunk.frames);
   }
+  const sarChunkResponse = await page.request.get(
+    `/api/replay?file=${encodeURIComponent(sarFile)}&offset=0&limit=120`,
+  );
+  expect(sarChunkResponse.ok()).toBe(true);
+  const sarChunk = await sarChunkResponse.json();
+  expect(sarChunk.total).toBeGreaterThan(0);
+  const sarFrames = [...sarChunk.frames];
+  const sarFrameIndex = sarFrames.findIndex((frame) =>
+    (frame.uavs || []).some((uav) => uav.sensor_mode === "sar"));
+  expect(sarFrameIndex).toBeGreaterThanOrEqual(0);
 
   await page.goto("/");
   await page.locator(".mode-switch button").nth(1).click();
@@ -336,9 +348,20 @@ test("real replay artifacts drive event-timed visual evidence", async ({ page },
     await page.screenshot({ path: screenshotPath(testInfo, name), fullPage: true });
   }
 
-  const sensorModes = new Set(
-    replayFrames.flatMap((frame) => (frame.uavs || []).map((uav) => uav.sensor_mode)),
-  );
+  await fileSelect.selectOption(sarFile);
+  await expect(page.locator(".playback-readout").first()).toContainText(String(sarChunk.total));
+  await page.locator(".timeline-control input").fill(String(sarFrameIndex));
+  await expect(page.locator(".playback-readout").first()).toContainText(`${sarFrameIndex + 1} /`);
+  await expect.poll(async () => page.locator(".connection-state").textContent()).not.toContain("载入目标帧");
+  await page.evaluate(() => document.fonts.ready);
+  await page.screenshot({ path: screenshotPath(testInfo, "08-sar-v06"), fullPage: true });
+
+  await fileSelect.selectOption(replayFile);
+  await expect(page.locator(".playback-readout").first()).toContainText(String(totalFrames));
+  const sensorModes = new Set([
+    ...replayFrames.flatMap((frame) => (frame.uavs || []).map((uav) => uav.sensor_mode)),
+    ...sarFrames.flatMap((frame) => (frame.uavs || []).map((uav) => uav.sensor_mode)),
+  ]);
   expect(sensorModes.has("eo")).toBe(true);
   expect(sensorModes.has("sar")).toBe(true);
   expect(Object.keys(eventFrames).length).toBeGreaterThanOrEqual(7);
