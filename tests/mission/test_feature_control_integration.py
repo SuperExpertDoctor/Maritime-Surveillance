@@ -108,6 +108,19 @@ def test_path_conflict_event_reaches_controller_and_causes_real_replan():
     assert after.route.route[0][:2] == pytest.approx(route_start_position)
 
 
+def test_controlled_coverage_does_not_replan_from_stale_legacy_path_each_tick():
+    engine = build_scenario("V06", seed=42, transport="fixture")
+    for _ in range(12):
+        engine.step()
+
+    uav = next(item for item in engine.uavs if item.id == "UAV-1")
+    controller = engine.control_coordinator.controller(uav.id)
+    follower = getattr(controller, "follower", None)
+    assert follower is not None
+    assert follower.index > 1
+    assert controller._route_revision < engine.clock.time
+
+
 def _recovery_engine() -> SimulationEngine:
     config = ConfigLoader.load()
     config = replace(
