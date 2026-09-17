@@ -37,6 +37,37 @@ def test_window_boundary_and_overlap():
     )["covered_cells"] == 0
 
 
+@pytest.mark.parametrize("windows_min", [(15, 30, 60), (30, 60), (30, 60, 120, 240)])
+def test_constructor_requires_the_authoritative_window_set(windows_min):
+    with pytest.raises(ValueError, match="exactly"):
+        CoverageMetrics(
+            episode_id="e1",
+            fixed_mask=np.ones((1, 1), bool),
+            cell_size_km=1,
+            windows_min=windows_min,
+            primary_window_min=60,
+        )
+
+
+def test_constructor_rejects_cell_size_with_overflowing_coverage_area():
+    with pytest.raises(ValueError, match="area"):
+        CoverageMetrics(
+            episode_id="e1", fixed_mask=np.ones((1, 1), bool), cell_size_km=1e200
+        )
+
+
+def test_extreme_but_finite_coverage_area_remains_json_safe():
+    metric = CoverageMetrics(
+        episode_id="e1", fixed_mask=np.ones((1, 1), bool), cell_size_km=1e154
+    )
+    metric.record_sar(((0, 0),), at_min=1)
+    snapshot = metric.snapshot(now_min=1, feasible_mask=np.ones((1, 1), bool))
+
+    assert np.isfinite(snapshot["fixed_searchable_area_km2"])
+    assert np.isfinite(snapshot["windows"][0]["covered_area_km2"])
+    json.dumps(snapshot, allow_nan=False)
+
+
 @pytest.mark.parametrize("shape", [(1, 10), (10, 10), (30, 30)])
 @pytest.mark.parametrize("cell_size_km", [1, 2.5, 10])
 def test_windows_match_the_independent_oracle(shape, cell_size_km):

@@ -31,16 +31,24 @@ class CoverageMetrics:
         if any(isinstance(window, bool) or not isinstance(window, int) or window <= 0
                for window in windows_min):
             raise ValueError("windows_min: expected positive integers")
-        if tuple(sorted(set(windows_min))) != windows_min:
-            raise ValueError("windows_min: expected sorted unique values")
+        if windows_min != (30, 60, 120):
+            raise ValueError("windows_min must be exactly (30, 60, 120)")
         if isinstance(primary_window_min, bool) or not isinstance(primary_window_min, int):
             raise ValueError("primary_window_min: expected integer")
         if primary_window_min not in windows_min:
             raise ValueError("primary_window_min must be in windows_min")
 
+        cell_size_km = float(cell_size_km)
+        area_per_cell = cell_size_km * cell_size_km
+        fixed_count = int(np.count_nonzero(fixed))
+        fixed_area = fixed_count * area_per_cell
+        if not math.isfinite(area_per_cell) or not math.isfinite(fixed_area):
+            raise ValueError("cell_size_km produces non-finite coverage area")
+
         self.episode_id = episode_id
         self._fixed = fixed.copy()
-        self._cell_size_km = float(cell_size_km)
+        self._area_per_cell = area_per_cell
+        self._fixed_area = fixed_area
         self._windows_min = windows_min
         self._primary_window_min = primary_window_min
         self._last_sar = np.full(fixed.shape, -np.inf, dtype=float)
@@ -97,7 +105,6 @@ class CoverageMetrics:
         current_count = int(np.count_nonzero(current))
         valid = self._fixed & np.isfinite(self._last_sar) & (self._last_sar <= now_min)
         ever_count = int(np.count_nonzero(valid))
-        area_per_cell = self._cell_size_km ** 2
         fixed_pct = None if fixed_count == 0 else 100.0 * ever_count / fixed_count
         unseen_pct = None if fixed_pct is None else 100.0 - fixed_pct
 
@@ -114,7 +121,7 @@ class CoverageMetrics:
             windows.append({
                 "minutes": window_min,
                 "covered_cells": count,
-                "covered_area_km2": float(count * area_per_cell),
+                "covered_area_km2": float(count * self._area_per_cell),
                 "coverage_pct": coverage_pct,
                 "currently_searchable_coverage_pct": dynamic_pct,
                 "window_complete": now_min >= window_min,
@@ -131,7 +138,7 @@ class CoverageMetrics:
             "denominator": "fixed_searchable_sea",
             "primary_window_min": self._primary_window_min,
             "fixed_searchable_cells": fixed_count,
-            "fixed_searchable_area_km2": float(fixed_count * area_per_cell),
+            "fixed_searchable_area_km2": float(self._fixed_area),
             "currently_searchable_cells": current_count,
             "weather_blocked_cells": fixed_count - current_count,
             "ever_scanned_cells": ever_count,
