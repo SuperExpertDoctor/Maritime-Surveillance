@@ -521,6 +521,30 @@ npm run test:acceptance
 - [docs/GOAL2.md](docs/GOAL2.md) § 十 — GOAL2 增量验证（多基地、AIS 判别、雷云规避、透明度可视化）
 - [docs/VALIDATION.md](docs/VALIDATION.md) — 最新验收记录
 
+### 回放视觉恢复验收
+
+2026-09-17 的真实引擎 fixture 长跑、专项集成测试、回放 API 和浏览器视觉验收记录在
+[回放视觉恢复验收报告](docs/validation/replay-restoration/acceptance-report.md)；25 项能力逐项状态见
+[feature integration matrix](docs/validation/replay-restoration/feature-integration-matrix.md)。运行产物放在
+`outputs/validation/replay-restoration/<run-id>/`，不得清理 `outputs/` 根目录。
+
+```bash
+# 20/120/480 分钟 V06 fixture 与实时帧审计示例
+python scripts/validate_replay_restoration.py \
+  --scenario V06 --seed 42 --steps 480 --transport fixture \
+  --output-dir outputs/validation/replay-restoration/<new-run-id>
+python scripts/validate_replay_restoration.py --check-log \
+  outputs/validation/replay-restoration/<run-id>/frames.jsonl
+
+# 专用浏览器验收使用已登记来源的输入目录
+cd src/vis/frontend
+REPLAY_ACCEPTANCE_DIR="/home/shuixia/users/houguoqiang/projects/Maritime-Surveillance/.worktrees/replay-visual-restoration/outputs/validation/replay-restoration/t14-browser-20260917" \
+REPLAY_SCREENSHOT_DIR="/home/shuixia/users/houguoqiang/projects/Maritime-Surveillance/.worktrees/replay-visual-restoration/outputs/validation/replay-restoration/t14-browser-20260917/screenshots-final" \
+  npx playwright test --config playwright.replay.config.js
+```
+
+该记录使用 fixture 验证真实引擎和渲染链路；当前环境未提供 `LONGCAT_API_KEY`，所以报告不会把 fixture 结果标记为 live 模型效果。
+
 ---
 
 ## 八、核心模块

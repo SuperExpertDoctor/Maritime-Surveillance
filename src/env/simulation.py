@@ -292,6 +292,7 @@ class SimulationEngine:
             uav.id: 1 for uav in self.uavs
         }
         self._emergency_failures: dict[str, str] = {}
+        self._active_path_conflicts: set[tuple[str, str]] = set()
         self._control_runtime_enabled = True
         action_spec = self._control_action_spec()
         self.control_ownership = ControlOwnership(tuple(uav.id for uav in self.uavs))
@@ -4258,9 +4259,7 @@ class SimulationEngine:
             {
                 "id": uav.id,
                 "status": uav.status,
-                "planned_path": [
-                    list(pose) for pose in uav.remaining_path[:60]
-                ],
+                "planned_path": self._planned_path_for_conflict(uav),
             }
             for uav in self.uavs
         ]
@@ -4269,18 +4268,57 @@ class SimulationEngine:
             cell_size_km=self.config.grid.cell_size_km,
             time_horizon_steps=30,
             min_separation_cells=0.5,
+            ignore_common_prefix=True,
         )
-        if not conflicts:
+        conflict_pairs = {
+            tuple(sorted((conflict.uav_a, conflict.uav_b)))
+            for conflict in conflicts
+        }
+        if not conflict_pairs:
+            self._active_path_conflicts.clear()
+            return
+        new_conflicts = [
+            conflict for conflict in conflicts
+            if tuple(sorted((conflict.uav_a, conflict.uav_b)))
+            not in self._active_path_conflicts
+        ]
+        self._active_path_conflicts = conflict_pairs
+        if not new_conflicts:
             return
 
         entities = {uav.id: uav for uav in self.uavs}
-        to_replan = resolve_conflicts(conflicts, entities)
+        to_replan = set(resolve_conflicts(new_conflicts, entities))
+
+        # Contact work is already carrying an evidence/lifecycle contract.
+        # When it shares a departure corridor with ordinary coverage, make the
+        # coverage airframe yield instead of repeatedly resetting a probe.
+        for conflict in new_conflicts:
+            left = entities.get(conflict.uav_a)
+            right = entities.get(conflict.uav_b)
+            if left is None or right is None:
+                continue
+            pair = (left, right)
+            coverage = [
+                item for item in pair
+                if self.control_coordinator.active_task(item.id) is not None
+                and self.control_coordinator.active_task(item.id).task_type
+                is OperationMode.COVERAGE
+            ]
+            protected = [
+                item for item in pair
+                if item not in coverage
+                and str(getattr(item, "mission_kind", "")).lower()
+                in {"probe", "track_entry"}
+            ]
+            if coverage and protected:
+                to_replan.difference_update(item.id for item in protected)
+                to_replan.add(min(coverage, key=lambda item: item.id).id)
 
         sm = self.allocator.sm
         search_regions = {
             region.id: region for region in sm.get_active_search_regions()
         }
-        for uav_id in to_replan:
+        for uav_id in sorted(to_replan):
             uav = entities.get(uav_id)
             if uav is None or uav.status in ("idle", "refueling", "holding", "returning"):
                 continue
@@ -4298,7 +4336,7 @@ class SimulationEngine:
                 continue
             conflicting_uavs = [
                 c.uav_b if c.uav_a == uav_id else c.uav_a
-                for c in conflicts
+                for c in new_conflicts
                 if uav_id in (c.uav_a, c.uav_b)
             ]
             yield_to = max(conflicting_uavs, key=uav_id_priority)
@@ -4310,7 +4348,7 @@ class SimulationEngine:
                     {"with": c.uav_b if c.uav_a == uav_id else c.uav_a,
                      "cell": list(c.cell),
                      "offset": c.step_offset_a if c.uav_a == uav_id else c.step_offset_b}
-                    for c in conflicts
+                    for c in new_conflicts
                     if uav_id in (c.uav_a, c.uav_b)
                 ],
             })
@@ -4348,6 +4386,20 @@ class SimulationEngine:
                 sm.add_event("conflict_replan_deferred", {
                     "uav_id": uav_id,
                 })
+
+    def _planned_path_for_conflict(
+        self, uav: UAVEntity,
+    ) -> list[tuple[float, float, float]]:
+        """Return the live, unconsumed route used by global conflict checks."""
+        if self.control_coordinator.has_controller(uav.id):
+            snapshot = self.control_coordinator.route_snapshot(uav.id).route
+            if snapshot.status != "ready" or not snapshot.route:
+                return []
+            return [
+                uav.pose,
+                *snapshot.route[snapshot.next_index:],
+            ][:60]
+        return [list(pose) for pose in uav.remaining_path[:60]]
 
     def _record_statuses(self) -> None:
         for uav in self.uavs:

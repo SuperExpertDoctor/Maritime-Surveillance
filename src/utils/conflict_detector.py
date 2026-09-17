@@ -34,6 +34,7 @@ def detect_conflicts(
     time_horizon_steps: int = 30,
     min_separation_cells: float = 0.5,
     min_prediction_offset: int = 1,
+    ignore_common_prefix: bool = False,
 ) -> list[PathConflict]:
     """Detect spatiotemporal conflicts across UAV planned paths.
 
@@ -44,6 +45,11 @@ def detect_conflicts(
         time_horizon_steps: Maximum number of future steps to check.
         min_separation_cells: Minimum allowed separation between two
             airframes (0.5 = same-cell, 1.0 = adjacent cells).
+        ignore_common_prefix: Ignore conflicts while the two predicted paths
+            are still the same shared departure corridor.  Once the paths
+            diverge, enforce the requested separation immediately. This is
+            useful for simultaneous launches from one base; the default keeps
+            the historical detector behavior for standalone callers.
 
     Returns:
         List of detected PathConflict objects.
@@ -62,7 +68,15 @@ def detect_conflicts(
             path_a = uav_a["planned_path"][:time_horizon_steps]
             path_b = uav_b["planned_path"][:time_horizon_steps]
             horizon = min(len(path_a), len(path_b))
+            paths_have_separated = not ignore_common_prefix
             for offset in range(min_prediction_offset, horizon):
+                if ignore_common_prefix and not paths_have_separated:
+                    paths_have_separated = any(
+                        math.dist(path_a[prior][:2], path_b[prior][:2]) > 1e-6
+                        for prior in range(offset + 1)
+                    )
+                    if not paths_have_separated:
+                        continue
                 current_a = path_a[offset][:2]
                 current_b = path_b[offset][:2]
                 distance = math.dist(current_a, current_b)
