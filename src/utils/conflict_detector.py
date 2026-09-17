@@ -73,7 +73,7 @@ def detect_conflicts(
                 if ignore_common_prefix and not paths_have_separated:
                     paths_have_separated = any(
                         math.dist(path_a[prior][:2], path_b[prior][:2]) > 1e-6
-                        for prior in range(offset)
+                        for prior in range(offset + 1)
                     )
                     if not paths_have_separated:
                         continue
