@@ -90,4 +90,18 @@ T03: PASS (implementation/baseline capture; endurance gate not evaluated)
 T04: PASS
 T05: PASS
 T06: PASS (focused contract; one T05 integration regression tracked above)
-T07-T16: NOT_RUN
+
+## T07: Task-level SAR completion acceptance
+
+Focused command and working directory: `python -m pytest tests/mission/test_coverage_service.py tests/mission/test_mission_task_lifecycle.py tests/control/heuristic/test_coverage.py tests/env/test_route_visual_frame.py -q` from repository root
+Related command: `python -m pytest tests/env/test_route_visual_frame.py tests/schedule/test_state_manager.py tests/mission/test_simulation_flow.py tests/control/heuristic/test_task_flow.py -q`
+Exit code: 0 for both commands
+Transport: none; task-level service uses actual SAR cell inputs, and lifecycle tests use the real simulation coordinator
+Config hash / seeds / actual simulation end: deterministic fixtures; no live-model gate
+Raw artifacts: `src/mission/coverage_service.py`, `tests/mission/test_coverage_service.py`
+Metric measurement: frozen bbox/fixed-domain task ledger; `completion_basis=task_sar` for verified regions and `legacy_observation` for old regions
+Result: PASS
+Evidence and remaining issue: Service and lifecycle tests produced `48 passed`; the broader related command produced `57 passed`. Route completion now emits `coverage_route_finished`, is held until the same tick's SAR footprint has been recorded, and only then either closes as complete or blocks with an auditable missing-cell list. Completion is queued as `search_complete` for the next control tick, so a completed coverage controller enters holding without a same-tick lease transition. Start validation is performed before assignment commit, and service identity carries `(task_id, generation, uav_id)` so local lease generations can safely be reused by a different UAV. The prior T06 scheduler/physical-route mismatch remains tracked for T10/T11.
+
+T07: PASS
+T08-T16: NOT_RUN

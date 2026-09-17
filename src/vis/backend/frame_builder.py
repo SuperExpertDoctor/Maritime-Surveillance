@@ -473,6 +473,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "avg_info": r.avg_info,
             "assigned_uav_id": r.assigned_uav_id,
             "completion_pct": r.completion_pct,
+            "completion_basis": getattr(r, "completion_basis", "legacy_observation"),
             "created_cycle": r.created_cycle,
             "cells": _task_cells(r),
         })

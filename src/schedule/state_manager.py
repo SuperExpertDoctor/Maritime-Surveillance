@@ -12,6 +12,7 @@ from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
 from src.mission.information_update import InformationUpdatePolicy, ScanRefresh
 from src.mission.coverage_metrics import CoverageMetrics
+from src.mission.coverage_service import CoverageService
 from src.mission.contact_store import ContactStore
 from src.mission.contracts import (
     PassiveBearingObservation,
@@ -50,6 +51,9 @@ class StateManager:
         self.lifecycle_mode = False
         self.information_policy = InformationUpdatePolicy(config)
         self.coverage_metrics: CoverageMetrics | None = None
+        self.coverage_service: CoverageService | None = None
+        self._coverage_task_generations: dict[str, int] = {}
+        self._coverage_task_uavs: dict[str, str] = {}
         self._last_information_delta = None
         self._uavs = [
             UAVState(
@@ -96,10 +100,32 @@ class StateManager:
         scan_times = self.get_last_scan_matrix()
         for region in self._search_regions:
             b = region.bbox
-            scan_patch = scan_times[
-                b.col_start:b.col_end, b.row_start:b.row_end
-            ]
-            region.completion_pct = float(np.isfinite(scan_patch).mean() * 100) if scan_patch.size else 0.0
+            generation = self._coverage_task_generations.get(region.id)
+            if generation is None and self.coverage_service is not None:
+                generation = self.coverage_service.latest_generation(region.id)
+            task_progress = None
+            if self.coverage_service is not None and generation is not None:
+                task_progress = self.coverage_service.progress(
+                    region.id,
+                    generation,
+                    uav_id=self._coverage_task_uavs.get(region.id),
+                )
+            if task_progress is not None:
+                required = len(task_progress.required_cells)
+                scanned = len(task_progress.scanned_cells)
+                region.completion_pct = (
+                    100.0 * scanned / required if required else 0.0
+                )
+                region.completion_basis = "task_sar"
+            else:
+                scan_patch = scan_times[
+                    b.col_start:b.col_end, b.row_start:b.row_end
+                ]
+                region.completion_pct = (
+                    float(np.isfinite(scan_patch).mean() * 100)
+                    if scan_patch.size else 0.0
+                )
+                region.completion_basis = "legacy_observation"
             region.avg_info = self.get_avg_info_in_bbox(b)
             patch = values[b.col_start:b.col_end, b.row_start:b.row_end]
             region.info_value = float(patch.mean()) if patch.size else 0.0
@@ -622,6 +648,32 @@ class StateManager:
             windows_min=coverage.windows_min,
             primary_window_min=coverage.primary_window_min,
         )
+
+    def configure_coverage_service(self, fixed_mask) -> None:
+        """Initialize task-level SAR completion accounting for this episode."""
+        self.coverage_service = CoverageService(fixed_mask)
+        self._coverage_task_generations.clear()
+        self._coverage_task_uavs.clear()
+
+    def register_coverage_task_generation(
+        self,
+        task_id: str,
+        generation: int,
+        uav_id: str | None = None,
+    ) -> None:
+        """Publish the committed generation used by region progress read models."""
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id must be a non-empty string")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            raise ValueError("generation must be a non-negative integer")
+        if uav_id is not None and (not isinstance(uav_id, str) or not uav_id):
+            raise ValueError("uav_id must be a non-empty string")
+        self._coverage_task_generations[task_id] = generation
+        if uav_id is not None:
+            self._coverage_task_uavs[task_id] = uav_id
+
+    def coverage_task_generation(self, task_id: str) -> int | None:
+        return self._coverage_task_generations.get(task_id)
 
     def get_persistent_coverage_stats(self) -> dict | None:
         """Return a detached point-in-time snapshot without advancing state."""

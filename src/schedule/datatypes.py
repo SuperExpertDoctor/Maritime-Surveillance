@@ -19,6 +19,7 @@ class Region:
     completion_pct: float = 0.0
     created_cycle: int = 0
     target_group_id: Optional[str] = None
+    completion_basis: str = "legacy_observation"
 
 
 @dataclass

@@ -252,7 +252,7 @@ def test_coverage_emits_search_complete_once_after_final_scan_pose(
         event for result in decisions for event in result.events
     ]
     assert [(event.event_type, dict(event.payload)) for event in completion_events] == [
-        ("search_complete", {"task_id": "S1"})
+        ("coverage_route_finished", {"task_id": "S1", "generation": 0})
     ]
     assert repeated.events == ()
 

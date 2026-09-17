@@ -287,7 +287,13 @@ class CoverageController(HeuristicControllerBase):
             return ControlDecision(
                 command,
                 tuple(watchdog_events)
-                + (ControllerEventRequest("search_complete", {"task_id": self.task.task_id}),),
+                + (ControllerEventRequest(
+                    "coverage_route_finished",
+                    {
+                        "task_id": self.task.task_id,
+                        "generation": self._generation,
+                    },
+                ),),
             )
         return ControlDecision(command, tuple(watchdog_events))
 

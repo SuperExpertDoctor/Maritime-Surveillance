@@ -77,6 +77,7 @@ from src.mission.contracts import (
     VesselCommand,
 )
 from src.mission.contact_assessor import ContactAssessor
+from src.mission.coverage_service import CoverageCompletion, CoverageService
 from src.mission.evasion_detector import EvasionDetector
 from src.mission.handoff import HandoffManager
 from src.mission.outcome_evaluator import (
@@ -223,6 +224,9 @@ class SimulationEngine:
         self.allocator.sm.configure_coverage_metrics(
             self._intent_searchable_mask(), self.episode_id,
         )
+        self.allocator.sm.configure_coverage_service(
+            self._intent_searchable_mask(),
+        )
         self.intents = IntentStore(
             self._intent_searchable_mask(), config.mission.intent,
         )
@@ -292,6 +296,8 @@ class SimulationEngine:
         self._return_reservation_sequence = 1
         self._coordinator_tasks: dict[str, ControlTask] = {}
         self._mission_task_records: dict[str, TaskRecord] = {}
+        self._coverage_assignment_generations: dict[tuple[str, str], int] = {}
+        self._pending_coverage_completions: list[dict[str, object]] = []
         self._next_probe_number = 1
         self._next_sortie_number: dict[str, int] = {
             uav.id: 1 for uav in self.uavs
@@ -1199,6 +1205,7 @@ class SimulationEngine:
         self._record_uav_position_history(t)
         self._update_passive_sensors(t)
         self._update_sensors_and_detections(t)
+        self._finalize_coverage_completions(t)
         self._advance_probe_sessions(t)
         self._update_lifecycle_mode(t)
         self._process_refuelling(t)
@@ -1360,6 +1367,17 @@ class SimulationEngine:
                     created_cycle=self.allocator.sm.cycle,
                     assigned_uav_id=assignment.uav_id,
                 )
+                if self.allocator.sm.coverage_service is not None:
+                    try:
+                        self.allocator.sm.coverage_service.validate_start(
+                            candidate.task_id,
+                            assignment.expected_generation + 1,
+                            assignment.uav_id,
+                            tuple(candidate.bbox),
+                            self.clock.time,
+                        )
+                    except ValueError:
+                        return False
                 try:
                     route_plan = plan_search_route(
                         self._search_route_request(uav, region)
@@ -1527,6 +1545,11 @@ class SimulationEngine:
                         reason="preempted",
                         current_time=self.clock.time,
                         preserve_search=old_record.kind in _SEARCH_TASK_KINDS,
+                        coverage_generation=(
+                            assignment.expected_generation
+                            if old_task.task_type is OperationMode.COVERAGE
+                            else None
+                        ),
                     )
                 self.allocator.sm.mark_uav_reassigned(
                     assignment.uav_id, self.clock.time,
@@ -1636,6 +1659,13 @@ class SimulationEngine:
                 lease.generation,
                 self.control_coordinator.safety_intervened(uav.id),
             )
+            if task.task_type is OperationMode.COVERAGE:
+                self._start_coverage_service_task(
+                    uav,
+                    task,
+                    self.clock.time,
+                    generation=lease.generation,
+                )
         self._next_probe_number = next_probe_number
         self.allocator.sm.add_event("mission_assignment_committed", {
             "snapshot_id": snapshot.snapshot_id,
@@ -1835,7 +1865,14 @@ class SimulationEngine:
                 and (previous_task is None or event_task_id != previous_task.task_id)
             ):
                 continue
-            if event.event_type == "search_complete":
+            if event.event_type == "coverage_route_finished":
+                self._queue_pending_coverage_completion(
+                    uav,
+                    event,
+                    previous_task,
+                    tick.lease.generation,
+                )
+            elif event.event_type == "search_complete":
                 self._record_search_completion_event(uav, event, previous_task)
             elif event.event_type == "task_failed":
                 failed_task = previous_task
@@ -1872,6 +1909,164 @@ class SimulationEngine:
             uav.sensor_mode = "off"
             self._land_for_refuelling(uav)
 
+    def _queue_pending_coverage_completion(
+        self,
+        uav: UAVEntity,
+        event: ControlEvent,
+        previous_task: ControlTask | None,
+        lease_generation: int,
+    ) -> None:
+        """Defer route completion until this tick's real SAR footprint is recorded."""
+        task_id = event.payload.get("task_id")
+        generation = event.payload.get("generation", lease_generation)
+        if not isinstance(task_id, str) or not task_id:
+            return
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation != lease_generation
+        ):
+            return
+        task = self.control_coordinator.active_task(uav.id)
+        if (
+            task is None
+            or task.task_type is not OperationMode.COVERAGE
+            or task.task_id != task_id
+        ):
+            task = previous_task
+        if (
+            task is None
+            or task.task_type is not OperationMode.COVERAGE
+            or task.task_id != task_id
+        ):
+            return
+        if any(
+            item["uav_id"] == uav.id
+            and item["task_id"] == task_id
+            and item["generation"] == generation
+            for item in self._pending_coverage_completions
+        ):
+            return
+        self._pending_coverage_completions.append({
+            "uav_id": uav.id,
+            "task_id": task_id,
+            "generation": generation,
+            "event": event,
+            "previous_task": task,
+        })
+
+    def _finalize_coverage_completions(self, current_time: float) -> None:
+        """Validate queued route finishes against the actual SAR task ledger."""
+        pending = self._pending_coverage_completions
+        self._pending_coverage_completions = []
+        service = self.allocator.sm.coverage_service
+        if service is None:
+            return
+        for item in pending:
+            uav_id = item["uav_id"]
+            task_id = item["task_id"]
+            generation = item["generation"]
+            if not isinstance(uav_id, str) or not isinstance(task_id, str):
+                continue
+            if isinstance(generation, bool) or not isinstance(generation, int):
+                continue
+            uav = next((entity for entity in self.uavs if entity.id == uav_id), None)
+            if uav is None:
+                continue
+            active = self.control_coordinator.active_task(uav_id)
+            lease = self.control_coordinator.current_lease(uav_id)
+            if (
+                active is None
+                or active.task_type is not OperationMode.COVERAGE
+                or active.task_id != task_id
+                or lease.generation != generation
+            ):
+                self.allocator.sm.add_event("coverage_completion_ignored", {
+                    "uav_id": uav_id,
+                    "task_id": task_id,
+                    "generation": generation,
+                    "reason": "stale_generation",
+                })
+                continue
+            try:
+                completion = service.finish(
+                    task_id,
+                    generation,
+                    current_time,
+                    uav_id=uav_id,
+                )
+            except ValueError as exc:
+                self.allocator.sm.add_event("coverage_completion_ignored", {
+                    "uav_id": uav_id,
+                    "task_id": task_id,
+                    "generation": generation,
+                    "reason": "unknown_task",
+                    "error": str(exc),
+                })
+                continue
+            event = item["event"]
+            if not isinstance(event, ControlEvent):
+                continue
+            if completion.complete:
+                self._record_search_completion_event(
+                    uav,
+                    event,
+                    item.get("previous_task"),
+                    completion=completion,
+                    coverage_generation=generation,
+                )
+                self._queue_control_event(
+                    "search_complete",
+                    uav_id,
+                    current_time,
+                    {
+                        "task_id": task_id,
+                        "generation": generation,
+                    },
+                )
+                continue
+
+            task = active
+            self._close_mission_task(
+                uav_id,
+                task,
+                status="blocked",
+                reason="coverage_incomplete",
+                current_time=current_time,
+                coverage_generation=generation,
+            )
+            region = next(
+                (
+                    item_region
+                    for item_region in self.allocator.sm.get_search_regions()
+                    if item_region.id == task_id
+                ),
+                None,
+            )
+            if region is not None:
+                region.completion_pct = completion.completion_pct
+                region.completion_basis = "task_sar"
+            self.allocator.sm.add_event("coverage_incomplete", {
+                "uav_id": uav_id,
+                "task_id": task_id,
+                "generation": generation,
+                "scanned_cells": completion.scanned_cells,
+                "required_cells": completion.required_cells,
+                "completion_pct": completion.completion_pct,
+                "missing_cells": [list(cell) for cell in completion.missing_cells],
+            })
+            self._queue_control_event(
+                "task_failed",
+                uav_id,
+                current_time,
+                {
+                    "task_id": task_id,
+                    "generation": generation,
+                    "reason": "coverage_incomplete",
+                    "missing_cells": [list(cell) for cell in completion.missing_cells],
+                },
+            )
+
     def _close_mission_task(
         self,
         uav_id: str,
@@ -1882,6 +2077,7 @@ class SimulationEngine:
         current_time: float,
         preserve_search: bool = False,
         preserve_contact: bool = False,
+        coverage_generation: int | None = None,
     ) -> None:
         """Close one mission binding without touching a replacement task."""
         sm = self.allocator.sm
@@ -1897,6 +2093,18 @@ class SimulationEngine:
         )
 
         if task.task_type is OperationMode.COVERAGE:
+            service = sm.coverage_service
+            if coverage_generation is None:
+                coverage_generation = self._coverage_assignment_generations.get(
+                    (uav_id, task.task_id)
+                )
+            if service is not None and coverage_generation is not None:
+                service.close(
+                    task.task_id,
+                    coverage_generation,
+                    reason,
+                    uav_id=uav_id,
+                )
             region = next(
                 (
                     item for item in sm.get_search_regions()
@@ -1990,6 +2198,52 @@ class SimulationEngine:
             "probe_id": task.probe_id,
         })
 
+    def _start_coverage_service_task(
+        self,
+        uav: UAVEntity,
+        task: ControlTask,
+        current_time: float,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        """Start task SAR accounting only after a lease assignment commits."""
+        if task.task_type is not OperationMode.COVERAGE or task.region_bbox is None:
+            return
+        service = self.allocator.sm.coverage_service
+        if service is None:
+            return
+        if generation is None:
+            generation = self.control_coordinator.current_lease(uav.id).generation
+        key = (uav.id, task.task_id)
+        previous_generation = self._coverage_assignment_generations.get(key)
+        if previous_generation == generation:
+            return
+        service.validate_start(
+            task.task_id,
+            generation,
+            uav.id,
+            tuple(task.region_bbox),
+            current_time,
+        )
+        if previous_generation is not None:
+            service.close(
+                task.task_id,
+                previous_generation,
+                "replaced",
+                uav_id=uav.id,
+            )
+        service.start(
+            task.task_id,
+            generation,
+            uav.id,
+            tuple(task.region_bbox),
+            current_time,
+        )
+        self._coverage_assignment_generations[key] = generation
+        self.allocator.sm.register_coverage_task_generation(
+            task.task_id, generation, uav.id,
+        )
+
     def _promote_work_controller_to_holding(
         self, uav: UAVEntity, current_time: float
     ) -> None:
@@ -2026,6 +2280,9 @@ class SimulationEngine:
         uav: UAVEntity,
         event: ControlEvent,
         previous_task: ControlTask | None = None,
+        *,
+        completion: CoverageCompletion | None = None,
+        coverage_generation: int | None = None,
     ) -> None:
         task = self.control_coordinator.active_task(uav.id)
         if (
@@ -2045,6 +2302,7 @@ class SimulationEngine:
                 status="completed",
                 reason="search_complete",
                 current_time=event.timestamp_min,
+                coverage_generation=coverage_generation,
             )
         region = next(
             (
@@ -2056,7 +2314,12 @@ class SimulationEngine:
         )
         if region is not None:
             region.status = "completed"
-            region.completion_pct = 100.0
+            region.completion_pct = (
+                completion.completion_pct if completion is not None else 100.0
+            )
+            region.completion_basis = (
+                "task_sar" if completion is not None else "legacy_observation"
+            )
             region.assigned_uav_id = None
         uav.completed_searches_since_refuel += 1
         self._sortie_searched[uav.id] = True
@@ -2067,10 +2330,18 @@ class SimulationEngine:
             uav_id=uav.id,
             region_id=region_id,
         )
-        self.allocator.sm.add_event("search_complete", {
+        payload = {
             "uav_id": uav.id,
             "region_id": region_id,
-        })
+        }
+        if completion is not None:
+            payload.update({
+                "completion_basis": "task_sar",
+                "scanned_cells": completion.scanned_cells,
+                "required_cells": completion.required_cells,
+                "completion_pct": completion.completion_pct,
+            })
+        self.allocator.sm.add_event("search_complete", payload)
 
     def _land_for_refuelling(self, uav: UAVEntity) -> None:
         base = self._return_base_by_uav.get(uav.id)
@@ -3121,6 +3392,23 @@ class SimulationEngine:
                     sm.coverage_metrics.record_sar(cells, at_min=current_time)
                     task = self.control_coordinator.active_task(uav.id)
                     lease = self.control_coordinator.current_lease(uav.id)
+                    if (
+                        task is not None
+                        and task.task_type is OperationMode.COVERAGE
+                        and self.allocator.sm.coverage_service is not None
+                        and self.allocator.sm.coverage_service.progress(
+                            task.task_id,
+                            lease.generation,
+                            uav_id=uav.id,
+                        ) is not None
+                    ):
+                        self.allocator.sm.coverage_service.record(
+                            task.task_id,
+                            lease.generation,
+                            cells,
+                            current_time,
+                            uav_id=uav.id,
+                        )
                     sm.add_event("sar_scan", {
                         "episode_id": self.episode_id,
                         "uav_id": uav.id,
@@ -4161,6 +4449,11 @@ class SimulationEngine:
                 self._apply_search_route_plan(entity, region, plans[entity.id])
                 if entity.mission_kind == "search":
                     self._install_coverage_task(entity, region, sm.current_time)
+                    task = self.control_coordinator.active_task(entity.id)
+                    if task is not None:
+                        self._start_coverage_service_task(
+                            entity, task, sm.current_time,
+                        )
             except Exception as exc:
                 region.status = "stale"
                 region.assigned_uav_id = None
