@@ -63,3 +63,45 @@ def test_runner_refuses_existing_manifest(tmp_path):
 
     with pytest.raises(SystemExit, match="refusing to overwrite"):
         run_scenario("V01", seed=42, steps=1, output_dir=output_dir, transport="fixture")
+
+
+def test_v07_fixture_runner_drives_assessment_return_and_handoff(tmp_path):
+    from scripts.replay_restoration_scenarios import run_scenario
+
+    output_dir = tmp_path / "v07"
+    result = run_scenario(
+        "V07", seed=42, steps=30, output_dir=output_dir, transport="fixture",
+    )
+
+    assert result["status"] == "finished"
+    events = [
+        json.loads(line)
+        for line in (output_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    event_types = {event["type"] for event in events}
+    assert {
+        "assessment_applied",
+        "uav_fuel_low_warning",
+        "handoff_required",
+        "handoff_assignment_committed",
+        "handoff_eo_lock_acquired",
+        "return_reserved",
+    } <= event_types
+
+    handoff = next(
+        event for event in events if event["type"] == "handoff_required"
+    )
+    assignment = next(
+        event for event in events
+        if event["type"] == "handoff_assignment_committed"
+        and event["data"]["handoff_id"] == handoff["data"]["handoff_id"]
+    )
+    lock = next(
+        event for event in events
+        if event["type"] == "handoff_eo_lock_acquired"
+        and event["data"]["handoff_id"] == handoff["data"]["handoff_id"]
+    )
+    # Requirement and assignment are one atomic scheduler boundary; the EO
+    # lock must still be acquired by a later observed control tick.
+    assert handoff["time"] <= assignment["time"] < lock["time"]

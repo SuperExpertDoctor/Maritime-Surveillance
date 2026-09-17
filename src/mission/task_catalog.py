@@ -118,7 +118,10 @@ class TaskCatalog:
         state,
         now: float,
     ) -> TaskCandidate:
-        key = ("contact", contact.contact_id)
+        # A contact can legitimately move from probe to track. Keep the
+        # operation identity distinct so a completed probe record cannot mask
+        # the successor track candidate in scheduler snapshots.
+        key = ("contact", kind, contact.contact_id)
         task_id = self._task_id(key)
         eligible_since = self._remember_age(key, contact.first_seen_min, now)
         wait = min(max(0.0, now - eligible_since) / 30.0, 1.0)

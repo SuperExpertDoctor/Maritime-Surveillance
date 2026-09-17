@@ -1138,23 +1138,10 @@ class SimulationEngine:
         self._expire_contacts(t)
 
         for uav in self.uavs:
+            self._publish_fuel_warning(uav, t)
             fuel_low = self._step_controlled_uav(uav, t)
             self._record_storm_avoidance(uav, t)
-            # GOAL2: proactive fuel warning at 25% — gives the scheduler time
-            # to pre-assign a replacement before the critical 8% return trigger.
-            if (
-                uav.fuel_remaining_pct <= 0.25
-                and not uav.fuel_warning_sent
-                and uav.status in ("searching", "tracking", "transit")
-            ):
-                uav.fuel_warning_sent = True
-                self.allocator.trigger_manager.notify_event(
-                    "uav_fuel_low_warning",
-                    time=t,
-                    uav_id=uav.id,
-                    fuel_pct=round(uav.fuel_remaining_pct, 3),
-                    status=uav.status,
-                )
+            self._publish_fuel_warning(uav, t)
             if uav.status == "searching":
                 self._sortie_searched[uav.id] = True
                 self._search_started_at.setdefault(uav.id, t)
@@ -1770,6 +1757,27 @@ class SimulationEngine:
             uav._fuel_low_reported = True
         return fuel_low
 
+    def _publish_fuel_warning(self, uav: UAVEntity, current_time: float) -> None:
+        """Publish the proactive fuel edge before or after one control tick."""
+        if (
+            uav.fuel_remaining_pct <= 0.25
+            and not uav.fuel_warning_sent
+            and uav.status in ("searching", "tracking", "transit")
+        ):
+            uav.fuel_warning_sent = True
+            self.allocator.trigger_manager.notify_event(
+                "uav_fuel_low_warning",
+                time=current_time,
+                uav_id=uav.id,
+                fuel_pct=round(uav.fuel_remaining_pct, 3),
+                status=uav.status,
+            )
+            self.allocator.sm.add_event("uav_fuel_low_warning", {
+                "uav_id": uav.id,
+                "fuel_pct": round(uav.fuel_remaining_pct, 3),
+                "status": uav.status,
+            })
+
     def _record_control_tick(self, uav: UAVEntity, tick) -> None:
         """Bridge immutable control output into legacy entity diagnostics."""
         previous_task = self._coordinator_tasks.get(uav.id)
@@ -1789,6 +1797,11 @@ class SimulationEngine:
                 command.target_contact_id, command.target_contact_id)
             if command.target_contact_id:
                 uav._mission_kind = "track_entry"
+        elif command.operation_mode is OperationMode.PROBE:
+            uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
+                command.target_contact_id, command.target_contact_id)
+            if command.target_contact_id:
+                uav._mission_kind = "probe"
         elif command.operation_mode not in (OperationMode.TRACK,):
             uav.target_group_id = None
         if command.operation_mode is OperationMode.HOLDING:
@@ -3062,7 +3075,11 @@ class SimulationEngine:
                 # It moves normally, but invalid SAR samples never improve
                 # the information field or produce a target detection.
                 uav.sar_footprint = []
-            elif uav.status == "tracking" and uav.target_group_id:
+            elif (
+                uav.status == "tracking"
+                and uav.sensor_mode == "eo"
+                and uav.target_group_id
+            ):
                 center = sm.contact_position(uav.target_group_id, current_time)
                 if center is not None:
                     self._process_ais_tracking(uav, center, current_time)
@@ -3302,7 +3319,9 @@ class SimulationEngine:
                 uav.float_position[0] + measurement.distance_cells * math.cos(bearing),
                 uav.float_position[1] + measurement.distance_cells * math.sin(bearing))
             self.allocator.sm.contacts.ingest_visual(
-                self._visual_detection(uav, estimate, current_time, "eo"))
+                self._visual_detection(uav, estimate, current_time, "eo"),
+                association_contact_id=uav.target_group_id,
+            )
             self._publish_information_delta(
                 self.allocator.sm.scan_cell(
                     GridCoord(*(int(round(v)) for v in estimate)),

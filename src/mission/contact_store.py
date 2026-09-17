@@ -305,23 +305,48 @@ class ContactStore:
                 self._event("association_ambiguous", contact_id=cid)
         return self.resolve(cid)
 
-    def ingest_visual(self, detection: VisualDetection) -> str:
+    def ingest_visual(
+        self,
+        detection: VisualDetection,
+        *,
+        association_contact_id: str | None = None,
+    ) -> str:
         if not isinstance(detection, VisualDetection):
             raise TypeError("expected VisualDetection")
         if detection.sample_id in self._sample_contacts:
             return self.resolve(self._sample_contacts[detection.sample_id])
         self._now = max(self._now, detection.observed_at_min)
-        signal_contacts = {
-            self.resolve(contact_id)
-            for contact_id in self._emitter_contacts.values()
-        }
-        visual_contacts = [
-            c for c in self.list_snapshots()
-            if c.contact_id in signal_contacts
-            or any(s.source != "ais" for s in c.samples)
-        ]
-        cid, ambiguous = self._nearest(detection.position_cells, detection.observed_at_min,
-                                      visual_contacts)
+        cid: str | None = None
+        ambiguous = False
+        if association_contact_id is not None:
+            try:
+                candidate = self.snapshot(association_contact_id)
+            except KeyError:
+                candidate = None
+            if candidate is not None and candidate.state != "departed":
+                predicted = self._predicted_position(
+                    candidate, detection.observed_at_min,
+                )
+                if (
+                    math.dist(detection.position_cells, predicted)
+                    <= self.config.association_gate_cells
+                ):
+                    cid = candidate.contact_id
+        if cid is None:
+            signal_contacts = {
+                self.resolve(contact_id)
+                for contact_id in self._emitter_contacts.values()
+            }
+            visual_contacts = [
+                c for c in self.list_snapshots()
+                if c.contact_id in signal_contacts
+                or any(s.source != "ais" for s in c.samples)
+            ]
+            cid, ambiguous = self._nearest(
+                detection.position_cells,
+                detection.observed_at_min,
+                visual_contacts,
+            )
         if cid is None:
             cid = self._create(detection.position_cells, detection.observed_at_min)
         # Association happens before constructing the public sample. No empty ID.
@@ -339,6 +364,8 @@ class ContactStore:
         # _nearest resets only pairs involved in an ambiguous gate. A unique
         # visual match can invalidate its own AIS pair below; sharing a UAV
         # with another contact is not contradictory association evidence.
+        if association_contact_id is not None and cid == self.resolve(association_contact_id):
+            return cid
         if self.snapshot(cid).ais_mmsi is None:
             aid, ais_ambiguous = self._nearest(
                 detection.position_cells, detection.observed_at_min,

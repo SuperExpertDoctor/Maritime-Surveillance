@@ -98,6 +98,7 @@ class CoverageController(HeuristicControllerBase):
         self._route_status = "pending"
         self._stopped = False
         self._completion_event_emitted = False
+        self._direction: str | None = None
 
     @property
     def observation_spec(self) -> ObservationSpec:
@@ -126,6 +127,7 @@ class CoverageController(HeuristicControllerBase):
         self._route_status = "pending"
         self._stopped = False
         self._completion_event_emitted = False
+        self._direction = None
         self._plan_route(observation)
 
     def is_complete(self, observation: ControlObservation) -> bool:
@@ -142,6 +144,7 @@ class CoverageController(HeuristicControllerBase):
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.task is None or self.follower is None:
             raise RuntimeError("start_task must be called before act")
+        self._refresh_conflict_route(observation)
         self._refresh_invalidated_route(observation)
         command = self.follower.next_command(
             observation,
@@ -169,11 +172,13 @@ class CoverageController(HeuristicControllerBase):
             )
         return ControlDecision(command)
 
-    def _plan_route(self, observation: ControlObservation) -> None:
+    def _plan_route(
+        self, observation: ControlObservation, direction: str | None = None
+    ) -> None:
         assert self.task is not None
         start_pose = (*observation.self_state.position, observation.self_state.heading_rad)
         initial_coverage = self.planner.plan(
-            self.task.region_bbox, start_pose, self.swath_width, self.r_min
+            self.task.region_bbox, start_pose, self.swath_width, self.r_min, direction
         )
         endpoints = scan_endpoint_poses(initial_coverage)
         if not endpoints:
@@ -187,7 +192,7 @@ class CoverageController(HeuristicControllerBase):
             observation.planning_map_version,
         )
         coverage = self.planner.plan(
-            self.task.region_bbox, entry, self.swath_width, self.r_min
+            self.task.region_bbox, entry, self.swath_width, self.r_min, direction
         )
         offset = len(transit) - 1
         route = tuple(transit) + tuple(coverage.waypoints[1:])
@@ -201,6 +206,28 @@ class CoverageController(HeuristicControllerBase):
             observation.planning_map_version,
         )
         self.phase = CoveragePhase.TRANSIT_ASTAR
+
+    def _refresh_conflict_route(self, observation: ControlObservation) -> None:
+        """Give a controlled coverage task a new scan orientation after a conflict."""
+        if not any(
+            event.event_type == "route_blocked"
+            and event.payload.get("reason") == "path_conflict"
+            for event in observation.events
+        ):
+            return
+        assert self.task is not None
+        if self.task.region_bbox is None:
+            return
+        width = self.task.region_bbox.col_end - self.task.region_bbox.col_start
+        height = self.task.region_bbox.row_end - self.task.region_bbox.row_start
+        current = self._direction or ("horizontal" if width >= height else "vertical")
+        self._direction = "vertical" if current == "horizontal" else "horizontal"
+        self.follower = None
+        self.route = ()
+        self.scan_ranges = ()
+        self.planning_map_version = None
+        self._route_status = "pending"
+        self._plan_route(observation, direction=self._direction)
 
     def _refresh_invalidated_route(self, observation: ControlObservation) -> None:
         if observation.planning_map_version == self.planning_map_version:

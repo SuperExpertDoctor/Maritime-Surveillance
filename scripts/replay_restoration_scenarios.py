@@ -124,7 +124,16 @@ def build_scenario(name: str, *, seed: int, transport: str):
     from src.env.simulation import SimulationEngine
 
     config = _scenario_config_for(ConfigLoader.load(str(PROJECT_ROOT / "configs")), name)
-    gateway = _FixtureGateway() if transport == "fixture" else None
+    gateway = (
+        _FixtureGateway(
+            contact_assessor_class="type_ii",
+            allow_handoff_preemption=True,
+        )
+        if transport == "fixture" and name == "V07"
+        else _FixtureGateway()
+        if transport == "fixture"
+        else None
+    )
     engine = SimulationEngine(
         config,
         seed=int(seed),
@@ -150,6 +159,125 @@ def capture_frame(engine, *, total_steps: int) -> dict:
         obstacles=engine.obstacles,
         bases=engine.bases,
     )
+
+
+def _advance_v07_fixture_controls(engine, step_index: int, state: dict) -> None:
+    """Drive the V07 fixture through observed control milestones.
+
+    The hook only changes a real engine entity after the corresponding public
+    event exists.  Frame capture and all subsequent sensor/control actions
+    still run through the production engine path.
+    """
+    sm = engine.allocator.sm
+    if step_index == 0 and "source_uav_id" not in state:
+        probe = next(
+            (
+                item for item in sm.get_probe_sessions()
+                if engine.control_coordinator.active_task(item.uav_id) is not None
+            ),
+            None,
+        )
+        if probe is None:
+            return
+        task = engine.control_coordinator.active_task(probe.uav_id)
+        target = sm.contact_position(probe.contact_id, engine.clock.time)
+        if task is None or target is None:
+            return
+        uav = next(item for item in engine.uavs if item.id == probe.uav_id)
+        uav._col, uav._row = target[0] - 1.0, target[1]
+        uav.heading_rad = 0.0
+        sm.update_uav_status(
+            uav.id,
+            uav.status,
+            uav.position,
+            assigned_region_id=task.task_id,
+        )
+        state.update({
+            "source_uav_id": uav.id,
+            "contact_id": probe.contact_id,
+            "probe_id": probe.probe_id,
+            "source_position": [uav.float_position[0], uav.float_position[1]],
+        })
+        sm.add_event("validation_fixture_prepared", {
+            "scenario": "V07",
+            "uav_id": uav.id,
+            "contact_id": probe.contact_id,
+            "probe_id": probe.probe_id,
+            "reason": "place_assigned_probe_at_observed_contact_standoff",
+        })
+
+    source_uav_id = state.get("source_uav_id")
+    contact_id = state.get("contact_id")
+    if not source_uav_id or not contact_id:
+        return
+    events = sm.get_recent_events(0.0)
+    source_task = engine.control_coordinator.active_task(source_uav_id)
+    if (
+        "fuel_set" not in state
+        and source_task is not None
+        and source_task.task_type.value == "track"
+        and any(
+            event["type"] == "assessment_applied"
+            and event["data"].get("contact_id") == contact_id
+            for event in events
+        )
+    ):
+        source = next(item for item in engine.uavs if item.id == source_uav_id)
+        # 20% is below the proactive warning gate and still leaves a legal
+        # fixed-wing route to Base-2 from the scripted V07 observation point.
+        source.fuel_remaining_pct = 0.2
+        source.fuel_warning_sent = False
+        state["fuel_set"] = True
+        sm.add_event("validation_fixture_fuel_set", {
+            "scenario": "V07",
+            "uav_id": source_uav_id,
+            "fuel_pct": source.fuel_remaining_pct,
+            "reason": "trigger_controlled_return_after_type_ii_track_started",
+        })
+
+    if "successor_uav_id" in state:
+        return
+    assignment = next(
+        (
+            event for event in events
+            if event["type"] == "handoff_assignment_committed"
+            and event["data"].get("contact_id") == contact_id
+        ),
+        None,
+    )
+    if assignment is None:
+        return
+    successor_id = assignment["data"]["successor_uav_id"]
+    target = sm.contact_position(contact_id, engine.clock.time)
+    if target is None:
+        return
+    successor = next(item for item in engine.uavs if item.id == successor_id)
+    successor._col, successor._row = target[0] - 1.0, target[1]
+    successor.heading_rad = 0.0
+    successor_state = sm.get_uav(successor.id)
+    sm.update_uav_status(
+        successor.id,
+        successor.status,
+        successor.position,
+        assigned_region_id=(
+            successor_state.assigned_region_id if successor_state is not None else None
+        ),
+        fuel_remaining_pct=successor.fuel_remaining_pct,
+        target_group_id=contact_id,
+        heading_deg=successor.heading_deg,
+        sensor_mode=successor.sensor_mode,
+    )
+    state["successor_uav_id"] = successor_id
+    state["successor_position"] = [
+        successor.float_position[0], successor.float_position[1],
+    ]
+    sm.add_event("validation_fixture_successor_prepared", {
+        "scenario": "V07",
+        "uav_id": successor_id,
+        "contact_id": contact_id,
+        "handoff_id": assignment["data"].get("handoff_id"),
+        "reason": "place_assigned_successor_at_observed_contact_standoff",
+    })
 
 
 def _finite_pair(value) -> bool:
@@ -369,8 +497,10 @@ def run_scenario(name: str, *, seed: int, steps: int, output_dir, transport: str
     status = "finished"
     blocked_reason = None
     previous = None
+    fixture_state = {}
     try:
         for _ in range(int(steps)):
+            step_index = len(all_frames)
             before = float(engine.clock.time)
             engine.step()
             after = float(engine.clock.time)
@@ -381,6 +511,8 @@ def run_scenario(name: str, *, seed: int, steps: int, output_dir, transport: str
                     f"from {before}"
                 )
                 break
+            if name == "V07" and transport == "fixture":
+                _advance_v07_fixture_controls(engine, step_index, fixture_state)
             frame = capture_frame(engine, total_steps=int(steps))
             issues = _audit_frame(frame, previous)
             all_issues.extend(issues)
@@ -441,6 +573,7 @@ def run_scenario(name: str, *, seed: int, steps: int, output_dir, transport: str
         "event_count": len(event_keys),
         "audit_issue_count": len(all_issues),
         "blocked_reason": blocked_reason,
+        "scenario_setup": fixture_state,
         "artifacts": {
             "frames": "frames.jsonl",
             "events": "events.jsonl",

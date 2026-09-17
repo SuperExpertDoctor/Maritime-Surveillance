@@ -49,6 +49,8 @@ class ProbeController(HeuristicControllerBase):
         self._reported_phases: set[str] = set()
         self._blocked = False
         self._timeout_reported = False
+        self._orbit_entry_active = False
+        self._guidance_phase: str | None = None
 
     @property
     def observation_spec(self) -> ObservationSpec:
@@ -76,6 +78,8 @@ class ProbeController(HeuristicControllerBase):
         self._reported_phases.clear()
         self._blocked = False
         self._timeout_reported = False
+        self._orbit_entry_active = False
+        self._guidance_phase = None
         contact = self._contact(observation.contacts)
         if contact is None:
             self._route_status = "unavailable"
@@ -120,7 +124,19 @@ class ProbeController(HeuristicControllerBase):
             if (
                 self._route_phase != probe.phase
                 or self._route is None
-                or self._route_contact_key != contact_key
+                or (
+                    self._route_contact_key != contact_key
+                    and not self._orbit_entry_active
+                    and self._route_contact_key is not None
+                    and math.dist(
+                        self._route_contact_key[0], contact_key[0]
+                    ) > max(
+                        0.5,
+                        observation.self_state.speed_cells_min
+                        * observation.dt_min
+                        * 2.0,
+                    )
+                )
             ):
                 self._set_route(
                     self._plan_route(observation, contact, standoff),
@@ -128,17 +144,28 @@ class ProbeController(HeuristicControllerBase):
                 )
                 self._route_phase = probe.phase
                 self._route_contact_key = contact_key
+                self._orbit_entry_active = False
+                self._guidance_phase = None
+            if self._guidance_phase == phase:
+                command = self._guidance_command(observation, contact, standoff)
+                events = self._phase_event(phase)
+                return ControlDecision(command, events)
             if self._at_standoff(observation, contact, standoff):
-                target_position = self._predicted_contact_position(observation, contact)
-                entry = plan_contact_orbit_entry(
-                    self.tracker, self._pose(observation), target_position, standoff
-                )
-                self._set_route(entry, observation.planning_map_version)
-                self._route_phase = probe.phase
-                self._route_contact_key = contact_key
+                if not self._orbit_entry_active:
+                    target_position = self._predicted_contact_position(observation, contact)
+                    entry = plan_contact_orbit_entry(
+                        self.tracker, self._pose(observation), target_position, standoff
+                    )
+                    self._set_route(entry, observation.planning_map_version)
+                    self._route_phase = probe.phase
+                    self._route_contact_key = contact_key
+                    self._orbit_entry_active = True
                 command = self._route.next_command(
                     observation, self.action_spec, SensorMode.EO, OperationMode.PROBE
                 )
+                if self._route.is_complete:
+                    self._guidance_phase = phase
+                    command = self._guidance_command(observation, contact, standoff)
                 events = self._phase_event(phase)
             else:
                 command = self._route.next_command(
@@ -156,6 +183,32 @@ class ProbeController(HeuristicControllerBase):
         )
         self._validate(targeted, observation)
         return ControlDecision(targeted, events)
+
+    def _guidance_command(
+        self,
+        observation: ControlObservation,
+        contact: ContactObservation,
+        standoff: float,
+    ) -> ControlCommand:
+        target_position = self._predicted_contact_position(observation, contact)
+        # Aim inside the near evidence band so target motion and fixed-wing
+        # turn-rate quantisation do not push otherwise valid samples outside
+        # the strict evidence gate.
+        guidance_standoff = max(self.r_min, standoff - 0.1)
+        speed = max(
+            self.action_spec.min_speed_cells_min,
+            min(observation.self_state.speed_cells_min, self.action_spec.max_speed_cells_min),
+        )
+        turn_rate, speed = self.tracker.compute_guidance(
+            self._pose(observation), target_position, guidance_standoff, speed,
+        )
+        self._route_status = "guidance_only"
+        command = ControlCommand(
+            float(turn_rate), float(speed), SensorMode.EO,
+            OperationMode.PROBE, self.task.target_contact_id,
+        )
+        self._validate(command, observation)
+        return command
 
     def is_complete(self, observation: ControlObservation) -> bool:
         return observation.probe is not None and observation.probe.phase == "finished"

@@ -221,9 +221,16 @@ def _scenario_intents(engine, scenario: str) -> None:
 class _FixtureGateway:
     """Deterministic model boundary used only by the batch fixture transport."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        contact_assessor_class: str = "unknown",
+        allow_handoff_preemption: bool = False,
+    ) -> None:
         self.call_log: list[dict] = []
         self._sequence = 0
+        self.contact_assessor_class = contact_assessor_class
+        self.allow_handoff_preemption = allow_handoff_preemption
 
     def resolve_binding(self, role: str) -> dict:
         return {
@@ -289,12 +296,16 @@ class _FixtureGateway:
         return float(max(lower, min(upper, value)))
 
     @staticmethod
-    def _selection_payload(snapshot: dict, selected: list[str]) -> dict:
+    def _selection_payload(
+        snapshot: dict,
+        selected: list[str],
+        preempt: list[str] | tuple[str, ...] = (),
+    ) -> dict:
         return {
             "schema_version": "mission-selection/v1",
             "snapshot_id": snapshot.get("snapshot_id"),
             "selected_task_ids": list(selected),
-            "preempt_uav_ids": [],
+            "preempt_uav_ids": list(preempt),
             "defer_reason": None if selected else "fixture_no_feasible_task",
             "notes": "deterministic fixture selection",
             "information_version": int(snapshot.get("information_version", 0)),
@@ -322,6 +333,23 @@ class _FixtureGateway:
             0 if item.get("priority") == "high" else 1,
             item.get("task_id", ""),
         ))
+        if self.allow_handoff_preemption:
+            handoff = next(
+                (
+                    item for item in visible
+                    if item.get("kind") == "track" and item.get("contact_id")
+                ),
+                None,
+            )
+            preemptible = tuple(snapshot.get("preemptible_uav_ids", ()))
+            if handoff is not None:
+                for uav_id in preemptible:
+                    payload = self._selection_payload(
+                        snapshot, [handoff["task_id"]], [uav_id],
+                    )
+                    errors = tuple(validate(payload)) if validate else ()
+                    if not errors:
+                        return payload, ()
         selected: list[str] = []
         final_errors: tuple[str, ...] = ()
         max_rounds = max(1, len(visible))
@@ -365,11 +393,11 @@ class _FixtureGateway:
                 "contact_id": features.get("contact_id"),
                 "probe_id": features.get("probe_id"),
                 "history_revision": features.get("history_revision"),
-                "vessel_class": "unknown",
-                "confidence": 0.5,
+                "vessel_class": self.contact_assessor_class,
+                "confidence": 0.95 if self.contact_assessor_class != "unknown" else 0.5,
                 "evidence_sample_ids": sample_ids[:12],
-                "reasons": ["fixture keeps vessel_class unknown"],
-                "alternative_explanations": ["fixture transport does not classify"],
+                "reasons": ["fixture contact assessment"],
+                "alternative_explanations": ["fixture transport is deterministic"],
             }
         elif role == "red_commander":
             snapshot = user_payload.get("snapshot", {})
