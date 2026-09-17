@@ -140,6 +140,28 @@ def test_executor_rejects_parallel_sar_offset_and_off_clears_prior_footprint(uav
     assert uav.sar_footprint == []
 
 
+def test_uav_clear_sar_acquisition_clears_view_and_all_geometry(uav):
+    uav.sar_look_direction = "left"
+    uav.sar_scan_heading_rad = math.pi
+    uav.sar_scan_origin = (9.0, 10.0)
+    uav.sar_heading_error_deg = 12.0
+    uav.sar_cross_track_error_cells = 0.5
+    uav.sar_aperture_track = [(9.0, 10.0), (10.0, 10.0)]
+    uav.sar_footprint = [GridCoord(9, 10)]
+    uav.sar_imaging = True
+
+    uav._clear_sar_acquisition()
+
+    assert uav.sar_look_direction is None
+    assert uav.sar_scan_heading_rad is None
+    assert uav.sar_scan_origin is None
+    assert uav.sar_heading_error_deg == 0.0
+    assert uav.sar_cross_track_error_cells == 0.0
+    assert uav.sar_aperture_track == []
+    assert uav.sar_footprint == []
+    assert not uav.sar_imaging
+
+
 def test_executor_maps_probe_operation_to_tracking_status(uav):
     command = ControlCommand(
         turn_rate_rad_min=0.0,

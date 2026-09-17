@@ -503,6 +503,7 @@ class UAVEntity:
 
     def _clear_sar_acquisition(self) -> None:
         self.sar_imaging = False
+        self.sar_look_direction = None
         self.sar_scan_heading_rad = None
         self.sar_scan_origin = None
         self.sar_heading_error_deg = 0.0
