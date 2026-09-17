@@ -304,6 +304,8 @@ extension interface.
   checks the first geometrically divergent prediction step instead of waiting
   one tick.  The focused conflict/control regression after that fix passed
   `12 passed` in `18.81s` (`fb43889`).
+- Re-running the complete T12 command after the fix passed `73 passed` in
+  `32.60s`; the earlier `72 passed` line above records the pre-review gate.
 
 ## T13 Reviewer, Metrics, Memory, and Providers
 
