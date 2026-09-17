@@ -529,7 +529,7 @@ def run_scenario(name: str, *, seed: int, steps: int, output_dir, transport: str
                     continue
                 event_keys.add(key)
                 with events_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps({"key": key, **event}, ensure_ascii=False, allow_nan=False) + "\n")
+                    handle.write(json.dumps({"episode_id": engine.episode_id, "key": key, **event}, ensure_ascii=False, allow_nan=False) + "\n")
             if issues:
                 status = "failed"
                 blocked_reason = "frame audit failed"

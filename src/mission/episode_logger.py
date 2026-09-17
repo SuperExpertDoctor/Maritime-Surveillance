@@ -128,6 +128,7 @@ class EpisodeLogger:
             if not isinstance(record, dict):
                 raise TypeError("log record must be a mapping")
             payload = deepcopy(record)
+            payload.setdefault("episode_id", self._episode_id)
             self._check_payload(payload, domain)
             try:
                 encoded = json.dumps(

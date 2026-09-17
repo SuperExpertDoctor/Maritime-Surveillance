@@ -627,9 +627,13 @@ class OutcomeEvaluator:
                 "discovery_tracking_numerator": metrics["discovery_tracking_numerator"],
                 "discovery_tracking_denominator": metrics["discovery_tracking_denominator"],
                 "handoff_success_numerator": metrics["handoff_success_numerator"],
+                "handoff_success_denominator": metrics["handoff_denominator"],
                 "handoff": metrics["handoff_denominator"],
                 "continuous_observation_numerator_min": metrics[
                     "continuous_observation_numerator_min"
+                ],
+                "continuous_observation_denominator_min": metrics[
+                    "continuous_observation_denominator_min"
                 ],
                 "continuous_observation_min": metrics["continuous_observation_denominator_min"],
             },
