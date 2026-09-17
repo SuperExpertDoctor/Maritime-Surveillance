@@ -203,29 +203,6 @@ class CoverageRouteFollower:
             candidate = self._project_segment(index, x, y, lower, upper)
             if candidate is not None:
                 candidates.append(candidate)
-        if self._scan_ranges:
-            next_scan_start = next(
-                (
-                    start
-                    for start, _ in self._scan_ranges
-                    if start > last_segment
-                ),
-                None,
-            )
-            if (
-                next_scan_start is not None
-                and math.dist((x, y), self._poses[next_scan_start][:2])
-                < self._r_min / 2.0 - 1e-9
-            ):
-                next_scan_end = next(
-                    end
-                    for start, end in self._scan_ranges
-                    if start == next_scan_start
-                )
-                for index in range(next_scan_start, next_scan_end):
-                    candidate = self._project_segment(index, x, y, lower, upper)
-                    if candidate is not None:
-                        candidates.append(candidate)
         if not candidates:
             projected = min(max(self._progress, 0.0), self._length)
             index = active_segment

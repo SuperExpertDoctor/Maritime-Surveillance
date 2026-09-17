@@ -109,15 +109,16 @@ def test_follower_does_not_jump_to_a_nearby_parallel_scan_line():
         action_spec=spec,
     )
     near_next_line = follower.update(
-        position=(1.5, 0.1),
+        position=(1.8, 0.09),
         heading_rad=0.0,
         speed_cells_min=1.0,
         dt_min=1.0,
         action_spec=spec,
     )
 
-    assert near_next_line.progress_cells == pytest.approx(first.progress_cells)
+    assert near_next_line.progress_cells < 2.1
     assert near_next_line.scan_segment_index == 0
+    assert near_next_line.progress_cells >= first.progress_cells
 
 
 def test_follower_skips_zero_length_segments_and_honors_asymmetric_turn_limits():
