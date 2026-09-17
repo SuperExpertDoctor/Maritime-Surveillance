@@ -86,6 +86,15 @@ class RouteFollower:
         return ControlCommand(turn_rate, speed, sensor_mode, operation_mode)
 
 
+def next_route_index(follower: RouteFollower | None) -> int:
+    """Translate the execution follower index into the next route point."""
+    if follower is None:
+        return 0
+    if follower.is_complete:
+        return len(follower.poses)
+    return min(follower.index + 1, len(follower.poses))
+
+
 class HeuristicControllerBase(ControllerBase):
     @property
     def control_mode(self) -> ControlMode:

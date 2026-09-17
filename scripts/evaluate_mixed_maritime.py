@@ -40,6 +40,14 @@ def _stable_hash(value) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _metric_denominator(outcome: dict, *keys: str) -> float:
+    denominators = outcome.get("metric_denominators", {})
+    for key in keys:
+        if key in denominators:
+            return float(denominators[key] or 0.0)
+    return 0.0
+
+
 def _git_commit() -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -221,9 +229,16 @@ def _scenario_intents(engine, scenario: str) -> None:
 class _FixtureGateway:
     """Deterministic model boundary used only by the batch fixture transport."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        contact_assessor_class: str = "unknown",
+        allow_handoff_preemption: bool = False,
+    ) -> None:
         self.call_log: list[dict] = []
         self._sequence = 0
+        self.contact_assessor_class = contact_assessor_class
+        self.allow_handoff_preemption = allow_handoff_preemption
 
     def resolve_binding(self, role: str) -> dict:
         return {
@@ -288,34 +303,93 @@ class _FixtureGateway:
     def _bounded(value, lower, upper) -> float:
         return float(max(lower, min(upper, value)))
 
+    @staticmethod
+    def _selection_payload(
+        snapshot: dict,
+        selected: list[str],
+        preempt: list[str] | tuple[str, ...] = (),
+    ) -> dict:
+        return {
+            "schema_version": "mission-selection/v1",
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "selected_task_ids": list(selected),
+            "preempt_uav_ids": list(preempt),
+            "defer_reason": None if selected else "fixture_no_feasible_task",
+            "notes": "deterministic fixture selection",
+            "information_version": int(snapshot.get("information_version", 0)),
+        }
+
+    def _build_decision_selection(
+        self, snapshot: dict, validate
+    ) -> tuple[dict, tuple[str, ...]]:
+        """Build a fixture selection through the same validator as production."""
+        candidates = [
+            item for item in snapshot.get("candidates", ())
+            if isinstance(item, dict)
+        ]
+        edge_ids = {
+            edge.get("task_id")
+            for edge in snapshot.get("feasible_edges", ())
+            if isinstance(edge, dict)
+        }
+        kind_rank = {"investigation": 0, "direction_search": 1, "search": 2}
+        visible = [
+            item for item in candidates if item.get("task_id") in edge_ids
+        ]
+        visible.sort(key=lambda item: (
+            kind_rank.get(item.get("kind"), 3),
+            0 if item.get("priority") == "high" else 1,
+            item.get("task_id", ""),
+        ))
+        if self.allow_handoff_preemption:
+            handoff = next(
+                (
+                    item for item in visible
+                    if item.get("kind") == "track" and item.get("contact_id")
+                ),
+                None,
+            )
+            preemptible = tuple(snapshot.get("preemptible_uav_ids", ()))
+            if handoff is not None:
+                for uav_id in preemptible:
+                    payload = self._selection_payload(
+                        snapshot, [handoff["task_id"]], [uav_id],
+                    )
+                    errors = tuple(validate(payload)) if validate else ()
+                    if not errors:
+                        return payload, ()
+        selected: list[str] = []
+        final_errors: tuple[str, ...] = ()
+        max_rounds = max(1, len(visible))
+        for _ in range(max_rounds):
+            changed = False
+            for candidate in visible:
+                task_id = candidate["task_id"]
+                if task_id in selected:
+                    continue
+                proposed = [*selected, task_id]
+                proposed_payload = self._selection_payload(snapshot, proposed)
+                errors = tuple(validate(proposed_payload)) if validate else ()
+                if not errors or all(
+                    error.startswith("underutilized_feasible_work:")
+                    for error in errors
+                ):
+                    selected = proposed
+                    final_errors = errors
+                    changed = True
+                    break
+            if not changed or not final_errors:
+                break
+
+        payload = self._selection_payload(snapshot, selected)
+        final_errors = tuple(validate(payload)) if validate else ()
+        return payload, final_errors
+
     def request_json(self, *, role: str, snapshot_id: str, user_payload: dict,
                      validate, **_kwargs) -> ModelResult:
         if role == "decision_maker":
             snapshot = user_payload.get("snapshot", {})
-            candidates = list(snapshot.get("candidates", ()))
-            edge_ids = {
-                edge.get("task_id") for edge in snapshot.get("feasible_edges", ())
-            }
-            kind_rank = {"investigation": 0, "direction_search": 1, "search": 2}
-            candidates.sort(key=lambda item: (
-                kind_rank.get(item.get("kind"), 3),
-                0 if item.get("priority") == "high" else 1,
-                item.get("task_id", ""),
-            ))
-            selected = next(
-                (item["task_id"] for item in candidates
-                 if item.get("task_id") in edge_ids),
-                None,
-            )
-            payload = {
-                "schema_version": "mission-selection/v1",
-                "snapshot_id": snapshot.get("snapshot_id", snapshot_id),
-                "selected_task_ids": [selected] if selected else [],
-                "preempt_uav_ids": [],
-                "defer_reason": None if selected else "fixture_no_feasible_task",
-                "notes": "deterministic fixture selection",
-                "information_version": int(snapshot.get("information_version", 0)),
-            }
+            payload, errors = self._build_decision_selection(snapshot, validate)
         elif role == "contact_assessor":
             features = user_payload.get("features", {})
             sample_ids = list(dict.fromkeys(
@@ -327,11 +401,11 @@ class _FixtureGateway:
                 "contact_id": features.get("contact_id"),
                 "probe_id": features.get("probe_id"),
                 "history_revision": features.get("history_revision"),
-                "vessel_class": "unknown",
-                "confidence": 0.5,
+                "vessel_class": self.contact_assessor_class,
+                "confidence": 0.95 if self.contact_assessor_class != "unknown" else 0.5,
                 "evidence_sample_ids": sample_ids[:12],
-                "reasons": ["fixture keeps vessel_class unknown"],
-                "alternative_explanations": ["fixture transport does not classify"],
+                "reasons": ["fixture contact assessment"],
+                "alternative_explanations": ["fixture transport is deterministic"],
             }
         elif role == "red_commander":
             snapshot = user_payload.get("snapshot", {})
@@ -353,6 +427,13 @@ class _FixtureGateway:
                 float(speed_lower), float(speed_upper),
             )
             phase_upper = float(constraints.get("phase_deg", [0.0, 360.0])[1])
+            active_ship_ids = snapshot.get("active_ship_ids")
+            if active_ship_ids is None:
+                active_ship_ids = [
+                    item[0]
+                    for item in snapshot.get("active_signature", ())
+                    if isinstance(item, (list, tuple)) and item
+                ]
             payload = {
                 "schema_version": "red-plan/v1",
                 "snapshot_id": snapshot.get("snapshot_id", snapshot_id),
@@ -366,13 +447,15 @@ class _FixtureGateway:
                         "zigzag_period_min": period,
                         "phase_deg": 0.0 if phase_upper > 0.0 else 0.0,
                     }
-                    for ship_id in snapshot.get("active_ship_ids", ())
+                    for ship_id in active_ship_ids
                 ],
                 "notes": "deterministic fixture red plan",
             }
         else:
             payload = {}
-        errors = tuple(validate(payload)) if validate is not None else ()
+            errors = ()
+        if role != "decision_maker":
+            errors = tuple(validate(payload)) if validate is not None else ()
         return self._result(role, snapshot_id, payload, errors)
 
     def request_text(self, *, role: str, snapshot_id: str, **_kwargs) -> ModelResult:
@@ -576,19 +659,22 @@ def _batch_report(args) -> dict:
         else:
             if name == "discovery_tracking_rate":
                 numerator_key = "discovery_tracking_numerator"
-                denominator_key = "discovery_tracking_denominator"
+                denominator_keys = ("discovery_tracking_denominator",)
             elif name == "handoff_success_rate":
                 numerator_key = "handoff_success_numerator"
-                denominator_key = "handoff"
+                denominator_keys = ("handoff_success_denominator", "handoff")
             else:
                 numerator_key = "continuous_observation_numerator_min"
-                denominator_key = "continuous_observation_min"
+                denominator_keys = (
+                    "continuous_observation_denominator_min",
+                    "continuous_observation_min",
+                )
             numerator = sum(
                 float(outcome.get("metric_denominators", {}).get(numerator_key, 0.0))
                 for outcome in outcome_values
             )
             denominator = sum(
-                float(outcome.get("metric_denominators", {}).get(denominator_key, 0.0))
+                _metric_denominator(outcome, *denominator_keys)
                 for outcome in outcome_values
             )
             value = numerator / denominator if denominator else None

@@ -32,5 +32,7 @@ baseline scheduling.
 
 The complete snapshot follows in the user message. The resources, feasible
 edge costs, active task records, contacts, intents, intent statuses, map
-version, and reviewer summary are authoritative. An empty selection requires a
-non-empty defer_reason whenever legal work and a usable resource are present.
+version, and reviewer summary are authoritative. A defer_reason documents why
+work is deferred; it does not override a legal feasible task that can use an
+otherwise idle UAV. Select all such visible work that can be assigned without
+an additional preemption.

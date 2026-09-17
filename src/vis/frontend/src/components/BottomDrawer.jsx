@@ -19,6 +19,16 @@ const EVENT_NAMES = {
   route_plan_failed: "航路失败",
   route_replanned: "航路重规划",
   environment_reset: "环境重置",
+  mission_assignment_committed: "任务已提交",
+  contact_created: "创建接触",
+  probe_phase_changed: "调查阶段变化",
+  type_i_assessed: "I 类研判",
+  type_ii_assessed: "II 类研判",
+  assessment_applied: "研判完成",
+  probe_timed_out: "调查超时",
+  task_failed: "任务失败",
+  task_completed: "任务结束",
+  uav_refueled: "加油完成",
 };
 
 export default function BottomDrawer({ frame, events = [], llmCycle, visible, onToggle }) {

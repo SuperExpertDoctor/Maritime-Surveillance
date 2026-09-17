@@ -13,6 +13,7 @@ from src.control.common.contracts import (
     ControlDecision,
     ControlObservation,
     ControlOwner,
+    ControlRouteSnapshot,
     ControlTask,
     ObservationSpec,
     OperationMode,
@@ -22,7 +23,11 @@ from src.control.common.contracts import (
     StopReason,
 )
 from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
-from src.control.heuristic.base import HeuristicControllerBase, RouteFollower
+from src.control.heuristic.base import (
+    HeuristicControllerBase,
+    RouteFollower,
+    next_route_index,
+)
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.utils.track_orbit import LGVFTracker
 
@@ -177,6 +182,9 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.follower: RouteFollower | None = None
         self.planning_map_version: int | None = None
         self.reservation_id: str | None = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._arrived = False
         self._reservation_released = False
         self._failure: NoSafeRecoveryPath | None = None
@@ -239,6 +247,9 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.follower = RouteFollower(route)
         self.planning_map_version = plan.planning_map_version
         self.reservation_id = plan.reservation_id
+        self._route_revision = 1
+        self._route_status = "ready"
+        self._stopped = False
         self._arrived = False
         self._reservation_released = False
         self._failure = None
@@ -272,6 +283,8 @@ class ReturnToBaseController(HeuristicControllerBase):
 
     def stop_task(self, reason: StopReason) -> None:
         del reason
+        self._stopped = True
+        self._route_status = "cleared"
         if (
             self.reservation_id is not None
             and not self._arrived
@@ -330,6 +343,8 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.route = route
         self.follower = RouteFollower(route)
         self.planning_map_version = observation.planning_map_version
+        self._route_revision += 1
+        self._route_status = "ready"
 
     def _fail_recovery(
         self, observation: ControlObservation, reason: str
@@ -343,6 +358,7 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.route = ()
         self.follower = None
         self._failure = failure
+        self._route_status = "unavailable"
         return failure
 
     @staticmethod
@@ -353,6 +369,33 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise InvalidControlCommand("operation mode is absent from action mask")
         if command.sensor_mode not in observation.action_mask.allowed_sensor_modes:
             raise InvalidControlCommand("sensor mode is absent from action mask")
+
+    def route_snapshot(self) -> ControlRouteSnapshot:
+        task = self.task
+        route = (
+            self.route
+            if self._route_status == "ready" and not self._stopped
+            else ()
+        )
+        follower = self.follower if route else None
+        status = self._route_status
+        if task is None:
+            status = "unavailable"
+        elif self._stopped:
+            status = "cleared"
+        elif not route and status == "ready":
+            status = "pending"
+        return ControlRouteSnapshot(
+            task.task_id if task is not None else None,
+            OperationMode.RETURN.value,
+            OperationMode.RETURN.value,
+            None,
+            route,
+            next_route_index(follower),
+            self._route_revision,
+            self.planning_map_version if route else None,
+            status,
+        )
 
 
 class SystemHoldingController(HeuristicControllerBase):
@@ -390,6 +433,7 @@ class SystemHoldingController(HeuristicControllerBase):
         )
         self.task: ControlTask | None = None
         self.orbit_center: tuple[float, float] | None = None
+        self._stopped = False
         self._safety = SafetyEnvelope(action_spec)
 
     @property
@@ -422,6 +466,7 @@ class SystemHoldingController(HeuristicControllerBase):
             float(position[1]) + self.orbit_radius_cells * math.cos(heading),
         )
         self.task = task
+        self._stopped = False
 
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.task is None or self.orbit_center is None:
@@ -447,6 +492,27 @@ class SystemHoldingController(HeuristicControllerBase):
 
     def stop_task(self, reason: StopReason) -> None:
         del reason
+        self._stopped = True
+
+    def route_snapshot(self) -> ControlRouteSnapshot:
+        task = self.task
+        if task is None:
+            status = "unavailable"
+        elif self._stopped:
+            status = "cleared"
+        else:
+            status = "guidance_only"
+        return ControlRouteSnapshot(
+            task.task_id if task is not None else None,
+            OperationMode.HOLDING.value,
+            OperationMode.HOLDING.value,
+            None,
+            (),
+            0,
+            0,
+            None,
+            status,
+        )
 
 
 def _current_pose(observation: ControlObservation) -> Pose:

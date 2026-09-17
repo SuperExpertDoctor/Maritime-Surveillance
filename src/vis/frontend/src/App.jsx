@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
+import { Eye, EyeOff, Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
 
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
@@ -16,6 +16,7 @@ export default function App() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
+  const [showScenario, setShowScenario] = useState(false);
   const [trailMode, setTrailMode] = useState("tail");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedBBox, setSelectedBBox] = useState(null);
@@ -67,25 +68,21 @@ export default function App() {
 
   const replayEvents = useMemo(() => {
     if (mode !== "replay") return [];
-    const unique = new Map();
-    replay.frames.slice(0, replay.index + 1).forEach((item) => {
-      if (!item) return;
-      (item.events || []).forEach((event) => {
-        const key = `${event.time}|${event.type}|${JSON.stringify(event.data)}`;
-        unique.set(key, event);
-      });
-    });
-    return [...unique.values()];
-  }, [mode, replay.frames, replay.index]);
+    return replay.markers.map((marker) => marker.event);
+  }, [mode, replay.markers]);
 
   const replayLlmCycle = useMemo(() => {
     if (mode !== "replay") return null;
-    for (let index = replay.index; index >= 0; index -= 1) {
-      if (replay.frames[index]?.llm_cycle) return replay.frames[index].llm_cycle;
-    }
-    return null;
-  }, [mode, replay.frames, replay.index]);
+    return replay.frame?.llm_cycle || null;
+  }, [mode, replay.frame]);
   const displayedLlmCycle = mode === "replay" ? replayLlmCycle : lastLlmCycle;
+
+  const replayConnectionStatus = replay.targetLoadingIndex != null || replay.loading
+    ? "connecting"
+    : replay.error ? "error" : "connected";
+  const replayConnectionLabel = replay.targetLoadingIndex != null
+    ? "载入目标帧"
+    : replay.error || (replay.loading ? "载入中" : `${replay.frames.length} 帧`);
 
   useEffect(() => {
     if (selectedUavId && frame && !(frame.uavs || []).some((uav) => uav.id === selectedUavId)) {
@@ -220,9 +217,9 @@ export default function App() {
             {replay.files.map((file) => <option key={file} value={file}>{file}</option>)}
           </select>
         )}
-        <span className={`connection-state ${mode === "live" ? live.status : replay.loading ? "connecting" : "connected"}`}>
+        <span className={`connection-state ${mode === "live" ? live.status : replayConnectionStatus}`}>
           <span className="connection-dot" />
-          {mode === "live" ? connectionLabel : replay.error || (replay.loading ? "载入中" : `${replay.frames.length} 帧`)}
+          {mode === "live" ? connectionLabel : replayConnectionLabel}
         </span>
         <div className="top-actions">
           <div className="trail-mode-switch" role="group" aria-label="UAV轨迹显示模式">
@@ -269,6 +266,15 @@ export default function App() {
           <button className={showGrid ? "icon-btn active" : "icon-btn"} onClick={() => setShowGrid((value) => !value)} title="网格" aria-label="切换网格">
             <Grid3X3 size={17} />
           </button>
+          <button
+            className={showScenario ? "icon-btn active" : "icon-btn"}
+            onClick={() => setShowScenario((value) => !value)}
+            title={showScenario ? "隐藏场景真值" : "显示场景真值"}
+            aria-label="切换场景真值图层"
+            aria-pressed={showScenario}
+          >
+            {showScenario ? <Eye size={17} /> : <EyeOff size={17} />}
+          </button>
           <button className={drawerVisible ? "icon-btn active" : "icon-btn"} onClick={() => setDrawerVisible((value) => !value)} title="任务详情" aria-label="切换任务详情面板" aria-pressed={drawerVisible}>
             <PanelBottom size={17} />
           </button>
@@ -294,6 +300,7 @@ export default function App() {
         selectedUavId={selectedUavId}
         onSelectUav={setSelectedUavId}
         showGrid={showGrid}
+        showScenario={showScenario || Boolean(vesselPlacement)}
         trailMode={trailMode}
         selectionMode={selectionMode}
         onSelectionCommit={(bbox) => { setSelectedBBox(bbox); setSidebarOpen(true); }}
@@ -350,6 +357,8 @@ export default function App() {
         onSpeedChange={replay.setSpeed}
         frame={frame}
         markers={replay.markers}
+        loadedFrames={replay.loadedFrameCount}
+        targetLoadingIndex={replay.targetLoadingIndex}
         onExportMp4={mp4Export.exportMp4}
         exportAvailable={mp4Export.available}
         exporting={mp4Export.exporting}

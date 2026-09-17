@@ -98,6 +98,7 @@ from src.mission.red_commander import (
     ThreatGate,
 )
 from src.mission.surveillance_stage import SurveillanceStageRegistry
+from src.mission.strategy_memory import StrategyMemoryStore
 from src.utils.coverage_planner import CoveragePlanner
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
@@ -143,6 +144,10 @@ class SimulationEngine:
         self._llm_gateway = llm_gateway
         self._control_providers = dict(control_providers or {})
         self.reset_generation = 0
+        memory_store = strategy_memory_store or StrategyMemoryStore()
+        resolved_memory_version = memory_store.resolve_version(
+            "baseline" if strategy_memory_version is None else strategy_memory_version
+        )
         self.rng = random.Random(seed)
         self.clock = SimClock()
         self.vessel_commands = VesselCommandQueue(
@@ -164,10 +169,9 @@ class SimulationEngine:
         self.allocator = TaskAllocator(
             config,
             llm_gateway=llm_gateway,
-            strategy_memory_store=strategy_memory_store,
+            strategy_memory_store=memory_store,
         )
-        if strategy_memory_version is not None:
-            self.allocator.set_strategy_memory_version(strategy_memory_version)
+        self.allocator.set_strategy_memory_version(resolved_memory_version)
         if llm_gateway is None:
             self.allocator.llm_client.assert_ready()
         self.allocator.sm.set_base_positions(base_positions)
@@ -620,17 +624,19 @@ class SimulationEngine:
             uav = next((item for item in self.uavs if item.id == uav_id), None)
             task = self.control_coordinator.active_task(uav_id)
             if task is not None and (
-                task.target_contact_id in contact_ids or task.probe_id in probe_ids
+                (
+                    task.target_contact_id is not None
+                    and sm.resolve_contact_id(task.target_contact_id) in contact_ids
+                )
+                or task.probe_id in probe_ids
             ):
-                record = self._mission_task_records.get(task.task_id)
-                if record is not None:
-                    self._mission_task_records[task.task_id] = replace(
-                        record,
-                        status="blocked",
-                        assigned_uav_id=None,
-                        finished_at_min=now,
-                        release_reason="vessel_removed",
-                    )
+                self._close_mission_task(
+                    uav_id,
+                    task,
+                    status="blocked",
+                    reason="vessel_removed",
+                    current_time=now,
+                )
             for record_id, record in tuple(self._mission_task_records.items()):
                 if record.contact_id in contact_ids and record.assigned_uav_id == uav_id:
                     self._mission_task_records[record_id] = replace(
@@ -837,12 +843,25 @@ class SimulationEngine:
         if hasattr(self, "surveillance_stages"):
             self._publish_vessel_inventory()
         self.allocator.sm.memory_version = self.allocator.memory_version
+        self._publish_control_routes()
         set_context = getattr(self.allocator.llm_client.gateway, "set_context", None)
         if callable(set_context):
             set_context(
                 self.episode_id,
                 self.allocator.memory_version,
                 float(self.clock.time),
+            )
+
+    def _publish_control_routes(self) -> None:
+        """Publish immutable controller route envelopes for frame readers."""
+        coordinator = getattr(self, "control_coordinator", None)
+        if coordinator is None:
+            return
+        state = self.allocator.sm
+        for uav in getattr(self, "uavs", ()):
+            state.set_control_route(
+                uav.id,
+                coordinator.route_snapshot(uav.id),
             )
 
     def _publish_vessel_inventory(self) -> None:
@@ -1123,23 +1142,10 @@ class SimulationEngine:
         self._expire_contacts(t)
 
         for uav in self.uavs:
+            self._publish_fuel_warning(uav, t)
             fuel_low = self._step_controlled_uav(uav, t)
             self._record_storm_avoidance(uav, t)
-            # GOAL2: proactive fuel warning at 25% — gives the scheduler time
-            # to pre-assign a replacement before the critical 8% return trigger.
-            if (
-                uav.fuel_remaining_pct <= 0.25
-                and not uav.fuel_warning_sent
-                and uav.status in ("searching", "tracking", "transit")
-            ):
-                uav.fuel_warning_sent = True
-                self.allocator.trigger_manager.notify_event(
-                    "uav_fuel_low_warning",
-                    time=t,
-                    uav_id=uav.id,
-                    fuel_pct=round(uav.fuel_remaining_pct, 3),
-                    status=uav.status,
-                )
+            self._publish_fuel_warning(uav, t)
             if uav.status == "searching":
                 self._sortie_searched[uav.id] = True
                 self._search_started_at.setdefault(uav.id, t)
@@ -1303,6 +1309,8 @@ class SimulationEngine:
         route_plans: dict[str, SearchRoutePlan] = {}
         reservations: list[tuple[str, str, str | None]] = []
         reserved_contacts: set[str] = set()
+        handoff_commits: list[tuple[object, str, str]] = []
+        next_probe_number = self._next_probe_number
         for assignment in batch.assignments:
             candidate = candidates.get(assignment.task_id)
             resource = resources.get(assignment.uav_id)
@@ -1384,6 +1392,20 @@ class SimulationEngine:
                     return False
                 if candidate.kind == "probe" and contact.vessel_class != "unknown":
                     return False
+                handoff = next(
+                    (
+                        item
+                        for item in self.handoff_manager.attempts()
+                        if item.contact_id == contact_id
+                        and item.state == "required"
+                        and item.source_uav_id != assignment.uav_id
+                    ),
+                    None,
+                )
+                if handoff is not None:
+                    if self.clock.time > handoff.assignment_deadline_min:
+                        return False
+                    handoff_commits.append((handoff, assignment.uav_id, contact_id))
                 target = contact.estimated_position_cells
                 radius = (
                     self.config.mission.contact.baseline_standoff_cells
@@ -1403,18 +1425,25 @@ class SimulationEngine:
                     return False
                 if not route:
                     return False
-                probe_id = (
-                    f"P{self._next_probe_number:04d}"
-                    if candidate.kind == "probe"
-                    else None
-                )
-                if (
+                reuse_existing_probe = (
                     candidate.kind == "probe"
                     and active is not None
                     and active.task_id == assignment.task_id
+                    and active.target_contact_id == contact_id
                     and active.probe_id is not None
-                ):
+                    and (
+                        session := self.allocator.sm.get_probe_session(active.probe_id)
+                    ) is not None
+                    and session.contact_id == contact_id
+                    and session.uav_id == assignment.uav_id
+                )
+                if reuse_existing_probe:
                     probe_id = active.probe_id
+                elif candidate.kind == "probe":
+                    probe_id = f"P{next_probe_number:04d}"
+                    next_probe_number += 1
+                else:
+                    probe_id = None
                 control_task = ControlTask(
                     candidate.task_id,
                     OperationMode.PROBE if candidate.kind == "probe" else OperationMode.TRACK,
@@ -1427,11 +1456,12 @@ class SimulationEngine:
                 return False
             prepared.append((uav, control_task, candidate, assignment, active))
 
-        reserved: list[tuple[str, str, str | None]] = []
+        reservation_state = self.allocator.sm.contacts.capture_reservation_state(
+            contact_id for contact_id, _, _ in reservations
+        )
         try:
             for contact_id, uav_id, probe_id in reservations:
                 self.allocator.sm.contacts.reserve(contact_id, uav_id, probe_id)
-                reserved.append((contact_id, uav_id, probe_id))
             leases = self.control_coordinator.assign_tasks_atomically(
                 tuple(
                     (assignment.uav_id, task, assignment.expected_generation)
@@ -1441,40 +1471,24 @@ class SimulationEngine:
                 dt_min=self.clock.dt_min,
             )
         except Exception as exc:
-            for contact_id, _, _ in reversed(reserved):
-                self.allocator.sm.contacts.release(
-                    contact_id, self.clock.time, "assignment_rollback"
-                )
+            self.allocator.sm.contacts.restore_reservation_state(reservation_state)
             self.allocator.sm.add_event("mission_assignment_rejected", {
                 "reason": str(exc),
                 "snapshot_id": snapshot.snapshot_id,
             })
             return False
 
-        for assignment in batch.assignments:
-            candidate = candidates[assignment.task_id]
-            if candidate.contact_id is None:
-                continue
-            contact_id = self.allocator.sm.resolve_contact_id(candidate.contact_id)
-            attempt = next(
-                (
-                    item for item in self.handoff_manager.attempts()
-                    if item.contact_id == contact_id
-                    and item.state == "required"
-                    and item.source_uav_id != assignment.uav_id
-                ),
-                None,
-            )
-            if attempt is None:
-                continue
+        for attempt, successor_uav_id, contact_id in handoff_commits:
             try:
                 self.handoff_manager.commit_assignment(
                     attempt.handoff_id,
-                    assignment.uav_id,
+                    successor_uav_id,
                     self.clock.time,
                 )
-            except (KeyError, ValueError):
-                return False
+            except (KeyError, ValueError) as exc:
+                raise RuntimeError(
+                    "handoff changed after assignment commit"
+                ) from exc
             self._outcome_evaluator.record_handoff_assignment(
                 attempt.handoff_id,
                 at_min=self.clock.time,
@@ -1494,28 +1508,18 @@ class SimulationEngine:
             if old_task is not None and old_task.task_id != task.task_id:
                 old_record = self._mission_task_records.get(old_task.task_id)
                 if old_record is not None:
-                    if old_record.kind in _SEARCH_TASK_KINDS:
-                        self._mission_task_records[old_task.task_id] = replace(
-                            old_record,
-                            status="approved",
-                            finished_at_min=None,
-                            release_reason="preempted",
-                            assigned_uav_id=None,
-                        )
-                    else:
-                        self._mission_task_records[old_task.task_id] = replace(
-                            old_record,
-                            status="cancelled",
-                            finished_at_min=self.clock.time,
-                            release_reason="preempted",
-                            assigned_uav_id=None,
-                        )
-                for region in self.allocator.sm.get_search_regions():
-                    if region.id == old_task.task_id:
-                        region.status = "active" if (
-                            old_record is not None and old_record.kind in _SEARCH_TASK_KINDS
-                        ) else "stale"
-                        region.assigned_uav_id = None
+                    self._close_mission_task(
+                        assignment.uav_id,
+                        old_task,
+                        status=(
+                            "approved"
+                            if old_record.kind in _SEARCH_TASK_KINDS
+                            else "cancelled"
+                        ),
+                        reason="preempted",
+                        current_time=self.clock.time,
+                        preserve_search=old_record.kind in _SEARCH_TASK_KINDS,
+                    )
                 self.allocator.sm.mark_uav_reassigned(
                     assignment.uav_id, self.clock.time,
                 )
@@ -1567,26 +1571,26 @@ class SimulationEngine:
                     fuel_remaining_pct=uav.fuel_remaining_pct,
                 )
                 assert task.probe_id is not None
-                self.allocator.sm.set_probe_session(
-                    ProbeSession(
-                        task.probe_id,
-                        task.target_contact_id,
-                        uav.id,
-                        "baseline",
-                        self.clock.time,
-                        None,
-                        self.clock.time,
-                        (),
-                        (),
-                        0.0,
-                        None,
+                if self.allocator.sm.get_probe_session(task.probe_id) is None:
+                    self.allocator.sm.set_probe_session(
+                        ProbeSession(
+                            task.probe_id,
+                            task.target_contact_id,
+                            uav.id,
+                            "baseline",
+                            self.clock.time,
+                            None,
+                            self.clock.time,
+                            (),
+                            (),
+                            0.0,
+                            None,
+                        )
                     )
-                )
                 for vessel_id in self._vessel_ids_for_contact(task.target_contact_id):
                     self._set_surveillance_fact(
                         vessel_id, "probe", True, self.clock.time, task.probe_id,
                     )
-                self._next_probe_number += 1
             self._coordinator_tasks[uav.id] = task
             existing_record = self._mission_task_records.get(task.task_id)
             if existing_record is None:
@@ -1624,11 +1628,13 @@ class SimulationEngine:
                 lease.generation,
                 self.control_coordinator.safety_intervened(uav.id),
             )
+        self._next_probe_number = next_probe_number
         self.allocator.sm.add_event("mission_assignment_committed", {
             "snapshot_id": snapshot.snapshot_id,
             "selection_call_id": batch.selection_call_id,
             "task_ids": [assignment.task_id for assignment in batch.assignments],
         })
+        self._publish_control_routes()
         return True
 
     def _prepare_red_decision(self, current_time: float) -> None:
@@ -1745,6 +1751,7 @@ class SimulationEngine:
             return False
 
         self._record_control_tick(uav, tick)
+        self._publish_control_routes()
         fuel_low = (
             uav.fuel_remaining_pct <= 0.08
             and uav.status not in ("returning", "idle", "refueling")
@@ -1754,8 +1761,30 @@ class SimulationEngine:
             uav._fuel_low_reported = True
         return fuel_low
 
+    def _publish_fuel_warning(self, uav: UAVEntity, current_time: float) -> None:
+        """Publish the proactive fuel edge before or after one control tick."""
+        if (
+            uav.fuel_remaining_pct <= 0.25
+            and not uav.fuel_warning_sent
+            and uav.status in ("searching", "tracking", "transit")
+        ):
+            uav.fuel_warning_sent = True
+            self.allocator.trigger_manager.notify_event(
+                "uav_fuel_low_warning",
+                time=current_time,
+                uav_id=uav.id,
+                fuel_pct=round(uav.fuel_remaining_pct, 3),
+                status=uav.status,
+            )
+            self.allocator.sm.add_event("uav_fuel_low_warning", {
+                "uav_id": uav.id,
+                "fuel_pct": round(uav.fuel_remaining_pct, 3),
+                "status": uav.status,
+            })
+
     def _record_control_tick(self, uav: UAVEntity, tick) -> None:
         """Bridge immutable control output into legacy entity diagnostics."""
+        previous_task = self._coordinator_tasks.get(uav.id)
         active_task = self.control_coordinator.active_task(uav.id)
         if active_task is not None:
             self._coordinator_tasks[uav.id] = active_task
@@ -1772,6 +1801,11 @@ class SimulationEngine:
                 command.target_contact_id, command.target_contact_id)
             if command.target_contact_id:
                 uav._mission_kind = "track_entry"
+        elif command.operation_mode is OperationMode.PROBE:
+            uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
+                command.target_contact_id, command.target_contact_id)
+            if command.target_contact_id:
+                uav._mission_kind = "probe"
         elif command.operation_mode not in (OperationMode.TRACK,):
             uav.target_group_id = None
         if command.operation_mode is OperationMode.HOLDING:
@@ -1787,8 +1821,22 @@ class SimulationEngine:
             uav.sar_imaging = False
         for event in tick.emitted_events:
             if event.event_type == "search_complete":
-                self._record_search_completion_event(uav, event)
+                self._record_search_completion_event(uav, event, previous_task)
             elif event.event_type == "task_failed":
+                failed_task = previous_task
+                if (
+                    failed_task is None
+                    or failed_task.task_id != event.payload.get("task_id")
+                ):
+                    failed_task = self.control_coordinator.active_task(uav.id)
+                if failed_task is not None and failed_task.task_id == event.payload.get("task_id"):
+                    self._close_mission_task(
+                        uav.id,
+                        failed_task,
+                        status="blocked",
+                        reason=str(event.payload.get("reason", "task_failed")),
+                        current_time=event.timestamp_min,
+                    )
                 self.allocator.sm.add_event("task_failed", {
                     "uav_id": uav.id,
                     **dict(event.payload),
@@ -1809,6 +1857,124 @@ class SimulationEngine:
             uav.sensor_mode = "off"
             self._land_for_refuelling(uav)
 
+    def _close_mission_task(
+        self,
+        uav_id: str,
+        task: ControlTask,
+        *,
+        status: str,
+        reason: str,
+        current_time: float,
+        preserve_search: bool = False,
+        preserve_contact: bool = False,
+    ) -> None:
+        """Close one mission binding without touching a replacement task."""
+        sm = self.allocator.sm
+        active = self.control_coordinator.active_task(uav_id)
+        owns_active = active is not None and active.task_id == task.task_id
+        replacement_targets_contact = (
+            active is not None
+            and not owns_active
+            and active.target_contact_id is not None
+            and task.target_contact_id is not None
+            and sm.resolve_contact_id(active.target_contact_id)
+            == sm.resolve_contact_id(task.target_contact_id)
+        )
+
+        if task.task_type is OperationMode.COVERAGE:
+            region = next(
+                (
+                    item for item in sm.get_search_regions()
+                    if item.id == task.task_id
+                ),
+                None,
+            )
+            if region is not None:
+                region.assigned_uav_id = None
+                if preserve_search:
+                    region.status = "active"
+                elif status == "completed":
+                    region.status = "completed"
+                else:
+                    region.status = "stale"
+
+        if task.target_contact_id is not None:
+            try:
+                contact_id = sm.resolve_contact_id(task.target_contact_id)
+                contact = sm.contacts.snapshot(contact_id)
+            except KeyError:
+                contact_id = None
+                contact = None
+            if contact_id is not None:
+                session = (
+                    sm.get_probe_session(task.probe_id)
+                    if task.probe_id is not None else None
+                )
+                if (
+                    session is not None
+                    and session.uav_id == uav_id
+                    and sm.resolve_contact_id(session.contact_id) == contact_id
+                ):
+                    sm.clear_probe_session(session.probe_id)
+                if not preserve_contact and not replacement_targets_contact:
+                    expected_probe = (
+                        task.probe_id
+                        if task.task_type is OperationMode.PROBE else None
+                    )
+                    if (
+                        contact.assigned_uav_id == uav_id
+                        and contact.active_probe_id == expected_probe
+                    ):
+                        sm.contacts.release(contact_id, current_time, reason)
+                track = sm.get_track_region_for_group(contact_id)
+                if (
+                    track is not None
+                    and track.assigned_uav_id == uav_id
+                    and not replacement_targets_contact
+                ):
+                    sm.release_track_region(
+                        track.id, source_uav_id=uav_id, create_marker=False
+                    )
+
+        if owns_active:
+            sm.clear_uav_assignment(uav_id)
+            if self._coordinator_tasks.get(uav_id) == task:
+                self._coordinator_tasks.pop(uav_id, None)
+
+        record = self._mission_task_records.get(task.task_id)
+        if record is None:
+            return
+        if preserve_search:
+            desired = replace(
+                record,
+                status="approved",
+                assigned_uav_id=None,
+                finished_at_min=None,
+                release_reason=reason,
+            )
+        elif record.status in {"completed", "cancelled", "blocked"}:
+            desired = record
+        else:
+            desired = replace(
+                record,
+                status=status,
+                assigned_uav_id=None,
+                finished_at_min=current_time,
+                release_reason=reason,
+            )
+        if desired == record:
+            return
+        self._mission_task_records[task.task_id] = desired
+        sm.current_time = max(float(sm.current_time), float(current_time))
+        sm.add_event("mission_task_released", {
+            "task_id": task.task_id,
+            "uav_id": uav_id,
+            "status": desired.status,
+            "reason": reason,
+            "contact_id": task.target_contact_id,
+            "probe_id": task.probe_id,
+        })
+
     def _promote_work_controller_to_holding(
         self, uav: UAVEntity, current_time: float
     ) -> None:
@@ -1818,6 +1984,18 @@ class SimulationEngine:
         lease = self.control_coordinator.current_lease(uav.id)
         if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
             return
+        previous_task = self.control_coordinator.active_task(uav.id)
+        if previous_task is not None and previous_task.task_type not in {
+            OperationMode.HOLDING,
+            OperationMode.RETURN,
+        }:
+            self._close_mission_task(
+                uav.id,
+                previous_task,
+                status="blocked",
+                reason="holding",
+                current_time=current_time,
+            )
         task = ControlTask(
             f"holding:{uav.id}:{current_time}", OperationMode.HOLDING,
         )
@@ -1829,12 +2007,30 @@ class SimulationEngine:
         self._coordinator_tasks[uav.id] = task
 
     def _record_search_completion_event(
-        self, uav: UAVEntity, event: ControlEvent
+        self,
+        uav: UAVEntity,
+        event: ControlEvent,
+        previous_task: ControlTask | None = None,
     ) -> None:
         task = self.control_coordinator.active_task(uav.id)
+        if (
+            (task is None or task.task_type is not OperationMode.COVERAGE)
+            and previous_task is not None
+            and previous_task.task_type is OperationMode.COVERAGE
+            and previous_task.task_id == event.payload.get("task_id")
+        ):
+            task = previous_task
         region_id = task.task_id if task and task.task_type is OperationMode.COVERAGE else None
         if region_id is None:
             region_id = event.payload.get("task_id")
+        if task is not None and task.task_type is OperationMode.COVERAGE:
+            self._close_mission_task(
+                uav.id,
+                task,
+                status="completed",
+                reason="search_complete",
+                current_time=event.timestamp_min,
+            )
         region = next(
             (
                 item
@@ -1847,16 +2043,6 @@ class SimulationEngine:
             region.status = "completed"
             region.completion_pct = 100.0
             region.assigned_uav_id = None
-        if region_id is not None:
-            record = self._mission_task_records.get(region_id)
-            if record is not None:
-                self._mission_task_records[region_id] = replace(
-                    record,
-                    status="completed",
-                    finished_at_min=event.timestamp_min,
-                    release_reason="search_complete",
-                    assigned_uav_id=None,
-                )
         uav.completed_searches_since_refuel += 1
         self._sortie_searched[uav.id] = True
         self.allocator.sm.clear_uav_assignment(uav.id)
@@ -1899,6 +2085,7 @@ class SimulationEngine:
         lease = self.control_coordinator.current_lease(uav.id)
         if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
             return False
+        previous_task = self.control_coordinator.active_task(uav.id)
         reserve_cells = self.config.control.safety.reserve_range_cells
         planner = RecoveryPlanner()
         try:
@@ -1982,6 +2169,17 @@ class SimulationEngine:
             OperationMode.RETURN,
             recovery_plan=plan,
         )
+        if previous_task is not None and previous_task.task_type not in {
+            OperationMode.RETURN,
+            OperationMode.HOLDING,
+        }:
+            self._close_mission_task(
+                uav.id,
+                previous_task,
+                status="blocked",
+                reason="fuel_return" if force else "range_reserve",
+                current_time=current_time,
+            )
         uav.plan_return(plan.path)
         self._prepare_return_state(uav, current_time)
         self.allocator.sm.add_event("return_reserved", {
@@ -2881,7 +3079,11 @@ class SimulationEngine:
                 # It moves normally, but invalid SAR samples never improve
                 # the information field or produce a target detection.
                 uav.sar_footprint = []
-            elif uav.status == "tracking" and uav.target_group_id:
+            elif (
+                uav.status == "tracking"
+                and uav.sensor_mode == "eo"
+                and uav.target_group_id
+            ):
                 center = sm.contact_position(uav.target_group_id, current_time)
                 if center is not None:
                     self._process_ais_tracking(uav, center, current_time)
@@ -2972,23 +3174,15 @@ class SimulationEngine:
         current_time: float,
     ) -> None:
         sm = self.allocator.sm
-        if contact.assigned_uav_id == probe.uav_id:
-            sm.contacts.release(
-                contact.contact_id,
-                current_time,
-                probe.completed_reason or "probe_timeout",
-            )
         task = self.control_coordinator.active_task(probe.uav_id)
         if task is not None and task.probe_id == probe.probe_id:
-            record = self._mission_task_records.get(task.task_id)
-            if record is not None:
-                self._mission_task_records[task.task_id] = replace(
-                    record,
-                    status="blocked",
-                    finished_at_min=current_time,
-                    release_reason=probe.completed_reason or "probe_timeout",
-                    assigned_uav_id=None,
-                )
+            self._close_mission_task(
+                probe.uav_id,
+                task,
+                status="blocked",
+                reason=probe.completed_reason or "probe_timeout",
+                current_time=current_time,
+            )
             if self.control_coordinator.has_controller(probe.uav_id):
                 self._queue_control_event(
                     "task_failed",
@@ -3001,7 +3195,8 @@ class SimulationEngine:
                         "reason": probe.completed_reason or "probe_timeout",
                     },
                 )
-        sm.clear_probe_session(probe.probe_id)
+        if sm.get_probe_session(probe.probe_id) is not None:
+            sm.clear_probe_session(probe.probe_id)
         for vessel_id in self._vessel_ids_for_contact(probe.contact_id):
             self._set_surveillance_fact(
                 vessel_id, "probe", False, current_time, probe.probe_id,
@@ -3025,16 +3220,27 @@ class SimulationEngine:
                 vessel_id, "probe", False, current_time, assessment.probe_id,
             )
         task = self.control_coordinator.active_task(probe.uav_id)
-        if task is not None:
-            record = self._mission_task_records.get(task.task_id)
-            if record is not None:
-                self._mission_task_records[task.task_id] = replace(
-                    record,
-                    status="completed",
-                    finished_at_min=current_time,
-                    release_reason=f"assessment:{assessment.vessel_class}",
-                    assigned_uav_id=None,
-                )
+        if task is not None and task.probe_id == probe.probe_id:
+            self._close_mission_task(
+                probe.uav_id,
+                task,
+                status="completed",
+                reason=f"assessment:{assessment.vessel_class}",
+                current_time=current_time,
+                preserve_contact=assessment.vessel_class == "type_ii",
+            )
+            if assessment.vessel_class == "type_ii":
+                contact = sm.contacts.snapshot(assessment.contact_id)
+                if (
+                    contact.assigned_uav_id == probe.uav_id
+                    and contact.active_probe_id == probe.probe_id
+                ):
+                    sm.contacts.transition_reservation(
+                        assessment.contact_id,
+                        probe.uav_id,
+                        probe.probe_id,
+                        None,
+                    )
         sm.add_event("assessment_applied", {
             "assessment_id": assessment.assessment_id,
             "contact_id": assessment.contact_id,
@@ -3117,7 +3323,9 @@ class SimulationEngine:
                 uav.float_position[0] + measurement.distance_cells * math.cos(bearing),
                 uav.float_position[1] + measurement.distance_cells * math.sin(bearing))
             self.allocator.sm.contacts.ingest_visual(
-                self._visual_detection(uav, estimate, current_time, "eo"))
+                self._visual_detection(uav, estimate, current_time, "eo"),
+                association_contact_id=uav.target_group_id,
+            )
             self._publish_information_delta(
                 self.allocator.sm.scan_cell(
                     GridCoord(*(int(round(v)) for v in estimate)),
@@ -3186,24 +3394,20 @@ class SimulationEngine:
             self._tracking_started_at.pop(uav.id, None)
             self._ais_tracking_started_at.pop(uav.id, None)
             self._ais_measurements.pop(uav.id, None)
-            uav.target_group_id = None
-            sm.clear_uav_assignment(uav.id)
-            task_record = (
-                self._mission_task_records.get(task.task_id)
-                if task is not None else None
-            )
-            if task_record is not None and task_record.contact_id:
-                self._mission_task_records[task.task_id] = replace(
-                    task_record,
+            if task is not None:
+                self._close_mission_task(
+                    uav.id,
+                    task,
                     status=(
                         "completed"
                         if event_type == "type_i_released"
                         else "blocked"
                     ),
-                    assigned_uav_id=None,
-                    finished_at_min=current_time,
-                    release_reason=event_type,
+                    reason=event_type,
+                    current_time=current_time,
                 )
+            uav.target_group_id = None
+            sm.clear_uav_assignment(uav.id)
             has_controller = self.control_coordinator.has_controller(uav.id)
             if not has_controller:
                 sm.update_uav_status(

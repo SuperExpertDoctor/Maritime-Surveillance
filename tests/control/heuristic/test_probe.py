@@ -149,6 +149,40 @@ def test_probe_uses_frozen_session_to_progress_baseline_then_near():
     assert navigator.calls[-1][0] == ConfigLoader.load().mission.contact.near_standoff_cells
 
 
+def test_probe_start_task_plans_a_baseline_route_for_the_route_snapshot():
+    navigator = NavigatorSpy()
+    controller = _controller(navigator)
+    observation = _observation(probe=_probe())
+
+    _start(controller, observation)
+    snapshot = controller.route_snapshot()
+
+    assert snapshot is not None
+    assert navigator.calls == [
+        (ConfigLoader.load().mission.contact.baseline_standoff_cells, 3.0)
+    ]
+    assert snapshot.task_id == "probe:C0001"
+    assert snapshot.task_type == OperationMode.PROBE.value
+    assert snapshot.phase == "baseline"
+    assert snapshot.target_contact_id == "C0001"
+    assert snapshot.route == controller._route.poses
+    assert snapshot.next_index == 1
+    assert snapshot.route_revision == 1
+    assert snapshot.status == "ready"
+
+
+def test_probe_missing_contact_exports_unavailable_route_without_motion():
+    controller = _controller(NavigatorSpy())
+    observation = _observation(probe=_probe(), contacts=())
+
+    _start(controller, observation)
+    snapshot = controller.route_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.status == "unavailable"
+    assert snapshot.route == ()
+
+
 def test_missing_contact_does_not_advance_the_frozen_probe_session():
     controller = _controller(NavigatorSpy())
     observation = _observation(probe=_probe())

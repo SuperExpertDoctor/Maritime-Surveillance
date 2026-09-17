@@ -1,5 +1,6 @@
 import { Bot, CircleX, Crosshair, MousePointer2, Plane, Radio, RadioTower, Radar, Ship, Trash2, Waypoints } from "lucide-react";
 import { UAV_STATUS_COLORS } from "../renderer/colors";
+import { uavDisplayState } from "../renderer/displayState";
 import ContactPanel from "./ContactPanel";
 import IntentPanel from "./IntentPanel";
 
@@ -225,10 +226,11 @@ export default function RightSidebar({
                 const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";
                 const fuel = Math.max(0, Math.min(100, (uav.fuel_remaining_pct ?? 0) * 100));
                 const isSelected = uav.id === selectedUavId;
+                const display = uavDisplayState(uav);
                 return (
                   <button key={uav.id} className={`uav-row ${isSelected ? "selected" : ""}`} onClick={() => onSelectUav?.(isSelected ? null : uav.id)} aria-pressed={isSelected}>
                     <span className="uav-plane" style={{ color }}><Plane size={16} /></span>
-                    <span className="uav-copy"><strong>{uav.id}</strong><small>{STATUS_LABELS[uav.status] || uav.status} · {uav.assigned_region_id || "无任务"}</small></span>
+                    <span className="uav-copy"><strong>{uav.id}</strong><small>{display.label} · {uav.assigned_region_id || "无任务"}</small></span>
                     <span className="fuel-gauge" style={{ "--fuel": `${fuel}%`, "--fuel-color": color }}><b>{Math.round(fuel)}</b></span>
                   </button>
                 );
@@ -240,6 +242,7 @@ export default function RightSidebar({
             <section className="sidebar-section selected-detail">
               <div className="section-heading"><span>{selected.id} 详情</span><small>{Math.round(selected.heading_deg || 0)}°</small></div>
               <dl>
+                <div><dt>任务阶段</dt><dd>{uavDisplayState(selected).label}</dd></div>
                 <div><dt>传感器</dt><dd>{selected.sensor_mode?.toUpperCase() || "OFF"}</dd></div>
                 <div><dt>坐标</dt><dd>{selected.position.map((value) => Number(value).toFixed(1)).join(", ")}</dd></div>
                 <div><dt>剩余航程</dt><dd>{Math.round(selected.remaining_range_km || 0)} km</dd></div>

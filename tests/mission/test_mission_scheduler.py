@@ -16,6 +16,7 @@ from src.mission.mission_scheduler import (
     MissionScheduler,
     MissionSnapshot,
     TaskRecord,
+    _minimum_cost_matching,
     pair_selected_tasks,
     validate_selection,
 )
@@ -151,6 +152,33 @@ def test_pairing_minimizes_total_transit_cost_instead_of_greedy_order():
     ) == pytest.approx(3.5)
 
 
+@pytest.mark.timeout(5)
+def test_large_matching_finds_exact_minimum_without_exponential_search():
+    task_ids = tuple(f"Q{index}" for index in range(10))
+    resource_ids = tuple(f"U{index}" for index in range(10))
+    resources = {uav_id: _resource(uav_id) for uav_id in resource_ids}
+    options = {
+        task_id: tuple(
+            _edge(task_id, uav_id, 0.0 if uav_id == f"U{9 - int(task_id[1:])}" else 1.0)
+            for uav_id in resource_ids
+        )
+        for task_id in task_ids
+    }
+
+    matching = _minimum_cost_matching(
+        task_ids,
+        options,
+        resources,
+        required_preempt_uav_ids=frozenset({"U9"}),
+    )
+
+    assert matching is not None
+    assert {task_id: edge.uav_id for task_id, edge in matching.items()} == {
+        task_id: f"U{9 - int(task_id[1:])}" for task_id in task_ids
+    }
+    assert sum(edge.transit_time_min for edge in matching.values()) == pytest.approx(0.0)
+
+
 def test_selection_rejects_unknown_ids_duplicate_contacts_and_overlapping_searches():
     tasks = [
         _task("Q1", kind="probe", contact_id="C1"),
@@ -263,12 +291,94 @@ def test_empty_selection_requires_defer_reason_when_legal_work_exists():
     snapshot = _snapshot(
         [task], [_resource("U1")], [_edge("Q1", "U1", 1.0)], available=("U1",)
     )
-    assert "empty_selection_requires_defer_reason" in validate_selection(
+    assert "underutilized_feasible_work:Q1" in validate_selection(
         _selection(snapshot, []), snapshot
     )
+    assert "underutilized_feasible_work:Q1" in validate_selection(
+        _selection(snapshot, [], defer="no feasible edges"), snapshot
+    )
+
+
+def test_reason_does_not_allow_empty_selection_with_idle_feasible_work():
+    snapshot = _snapshot(
+        [_task("S1")],
+        [_resource("U1", generation=0)],
+        [_edge("S1", "U1", 1.0)],
+    )
+
+    errors = validate_selection(
+        _selection(snapshot, [], defer="no feasible edges"), snapshot,
+    )
+
+    assert "underutilized_feasible_work:S1" in errors
+
+
+def test_partial_selection_must_add_independent_idle_work():
+    snapshot = _snapshot(
+        [_task("S1"), _task("S2")],
+        [_resource("U1"), _resource("U2")],
+        [_edge("S1", "U1", 1.0), _edge("S2", "U2", 1.0)],
+    )
+
+    errors = validate_selection(_selection(snapshot, ["S1"]), snapshot)
+
+    assert "underutilized_feasible_work:S2" in errors
+
+
+def test_underutilization_allows_rematching_selected_work_to_use_idle_uav():
+    snapshot = _snapshot(
+        [_task("S1"), _task("S2")],
+        [_resource("U1"), _resource("U2")],
+        [
+            _edge("S1", "U1", 1.0),
+            _edge("S1", "U2", 5.0),
+            _edge("S2", "U1", 1.0),
+        ],
+    )
+
+    errors = validate_selection(_selection(snapshot, ["S1"]), snapshot)
+
+    assert "underutilized_feasible_work:S2" in errors
+
+
+def test_underutilization_does_not_force_work_without_an_idle_resource():
+    snapshot = _snapshot(
+        [_task("S1"), _task("S2")],
+        [_resource("U1")],
+        [_edge("S1", "U1", 1.0), _edge("S2", "U1", 1.0)],
+    )
+
+    assert validate_selection(_selection(snapshot, ["S1"]), snapshot) == ()
+
+
+def test_hidden_candidate_cannot_be_selected_or_create_underutilization_witness():
+    snapshot = _snapshot(
+        [_task("S1"), _task("S2")],
+        [_resource("U1"), _resource("U2")],
+        [_edge("S1", "U1", 1.0), _edge("S2", "U2", 1.0)],
+    )
+
+    assert "selected_task_not_visible:S2" in validate_selection(
+        _selection(snapshot, ["S2"]), snapshot, visible_task_ids=frozenset({"S1"})
+    )
     assert validate_selection(
-        _selection(snapshot, [], defer="hold for higher priority contact"), snapshot
+        _selection(snapshot, ["S1"]), snapshot, visible_task_ids=frozenset({"S1"})
     ) == ()
+
+
+def test_scheduler_rejects_selection_hidden_by_this_prompt_payload():
+    snapshot = _snapshot(
+        [_task("S1"), _task("S2")],
+        [_resource("U1"), _resource("U2")],
+        [_edge("S1", "U1", 1.0), _edge("S2", "U2", 1.0)],
+    )
+    scheduler = MissionScheduler(
+        max_tasks_in_prompt=1,
+        selection_provider=lambda current, _payload: _selection(current, ["S2"]),
+    )
+
+    assert scheduler.decide(snapshot) is None
+    assert scheduler.last_selection_errors == ("selected_task_not_visible:S2",)
 
 
 def test_approved_active_task_can_be_selected_on_its_original_id():
@@ -398,7 +508,9 @@ def test_scheduler_prompt_compacts_large_feasible_edge_graph():
 
     scheduler = MissionScheduler(
         max_tasks_in_prompt=4,
-        selection_provider=lambda current, _payload: _selection(current, ["Q1"]),
+        selection_provider=lambda current, _payload: _selection(
+            current, ["Q1", "Q2"]
+        ),
     )
     assert scheduler.decide(snapshot) is not None
 

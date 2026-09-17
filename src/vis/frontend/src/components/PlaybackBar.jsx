@@ -10,7 +10,8 @@ const EVENT_COLORS = {
 export default function PlaybackBar({
   visible, isPlaying, onPlayPause, frameIndex, totalFrames, onSeek,
   playSpeed, onSpeedChange, frame, markers = [], onExportMp4,
-  exportAvailable = false, exporting = false, exportProgress = 0, exportError = "",
+  loadedFrames = 0, targetLoadingIndex = null, exportAvailable = false,
+  exporting = false, exportProgress = 0, exportError = "",
 }) {
   if (!visible) return null;
   const disabled = totalFrames === 0;
@@ -29,13 +30,18 @@ export default function PlaybackBar({
       <div className="timeline-control">
         <div className="event-marks" aria-hidden="true">
           {markers.map((marker, index) => (
-            <i key={`${marker.frameIndex}-${marker.type}-${index}`} style={{ left: `${totalFrames > 1 ? marker.frameIndex / (totalFrames - 1) * 100 : 0}%`, background: EVENT_COLORS[marker.type] }} />
+            <i key={marker.key || `${marker.frameIndex}-${marker.type}-${index}`} style={{ left: `${totalFrames > 1 ? marker.frameIndex / (totalFrames - 1) * 100 : 0}%`, background: EVENT_COLORS[marker.type] || "var(--line-strong)" }} />
           ))}
         </div>
         <input type="range" min="0" max={Math.max(0, totalFrames - 1)} value={frameIndex} onChange={(event) => onSeek(event.target.value)} disabled={disabled} aria-label="回放时间轴" />
       </div>
       <span className="playback-readout">帧 {disabled ? 0 : frameIndex + 1} / {totalFrames}</span>
       <span className="playback-readout time">{frame?.timestamp || "--:--:--"}</span>
+      {targetLoadingIndex != null ? (
+        <span className="playback-load-status">载入目标帧 {targetLoadingIndex + 1}</span>
+      ) : totalFrames > loadedFrames ? (
+        <span className="playback-load-status">已载入 {loadedFrames}/{totalFrames}</span>
+      ) : null}
       <select className="speed-select" value={playSpeed} onChange={(event) => onSpeedChange(Number(event.target.value))} aria-label="回放速度">
         {SPEEDS.map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
       </select>

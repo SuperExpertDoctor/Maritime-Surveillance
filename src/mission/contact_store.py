@@ -305,23 +305,48 @@ class ContactStore:
                 self._event("association_ambiguous", contact_id=cid)
         return self.resolve(cid)
 
-    def ingest_visual(self, detection: VisualDetection) -> str:
+    def ingest_visual(
+        self,
+        detection: VisualDetection,
+        *,
+        association_contact_id: str | None = None,
+    ) -> str:
         if not isinstance(detection, VisualDetection):
             raise TypeError("expected VisualDetection")
         if detection.sample_id in self._sample_contacts:
             return self.resolve(self._sample_contacts[detection.sample_id])
         self._now = max(self._now, detection.observed_at_min)
-        signal_contacts = {
-            self.resolve(contact_id)
-            for contact_id in self._emitter_contacts.values()
-        }
-        visual_contacts = [
-            c for c in self.list_snapshots()
-            if c.contact_id in signal_contacts
-            or any(s.source != "ais" for s in c.samples)
-        ]
-        cid, ambiguous = self._nearest(detection.position_cells, detection.observed_at_min,
-                                      visual_contacts)
+        cid: str | None = None
+        ambiguous = False
+        if association_contact_id is not None:
+            try:
+                candidate = self.snapshot(association_contact_id)
+            except KeyError:
+                candidate = None
+            if candidate is not None and candidate.state != "departed":
+                predicted = self._predicted_position(
+                    candidate, detection.observed_at_min,
+                )
+                if (
+                    math.dist(detection.position_cells, predicted)
+                    <= self.config.association_gate_cells
+                ):
+                    cid = candidate.contact_id
+        if cid is None:
+            signal_contacts = {
+                self.resolve(contact_id)
+                for contact_id in self._emitter_contacts.values()
+            }
+            visual_contacts = [
+                c for c in self.list_snapshots()
+                if c.contact_id in signal_contacts
+                or any(s.source != "ais" for s in c.samples)
+            ]
+            cid, ambiguous = self._nearest(
+                detection.position_cells,
+                detection.observed_at_min,
+                visual_contacts,
+            )
         if cid is None:
             cid = self._create(detection.position_cells, detection.observed_at_min)
         # Association happens before constructing the public sample. No empty ID.
@@ -339,6 +364,8 @@ class ContactStore:
         # _nearest resets only pairs involved in an ambiguous gate. A unique
         # visual match can invalidate its own AIS pair below; sharing a UAV
         # with another contact is not contradictory association evidence.
+        if association_contact_id is not None and cid == self.resolve(association_contact_id):
+            return cid
         if self.snapshot(cid).ais_mmsi is None:
             aid, ais_ambiguous = self._nearest(
                 detection.position_cells, detection.observed_at_min,
@@ -499,6 +526,26 @@ class ContactStore:
         self._contacts[c.contact_id] = replace(c, assigned_uav_id=uav_id, active_probe_id=probe_id,
                                               state="approaching" if probe_id else "tracking")
 
+    def transition_reservation(
+        self,
+        contact_id: str,
+        uav_id: str,
+        expected_probe_id: str | None,
+        new_probe_id: str | None,
+    ) -> None:
+        """Change the operation represented by an existing owner reservation."""
+        c = self.snapshot(contact_id)
+        if (
+            c.assigned_uav_id != uav_id
+            or c.active_probe_id != expected_probe_id
+        ):
+            raise ValueError("reservation owner or probe does not match")
+        self._contacts[c.contact_id] = replace(
+            c,
+            active_probe_id=new_probe_id,
+            state="approaching" if new_probe_id else "tracking",
+        )
+
     def release(self, contact_id: str, now_min: float, reason: str) -> None:
         self._finite_time(now_min)
         c = self.snapshot(contact_id)
@@ -512,6 +559,21 @@ class ContactStore:
                                               active_probe_id=None, next_probe_not_before_min=cooldown)
         self._event("contact_released", contact_id=c.contact_id, uav_id=c.assigned_uav_id,
                     probe_id=c.active_probe_id, reason=reason)
+
+    def capture_reservation_state(self, contact_ids):
+        """Capture only contact reservations touched by a pending batch."""
+        resolved = tuple(sorted({self.resolve(contact_id) for contact_id in contact_ids}))
+        return (
+            tuple((contact_id, self.snapshot(contact_id)) for contact_id in resolved),
+            len(self._events),
+        )
+
+    def restore_reservation_state(self, state) -> None:
+        """Restore a reservation snapshot after a pre-commit failure."""
+        snapshots, event_count = state
+        for contact_id, snapshot in snapshots:
+            self._contacts[contact_id] = snapshot
+        del self._events[event_count:]
 
     def apply_assessment(self, assessment: Assessment) -> None:
         """Apply a service-validated assessment; reject stale probe/history references.

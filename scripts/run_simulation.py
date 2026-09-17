@@ -23,4 +23,6 @@ if __name__ == "__main__":
         hold_server=args.hold_server,
         probe_llm=not args.skip_llm_probe,
         llm_probe_timeout=args.llm_probe_timeout,
+        memory_version=args.memory_version,
+        memory_root=args.memory_root,
     )

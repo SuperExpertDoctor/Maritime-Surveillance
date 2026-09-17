@@ -10,6 +10,21 @@ from src.mission.vessel_compat import (
 
 _VALID_SURVEILLANCE_STAGES = {"undetected", "detected", "probing", "tracking"}
 _MISSING = object()
+_LIST_DEFAULTS = (
+    "uavs",
+    "contacts",
+    "ships",
+    "events",
+    "markers",
+    "evidence",
+    "intents",
+    "intent_statuses",
+    "intent_events",
+    "search_regions",
+    "track_regions",
+    "obstacles",
+    "bases",
+)
 
 
 def _normalize_revision(value: object) -> int:
@@ -24,6 +39,30 @@ def normalize_replay_frame(frame: dict) -> dict:
         raise TypeError("replay frame must be an object")
 
     result = deepcopy(frame)
+    result.setdefault("schema_version", "mission-frame/v2")
+    result.setdefault("visual_schema_version", "mission-visual/v1")
+    result.setdefault("mode", "replay")
+    result.setdefault("cycle", 0)
+    result.setdefault("sim_time_min", 0.0)
+    result.setdefault("frame_id", 0)
+    for key in _LIST_DEFAULTS:
+        if not isinstance(result.get(key), list):
+            result[key] = []
+
+    normalized_uavs: list[dict] = []
+    for raw in result["uavs"]:
+        if not isinstance(raw, dict):
+            raise TypeError("uavs entries must be objects")
+        item = deepcopy(raw)
+        # A legacy record cannot acquire a route from its current position.
+        # Missing route fields remain explicitly empty at the replay boundary.
+        if not isinstance(item.get("planned_path"), list):
+            item["planned_path"] = []
+        if not isinstance(item.get("mission_route"), list):
+            item["mission_route"] = []
+        normalized_uavs.append(item)
+    result["uavs"] = normalized_uavs
+
     normalized: list[dict] = []
     for index, raw in enumerate(result.get("scenario_vessels") or ()):
         if not isinstance(raw, dict):

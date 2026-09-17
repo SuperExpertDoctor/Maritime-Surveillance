@@ -13,6 +13,7 @@ from src.control.common.contracts import (
     ControlCommand,
     ControlDecision,
     ControlObservation,
+    ControlRouteSnapshot,
     ControlTask,
     ControllerEventRequest,
     HazardObservation,
@@ -23,7 +24,11 @@ from src.control.common.contracts import (
     StopReason,
 )
 from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
-from src.control.heuristic.base import HeuristicControllerBase, RouteFollower
+from src.control.heuristic.base import (
+    HeuristicControllerBase,
+    RouteFollower,
+    next_route_index,
+)
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.utils.storm_avoider import StormAvoider, ThreatLevel
 from src.utils.track_orbit import LGVFTracker
@@ -181,6 +186,9 @@ class TrackingController(HeuristicControllerBase):
         self.avoidance_route: tuple[Pose, ...] = ()
         self._avoidance_follower: RouteFollower | None = None
         self._avoidance_planning_map_version: int | None = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._failure_event_emitted = False
 
     @property
@@ -213,6 +221,9 @@ class TrackingController(HeuristicControllerBase):
         self.avoidance_route = ()
         self._avoidance_follower = None
         self._avoidance_planning_map_version = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._failure_event_emitted = False
 
     def act(self, observation: ControlObservation) -> ControlDecision:
@@ -265,6 +276,8 @@ class TrackingController(HeuristicControllerBase):
         return self.phase in (TrackingPhase.COMPLETED, TrackingPhase.LOST)
 
     def stop_task(self, reason: StopReason) -> None:
+        self._stopped = True
+        self._route_status = "cleared"
         self.phase = (
             TrackingPhase.COMPLETED
             if reason is StopReason.COMPLETED
@@ -328,6 +341,8 @@ class TrackingController(HeuristicControllerBase):
                 self.avoidance_route = route
                 self._avoidance_follower = RouteFollower(route)
                 self._avoidance_planning_map_version = observation.planning_map_version
+                self._route_revision += 1
+            self._route_status = "ready"
             command = self._avoidance_follower.next_command(
                 observation,
                 self.action_spec,
@@ -337,6 +352,7 @@ class TrackingController(HeuristicControllerBase):
             return self._with_target(command, observation)
         self._avoidance_follower = None
         self._avoidance_planning_map_version = None
+        self._route_status = "guidance_only"
         turn_rate, speed = self.tracker.compute_guidance(
             pose,
             self.target_position,
@@ -367,6 +383,8 @@ class TrackingController(HeuristicControllerBase):
         self.route = route
         self.follower = RouteFollower(route)
         self.planning_map_version = observation.planning_map_version
+        self._route_revision += 1
+        self._route_status = "ready"
 
     def _refresh_contact(self, observation: ControlObservation) -> None:
         assert self.task is not None
@@ -389,6 +407,7 @@ class TrackingController(HeuristicControllerBase):
             self.follower = None
             self.planning_map_version = None
             self.phase = TrackingPhase.CREATED
+            self._route_status = "pending"
 
     def _refresh_invalidated_route(self, observation: ControlObservation) -> None:
         if self.phase not in (
@@ -410,6 +429,7 @@ class TrackingController(HeuristicControllerBase):
         self.follower = None
         self.planning_map_version = None
         self.phase = TrackingPhase.CREATED
+        self._route_status = "pending"
 
     def _refresh_avoidance_route(
         self, observation: ControlObservation, current_pose: Pose
@@ -427,6 +447,8 @@ class TrackingController(HeuristicControllerBase):
         self.avoidance_route = ()
         self._avoidance_follower = None
         self._avoidance_planning_map_version = None
+        if self.phase is TrackingPhase.TRACKING:
+            self._route_status = "guidance_only"
 
     def _within_eo_range(self, observation: ControlObservation) -> bool:
         assert self.target_position is not None
@@ -453,6 +475,7 @@ class TrackingController(HeuristicControllerBase):
         self, observation: ControlObservation, reason: str
     ) -> ControlDecision:
         assert self.task is not None
+        self._route_status = "unavailable"
         speed = min(
             max(
                 observation.self_state.speed_cells_min,
@@ -568,6 +591,45 @@ class TrackingController(HeuristicControllerBase):
             not in observation.action_mask.target_contact_ids
         ):
             raise InvalidControlCommand("target contact is absent from action mask")
+
+    def route_snapshot(self) -> ControlRouteSnapshot:
+        task = self.task
+        status = self._route_status
+        route: tuple[Pose, ...] = ()
+        follower: RouteFollower | None = None
+        planning_map_version: int | None = None
+        if task is None:
+            status = "unavailable"
+        elif self._stopped:
+            status = "cleared"
+        elif self.phase is TrackingPhase.LOST:
+            status = "unavailable"
+        elif status in {"ready", "guidance_only"}:
+            if (
+                self._avoidance_follower is not None
+                and self.avoidance_route
+                and status == "ready"
+            ):
+                route = self.avoidance_route
+                follower = self._avoidance_follower
+                planning_map_version = self._avoidance_planning_map_version
+            elif self.follower is not None and self.route:
+                route = self.route
+                follower = self.follower
+                planning_map_version = self.planning_map_version
+            else:
+                status = "pending"
+        return ControlRouteSnapshot(
+            task.task_id if task is not None else None,
+            OperationMode.TRACK.value,
+            self.phase.value,
+            task.target_contact_id if task is not None else None,
+            route,
+            next_route_index(follower),
+            self._route_revision,
+            planning_map_version if route else None,
+            status,
+        )
 
 
 __all__ = [

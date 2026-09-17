@@ -87,6 +87,7 @@ def test_investigation_selection_and_assignment_use_one_information_version():
         item for item in snapshot.candidates
         if item.task_id == "investigation:EMITTER-ACCEPT-2"
     )
+    probe = next(item for item in snapshot.candidates if item.kind == "probe")
     edge = next(edge for edge in snapshot.feasible_edges if edge.task_id == task.task_id)
 
     scheduler = MissionScheduler(
@@ -94,7 +95,7 @@ def test_investigation_selection_and_assignment_use_one_information_version():
         selection_provider=lambda _snapshot, _payload: {
             "schema_version": "mission-selection/v1",
             "snapshot_id": snapshot.snapshot_id,
-            "selected_task_ids": [task.task_id],
+            "selected_task_ids": [task.task_id, probe.task_id],
             "preempt_uav_ids": [],
             "defer_reason": None,
             "notes": "fixture investigation",

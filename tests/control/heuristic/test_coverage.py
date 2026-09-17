@@ -163,6 +163,22 @@ def test_coverage_uses_astar_before_enabling_sar(controller, observation):
     assert decision.command.operation_mode is OperationMode.TRANSIT
 
 
+def test_coverage_route_snapshot_exports_the_authoritative_follower_route(
+    started_controller,
+):
+    snapshot = started_controller.route_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.task_id == "S1"
+    assert snapshot.task_type == OperationMode.COVERAGE.value
+    assert snapshot.phase == CoveragePhase.TRANSIT_ASTAR.value
+    assert snapshot.route == started_controller.route
+    assert snapshot.next_index == 1
+    assert snapshot.route_revision == 1
+    assert snapshot.planning_map_version == 1
+    assert snapshot.status == "ready"
+
+
 def test_coverage_enables_sar_only_on_stable_scan_leg(started_controller, observation):
     scan_start, scan_end = started_controller.scan_ranges[0]
     interior_index = scan_start + 1

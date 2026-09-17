@@ -290,6 +290,19 @@ def test_release_event_preserves_reservation_owner_before_clearing(store):
     assert store.snapshot(cid).active_probe_id is None
 
 
+def test_reservation_snapshot_restores_contact_and_event_log(store):
+    cid = store.ingest_visual(visual())
+    state = store.capture_reservation_state([cid])
+    before_events = store.events
+    before_contact = store.snapshot(cid)
+
+    store.reserve(cid, "UAV-1", "P0001")
+    store.restore_reservation_state(state)
+
+    assert store.snapshot(cid) == before_contact
+    assert store.events == before_events
+
+
 def test_lost_event_preserves_reservation_owner_before_clearing(store):
     cid = store.ingest_visual(visual())
     store.reserve(cid, "UAV-1", "P0001")

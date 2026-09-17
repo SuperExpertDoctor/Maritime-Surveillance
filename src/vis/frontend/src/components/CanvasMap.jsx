@@ -26,6 +26,7 @@ const CanvasMap = forwardRef(function CanvasMap({
   selectedUavId,
   onSelectUav,
   showGrid = false,
+  showScenario = false,
   trailMode = "tail",
   selectionMode = false,
   onSelectionCommit,
@@ -166,6 +167,7 @@ const CanvasMap = forwardRef(function CanvasMap({
         mapBounds,
         legendBounds,
         showGrid,
+        showScenario,
         trailMode,
         selectedContactId,
         selectedScenarioVesselId,
@@ -186,7 +188,7 @@ const CanvasMap = forwardRef(function CanvasMap({
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, hoverVersion, mapAssets, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, sizeVersion, trailMode]);
+  }, [frame, hoverVersion, mapAssets, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, showScenario, sizeVersion, trailMode]);
 
   useImperativeHandle(ref, () => ({
     async recordReplay(frames, { fps = 20, onProgress } = {}) {
@@ -217,7 +219,7 @@ const CanvasMap = forwardRef(function CanvasMap({
           context.save();
           renderFrame(context, frames[index], {
             cellSize, offsetX, offsetY, mapBounds, legendBounds,
-            showGrid, trailMode, hoverInfo: null, selectedUavId,
+            showGrid, showScenario, trailMode, hoverInfo: null, selectedUavId,
             selectedContactId,
             selectedScenarioVesselId,
             frameCount: index, assets: mapAssets,
@@ -233,7 +235,7 @@ const CanvasMap = forwardRef(function CanvasMap({
       }
       return finished;
     },
-  }), [mapAssets, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, trailMode]);
+  }), [mapAssets, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, showScenario, trailMode]);
 
   const handleMouseMove = useCallback((event) => {
     const canvas = canvasRef.current;

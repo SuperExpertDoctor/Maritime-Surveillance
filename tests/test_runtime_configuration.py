@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 import shutil
 
 import pytest
@@ -116,3 +117,29 @@ def test_clear_output_cache_removes_only_output_directory_contents(tmp_path: Pat
 
     with pytest.raises(ValueError, match="outputs directory"):
         clear_output_cache(str(tmp_path / "not-outputs"))
+
+
+def test_main_rejects_memory_root_inside_cleanup_target_before_deleting(monkeypatch, tmp_path):
+    import main as main_module
+
+    monkeypatch.setattr(
+        main_module.ConfigLoader,
+        "load",
+        lambda _path: SimpleNamespace(
+            common=SimpleNamespace(clear_outputs_before_run=True),
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "clear_output_cache",
+        lambda *_args, **_kwargs: pytest.fail("cleanup ran before memory-root validation"),
+    )
+
+    with pytest.raises(ValueError, match="memory-root"):
+        main_module.main(
+            config_path="configs",
+            steps=1,
+            start_server=False,
+            probe_llm=False,
+            memory_root=Path.cwd() / "outputs" / "strategy_memory",
+        )

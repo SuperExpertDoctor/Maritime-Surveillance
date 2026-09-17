@@ -326,6 +326,23 @@ class StrategyMemoryStore:
         with self._lock:
             return str(self._read_manifest().get("active_version", "baseline"))
 
+    def resolve_version(self, version: str) -> str:
+        """Resolve a requested version once against the current manifest."""
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError("memory version must be a non-empty string")
+        requested = version.strip()
+        if requested == "baseline":
+            return requested
+        with self._lock:
+            manifest = self._read_manifest()
+            resolved = (
+                str(manifest.get("active_version", "baseline"))
+                if requested == "active" else requested
+            )
+            if resolved != "baseline" and resolved not in manifest["versions"]:
+                raise KeyError(f"unknown strategy version: {requested}")
+            return resolved
+
     def activate(self, memory_id: str, report_id: str) -> str:
         """Activate only a stored passing report with both validation phases."""
         with self._lock:

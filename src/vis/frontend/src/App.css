@@ -1747,6 +1747,14 @@ button {
   color: var(--cyan);
 }
 
+.playback-load-status {
+  min-width: 94px;
+  color: var(--warning);
+  font: 700 9px/1 Consolas, monospace;
+  text-align: center;
+  white-space: nowrap;
+}
+
 .speed-select {
   width: 62px;
   flex: 0 0 auto;

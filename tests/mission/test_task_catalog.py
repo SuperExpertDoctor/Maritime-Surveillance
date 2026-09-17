@@ -111,6 +111,24 @@ def test_catalog_keeps_probe_track_and_search_candidates_with_stable_ids(state):
     assert [task.eligible_since_min for task in first] == [task.eligible_since_min for task in second]
 
 
+def test_catalog_does_not_reuse_probe_id_for_same_contact_track(state):
+    catalog = TaskCatalog(candidate_extractor=CandidateSource([]))
+
+    probe = catalog.build(
+        state, (_contact("C0001"),), (), now_min=10.0,
+    )[0]
+    track = catalog.build(
+        state,
+        (_contact("C0001", vessel_class="type_ii"),),
+        (),
+        now_min=11.0,
+    )[0]
+
+    assert probe.kind == "probe"
+    assert track.kind == "track"
+    assert probe.task_id != track.task_id
+
+
 def test_catalog_does_not_duplicate_reserved_contact_and_retains_uncapped_queue(state):
     candidates = [
         _search_candidate((index + 1, 10, index + 3, 20))

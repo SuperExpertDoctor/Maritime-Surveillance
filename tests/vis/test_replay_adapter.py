@@ -1,4 +1,6 @@
 from copy import deepcopy
+import hashlib
+import json
 
 from src.vis.backend.replay_adapter import normalize_replay_frame
 
@@ -36,3 +38,25 @@ def test_replay_adapter_defaults_type_i_ais_and_does_not_share_nested_state():
     assert normalized["scenario_vessels"][0]["ais_enabled"] is True
     assert old["scenario_vessels"][0]["position"] == [1, 2]
 
+
+def test_replay_adapter_fills_historical_defaults_and_keeps_routes_empty():
+    old = {
+        "frame_id": 17,
+        "uavs": [{"id": "UAV-1", "status": "tracking", "position": [3, 4]}],
+        "events": [{"type": "target_found", "time": 2.5, "data": {"id": "C-1"}}],
+    }
+    source = hashlib.sha256(
+        json.dumps(old, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    normalized = normalize_replay_frame(old)
+
+    assert normalized["contacts"] == []
+    assert normalized["scenario_vessels"] == []
+    assert normalized["uavs"][0]["planned_path"] == []
+    assert normalized["uavs"][0]["mission_route"] == []
+    assert normalized["uavs"][0]["position"] == [3, 4]
+    assert hashlib.sha256(
+        json.dumps(old, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest() == source
+    assert old["uavs"][0] == {"id": "UAV-1", "status": "tracking", "position": [3, 4]}

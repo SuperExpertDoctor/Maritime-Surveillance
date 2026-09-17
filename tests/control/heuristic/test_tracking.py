@@ -380,6 +380,30 @@ def test_tracking_uses_astar_before_lgvf_entry_and_guidance(
     assert guidance.command.operation_mode is OperationMode.TRACK
 
 
+def test_tracking_route_snapshot_switches_from_approach_to_guidance_only(
+    controller, observation
+):
+    _start_tracking(controller, observation)
+
+    controller.act(observation)
+    approach = controller.route_snapshot()
+    assert approach is not None
+    assert approach.route == controller.route
+    assert approach.next_index == 1
+    assert approach.status == "ready"
+    assert approach.phase == TrackingPhase.APPROACH_ASTAR.value
+
+    near_target = _with_pose(observation, (10.0, 13.0, 0.0))
+    controller.act(near_target)
+    tracking = controller.route_snapshot()
+
+    assert tracking is not None
+    assert tracking.phase == TrackingPhase.TRACKING.value
+    assert tracking.status == "guidance_only"
+    assert tracking.target_contact_id == "contact:G1"
+    assert tracking.route == controller.route
+
+
 def test_tracking_replans_for_only_a_newer_contact_update(
     controller, observation
 ):
@@ -847,6 +871,30 @@ def test_return_follows_only_the_reserved_plan_and_emits_system_return(
     assert controller.lease_owner is ControlOwner.SYSTEM
 
 
+def test_return_route_snapshot_exports_the_reserved_route_and_progress(
+    action_spec, observation
+):
+    controller = _return_controller(action_spec, RecoveryNavigatorSpy(), [])
+    return_observation = _return_observation(observation)
+    plan = _recovery_plan()
+
+    controller.start_task(
+        ControlTask("R1", OperationMode.RETURN, recovery_plan=plan),
+        return_observation,
+    )
+    snapshot = controller.route_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.task_id == "R1"
+    assert snapshot.task_type == OperationMode.RETURN.value
+    assert snapshot.phase == OperationMode.RETURN.value
+    assert snapshot.route == plan.path
+    assert snapshot.next_index == 1
+    assert snapshot.route_revision == 1
+    assert snapshot.planning_map_version == 1
+    assert snapshot.status == "ready"
+
+
 def test_return_stop_releases_an_unused_reservation_once(action_spec, observation):
     released = []
     controller = _return_controller(action_spec, RecoveryNavigatorSpy(), released)
@@ -1136,6 +1184,27 @@ def test_system_holding_emits_safety_checked_fixed_wing_orbit_until_stopped(
     assert not controller.is_complete(holding)
     assert tracker.guidance_arguments[0][1] == (10.0, 12.0)
     assert len(tracker.guidance_arguments) == 2
+
+
+def test_system_holding_route_snapshot_is_explicitly_guidance_only(
+    action_spec, observation
+):
+    controller = SystemHoldingController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=action_spec,
+        tracker=TrackerSpy(turn_rate=0.0, speed=1.0),
+    )
+    holding = _return_observation(observation)
+    controller.start_task(ControlTask("H1", OperationMode.HOLDING), holding)
+
+    snapshot = controller.route_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.task_id == "H1"
+    assert snapshot.task_type == OperationMode.HOLDING.value
+    assert snapshot.phase == OperationMode.HOLDING.value
+    assert snapshot.route == ()
+    assert snapshot.status == "guidance_only"
 
 
 def test_legacy_orbit_wrappers_warn_and_preserve_grid_coordinate_results():
