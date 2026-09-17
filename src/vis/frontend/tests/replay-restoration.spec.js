@@ -1,4 +1,22 @@
+import fs from "node:fs";
+import path from "node:path";
 import { expect, test } from "@playwright/test";
+
+function evidenceDirectory(testInfo) {
+  const directory = process.env.REPLAY_SCREENSHOT_DIR
+    ? path.resolve(process.env.REPLAY_SCREENSHOT_DIR)
+    : testInfo.outputDir;
+  fs.mkdirSync(directory, { recursive: true });
+  return directory;
+}
+
+function evidencePath(testInfo, name) {
+  return path.join(evidenceDirectory(testInfo), name);
+}
+
+function screenshotPath(testInfo, name) {
+  return evidencePath(testInfo, `${name}.png`);
+}
 
 test("approaching probe is not displayed as acquired tracking", async ({ page }) => {
   await page.goto("/");
@@ -235,4 +253,115 @@ test("switching replay files cancels stale frames and markers", async ({ page })
   releaseNew();
   await expect(page.locator(".playback-readout.time")).toContainText("00:09:09");
   await expect(page.locator(".event-marks i")).toHaveCount(0);
+});
+
+test("real replay artifacts drive event-timed visual evidence", async ({ page }, testInfo) => {
+  test.setTimeout(300_000);
+  const listResponse = await page.request.get("/api/replay/list");
+  expect(listResponse.ok()).toBe(true);
+  const { files } = await listResponse.json();
+  expect(files.length).toBeGreaterThan(0);
+
+  const replayFile = files.find((file) => /v07.*frames/i.test(file)) || files[0];
+  expect(replayFile).toMatch(/frames\.jsonl$/i);
+  const firstChunkResponse = await page.request.get(
+    `/api/replay?file=${encodeURIComponent(replayFile)}&offset=0&limit=120`,
+  );
+  expect(firstChunkResponse.ok()).toBe(true);
+  const firstChunk = await firstChunkResponse.json();
+  expect(firstChunk.total).toBeGreaterThan(0);
+  expect(firstChunk.frames[0].episode_id).toBeTruthy();
+  expect(firstChunk.frames[0].frame_id).toBeTruthy();
+  const replayFrames = [...firstChunk.frames];
+  if (firstChunk.total > firstChunk.frames.length) {
+    const secondChunkResponse = await page.request.get(
+      `/api/replay?file=${encodeURIComponent(replayFile)}&offset=120&limit=120`,
+    );
+    expect(secondChunkResponse.ok()).toBe(true);
+    const secondChunk = await secondChunkResponse.json();
+    replayFrames.push(...secondChunk.frames);
+  }
+
+  await page.goto("/");
+  await page.locator(".mode-switch button").nth(1).click();
+  const fileSelect = page.locator(".file-select");
+  await expect(fileSelect.locator(`option[value="${replayFile}"]`)).toHaveCount(1);
+  await fileSelect.selectOption(replayFile);
+  const totalFrames = Number(firstChunk.total);
+  await expect(page.locator(".playback-readout").first()).toContainText(String(totalFrames));
+  await expect(page.locator("canvas")).toBeVisible();
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await Promise.all([
+      "/assets/background.png",
+      "/assets/rainbow-uav.png?v=20260801",
+      "/assets/carrier.png?v=20260801",
+      "/assets/destroyer.png?v=20260801",
+    ].map((source) => new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => image.complete ? resolve() : reject(new Error(`image_incomplete:${source}`));
+      image.onerror = () => reject(new Error(`image_failed:${source}`));
+      image.src = source;
+    })));
+  });
+
+  const eventFrames = {};
+  const eventTargets = [
+    ["mission_assignment_committed", "01-assignment"],
+    ["assessment_applied", "02-assessment"],
+    ["return_reserved", "03-return"],
+    ["handoff_required", "04-handoff"],
+  ];
+  for (const [eventType, filename] of eventTargets) {
+    const index = replayFrames.findIndex((frame) =>
+      (frame.events || []).some((event) => event.type === eventType));
+    if (index >= 0) eventFrames[filename] = index;
+  }
+  const phaseTargets = [
+    ["baseline", "05-probe-baseline"],
+    ["near", "06-probe-near"],
+    ["tracking", "07-tracking"],
+  ];
+  for (const [phase, filename] of phaseTargets) {
+    const index = replayFrames.findIndex((frame) =>
+      (frame.uavs || []).some((uav) => uav.task_visual?.phase === phase));
+    if (index >= 0) eventFrames[filename] = index;
+  }
+
+  for (const [name, index] of Object.entries(eventFrames)) {
+    await page.locator(".timeline-control input").fill(String(index));
+    await expect(page.locator(".playback-readout").first()).toContainText(`${index + 1} /`);
+    await expect.poll(async () => page.locator(".connection-state").textContent()).not.toContain("载入目标帧");
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({ path: screenshotPath(testInfo, name), fullPage: true });
+  }
+
+  const sensorModes = new Set(
+    replayFrames.flatMap((frame) => (frame.uavs || []).map((uav) => uav.sensor_mode)),
+  );
+  expect(sensorModes.has("eo")).toBe(true);
+  expect(sensorModes.has("sar")).toBe(true);
+  expect(Object.keys(eventFrames).length).toBeGreaterThanOrEqual(7);
+  const canvasEvidence = await page.locator("canvas").evaluate((canvas) => {
+    const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    let opaque = 0;
+    const colors = new Set();
+    for (let index = 0; index < pixels.length; index += 16) {
+      if (pixels[index + 3] > 0) opaque += 1;
+      colors.add(`${pixels[index]},${pixels[index + 1]},${pixels[index + 2]},${pixels[index + 3]}`);
+    }
+    return { opaque, colors: colors.size, width: canvas.width, height: canvas.height };
+  });
+  expect(canvasEvidence.opaque).toBeGreaterThan(100);
+  expect(canvasEvidence.colors).toBeGreaterThan(4);
+  await page.screenshot({ path: screenshotPath(testInfo, "08-final-map"), fullPage: true });
+
+  const exportButton = page.locator(".export-mp4-btn");
+  await expect(exportButton).toBeEnabled();
+  const downloadPromise = page.waitForEvent("download", { timeout: 180_000 });
+  await exportButton.click();
+  const download = await downloadPromise;
+  const mp4Path = evidencePath(testInfo, "v07-seed42-replay.mp4");
+  await download.saveAs(mp4Path);
+  expect(fs.statSync(mp4Path).size).toBeGreaterThan(1_000);
 });
