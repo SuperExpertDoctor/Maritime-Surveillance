@@ -192,13 +192,22 @@ def test_coverage_route_snapshot_exports_the_authoritative_follower_route(
 
 def test_coverage_enables_sar_only_on_stable_scan_leg(started_controller, observation):
     scan_start, scan_end = started_controller.scan_ranges[0]
-    interior_index = scan_start + 1
+    interior_index = scan_start + 5
     assert interior_index < scan_end
     decision = _advance_to(started_controller, observation, interior_index)
 
     assert started_controller.phase is CoveragePhase.SCANNING
     assert decision.command.sensor_mode is SensorMode.SAR
     assert decision.command.operation_mode is OperationMode.COVERAGE
+
+
+def test_coverage_transit_entry_uses_the_scan_heading(
+    started_controller,
+):
+    scan_start, _ = started_controller.scan_ranges[0]
+    assert started_controller.route[scan_start][2] == pytest.approx(
+        started_controller.scan_swaths[0].heading
+    )
 
 
 def test_coverage_keeps_sar_off_until_heading_is_stable(started_controller, observation):
@@ -321,6 +330,7 @@ def test_coverage_replan_starts_at_next_unconsumed_scan_band(
     first_scan_end = controller.scan_ranges[0][1]
     _advance_to(controller, observation, first_scan_end)
     previous_index = controller.follower.index
+    previous_progress = controller.follower.progress_cells
     next_scan_start = next(
         start for start, end in controller.scan_ranges if end > previous_index
     )
@@ -342,6 +352,8 @@ def test_coverage_replan_starts_at_next_unconsumed_scan_band(
     assert controller.navigator.plan_arguments[-1][1] == {next_scan_entry[:2]}
     assert controller.route[3][:2] == next_scan_entry[:2]
     assert controller.route[3][:2] != observation.self_state.position
+    assert controller.follower.progress_cells >= previous_progress
+    assert all(start < end for start, end in controller.scan_ranges)
 
 
 def test_coverage_stop_before_final_pose_is_not_complete_and_is_idempotent(

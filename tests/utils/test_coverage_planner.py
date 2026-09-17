@@ -58,3 +58,14 @@ def test_region_feasibility_checks_dubins_turns_outside_bbox():
     mask = np.zeros((30, 30), dtype=bool)
     mask[4, 7] = True
     assert not planner.is_region_feasible(bbox, 2, 1, mask)
+
+
+def test_region_feasibility_checks_extended_sensor_scan_geometry():
+    planner = CoveragePlanner(sample_step=0.2, near_range=0.25)
+    bbox = BBox(10, 10, 16, 14)
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[6, 10] = True
+
+    assert not planner.is_region_feasible(
+        bbox, 1.5, 1.0, mask, along_track_cells=0.8
+    )

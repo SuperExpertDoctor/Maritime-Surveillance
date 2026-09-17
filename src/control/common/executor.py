@@ -75,6 +75,13 @@ class UAVDynamicsExecutor:
             applied_command = command
             requested_command = requested_command or command
             interventions = ()
+        before_position = uav.float_position
+        previous_geometry = (
+            uav.sensor_mode,
+            uav.sar_look_direction,
+            uav.sar_scan_heading_rad,
+            uav.sar_scan_origin,
+        )
         distance = uav.apply_motion(
             applied_command.turn_rate_rad_min,
             applied_command.speed_cells_min,
@@ -83,6 +90,14 @@ class UAVDynamicsExecutor:
         uav.status = _STATUS_BY_OPERATION[applied_command.operation_mode]
         uav.sensor_mode = applied_command.sensor_mode.value
         if applied_command.sensor_mode is SensorMode.SAR:
+            same_geometry = previous_geometry == (
+                SensorMode.SAR.value,
+                applied_command.sar_look_direction,
+                applied_command.sar_scan_heading_rad,
+                applied_command.sar_scan_origin,
+            )
+            if not same_geometry:
+                uav.sar_aperture_track = [before_position]
             uav.sar_look_direction = applied_command.sar_look_direction
             uav.sar_scan_heading_rad = applied_command.sar_scan_heading_rad
             uav.sar_scan_origin = applied_command.sar_scan_origin
@@ -96,10 +111,16 @@ class UAVDynamicsExecutor:
                 applied_command.sar_scan_heading_rad,
             )
             uav.sar_cross_track_error_cells = cross_track_error
+            uav._append_sar_aperture_position()
+            stable_margin = max(
+                abs(applied_command.speed_cells_min) * dt_min,
+                self.coverage_execution.along_track_cells / 2.0,
+            )
             uav.sar_imaging = (
                 applied_command.operation_mode is OperationMode.COVERAGE
                 and heading_error <= self.coverage_execution.heading_tolerance_rad
                 and cross_track_error <= self.coverage_execution.cross_track_tolerance_cells
+                and uav._aperture_length() + 1e-12 >= stable_margin
             )
         else:
             uav.sar_look_direction = None

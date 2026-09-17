@@ -207,19 +207,26 @@ class CoveragePlanner:
         swath_width: float,
         R_min: float,
         obstacle_mask,
+        along_track_cells: float | None = 0.8,
     ) -> bool:
         """Check every scan line and inter-line Dubins turn against a mask."""
         box = bbox if isinstance(bbox, BBox) else BBox(*bbox)
         width = box.col_end - box.col_start
         height = box.row_end - box.row_start
         orientation = "horizontal" if width >= height else "vertical"
+        use_sensor_geometry = along_track_cells is not None
+        along_track = (
+            1.0 if along_track_cells is None else float(along_track_cells)
+        )
+        if not math.isfinite(along_track) or along_track <= 0.0:
+            raise ValueError("along_track_cells must be finite and positive")
         swaths = self._build_swaths(
             box,
             swath_width,
             R_min,
             orientation,
-            along_track_cells=1.0,
-            extend_endpoints=False,
+            along_track_cells=along_track,
+            extend_endpoints=use_sensor_geometry,
         )
         previous: ScanSwath | None = None
         for swath in swaths:

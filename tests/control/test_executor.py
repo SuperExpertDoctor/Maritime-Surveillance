@@ -74,13 +74,16 @@ def test_executor_installs_sar_geometry_and_gates_imaging_on_heading_error(uav):
         sar_scan_origin=(10.0, 10.0),
     )
 
-    result = UAVDynamicsExecutor().execute(uav, command, dt_min=1.0)
+    executor = UAVDynamicsExecutor()
+    result = executor.execute(uav, command, dt_min=1.0)
 
     assert result.applied_command is command
     assert uav.sar_look_direction == "right"
     assert uav.sar_scan_heading_rad == pytest.approx(0.0)
     assert uav.sar_scan_origin == pytest.approx((10.0, 10.0))
     assert uav.sar_heading_error_deg == pytest.approx(0.0)
+    assert not uav.sar_imaging
+    executor.execute(uav, command, dt_min=1.0)
     assert uav.sar_imaging
 
 

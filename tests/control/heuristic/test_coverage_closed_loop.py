@@ -74,6 +74,52 @@ def test_motion_trace_uses_the_speed_limit_for_that_tick():
     assert record["distance_cells"] <= record["max_speed_cells_min"] + 1e-8
 
 
+def test_transit_guidance_keeps_turning_toward_curved_scan_entry():
+    rig = make_coverage_rig(
+        bbox=(10, 10, 16, 14), start_pose=(6.0, 12.0, 0.0), dt_min=1.0
+    )
+
+    records = [rig.tick() for _ in range(8)]
+
+    assert any(
+        abs(record["applied_command"].turn_rate_rad_min) > 1e-9
+        for record in records
+    )
+    assert rig.entity.float_position[1] < 12.0
+
+
+def test_follower_does_not_jump_to_a_nearby_parallel_scan_line():
+    follower = CoverageRouteFollower(
+        (
+            (0.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (2.0, 0.1, math.pi / 2.0),
+            (0.0, 0.1, math.pi),
+        ),
+        scan_ranges=((0, 1), (2, 3)),
+        r_min=1.0,
+    )
+    spec = ActionSpec(-2.0, 2.0, 0.5, 1.0)
+
+    first = follower.update(
+        position=(1.5, 0.0),
+        heading_rad=0.0,
+        speed_cells_min=1.0,
+        dt_min=1.0,
+        action_spec=spec,
+    )
+    near_next_line = follower.update(
+        position=(1.5, 0.1),
+        heading_rad=0.0,
+        speed_cells_min=1.0,
+        dt_min=1.0,
+        action_spec=spec,
+    )
+
+    assert near_next_line.progress_cells == pytest.approx(first.progress_cells)
+    assert near_next_line.scan_segment_index == 0
+
+
 def test_follower_skips_zero_length_segments_and_honors_asymmetric_turn_limits():
     follower = CoverageRouteFollower(
         ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (4.0, 0.0, 0.0)),
@@ -92,6 +138,52 @@ def test_follower_skips_zero_length_segments_and_honors_asymmetric_turn_limits()
     assert guidance.progress_cells == pytest.approx(0.0)
     assert guidance.next_index == 2
     assert guidance.turn_rate_rad_min == pytest.approx(-0.2)
+
+
+def test_real_sar_imaging_has_entry_and_exit_stability_margins():
+    rig = make_coverage_rig(
+        bbox=(10, 10, 16, 14), start_pose=(6.0, 12.0, 0.0), dt_min=1.0
+    )
+    records = rig.run(max_minutes=240)
+    route = rig.controller.route
+    cumulative = [0.0]
+    for start, end in zip(route, route[1:]):
+        cumulative.append(cumulative[-1] + math.dist(start[:2], end[:2]))
+
+    for scan_start, scan_end in rig.controller.scan_ranges:
+        start_s, end_s = cumulative[scan_start], cumulative[scan_end]
+        imaging = [
+            record
+            for record in records
+            if record["sar_imaging"]
+            and start_s < record["progress_cells"] < end_s
+        ]
+        assert imaging
+        margin = max(1.0 * rig.dt_min * 160.0 / 10.0 / 60.0, 0.8 / 2.0)
+        assert imaging[0]["progress_cells"] - start_s >= margin - 1e-8
+        assert end_s - imaging[-1]["progress_cells"] >= margin - 1e-8
+
+
+def test_safety_intervention_recovers_to_real_sar_footprints():
+    rig = make_coverage_rig(
+        bbox=(10, 10, 16, 14), start_pose=(6.0, 12.0, 0.0), dt_min=1.0
+    )
+    for _ in range(40):
+        rig.tick()
+
+    interrupted = None
+    for _ in range(240):
+        candidate = rig.tick(inject_safety_obstacle=True)
+        if candidate["safety_obstacle_mask_cells"]:
+            interrupted = candidate
+            break
+    resumed = rig.run(max_minutes=240)
+
+    assert interrupted is not None
+    assert interrupted["safety_intervened"] is True
+    assert interrupted["safety_interventions"]
+    assert interrupted["safety_obstacle_mask_cells"]
+    assert any(record["sar_imaging"] and record["footprint"] for record in resumed)
 
 
 def test_follower_projects_only_in_the_current_local_route_window():

@@ -34,11 +34,17 @@ class CoverageRouteFollower:
         *,
         scan_ranges: Sequence[tuple[int, int]] = (),
         r_min: float,
+        along_track_cells: float = 0.8,
+        progress_offset_cells: float = 0.0,
     ) -> None:
         if not route:
             raise ValueError("route must contain at least one pose")
         if not math.isfinite(r_min) or r_min <= 0.0:
             raise ValueError("r_min must be finite and positive")
+        if not math.isfinite(along_track_cells) or along_track_cells <= 0.0:
+            raise ValueError("along_track_cells must be finite and positive")
+        if not math.isfinite(progress_offset_cells) or progress_offset_cells < 0.0:
+            raise ValueError("progress_offset_cells must be finite and non-negative")
         poses = tuple(tuple(map(float, pose)) for pose in route)
         if any(len(pose) != 3 for pose in poses):
             raise ValueError("route poses must be (column, row, heading) triples")
@@ -61,9 +67,12 @@ class CoverageRouteFollower:
         self._cumulative = tuple(cumulative)
         self._length = cumulative[-1]
         self._r_min = float(r_min)
+        self._along_track_cells = float(along_track_cells)
+        self._progress_offset = float(progress_offset_cells)
         self._progress = 0.0
         self._index = 0
         self._complete = False
+        self._scan_is_stable = False
 
     @property
     def poses(self) -> tuple[Pose, ...]:
@@ -79,11 +88,15 @@ class CoverageRouteFollower:
 
     @property
     def progress_cells(self) -> float:
-        return self._progress
+        return self._progress_offset + self._progress
 
     @property
     def scan_segment_index(self) -> int | None:
         return self._scan_segment_for_progress(self._progress)
+
+    @property
+    def scan_is_stable(self) -> bool:
+        return self._scan_is_stable
 
     def update(
         self,
@@ -115,6 +128,14 @@ class CoverageRouteFollower:
         self._index = self._index_for_progress(self._progress)
 
         scan_segment_index = self._scan_segment_for_progress(self._progress)
+        stable_margin = max(speed * dt_min, self._along_track_cells / 2.0)
+        self._scan_is_stable = (
+            scan_segment_index is not None
+            and self._scan_segment_for_progress(
+                self._progress, margin=stable_margin
+            )
+            == scan_segment_index
+        )
         if scan_segment_index is not None:
             scan_start, scan_end = self._scan_ranges[scan_segment_index]
             segment_index = min(max(segment_index, scan_start), scan_end - 1)
@@ -148,7 +169,7 @@ class CoverageRouteFollower:
         )
         next_index = len(self._poses) if self._complete else min(self._index + 1, len(self._poses))
         return CoverageGuidance(
-            progress_cells=self._progress,
+            progress_cells=self.progress_cells,
             next_index=next_index,
             turn_rate_rad_min=turn,
             speed_cells_min=speed,
@@ -162,29 +183,103 @@ class CoverageRouteFollower:
     ) -> tuple[float, int, float]:
         if self._length <= 1e-12:
             return 0.0, 0, math.dist((x, y), self._poses[0][:2])
+        active_segment = self._active_segment_index(self._progress)
+        first_segment, last_segment = self._route_interval(active_segment)
         candidates = []
-        for index, (start, end) in enumerate(zip(self._poses, self._poses[1:])):
-            start_s, end_s = self._cumulative[index], self._cumulative[index + 1]
-            if end_s <= lower + 1e-12 or start_s >= upper - 1e-12:
-                continue
-            dx, dy = end[0] - start[0], end[1] - start[1]
-            length_sq = dx * dx + dy * dy
-            if length_sq <= 1e-18:
-                continue
-            fraction = ((x - start[0]) * dx + (y - start[1]) * dy) / length_sq
-            fraction = min(1.0, max(0.0, fraction))
-            projected = start_s + fraction * math.sqrt(length_sq)
-            if projected < lower - 1e-12 or projected > upper + 1e-12:
-                continue
-            px, py = start[0] + fraction * dx, start[1] + fraction * dy
-            candidates.append((math.dist((x, y), (px, py)), projected, index))
+        for index in range(first_segment, last_segment + 1):
+            candidate = self._project_segment(index, x, y, lower, upper)
+            if candidate is not None:
+                candidates.append(candidate)
+        if self._scan_ranges:
+            next_scan_start = next(
+                (
+                    start
+                    for start, _ in self._scan_ranges
+                    if start > last_segment
+                ),
+                None,
+            )
+            if (
+                next_scan_start is not None
+                and math.dist((x, y), self._poses[next_scan_start][:2])
+                < self._r_min / 2.0 - 1e-9
+            ):
+                next_scan_end = next(
+                    end
+                    for start, end in self._scan_ranges
+                    if start == next_scan_start
+                )
+                for index in range(next_scan_start, next_scan_end):
+                    candidate = self._project_segment(index, x, y, lower, upper)
+                    if candidate is not None:
+                        candidates.append(candidate)
         if not candidates:
             projected = min(max(self._progress, 0.0), self._length)
-            index = min(self._index, max(0, len(self._poses) - 2))
+            index = active_segment
             point = self._interpolate(projected)
             return projected, index, math.dist((x, y), point[:2])
         distance, projected, index = min(candidates, key=lambda item: (item[0], item[1]))
         return projected, index, distance
+
+    def _project_segment(
+        self, index: int, x: float, y: float, lower: float, upper: float
+    ) -> tuple[float, float, int] | None:
+        start, end = self._poses[index], self._poses[index + 1]
+        start_s, end_s = self._cumulative[index], self._cumulative[index + 1]
+        if end_s <= lower + 1e-12 or start_s >= upper - 1e-12:
+            return None
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-18:
+            return None
+        fraction = ((x - start[0]) * dx + (y - start[1]) * dy) / length_sq
+        fraction = min(1.0, max(0.0, fraction))
+        projected = start_s + fraction * math.sqrt(length_sq)
+        if projected < lower - 1e-12 or projected > upper + 1e-12:
+            return None
+        px, py = start[0] + fraction * dx, start[1] + fraction * dy
+        return math.dist((x, y), (px, py)), projected, index
+
+    def _active_segment_index(self, progress: float) -> int:
+        if len(self._poses) < 2:
+            return 0
+        index = bisect_right(self._cumulative, progress + 1e-12) - 1
+        index = min(max(index, 0), len(self._poses) - 2)
+        while (
+            index < len(self._poses) - 1
+            and self._segment_length(index) <= 1e-12
+        ):
+            index += 1
+        if index >= len(self._poses) - 1:
+            index = len(self._poses) - 2
+            while index > 0 and self._segment_length(index) <= 1e-12:
+                index -= 1
+        return index
+
+    def _route_interval(self, active_segment: int) -> tuple[int, int]:
+        if len(self._poses) < 2:
+            return 0, 0
+        # Scan ranges are the route's semantic barriers.  Projection may use
+        # every segment in the active straight line, or the connector interval
+        # between two lines, but it must not use the next parallel line merely
+        # because it is spatially close.
+        for scan_index, (start, end) in enumerate(self._scan_ranges):
+            if start <= active_segment < end:
+                return start, end - 1
+            if active_segment < start:
+                previous_end = self._scan_ranges[scan_index - 1][1] if scan_index else 0
+                return previous_end, start - 1
+        previous_end = self._scan_ranges[-1][1] if self._scan_ranges else 0
+        return previous_end, len(self._poses) - 2
+
+    def _segment_length(self, index: int) -> float:
+        return self._cumulative[index + 1] - self._cumulative[index]
+
+    def _segment_heading(self, index: int) -> float:
+        start, end = self._poses[index], self._poses[index + 1]
+        if self._segment_length(index) <= 1e-12:
+            return end[2]
+        return math.atan2(end[1] - start[1], end[0] - start[0])
 
     def _index_for_progress(self, progress: float) -> int:
         index = bisect_right(self._cumulative, progress + 1e-12) - 1
@@ -205,13 +300,21 @@ class CoverageRouteFollower:
             _wrap_pi(start[2] + _wrap_pi(end[2] - start[2]) * fraction),
         )
 
-    def _scan_segment_for_progress(self, progress: float) -> int | None:
+    def _scan_segment_for_progress(
+        self, progress: float, *, margin: float = 0.0
+    ) -> int | None:
         for scan_index, (start, end) in enumerate(self._scan_ranges):
-            if self._cumulative[start] < progress < self._cumulative[end]:
+            if (
+                self._cumulative[start] + margin
+                < progress
+                < self._cumulative[end] - margin
+            ):
                 return scan_index
         return None
 
     def _segment_tangent(self, index: int) -> float:
+        if len(self._poses) < 2:
+            return self._poses[0][2]
         index = min(max(index, 0), len(self._poses) - 2)
         start, end = self._poses[index], self._poses[index + 1]
         if math.dist(start[:2], end[:2]) <= 1e-12:

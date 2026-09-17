@@ -233,7 +233,10 @@ class CoverageController(HeuristicControllerBase):
         return ControlDecision(command)
 
     def _plan_route(
-        self, observation: ControlObservation, direction: str | None = None
+        self,
+        observation: ControlObservation,
+        direction: str | None = None,
+        progress_offset_cells: float = 0.0,
     ) -> None:
         assert self.task is not None
         start_pose = (*observation.self_state.position, observation.self_state.heading_rad)
@@ -264,8 +267,12 @@ class CoverageController(HeuristicControllerBase):
             direction,
             along_track_cells=self.sar_along_track_cells,
         )
-        offset = len(transit) - 1
+        # The navigator reaches the scan entry position, but its final heading
+        # is only a transit tangent.  Let the first scan segment carry the
+        # physical heading transition while the SAR gate remains closed.
+        transit[-1] = coverage.waypoints[0]
         route = tuple(transit) + tuple(coverage.waypoints[1:])
+        offset = len(transit) - 1
         scan_ranges = tuple(
             (offset + start, offset + end) for start, end in coverage.scan_ranges
         )
@@ -275,6 +282,7 @@ class CoverageController(HeuristicControllerBase):
             coverage.swaths,
             observation.planning_obstacle_mask,
             observation.planning_map_version,
+            progress_offset_cells=progress_offset_cells,
         )
         self.phase = CoveragePhase.TRANSIT_ASTAR
 
@@ -289,6 +297,7 @@ class CoverageController(HeuristicControllerBase):
         assert self.task is not None
         if self.task.region_bbox is None:
             return
+        progress_offset_cells = self.follower.progress_cells
         width = self.task.region_bbox.col_end - self.task.region_bbox.col_start
         height = self.task.region_bbox.row_end - self.task.region_bbox.row_start
         current = self._direction or ("horizontal" if width >= height else "vertical")
@@ -299,7 +308,11 @@ class CoverageController(HeuristicControllerBase):
         self.scan_swaths = ()
         self.planning_map_version = None
         self._route_status = "pending"
-        self._plan_route(observation, direction=self._direction)
+        self._plan_route(
+            observation,
+            direction=self._direction,
+            progress_offset_cells=progress_offset_cells,
+        )
 
     def _refresh_invalidated_route(self, observation: ControlObservation) -> None:
         if observation.planning_map_version == self.planning_map_version:
@@ -321,6 +334,7 @@ class CoverageController(HeuristicControllerBase):
 
     def _replan_unflown_suffix(self, observation: ControlObservation) -> None:
         assert self.follower is not None
+        progress_offset_cells = self.follower.progress_cells
         suffix_start = self._next_unconsumed_scan_start()
         suffix = self.route[suffix_start:]
         if not suffix:
@@ -343,6 +357,18 @@ class CoverageController(HeuristicControllerBase):
             self.r_min,
             observation.planning_map_version,
         )
+        first_scan_range_index = next(
+            index
+            for index, (start, end) in enumerate(self.scan_ranges)
+            if end > suffix_start
+        )
+        scan_entry = suffix[0]
+        transit[-1] = (
+            scan_entry[0],
+            scan_entry[1],
+            self.scan_swaths[first_scan_range_index].heading,
+        )
+        suffix = (transit[-1],) + suffix[1:]
         offset = len(transit) - 1
         scan_ranges = tuple(
             (
@@ -350,12 +376,12 @@ class CoverageController(HeuristicControllerBase):
                 offset + end - suffix_start,
             )
             for start, end in self.scan_ranges
-            if end >= suffix_start
+            if end > suffix_start
         )
         scan_swaths = tuple(
             swath
             for (start, end), swath in zip(self.scan_ranges, self.scan_swaths)
-            if end >= suffix_start
+            if end > suffix_start
         )
         route = tuple(transit) + suffix[1:]
         self._set_route(
@@ -364,6 +390,7 @@ class CoverageController(HeuristicControllerBase):
             scan_swaths,
             observation.planning_obstacle_mask,
             observation.planning_map_version,
+            progress_offset_cells=progress_offset_cells,
         )
         self.phase = CoveragePhase.TRANSIT_ASTAR
 
@@ -384,6 +411,7 @@ class CoverageController(HeuristicControllerBase):
         scan_swaths: Sequence[ScanSwath],
         obstacle_mask: object,
         planning_map_version: int,
+        progress_offset_cells: float = 0.0,
     ) -> None:
         blocked = self._route_blocked(route, obstacle_mask)
         if blocked is not None:
@@ -398,6 +426,8 @@ class CoverageController(HeuristicControllerBase):
             self.route,
             scan_ranges=scan_ranges,
             r_min=self.r_min,
+            along_track_cells=self.sar_along_track_cells,
+            progress_offset_cells=progress_offset_cells,
         )
         self.planning_map_version = planning_map_version
         self._route_revision += 1
@@ -425,6 +455,8 @@ class CoverageController(HeuristicControllerBase):
             self.phase = (
                 CoveragePhase.SCANNING
                 if (
+                    self.follower.scan_is_stable
+                    and
                     heading_error <= self.sar_heading_tolerance_rad
                     and guidance.cross_track_error_cells
                     <= self.cross_track_tolerance_cells

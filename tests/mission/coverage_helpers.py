@@ -1,6 +1,6 @@
 """Independent persistent-coverage oracle and real-motion test rig."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import numpy as np
@@ -52,7 +52,7 @@ class CoverageRig:
     current_time: float = 0.0
     _progress_cells: float = 0.0
 
-    def tick(self) -> dict:
+    def tick(self, *, inject_safety_obstacle: bool = False) -> dict:
         before = self.entity.pose
         observation = self.observations.build(
             self.entity,
@@ -67,7 +67,64 @@ class CoverageRig:
             dt_min=self.dt_min,
         )
         requested = self.controller.act(observation).command
-        safe = self.safety.apply(requested, observation, self.dt_min)
+        safety_obstacle_mask_cells = []
+        safety_observation = observation
+        if inject_safety_obstacle:
+            requested_cells = self._command_cells(observation, requested)
+            clipped = replace(
+                requested,
+                turn_rate_rad_min=self.safety._clip(
+                    requested.turn_rate_rad_min,
+                    self.safety._action_spec.min_turn_rate_rad_min,
+                    self.safety._action_spec.max_turn_rate_rad_min,
+                ),
+                speed_cells_min=self.safety._clip(
+                    requested.speed_cells_min,
+                    self.safety._action_spec.min_speed_cells_min,
+                    self.safety._action_spec.max_speed_cells_min,
+                ),
+            )
+            alternatives = [clipped]
+            for turn_rate in (
+                self.safety._action_spec.max_turn_rate_rad_min,
+                self.safety._action_spec.min_turn_rate_rad_min,
+                0.0,
+            ):
+                alternatives.append(
+                    replace(
+                        requested,
+                        turn_rate_rad_min=turn_rate,
+                        speed_cells_min=self.safety._action_spec.min_speed_cells_min,
+                    )
+                )
+            current_cell = (
+                math.floor(observation.self_state.position[0]),
+                math.floor(observation.self_state.position[1]),
+            )
+            for col, row in requested_cells:
+                if (col, row) == current_cell:
+                    continue
+                if not (0 <= col < observation.planning_obstacle_mask.shape[0]):
+                    continue
+                if not (0 <= row < observation.planning_obstacle_mask.shape[1]):
+                    continue
+                mask = np.array(observation.planning_obstacle_mask, copy=True)
+                mask[col, row] = True
+                candidate_observation = replace(
+                    observation, planning_obstacle_mask=mask
+                )
+                if self.safety._motion_blocked(
+                    clipped, candidate_observation, self.dt_min
+                ) and any(
+                    not self.safety._motion_blocked(
+                        alternative, candidate_observation, self.dt_min
+                    )
+                    for alternative in alternatives[1:]
+                ):
+                    safety_observation = candidate_observation
+                    safety_obstacle_mask_cells.append([col, row])
+                    break
+        safe = self.safety.apply(requested, safety_observation, self.dt_min)
         result = self.executor.execute(self.entity, safe, self.dt_min)
         footprint = []
         if (
@@ -108,6 +165,9 @@ class CoverageRig:
             "distance_cells": result.distance_cells,
             "max_speed_cells_min": result.applied_command.speed_cells_min,
             "obstacle_intersection": obstacle_intersection,
+            "safety_intervened": bool(safe.interventions),
+            "safety_interventions": safe.interventions,
+            "safety_obstacle_mask_cells": safety_obstacle_mask_cells,
         }
         self.current_time += self.dt_min
         self.state.current_time = self.current_time
@@ -122,6 +182,21 @@ class CoverageRig:
             if self.controller.follower is not None and self.controller.follower.is_complete:
                 break
         return records
+
+    def _command_cells(self, observation, command):
+        mid_heading = (
+            observation.self_state.heading_rad
+            + command.turn_rate_rad_min * self.dt_min / 2.0
+        )
+        distance = command.speed_cells_min * self.dt_min
+        end_col = observation.self_state.position[0] + distance * math.cos(mid_heading)
+        end_row = observation.self_state.position[1] + distance * math.sin(mid_heading)
+        return SafetyEnvelope._traversed_cells(
+            observation.self_state.position[0],
+            observation.self_state.position[1],
+            end_col,
+            end_row,
+        )
 
 
 def make_coverage_rig(*, bbox, start_pose, swath_cells=1.5, dt_min=1.0):
