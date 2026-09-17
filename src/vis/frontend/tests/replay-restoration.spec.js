@@ -356,6 +356,14 @@ test("real replay artifacts drive event-timed visual evidence", async ({ page },
   expect(canvasEvidence.colors).toBeGreaterThan(4);
   await page.screenshot({ path: screenshotPath(testInfo, "08-final-map"), fullPage: true });
 
+  for (const [index, name] of [[119, "09-v07-t120"], [479, "10-v07-t480"]]) {
+    await page.locator(".timeline-control input").fill(String(index));
+    await expect(page.locator(".playback-readout").first()).toContainText(`${index + 1} /`);
+    await expect.poll(async () => page.locator(".connection-state").textContent()).not.toContain("载入目标帧");
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({ path: screenshotPath(testInfo, name), fullPage: true });
+  }
+
   const exportButton = page.locator(".export-mp4-btn");
   await expect(exportButton).toBeEnabled();
   const downloadPromise = page.waitForEvent("download", { timeout: 180_000 });

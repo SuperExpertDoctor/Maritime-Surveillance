@@ -415,6 +415,35 @@ def _phase_metrics(frames: Iterable[dict]) -> dict:
     return phases
 
 
+def _observed_phase_names(frames: Iterable[dict]) -> set[str]:
+    """Map controller phases to the semantic phase gates used by validation."""
+    observed = set()
+    for frame in frames:
+        for uav in frame.get("uavs", ()):
+            visual = uav.get("task_visual") or {}
+            task_type = visual.get("task_type")
+            phase = visual.get("phase")
+            if task_type == "coverage":
+                if phase in {"transit", "transit_astar"}:
+                    observed.add("coverage_transit")
+                if phase in {"align_scan", "scanning"}:
+                    observed.add("coverage_scan")
+            elif task_type == "probe":
+                if phase == "baseline":
+                    observed.add(
+                        "probe_baseline" if visual.get("observation_started") else "probe_approach"
+                    )
+                elif phase in {"near", "closing"}:
+                    observed.add("probe_near")
+            elif task_type == "track" and phase == "tracking":
+                observed.add("track_active")
+            if task_type == "return" or phase == "return":
+                observed.add("return")
+            if task_type == "holding" or phase == "holding":
+                observed.add("holding")
+    return observed
+
+
 def _write_json(path: Path, payload: dict) -> None:
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -559,8 +588,9 @@ def run_scenario(name: str, *, seed: int, steps: int, output_dir, transport: str
         "audit_issue_count": len(all_issues),
         "not_observed": {},
     }
+    observed_phases = _observed_phase_names(all_frames)
     for expected in ("coverage_transit", "coverage_scan", "probe_approach", "probe_baseline", "probe_near", "track_active", "return", "holding"):
-        if expected not in metrics["phases"]:
+        if expected not in observed_phases:
             metrics["not_observed"][expected] = "not observed within requested steps"
     _write_json(output_dir / "metrics.json", metrics)
 

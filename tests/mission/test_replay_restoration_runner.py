@@ -65,6 +65,34 @@ def test_runner_refuses_existing_manifest(tmp_path):
         run_scenario("V01", seed=42, steps=1, output_dir=output_dir, transport="fixture")
 
 
+def test_runner_normalizes_controller_phases_for_observation_gates():
+    from scripts.replay_restoration_scenarios import _observed_phase_names
+
+    observed = _observed_phase_names([{
+        "uavs": [
+            {"task_visual": {"task_type": "coverage", "phase": "transit_astar"}},
+            {"task_visual": {"task_type": "coverage", "phase": "align_scan"}},
+            {"task_visual": {"task_type": "probe", "phase": "baseline", "observation_started": False}},
+            {"task_visual": {"task_type": "probe", "phase": "baseline", "observation_started": True}},
+            {"task_visual": {"task_type": "probe", "phase": "near", "observation_started": True}},
+            {"task_visual": {"task_type": "track", "phase": "tracking"}},
+            {"task_visual": {"task_type": "return", "phase": "return"}},
+            {"task_visual": {"task_type": "holding", "phase": "holding"}},
+        ],
+    }])
+
+    assert observed == {
+        "coverage_transit",
+        "coverage_scan",
+        "probe_approach",
+        "probe_baseline",
+        "probe_near",
+        "track_active",
+        "return",
+        "holding",
+    }
+
+
 def test_v07_fixture_runner_drives_assessment_return_and_handoff(tmp_path):
     from scripts.replay_restoration_scenarios import run_scenario
 
