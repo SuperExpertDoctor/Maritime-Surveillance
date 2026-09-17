@@ -107,6 +107,15 @@ class CoverageController(HeuristicControllerBase):
         self._observation_spec = observation_spec
         self._action_spec = action_spec
         self.navigator = navigator or AStarNavigator()
+        if planner is not None and not math.isclose(
+            float(getattr(planner, "near_range", math.nan)),
+            float(near_range),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                "custom CoveragePlanner near_range must match near_range_cells"
+            )
         self.planner = planner or CoveragePlanner(near_range=near_range)
         self.swath_width = float(swath_width)
         self.r_min = float(r_min)
@@ -293,6 +302,7 @@ class CoverageController(HeuristicControllerBase):
             self._replan_unflown_suffix(observation)
         else:
             self.planning_map_version = observation.planning_map_version
+            self._route_status = "ready"
 
     def _replan_unflown_suffix(self, observation: ControlObservation) -> None:
         assert self.follower is not None

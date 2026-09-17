@@ -10,6 +10,7 @@ from src.control.common.contracts import (
     ControlObservation,
     ControlOwner,
     ControlTask,
+    CoverageExecutionConfig,
     ObservationSpec,
     OperationMode,
     SensorMode,
@@ -19,6 +20,7 @@ from src.control.heuristic.coverage import CoverageController
 from src.env.sar_sensor import SARSensor
 from src.schedule.datatypes import BBox, GridCoord
 from src.utils.coverage_planner import CoveragePlanner
+import pytest
 
 
 def test_alternating_scan_direction_covers_same_side_of_world():
@@ -112,3 +114,22 @@ def test_controller_emits_scan_direction_heading_and_origin_for_each_swath():
     assert command.sar_look_direction == swath.look_direction
     assert command.sar_scan_heading_rad == swath.heading
     assert command.sar_scan_origin == swath.start
+
+
+def test_controller_rejects_planner_with_inconsistent_near_range():
+    execution = CoverageExecutionConfig(
+        swath_width_cells=1.5,
+        near_range_cells=0.25,
+        min_turn_radius_cells=1.0,
+        along_track_cells=.8,
+        heading_tolerance_rad=math.radians(2.0),
+        cross_track_tolerance_cells=.2,
+    )
+
+    with pytest.raises(ValueError, match="near_range"):
+        CoverageController(
+            observation_spec=ObservationSpec("control-observation/v1", 11),
+            action_spec=ActionSpec(-2.0, 2.0, .5, 1.0),
+            planner=CoveragePlanner(sample_step=.5, near_range=.5),
+            coverage_execution=execution,
+        )

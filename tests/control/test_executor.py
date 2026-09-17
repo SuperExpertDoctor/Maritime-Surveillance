@@ -114,6 +114,32 @@ def test_executor_reports_real_heading_error_and_suppresses_imaging(uav):
     assert not uav.sar_imaging
 
 
+def test_executor_rejects_parallel_sar_offset_and_off_clears_prior_footprint(uav):
+    uav.sar_footprint = [GridCoord(10, 10)]
+    command = ControlCommand(
+        0.0,
+        0.25,
+        SensorMode.SAR,
+        OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(10.0, 10.5),
+    )
+
+    UAVDynamicsExecutor().execute(uav, command, dt_min=1.0)
+
+    assert uav.sar_cross_track_error_cells > 0.2
+    assert not uav.sar_imaging
+
+    UAVDynamicsExecutor().execute(
+        uav,
+        ControlCommand(0.0, 0.25, SensorMode.OFF, OperationMode.TRANSIT),
+        dt_min=1.0,
+    )
+
+    assert uav.sar_footprint == []
+
+
 def test_executor_maps_probe_operation_to_tracking_status(uav):
     command = ControlCommand(
         turn_rate_rad_min=0.0,

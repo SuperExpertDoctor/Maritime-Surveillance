@@ -246,6 +246,7 @@ def test_coverage_updates_the_map_version_when_unflown_route_is_still_safe(
 
     assert started_controller.navigator.plan_calls == 1
     assert started_controller.planning_map_version == 2
+    assert started_controller.route_snapshot().status == "ready"
 
 
 def test_coverage_rejects_a_continuous_route_segment_that_crosses_a_blocked_cell(
@@ -288,6 +289,8 @@ def test_coverage_rejects_a_new_obstacle_on_an_unflown_scan_leg(
 
     with pytest.raises(CoverageRouteBlockedError, match="coverage route blocked"):
         started_controller.act(blocked_observation)
+
+    assert started_controller.route_snapshot().status == "pending"
 
 
 def test_coverage_replan_starts_at_next_unconsumed_scan_band(

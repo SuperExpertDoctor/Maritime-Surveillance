@@ -69,7 +69,9 @@ class UAVEntity:
         self.sar_heading_tolerance_rad = math.radians(2.0)
         self.sar_imaging = False
         self.sar_scan_heading_rad: float | None = None
+        self.sar_scan_origin: tuple[float, float] | None = None
         self.sar_heading_error_deg = 0.0
+        self.sar_cross_track_error_cells = 0.0
         self.sar_aperture_track: list[tuple[float, float]] = []
         self.sar_footprint: list[GridCoord] = []
         self.eo_fov: FOVCone | None = None
@@ -502,8 +504,11 @@ class UAVEntity:
     def _clear_sar_acquisition(self) -> None:
         self.sar_imaging = False
         self.sar_scan_heading_rad = None
+        self.sar_scan_origin = None
         self.sar_heading_error_deg = 0.0
+        self.sar_cross_track_error_cells = 0.0
         self.sar_aperture_track = []
+        self.sar_footprint = []
 
     def _step_tracking(
         self,
