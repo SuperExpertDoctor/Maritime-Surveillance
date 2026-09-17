@@ -250,6 +250,7 @@ class TaskAllocator:
             "trigger_reason": decision.reason,
             "affected_uav_ids": sorted(decision.affected_uavs),
             "trigger_information_version": decision.information_version,
+            "reviewer_summary": snapshot.reviewer_summary,
             "prompt_candidate_ids": [
                 candidate.get("task_id")
                 for candidate in prompt_snapshot.get("candidates", [])
