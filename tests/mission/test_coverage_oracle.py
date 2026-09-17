@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.mission.coverage_helpers import oracle_coverage
+from tests.mission.coverage_helpers import make_coverage_rig, oracle_coverage
 
 
 EVENTS = [
@@ -35,12 +35,51 @@ def test_oracle_deduplicates_cells_and_is_independent_of_event_order():
     repeated = EVENTS + [
         {"time": 1, "source": "sar", "cells": [(0, 1), (1, 0)]},
     ]
-    expected = oracle_coverage(
+    expected = {
+        "covered_cells": 2,
+        "covered_area_km2": 200,
+        "coverage_pct": 50.0,
+    }
+    deduplicated = [event for event in EVENTS if event["time"] != 59]
+    assert oracle_coverage(
         repeated, DOMAIN, now_min=60, window_min=60, cell_size_km=10
-    )
+    ) == expected
+    assert oracle_coverage(
+        deduplicated, DOMAIN, now_min=60, window_min=60, cell_size_km=10
+    ) == expected
     assert oracle_coverage(
         list(reversed(repeated)), DOMAIN, now_min=60, window_min=60, cell_size_km=10
     ) == expected
+
+
+@pytest.mark.parametrize("dt_min", [1.0, 0.25])
+def test_coverage_rig_records_real_motion_and_time_state(dt_min):
+    rig = make_coverage_rig(
+        bbox=(10, 10, 16, 14),
+        start_pose=(6.0, 12.0, 0.0),
+        dt_min=dt_min,
+    )
+    before_fuel = rig.entity.fuel_remaining_pct
+    record = rig.tick()
+
+    assert record["before_pose"] != record["after_pose"]
+    assert record["distance_cells"] == pytest.approx((160 / 10 / 60) * dt_min)
+    assert rig.current_time == pytest.approx(dt_min)
+    assert rig.state.current_time == pytest.approx(dt_min)
+    assert rig.entity.fuel_remaining_pct < before_fuel
+    assert record["sar_imaging"] is True
+    assert set(record) == {
+        "before_pose",
+        "after_pose",
+        "phase",
+        "applied_command",
+        "footprint",
+        "progress_cells",
+        "sar_imaging",
+        "distance_cells",
+        "max_speed_cells_min",
+        "obstacle_intersection",
+    }
 
 
 def test_oracle_returns_null_percentage_for_an_empty_domain():

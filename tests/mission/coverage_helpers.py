@@ -7,7 +7,6 @@ import numpy as np
 
 from src.control.common.contracts import (
     ActionSpec,
-    BaseObservation,
     ControlMode,
     ControlOwner,
     ControlCommand,

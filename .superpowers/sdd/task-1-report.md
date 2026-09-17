@@ -75,3 +75,37 @@ The audit JSON records both original log paths, seed 42, common end time 177, th
 - The rig controller is intentionally a deterministic straight-line command source. It is a real-motion integration fixture, not the future closed-loop scan planner; successful imaging and full-bbox coverage remain deferred to T04/T05.
 - The historical source JSONL files are not present in this checkout, so the baseline JSON preserves the required paths and recorded audit values without reconstructing or rerunning those logs.
 - The full repository regression was not rerun for this test-only task; the contracted T01 command and focused smoke/compile checks were run.
+
+## T01 Follow-up Fix Evidence
+
+Reviewer issue 1 is fixed: the repeated-event test now compares the duplicated event input and its reversed order directly to the exact expected result (`2` cells, `200` km2, `50.0` percent), and also compares a deduplicated input to that same result.
+
+Reviewer issue 2 is fixed: a committed parametrized test exercises `CoverageRig` at both `dt_min=1.0` and `dt_min=0.25`. It verifies executor-driven pose movement, positive distance, simulation/state time advancement, fuel consumption, SAR imaging, and the complete contracted tick-key set. It intentionally does not assert full-bbox imaging success; that remains deferred to T04/T05.
+
+Red command:
+
+```text
+python -m pytest tests/mission/test_coverage_oracle.py -q
+```
+
+Actual focused red output after adding the new test with an intentionally incorrect distance expectation:
+
+```text
+..FF..                                                                   [100%]
+2 failed, 4 passed in 0.39s
+```
+
+Green command:
+
+```text
+python -m pytest tests/mission/test_coverage_oracle.py -q
+```
+
+Actual focused green output:
+
+```text
+......                                                                   [100%]
+6 passed in 0.36s
+```
+
+Self-review: the follow-up does not modify production algorithms, user-provided input documents, or `.superpowers/sdd/progress.md`; the unused `BaseObservation` import is removed. The red failure was an intentionally wrong test expectation used to document the TDD cycle, and the final assertion derives distance from the required `160 / 10 / 60` cells/min rate.
