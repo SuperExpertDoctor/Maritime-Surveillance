@@ -3077,8 +3077,8 @@ class SimulationEngine:
                         sm.scan_cell(cell, current_time, is_track=False),
                         current_time,
                     )
-                sm.coverage_metrics.record_sar(cells, at_min=current_time)
                 if cells:
+                    sm.coverage_metrics.record_sar(cells, at_min=current_time)
                     task = self.control_coordinator.active_task(uav.id)
                     lease = self.control_coordinator.current_lease(uav.id)
                     sm.add_event("sar_scan", {

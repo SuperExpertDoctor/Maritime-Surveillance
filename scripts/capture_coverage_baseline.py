@@ -107,7 +107,6 @@ def _event_identity(episode_id: str, event: dict) -> tuple:
         event.get("type"),
         event.get("time"),
         data.get("uav_id"),
-        _stable_hash(event),
     )
 
 
@@ -149,7 +148,7 @@ def _capture_seed(scenario: str, seed: int, steps: int, output_dir: Path) -> dic
     }
     _write_json(manifest_path, manifest)
 
-    seen_events: set[tuple] = set()
+    seen_events: dict[tuple, str] = {}
     frame_count = 0
     event_count = 0
 
@@ -160,10 +159,13 @@ def _capture_seed(scenario: str, seed: int, steps: int, output_dir: Path) -> dic
         frame_count += 1
         for event in frame.get("events", ()):
             identity = _event_identity(engine.episode_id, event)
+            payload = _stable_json(event)
             if identity in seen_events:
+                if seen_events[identity] != payload:
+                    raise ValueError(f"conflicting event payload for identity {identity!r}")
                 continue
-            seen_events.add(identity)
             _append_jsonl(events_path, event)
+            seen_events[identity] = payload
             event_count += 1
 
     status = "completed"

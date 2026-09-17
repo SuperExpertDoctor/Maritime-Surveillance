@@ -227,22 +227,54 @@ def test_duplicate_sar_cells_refresh_legacy_information_once_per_uav(monkeypatch
     assert sm.coverage_metrics.last_scan_matrix()[10, 10] == 1.0
 
 
-def test_empty_sar_footprint_advances_metric_record_time_without_an_event():
+def test_empty_sar_footprint_preserves_metrics_while_engine_time_advances(monkeypatch):
     engine = _engine(uav_count=1)
     sm = engine.allocator.sm
     uav = engine.uavs[0]
-    uav.status = "searching"
-    uav.sensor_mode = "sar"
-    uav.sar_imaging = True
-    uav.sar_look_direction = "right"
     uav.sar_sensor = _FixedSar(())
+    metric = sm.coverage_metrics
+    metric.record_sar(((10, 10),), at_min=0.0)
+    before = sm.get_persistent_coverage_stats()
+    scans = metric.last_scan_matrix()
+    sensor_boundary = engine._update_sensors_and_detections
+    observed_times = []
 
-    sm.current_time = 10.0
-    engine._update_sensors_and_detections(10.0)
+    def empty_scan(current_time):
+        uav.status = "searching"
+        uav.sensor_mode = "sar"
+        uav.sar_imaging = True
+        uav.sar_look_direction = "right"
+        observed_times.append(current_time)
+        sensor_boundary(current_time)
 
+    monkeypatch.setattr(engine, "_update_sensors_and_detections", empty_scan)
+    engine.step()
+
+    assert observed_times == [1.0]
+    assert engine.clock.time == sm.current_time == 1.0
     assert not any(event["type"] == "sar_scan" for event in sm.get_recent_events(0.0))
-    with pytest.raises(ValueError, match="earlier"):
-        sm.coverage_metrics.record_sar(((10, 10),), at_min=9.0)
+    np.testing.assert_array_equal(metric.last_scan_matrix(), scans)
+    # A pure snapshot at the last real scan time remains legal: no empty
+    # observation may move the metric's internal monotonic-time boundary.
+    assert metric.snapshot(now_min=0.0, feasible_mask=sm.get_searchable_mask()) == before
+    after = sm.get_persistent_coverage_stats()
+    assert after == {**before, "as_of_min": 1.0}
+
+
+@pytest.mark.parametrize("class_name", ["CoverageFixtureGateway", "_FixtureGateway"])
+def test_fixture_hash_covers_both_defining_sources(monkeypatch, class_name):
+    from scripts import persistent_coverage_scenarios as scenarios
+
+    before = scenarios.coverage_fixture_source_hash()
+    getsource = scenarios.inspect.getsource
+    changed_class = getattr(scenarios, class_name)
+
+    def changed_source(obj):
+        source = getsource(obj)
+        return source + "\n# changed defining source\n" if obj is changed_class else source
+
+    monkeypatch.setattr(scenarios.inspect, "getsource", changed_source)
+    assert scenarios.coverage_fixture_source_hash() != before
 
 
 def test_shared_coverage_scenarios_and_constraint_aware_fixture():

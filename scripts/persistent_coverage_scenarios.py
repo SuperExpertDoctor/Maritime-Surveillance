@@ -95,7 +95,9 @@ class CoverageFixtureGateway(_FixtureGateway):
 
 
 def coverage_fixture_source_hash() -> str:
-    source = inspect.getsource(CoverageFixtureGateway).encode("utf-8")
+    source = "\n".join(
+        inspect.getsource(cls) for cls in (_FixtureGateway, CoverageFixtureGateway)
+    ).encode("utf-8")
     return hashlib.sha256(source).hexdigest()
 
 

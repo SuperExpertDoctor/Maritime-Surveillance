@@ -168,3 +168,50 @@ def test_baseline_startup_failure_is_reported_without_inventing_an_end_time(tmp_
     assert manifest["actual_end_time_min"] is None
     assert manifest["completed_steps"] == manifest["frame_count"] == 0
     assert "engine initialization failed" in manifest["stopped_reason"]
+
+
+def test_baseline_event_identity_is_episode_type_time_and_uav_only():
+    from scripts.capture_coverage_baseline import _event_identity
+
+    event = {"type": "sar_scan", "time": 1.0, "data": {"uav_id": "U1", "cells": [[1, 1]]}}
+    identity = _event_identity("episode-1", event)
+    assert identity == ("episode-1", "sar_scan", 1.0, "U1")
+    changed = {**event, "data": {**event["data"], "cells": [[2, 2]]}}
+    assert _event_identity("episode-1", changed) == identity
+    assert _event_identity("episode-2", event) != identity
+    assert _event_identity("episode-1", {**event, "type": "other"}) != identity
+    assert _event_identity("episode-1", {**event, "time": 2.0}) != identity
+    assert _event_identity("episode-1", {**event, "data": {"uav_id": "U2"}}) != identity
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_baseline_deduplicates_equal_events_but_fails_conflicting_payloads(
+    tmp_path, monkeypatch, conflicting,
+):
+    from scripts import capture_coverage_baseline as capture
+
+    real_capture = capture.capture_frame
+
+    def controlled_events(engine, **kwargs):
+        frame = real_capture(engine, **kwargs)
+        cells = [[2, 2]] if conflicting and engine.clock.time > 0 else [[1, 1]]
+        frame["events"] = [
+            {"type": "sar_scan", "time": 0.0, "data": {"uav_id": "U1", "cells": cells}},
+            {"type": "sar_scan", "time": 0.0, "data": {"uav_id": "U2", "cells": [[1, 1]]}},
+        ]
+        return frame
+
+    monkeypatch.setattr(capture, "capture_frame", controlled_events)
+    summary = capture.capture_baseline(
+        scenario="coverage-open-water", seeds=(42,), steps=1, output_dir=tmp_path,
+    )
+    run = summary["runs"][0]
+    assert run["status"] == ("failed" if conflicting else "completed")
+    assert summary["status"] == ("incomplete" if conflicting else "completed")
+    events = [json.loads(line) for line in (tmp_path / "seed-42/events.jsonl").read_text().splitlines()]
+    assert len(events) == run["event_count"] == 2
+    assert {event["data"]["uav_id"] for event in events} == {"U1", "U2"}
+    if conflicting:
+        assert "conflicting event payload" in run["stopped_reason"]
+        frames = [json.loads(line) for line in (tmp_path / "seed-42/frames.jsonl").read_text().splitlines()]
+        assert frames[-1]["events"][0]["data"]["cells"] == [[2, 2]]
