@@ -237,3 +237,139 @@ extension interface.
   `python -m pytest tests/vis/test_replay_adapter.py tests/env/test_server_runtime.py -q`
   -> `16 passed`; frontend replay/legacy/mixed gate -> `16 passed`; `npm run build`
   -> Vite build passed.
+
+## T10 Real-Engine Scenario Runner
+
+- Added `build_scenario`, `capture_frame`, `run_scenario`, and the
+  `validate_replay_restoration.py` CLI.  The runner advances only through
+  `SimulationEngine.step()`, rejects a repeated output manifest, preserves
+  fixture/live role bindings, writes canonical event keys, and stops with a
+  blocked result when simulation time does not advance.
+- The frame audit checks finite entity and sensor geometry, route continuity,
+  controller generation, monotonic time, and bounded metric values.  The
+  first runner gate passed with `5 passed` in
+  `tests/mission/test_replay_restoration_runner.py`.
+- Real-engine smoke artifacts passed:
+  `outputs/validation/replay-restoration/t10-v01` (2/2 frames) and
+  `outputs/validation/replay-restoration/t10-v03` (20/20 frames).  They are
+  production frame-builder outputs, not static visual fixtures.
+
+## T11 Sensing, Information, and Runtime Commands
+
+- Added cross-module integration coverage for AIS toggle, passive sensing
+  gates/aggregation, information version and fairness propagation, contact
+  assessment, operator intent lifecycle, and vessel/red lifecycle.  The two
+  new feature integration modules passed `10 passed`.
+- The public regression set for information, visibility, maritime acceptance,
+  prompt fairness, passive sensing, and vessel boundaries passed `10 passed`.
+  The feature suite later produced finished 120-minute real-engine runs for
+  `ais-toggle`, `passive-gates`, `information-loop`,
+  `contact-assessment`, `intent-lifecycle`, and `vessel-red-lifecycle` under
+  `outputs/validation/replay-restoration/t15-features-42-20260917`.
+- Negative paths remain explicit: AIS-off creates no new AIS sample, one
+  passive bearing does not release a position, stale intent revisions are
+  rejected, and vessel/red failures do not leak deleted or hidden truth into
+  blue prompts.
+
+## T12 Safety, Recovery, and Handoff
+
+- Connected live controller route snapshots to conflict detection and kept
+  conflict handling edge-triggered.  Shared departure prefixes are ignored
+  only while routes are geometrically identical; after divergence, the
+  requested separation is enforced.  A persistent conflict pair does not
+  reset a coverage follower on every tick.  Coverage yields to a probe/track
+  entry when the real conflict requires it, while BC/RL ownership remains
+  untouched.  The follow-up regression is committed as `be1eead`.
+- T12 gate:
+  `LONGCAT_API_KEY=t12-control-gate-final2 python -m pytest
+  tests/mission/test_feature_control_integration.py tests/mission/test_handoff.py
+  tests/control/test_simulation_ownership.py tests/control/test_safety.py
+  tests/env/test_storm_avoidance.py tests/utils/test_conflict_detector.py
+  tests/env/test_goal2_foundation.py -q`
+  -> `72 passed in 32.05s`.
+- Latest V07 fixture run:
+  `outputs/validation/replay-restoration/t12-v07-480-20260917` has
+  `480/480` frames, `sim_time=480.0`, `audit_issue_count=0`, and the latest
+  manifest commit `be1eead`.  Its observed causal chain is:
+  `assessment_applied` at t24, fixture fuel preparation at t25, fuel warning
+  and `handoff_required` at t26, `handoff_assignment_committed` at t26, and
+  `handoff_eo_lock_acquired` at t27.  The manifest records the source and
+  successor UAV positions used for the observed-contact fixture.
+- The same gate covers dynamic storm route revision and unaffected task
+  preservation, real return/refuel/reset/redispatch, capacity exhaustion with
+  `no_safe_recovery_path`, sensor-unavailable/normal-return distinction, and
+  the no-omniscient-track regressions.  No instant refuelling or synthetic
+  frame was used.
+- Merge review also covered the shared-prefix exception: the detector now
+  checks the first geometrically divergent prediction step instead of waiting
+  one tick.  The focused conflict/control regression after that fix passed
+  `12 passed` in `18.81s` (`fb43889`).
+
+## T13 Reviewer, Metrics, Memory, and Providers
+
+- The T13 gate passed `72 passed in 3.32s`.  Reviewer summaries reach the next
+  mission prompt while reviewer failure keeps the unified scheduler; evaluator
+  outputs retain `None` for missing denominators and mark empty episodes
+  invalid; all episode logger streams receive the episode ID.
+- Runtime memory selection is resolved once at episode initialization.  The
+  `baseline`/`active`/explicit-version and unknown-version paths, reset
+  behavior, cleanup protection, and `--memory-root`/`--memory-version` parity
+  are covered.  The provider contract runs factory -> observation -> action ->
+  SafetyEnvelope -> executor, and absent providers fail explicitly.
+- The temporary memory tests exercise propose/save/validate/report/activate/
+  select/rollback with holdout checks.  No valid production live history was
+  available in this run, so I14 remains `待验证`; fixture episodes are not
+  eligible for formal activation or the production prompt.
+
+## T14 Browser and Visual Acceptance
+
+- `npm run build` passed.  The existing static acceptance suite passed
+  `13 passed`.  The dedicated replay configuration passed `7 passed` using
+  the real artifacts in
+  `outputs/validation/replay-restoration/t14-browser-20260917`.
+- The browser input directory records eight source entries and SHA-256 values
+  for V01/V03 smoke data, V06 SAR data, and the latest V07 EO/handoff data in
+  `sources.json`.  The test waits for the target frame, fonts, and image
+  completion; it verifies canonical markers, unloaded seeks, file switching,
+  layer pixels, responsive overflow, and a real MP4 download.
+- Visual evidence includes event-timed assignment, assessment, return,
+  handoff, probe baseline/near/tracking, V06 SAR (`08-sar-v06.png`), final
+  V07 map, and t120/t480 screenshots.  The MP4 is
+  `screenshots-final/v07-seed42-replay.mp4`; `ffprobe` reports MP4 format,
+  26.888 seconds, and 29,617,626 bytes.  Manual inspection found the map,
+  tracks, sensor layer, labels, and sidebar state visible without an empty
+  canvas or material overlap.
+- An initial V07-only visual attempt correctly failed because that scenario
+  contains EO but no SAR.  The final test uses the real V06 SAR run for the
+  SAR frame and keeps V07 for the EO/handoff storyline; no sensor mode was
+  fabricated.
+
+## T15 Long-Run and Final Gates
+
+- Full Python regression:
+  `LONGCAT_API_KEY=offline-test PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m
+  pytest tests -q` -> `1383 passed, 1 warning in 518.33s`.  The warning is
+  the known unregistered `pytest.mark.timeout` warning caused by disabling
+  external plugins; it is not a test failure.
+- Required current-commit fixture runs all finished with zero frame-audit
+  issues:
+
+  | Run | Frames / sim time | Modes or result | Audit |
+  | --- | ---: | --- | ---: |
+  | `t15-v06-20-20260917` | 20 / 20 min | startup transit | 0 |
+  | `t15-v06-120-20260917` | 120 / 120 min | SAR + EO, 1 search completion | 0 |
+  | `t15-v06-480-20260917` | 480 / 480 min | SAR + EO, 6 returns, 3 search completions | 0 |
+  | `t15-v06-seed101-480-20260917` | 480 / 480 min | SAR + EO, 1 return, 1 search completion | 0 |
+  | `t12-v07-480-20260917` | 480 / 480 min | EO, classification and handoff lock | 0 |
+
+- Read-only `--check-log` re-audits passed for the V06 seed42 480 run, V07
+  480 run, and V06 seed101 480 run; each returned `frames=480`, `issues=[]`.
+  The feature suite contains 11 finished 120-minute subruns, each with
+  `audit_issue_count=0`.
+- The fixed 900x700 browser render sample remains within the recorded baseline
+  comparison: remeasure P50/P95 `0.9/29.4 ms`, current P50/P95 `1.0/29.0 ms`,
+  500 samples on the same source frame set.  This is an environment-local
+  comparison only; no performance improvement claim is made.
+- No `LONGCAT_API_KEY` was present, so the requested live model run was not
+  started and no fixture result is labeled live.  Formal cross-episode I14
+  memory validation and online model accuracy are therefore explicitly open.
