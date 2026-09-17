@@ -98,6 +98,7 @@ from src.mission.red_commander import (
     ThreatGate,
 )
 from src.mission.surveillance_stage import SurveillanceStageRegistry
+from src.mission.strategy_memory import StrategyMemoryStore
 from src.utils.coverage_planner import CoveragePlanner
 from src.utils.obstacle_avoider import ObstacleAvoider
 from src.utils.phase_coordinator import PhaseCoordinator
@@ -143,6 +144,10 @@ class SimulationEngine:
         self._llm_gateway = llm_gateway
         self._control_providers = dict(control_providers or {})
         self.reset_generation = 0
+        memory_store = strategy_memory_store or StrategyMemoryStore()
+        resolved_memory_version = memory_store.resolve_version(
+            "baseline" if strategy_memory_version is None else strategy_memory_version
+        )
         self.rng = random.Random(seed)
         self.clock = SimClock()
         self.vessel_commands = VesselCommandQueue(
@@ -164,10 +169,9 @@ class SimulationEngine:
         self.allocator = TaskAllocator(
             config,
             llm_gateway=llm_gateway,
-            strategy_memory_store=strategy_memory_store,
+            strategy_memory_store=memory_store,
         )
-        if strategy_memory_version is not None:
-            self.allocator.set_strategy_memory_version(strategy_memory_version)
+        self.allocator.set_strategy_memory_version(resolved_memory_version)
         if llm_gateway is None:
             self.allocator.llm_client.assert_ready()
         self.allocator.sm.set_base_positions(base_positions)

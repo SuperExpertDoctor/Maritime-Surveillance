@@ -15,6 +15,7 @@ import time
 import uvicorn
 
 from src.env.simulation import SimulationEngine
+from src.mission.strategy_memory import StrategyMemoryStore
 from src.schedule.config_loader import ConfigLoader
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend.frame_publisher import FramePublisher
@@ -115,6 +116,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-delay", type=float, default=0.05)
     parser.add_argument("--skip-llm-probe", action="store_true")
     parser.add_argument("--llm-probe-timeout", type=float, default=20.0)
+    parser.add_argument("--memory-version", default="baseline")
+    parser.add_argument("--memory-root", default="outputs/strategy_memory")
     return parser
 
 
@@ -127,12 +130,26 @@ def main(
     hold_server: bool = False,
     probe_llm: bool = True,
     llm_probe_timeout: float = 20.0,
+    memory_version: str = "baseline",
+    memory_root: str | os.PathLike[str] = "outputs/strategy_memory",
 ) -> dict:
     config = ConfigLoader.load(config_path)
+    memory_store = StrategyMemoryStore(memory_root)
     if config.common.clear_outputs_before_run:
+        output_path = Path("outputs").resolve()
+        memory_path = Path(memory_root).resolve()
+        if memory_path == output_path or output_path in memory_path.parents:
+            raise ValueError(
+                "memory-root must be outside outputs when clear_outputs_before_run is enabled"
+            )
         removed = clear_output_cache()
         print(f"Cleared {removed} cached output item(s)")
-    engine = SimulationEngine(config)
+    resolved_memory_version = memory_store.resolve_version(memory_version)
+    engine = SimulationEngine(
+        config,
+        strategy_memory_store=memory_store,
+        strategy_memory_version=resolved_memory_version,
+    )
     if probe_llm:
         engine.allocator.llm_client.probe(llm_probe_timeout)
         print("LongCat-2.0 connectivity probe passed")
@@ -220,4 +237,6 @@ if __name__ == "__main__":
         hold_server=args.hold_server,
         probe_llm=not args.skip_llm_probe,
         llm_probe_timeout=args.llm_probe_timeout,
+        memory_version=args.memory_version,
+        memory_root=args.memory_root,
     )
