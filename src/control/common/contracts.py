@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import math
 from types import MappingProxyType
+from typing import Literal
 
 import numpy as np
 
@@ -77,6 +78,36 @@ class ActionSpec:
     max_turn_rate_rad_min: float
     min_speed_cells_min: float
     max_speed_cells_min: float
+
+
+@dataclass(frozen=True)
+class CoverageExecutionConfig:
+    """Physical SAR geometry shared by planning, safety, and execution."""
+
+    swath_width_cells: float
+    near_range_cells: float
+    min_turn_radius_cells: float
+    along_track_cells: float
+    heading_tolerance_rad: float
+    cross_track_tolerance_cells: float
+
+    def __post_init__(self) -> None:
+        positive = (
+            "swath_width_cells",
+            "near_range_cells",
+            "min_turn_radius_cells",
+            "along_track_cells",
+        )
+        for name in positive:
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+            object.__setattr__(self, name, value)
+        for name in ("heading_tolerance_rad", "cross_track_tolerance_cells"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True)
@@ -159,6 +190,11 @@ class ControlCommand:
     operation_mode: OperationMode
     target_contact_id: str | None = None
     schema_version: str = "control-command/v1"
+    sar_look_direction: Literal["left", "right"] | None = field(
+        default=None, kw_only=True
+    )
+    sar_scan_heading_rad: float | None = field(default=None, kw_only=True)
+    sar_scan_origin: tuple[float, float] | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

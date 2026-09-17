@@ -1,3 +1,6 @@
+import math
+from dataclasses import FrozenInstanceError, fields
+
 import numpy as np
 import pytest
 
@@ -12,6 +15,7 @@ from src.control.common.contracts import (
     ControlObservation,
     ControlOwner,
     ControllerEventRequest,
+    CoverageExecutionConfig,
     HazardObservation,
     OperationMode,
     PolicySource,
@@ -21,12 +25,63 @@ from src.control.common.contracts import (
 )
 
 
+def test_coverage_execution_config_is_frozen_and_has_six_physical_fields():
+    config = CoverageExecutionConfig(
+        swath_width_cells=1.5,
+        near_range_cells=0.25,
+        min_turn_radius_cells=1.0,
+        along_track_cells=0.8,
+        heading_tolerance_rad=math.radians(2.0),
+        cross_track_tolerance_cells=0.2,
+    )
+
+    assert tuple(item.name for item in fields(config)) == (
+        "swath_width_cells",
+        "near_range_cells",
+        "min_turn_radius_cells",
+        "along_track_cells",
+        "heading_tolerance_rad",
+        "cross_track_tolerance_cells",
+    )
+    with pytest.raises(FrozenInstanceError):
+        config.swath_width_cells = 2.0
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "swath_width_cells",
+        "near_range_cells",
+        "min_turn_radius_cells",
+        "along_track_cells",
+        "heading_tolerance_rad",
+        "cross_track_tolerance_cells",
+    ],
+)
+def test_coverage_execution_config_rejects_nonphysical_values(field_name):
+    values = {
+        "swath_width_cells": 1.5,
+        "near_range_cells": 0.25,
+        "min_turn_radius_cells": 1.0,
+        "along_track_cells": 0.8,
+        "heading_tolerance_rad": 0.03,
+        "cross_track_tolerance_cells": 0.2,
+    }
+    values[field_name] = -1.0
+
+    with pytest.raises(ValueError, match=field_name):
+        CoverageExecutionConfig(**values)
+
+
 def test_control_command_uses_physical_step_units():
     command = ControlCommand(
         turn_rate_rad_min=0.2,
         speed_cells_min=0.25,
         sensor_mode=SensorMode.SAR,
         operation_mode=OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(0.0, 0.0),
     )
 
     assert command.turn_rate_rad_min == 0.2

@@ -159,6 +159,9 @@ def test_safety_masks_sar_outside_stable_coverage_leg(setup):
         speed_cells_min=0.25,
         sensor_mode=SensorMode.SAR,
         operation_mode=OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(1.5, 2.5),
     )
 
     result = envelope.apply(command, observation, dt_min=1.0)
@@ -182,6 +185,9 @@ def test_safety_rejects_masked_sar_before_stability_masking(setup):
         speed_cells_min=0.25,
         sensor_mode=SensorMode.SAR,
         operation_mode=OperationMode.TRANSIT,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(1.5, 2.5),
     )
 
     with pytest.raises(InvalidControlCommand, match="sensor mode"):
@@ -332,6 +338,68 @@ def test_safety_rejects_masked_operation_or_unknown_target(setup):
         envelope.apply(operation, observation, dt_min=1.0)
     with pytest.raises(InvalidControlCommand, match="target"):
         envelope.apply(unknown_target, observation, dt_min=1.0)
+
+
+def test_safety_rejects_sar_without_complete_geometry(setup):
+    envelope, observation = setup
+    command = ControlCommand(
+        0.0,
+        0.25,
+        SensorMode.SAR,
+        OperationMode.COVERAGE,
+    )
+
+    with pytest.raises(InvalidControlCommand, match="SAR geometry"):
+        envelope.apply(command, observation, dt_min=1.0)
+
+
+def test_safety_clears_geometry_when_sar_is_masked_or_off(setup):
+    envelope, observation = setup
+    command = ControlCommand(
+        0.0,
+        0.25,
+        SensorMode.OFF,
+        OperationMode.TRANSIT,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(1.5, 2.5),
+    )
+
+    result = envelope.apply(command, observation, dt_min=1.0)
+
+    assert result.applied_command.sar_look_direction is None
+    assert result.applied_command.sar_scan_heading_rad is None
+    assert result.applied_command.sar_scan_origin is None
+
+
+@pytest.mark.parametrize(
+    "field_overrides",
+    [
+        {"sar_look_direction": "forward"},
+        {"sar_scan_heading_rad": math.inf},
+        {"sar_scan_origin": (math.nan, 2.5)},
+        {"sar_scan_origin": (1.5,)},
+        {"sar_scan_origin": ("x", 2.5)},
+    ],
+)
+def test_safety_rejects_invalid_sar_geometry(setup, field_overrides):
+    envelope, observation = setup
+    fields = {
+        "sar_look_direction": "right",
+        "sar_scan_heading_rad": 0.0,
+        "sar_scan_origin": (1.5, 2.5),
+    }
+    fields.update(field_overrides)
+    command = ControlCommand(
+        0.0,
+        0.25,
+        SensorMode.SAR,
+        OperationMode.COVERAGE,
+        **fields,
+    )
+
+    with pytest.raises(InvalidControlCommand, match="SAR geometry"):
+        envelope.apply(command, observation, dt_min=1.0)
 
 
 def test_safety_rejects_unknown_command_schema(setup):

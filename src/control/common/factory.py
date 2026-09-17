@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from inspect import signature
-from math import pi
+from math import pi, radians
 
 from src.control.common.base import ControllerBase
 from src.control.common.contracts import (
     ActionSpec,
     ControlMode,
     ControlTask,
+    CoverageExecutionConfig,
     ObservationSpec,
     OperationMode,
 )
@@ -40,6 +41,7 @@ class ControlFactory:
         observation_spec: ObservationSpec | None = None,
         action_spec: ActionSpec | None = None,
         contact_config: ContactConfig | None = None,
+        coverage_execution: CoverageExecutionConfig | None = None,
     ) -> None:
         self._config = config
         self._observation_spec = observation_spec or ObservationSpec(
@@ -48,6 +50,14 @@ class ControlFactory:
         )
         self._action_spec = action_spec or ActionSpec(-pi, pi, 0.1, 1.0)
         self._contact_config = contact_config
+        self._coverage_execution = coverage_execution or CoverageExecutionConfig(
+            swath_width_cells=2.0,
+            near_range_cells=0.25,
+            min_turn_radius_cells=1.0,
+            along_track_cells=0.8,
+            heading_tolerance_rad=radians(2.0),
+            cross_track_tolerance_cells=0.2,
+        )
         self._providers: dict[ControlMode, ControlProvider] = {
             ControlMode.HEURISTIC: self._create_builtin_heuristic,
         }
@@ -133,7 +143,10 @@ class ControlFactory:
             "action_spec": self._action_spec,
         }
         if task.task_type is OperationMode.COVERAGE:
-            return CoverageController(**kwargs)
+            return CoverageController(
+                coverage_execution=self._coverage_execution,
+                **kwargs,
+            )
         if task.task_type is OperationMode.TRACK:
             return TrackingController(**kwargs)
         if task.task_type is OperationMode.PROBE:

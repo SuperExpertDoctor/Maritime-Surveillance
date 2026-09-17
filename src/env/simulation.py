@@ -37,6 +37,7 @@ from src.control.common.contracts import (
     ControlMode,
     ControlOwner,
     ControlTask,
+    CoverageExecutionConfig,
     OperationMode,
     RecoveryPlan,
     SensorMode,
@@ -282,6 +283,7 @@ class SimulationEngine:
                 max_range_cells=config.sensor.eoir.detection_range_km / config.grid.cell_size_km,
             )
             uav.storm_avoider.eo_detection_range_cells = uav.eo_sensor.max_range_cells
+        coverage_execution = self._coverage_execution_config()
         self._uav_position_history: dict[str, list[tuple[float, tuple[float, float]]]] = {
             uav.id: [(0.0, uav.float_position)] for uav in self.uavs
         }
@@ -301,12 +303,13 @@ class SimulationEngine:
         self.control_ownership = ControlOwnership(tuple(uav.id for uav in self.uavs))
         self.observation_provider = ObservationProvider(config)
         self.safety_envelope = SafetyEnvelope(action_spec)
-        self.dynamics_executor = UAVDynamicsExecutor()
+        self.dynamics_executor = UAVDynamicsExecutor(coverage_execution)
         self.operation_registry = OperationRegistry(self.allocator.sm)
         self.control_factory = ControlFactory(
             config.control,
             action_spec=action_spec,
             contact_config=config.mission.contact,
+            coverage_execution=coverage_execution,
         )
         for mode, provider in self._control_providers.items():
             resolved_mode = ControlMode(mode)
@@ -1816,13 +1819,6 @@ class SimulationEngine:
             self._promote_work_controller_to_holding(
                 uav, tick.observation.timestamp_min,
             )
-        if command.sensor_mode is SensorMode.SAR:
-            uav.sar_look_direction = uav.sar_look_direction or "right"
-            uav.sar_scan_heading_rad = uav.heading_rad
-            uav.sar_heading_error_deg = 0.0
-            uav.sar_imaging = True
-        else:
-            uav.sar_imaging = False
         for event in tick.emitted_events:
             if event.event_type == "search_complete":
                 self._record_search_completion_event(uav, event, previous_task)
@@ -2470,6 +2466,35 @@ class SimulationEngine:
             raise ValueError("control safety speed fractions produce invalid bounds")
         max_turn = max_speed / 1.0
         return ActionSpec(-max_turn, max_turn, min_speed, max_speed)
+
+    def _coverage_execution_config(self) -> CoverageExecutionConfig:
+        """Publish one immutable geometry contract for the homogeneous fleet."""
+        first = self.uavs[0]
+        expected = (
+            first.sar_sensor.swath_width_cells,
+            first.sar_sensor.near_range_cells,
+            first.R_min,
+            first.sar_along_track_cells,
+            first.sar_heading_tolerance_rad,
+        )
+        for uav in self.uavs[1:]:
+            actual = (
+                uav.sar_sensor.swath_width_cells,
+                uav.sar_sensor.near_range_cells,
+                uav.R_min,
+                uav.sar_along_track_cells,
+                uav.sar_heading_tolerance_rad,
+            )
+            if actual != expected:
+                raise ValueError("heterogeneous UAV SAR geometry requires per-UAV factory mapping")
+        return CoverageExecutionConfig(
+            swath_width_cells=expected[0],
+            near_range_cells=expected[1],
+            min_turn_radius_cells=expected[2],
+            along_track_cells=expected[3],
+            heading_tolerance_rad=expected[4],
+            cross_track_tolerance_cells=0.2,
+        )
 
     def _control_base_observations(self) -> tuple[BaseObservation, ...]:
         return tuple(

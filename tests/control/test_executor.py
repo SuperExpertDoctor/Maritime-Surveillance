@@ -63,6 +63,57 @@ def test_executor_updates_legacy_state_trail_and_command_audit_fields(uav):
     assert uav.last_applied_command is command
 
 
+def test_executor_installs_sar_geometry_and_gates_imaging_on_heading_error(uav):
+    command = ControlCommand(
+        0.0,
+        0.25,
+        SensorMode.SAR,
+        OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(10.0, 10.0),
+    )
+
+    result = UAVDynamicsExecutor().execute(uav, command, dt_min=1.0)
+
+    assert result.applied_command is command
+    assert uav.sar_look_direction == "right"
+    assert uav.sar_scan_heading_rad == pytest.approx(0.0)
+    assert uav.sar_scan_origin == pytest.approx((10.0, 10.0))
+    assert uav.sar_heading_error_deg == pytest.approx(0.0)
+    assert uav.sar_imaging
+
+
+def test_executor_turning_off_sar_clears_acquisition_geometry(uav):
+    uav.sar_look_direction = "left"
+    uav.sar_scan_origin = (9.0, 10.0)
+    command = ControlCommand(0.0, 0.25, SensorMode.OFF, OperationMode.TRANSIT)
+
+    UAVDynamicsExecutor().execute(uav, command, dt_min=1.0)
+
+    assert not uav.sar_imaging
+    assert uav.sar_look_direction is None
+    assert uav.sar_scan_heading_rad is None
+    assert uav.sar_scan_origin is None
+
+
+def test_executor_reports_real_heading_error_and_suppresses_imaging(uav):
+    command = ControlCommand(
+        0.0,
+        0.25,
+        SensorMode.SAR,
+        OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=math.pi / 2.0,
+        sar_scan_origin=uav.float_position,
+    )
+
+    UAVDynamicsExecutor().execute(uav, command, dt_min=1.0)
+
+    assert uav.sar_heading_error_deg == pytest.approx(90.0)
+    assert not uav.sar_imaging
+
+
 def test_executor_maps_probe_operation_to_tracking_status(uav):
     command = ControlCommand(
         turn_rate_rad_min=0.0,
@@ -84,6 +135,9 @@ def test_executor_preserves_distinct_requested_and_safety_applied_commands(uav):
         speed_cells_min=1.0,
         sensor_mode=SensorMode.SAR,
         operation_mode=OperationMode.TRANSIT,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=uav.float_position,
     )
     observation = make_observation_for_executor(uav)
     safety = SafetyEnvelope(

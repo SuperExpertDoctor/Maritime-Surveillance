@@ -10,6 +10,7 @@ import math
 from src.control.common.contracts import (
     ActionSpec,
     ControlDecision,
+    CoverageExecutionConfig,
     ControlObservation,
     ControlRouteSnapshot,
     ControlTask,
@@ -27,7 +28,7 @@ from src.control.heuristic.base import (
     next_route_index,
 )
 from src.control.heuristic.navigation import AStarNavigator
-from src.utils.coverage_planner import CoveragePath, CoveragePlanner
+from src.utils.coverage_planner import CoveragePath, CoveragePlanner, ScanSwath
 
 
 class CoveragePhase(str, Enum):
@@ -75,24 +76,57 @@ class CoverageController(HeuristicControllerBase):
         planner: CoveragePlanner | None = None,
         swath_width: float = 2.0,
         r_min: float = 1.0,
+        coverage_execution: CoverageExecutionConfig | None = None,
+        sar_along_track_cells: float | None = None,
         sar_heading_tolerance_rad: float = math.radians(2.0),
+        cross_track_tolerance_cells: float = 0.2,
     ) -> None:
+        if coverage_execution is not None:
+            swath_width = coverage_execution.swath_width_cells
+            near_range = coverage_execution.near_range_cells
+            r_min = coverage_execution.min_turn_radius_cells
+            sar_along_track_cells = coverage_execution.along_track_cells
+            sar_heading_tolerance_rad = coverage_execution.heading_tolerance_rad
+            cross_track_tolerance_cells = coverage_execution.cross_track_tolerance_cells
+        elif sar_along_track_cells is None:
+            near_range = 0.25
+            sar_along_track_cells = 0.8
+        else:
+            near_range = 0.25
         if swath_width <= 0.0 or r_min <= 0.0:
             raise ValueError("swath_width and r_min must be positive")
-        if not math.isfinite(sar_heading_tolerance_rad) or sar_heading_tolerance_rad < 0.0:
+        if (
+            not math.isfinite(sar_heading_tolerance_rad)
+            or sar_heading_tolerance_rad < 0.0
+            or not math.isfinite(sar_along_track_cells)
+            or sar_along_track_cells <= 0.0
+            or not math.isfinite(cross_track_tolerance_cells)
+            or cross_track_tolerance_cells < 0.0
+        ):
             raise ValueError("sar_heading_tolerance_rad must be finite and non-negative")
         self._observation_spec = observation_spec
         self._action_spec = action_spec
         self.navigator = navigator or AStarNavigator()
-        self.planner = planner or CoveragePlanner()
+        self.planner = planner or CoveragePlanner(near_range=near_range)
         self.swath_width = float(swath_width)
         self.r_min = float(r_min)
+        self.sar_along_track_cells = float(sar_along_track_cells)
         self.sar_heading_tolerance_rad = float(sar_heading_tolerance_rad)
+        self.cross_track_tolerance_cells = float(cross_track_tolerance_cells)
+        self.coverage_execution = coverage_execution or CoverageExecutionConfig(
+            swath_width_cells=self.swath_width,
+            near_range_cells=0.25,
+            min_turn_radius_cells=self.r_min,
+            along_track_cells=self.sar_along_track_cells,
+            heading_tolerance_rad=self.sar_heading_tolerance_rad,
+            cross_track_tolerance_cells=self.cross_track_tolerance_cells,
+        )
         self.phase = CoveragePhase.CREATED
         self.task: ControlTask | None = None
         self.follower: RouteFollower | None = None
         self.route: tuple[tuple[float, float, float], ...] = ()
         self.scan_ranges: tuple[tuple[int, int], ...] = ()
+        self.scan_swaths: tuple[ScanSwath, ...] = ()
         self.planning_map_version: int | None = None
         self._route_revision = 0
         self._route_status = "pending"
@@ -122,6 +156,7 @@ class CoverageController(HeuristicControllerBase):
         self.follower = None
         self.route = ()
         self.scan_ranges = ()
+        self.scan_swaths = ()
         self.planning_map_version = None
         self._route_revision = 0
         self._route_status = "pending"
@@ -164,6 +199,17 @@ class CoverageController(HeuristicControllerBase):
         command = replace(
             command, sensor_mode=sensor_mode, operation_mode=operation_mode
         )
+        if sensor_mode is SensorMode.SAR:
+            scan_index = self._scan_segment_index()
+            if scan_index is None:
+                raise RuntimeError("SAR enabled without an active scan swath")
+            swath = self.scan_swaths[scan_index]
+            command = replace(
+                command,
+                sar_look_direction=swath.look_direction,
+                sar_scan_heading_rad=swath.heading,
+                sar_scan_origin=swath.start,
+            )
         if self.phase is CoveragePhase.COMPLETED and not self._completion_event_emitted:
             self._completion_event_emitted = True
             return ControlDecision(
@@ -202,6 +248,7 @@ class CoverageController(HeuristicControllerBase):
         self._set_route(
             route,
             scan_ranges,
+            coverage.swaths,
             observation.planning_obstacle_mask,
             observation.planning_map_version,
         )
@@ -225,6 +272,7 @@ class CoverageController(HeuristicControllerBase):
         self.follower = None
         self.route = ()
         self.scan_ranges = ()
+        self.scan_swaths = ()
         self.planning_map_version = None
         self._route_status = "pending"
         self._plan_route(observation, direction=self._direction)
@@ -279,10 +327,16 @@ class CoverageController(HeuristicControllerBase):
             for start, end in self.scan_ranges
             if end >= suffix_start
         )
+        scan_swaths = tuple(
+            swath
+            for (start, end), swath in zip(self.scan_ranges, self.scan_swaths)
+            if end >= suffix_start
+        )
         route = tuple(transit) + suffix[1:]
         self._set_route(
             route,
             scan_ranges,
+            scan_swaths,
             observation.planning_obstacle_mask,
             observation.planning_map_version,
         )
@@ -302,6 +356,7 @@ class CoverageController(HeuristicControllerBase):
         self,
         route: Sequence[tuple[float, float, float]],
         scan_ranges: tuple[tuple[int, int], ...],
+        scan_swaths: Sequence[ScanSwath],
         obstacle_mask: object,
         planning_map_version: int,
     ) -> None:
@@ -311,6 +366,9 @@ class CoverageController(HeuristicControllerBase):
             raise CoverageRouteBlockedError(segment_index, cell, planning_map_version)
         self.route = tuple(route)
         self.scan_ranges = scan_ranges
+        if len(scan_ranges) != len(scan_swaths):
+            raise ValueError("scan_ranges and scan_swaths must have matching lengths")
+        self.scan_swaths = tuple(scan_swaths)
         self.follower = RouteFollower(self.route)
         self.planning_map_version = planning_map_version
         self._route_revision += 1
@@ -325,12 +383,9 @@ class CoverageController(HeuristicControllerBase):
         if not self.scan_ranges or index < self.scan_ranges[0][0]:
             self.phase = CoveragePhase.TRANSIT_ASTAR
             return
-        if any(start < index < end for start, end in self.scan_ranges):
-            target = self.route[index + 1]
-            desired_heading = math.atan2(
-                target[1] - observation.self_state.position[1],
-                target[0] - observation.self_state.position[0],
-            )
+        scan_index = self._scan_segment_index()
+        if scan_index is not None:
+            desired_heading = self.scan_swaths[scan_index].heading
             heading_error = abs(
                 _wrap_pi(desired_heading - observation.self_state.heading_rad)
             )
@@ -341,6 +396,18 @@ class CoverageController(HeuristicControllerBase):
             )
             return
         self.phase = CoveragePhase.ALIGN_SCAN
+
+    def _scan_segment_index(self) -> int | None:
+        assert self.follower is not None
+        index = self.follower.index
+        return next(
+            (
+                scan_index
+                for scan_index, (start, end) in enumerate(self.scan_ranges)
+                if start < index < end
+            ),
+            None,
+        )
 
     @staticmethod
     def _route_blocked(

@@ -40,8 +40,9 @@ def oracle_coverage(events, fixed_cells, *, now_min, window_min, cell_size_km):
 class _RigController:
     phase = "scan"
 
-    def __init__(self, speed_cells_min: float):
+    def __init__(self, speed_cells_min: float, scan_origin: tuple[float, float]):
         self._speed_cells_min = speed_cells_min
+        self._scan_origin = scan_origin
 
     def act(self, _observation) -> ControlCommand:
         return ControlCommand(
@@ -49,6 +50,9 @@ class _RigController:
             speed_cells_min=self._speed_cells_min,
             sensor_mode=SensorMode.SAR,
             operation_mode=OperationMode.COVERAGE,
+            sar_look_direction="right",
+            sar_scan_heading_rad=0.0,
+            sar_scan_origin=self._scan_origin,
         )
 
 
@@ -162,7 +166,7 @@ def make_coverage_rig(*, bbox, start_pose, swath_cells=1.5, dt_min=1.0):
     )
     speed = 160.0 / 10.0 / 60.0
     return CoverageRig(
-        controller=_RigController(speed),
+        controller=_RigController(speed, (float(start_pose[0]), float(start_pose[1]))),
         entity=entity,
         observations=ObservationProvider(config),
         safety=SafetyEnvelope(ActionSpec(-speed, speed, speed, speed)),

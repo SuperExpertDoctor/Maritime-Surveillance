@@ -7,6 +7,7 @@ from src.control.common.contracts import (
     ActionSpec,
     ControlMode,
     ControlTask,
+    CoverageExecutionConfig,
     ObservationSpec,
     OperationMode,
     RecoveryPlan,
@@ -142,6 +143,33 @@ def test_builtin_heuristic_task_controllers(factory):
         assert isinstance(controller, expected_type)
         assert controller.control_mode is ControlMode.HEURISTIC
         assert controller.operation_mode is task.task_type
+
+
+def test_factory_passes_actual_coverage_execution_geometry_to_controller(config):
+    coverage_execution = CoverageExecutionConfig(
+        swath_width_cells=1.5,
+        near_range_cells=0.25,
+        min_turn_radius_cells=1.75,
+        along_track_cells=0.8,
+        heading_tolerance_rad=0.03,
+        cross_track_tolerance_cells=0.2,
+    )
+    factory = ControlFactory(
+        config.control,
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=ActionSpec(-2.0, 2.0, 0.5, 1.0),
+        coverage_execution=coverage_execution,
+    )
+
+    controller = factory.create_heuristic(
+        "UAV-1",
+        ControlTask("coverage", OperationMode.COVERAGE, region_bbox=BBox(1, 1, 5, 5)),
+    )
+
+    assert controller.swath_width == pytest.approx(1.5)
+    assert controller.r_min == pytest.approx(1.75)
+    assert controller.sar_along_track_cells == pytest.approx(0.8)
+    assert controller.planner.near_range == pytest.approx(0.25)
 
 
 @pytest.mark.parametrize(

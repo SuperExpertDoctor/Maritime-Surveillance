@@ -184,6 +184,20 @@ class ControlObservation:
 
 ### 3.3 动作和事件
 
+覆盖控制使用一个冻结的物理几何契约。生产环境从实际 `SARSensor` 和 `UAVEntity`
+构造它，不能在 controller 中复制或放大传感器扫幅：
+
+```python
+@dataclass(frozen=True)
+class CoverageExecutionConfig:
+    swath_width_cells: float
+    near_range_cells: float
+    min_turn_radius_cells: float
+    along_track_cells: float
+    heading_tolerance_rad: float
+    cross_track_tolerance_cells: float
+```
+
 ```python
 @dataclass(frozen=True)
 class ControlCommand:
@@ -193,6 +207,9 @@ class ControlCommand:
     operation_mode: OperationMode
     target_contact_id: str | None = None
     schema_version: str = "control-command/v1"
+    sar_look_direction: Literal["left", "right"] | None = None
+    sar_scan_heading_rad: float | None = None
+    sar_scan_origin: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -203,6 +220,11 @@ class ControlDecision:
 
 一个动作只描述一个仿真控制步，不是整条航路。控制器可以在内部保留路线、滤波器
 或策略状态，但每个 tick 必须返回 `ControlDecision`。
+
+三个 SAR 字段是关键字参数。`SensorMode.SAR` 的动作必须同时提供合法的视向、有限
+扫描段切线航向和当前条带起点；安全层拒绝缺失或非有限值。`OFF`/`EO` 动作可以省略
+这些字段，安全层会清除残留的 SAR acquisition 元数据。SAR 是否实际成像还要由执行
+器根据应用后的真实航向误差和条带横向误差门控。
 
 控制器事件使用 `ControllerEventRequest` 请求；协调器会分配全局 sequence、设置
 时间戳和来源，并把它们排入后续 tick。控制器不能直接修改事件队列或调用调度器。
@@ -218,6 +240,9 @@ return ControlDecision(
         speed_cells_min=speed,
         sensor_mode=SensorMode.SAR,
         operation_mode=OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(10.0, 10.0),
     ),
     events=(
         ControllerEventRequest(
@@ -670,6 +695,9 @@ class MyCoverageController(HeuristicControllerBase):
             speed_cells_min=self.action_spec.max_speed_cells_min,
             sensor_mode=SensorMode.SAR,
             operation_mode=OperationMode.COVERAGE,
+            sar_look_direction="right",
+            sar_scan_heading_rad=0.0,
+            sar_scan_origin=(0.0, 0.0),
         )
         if self.is_complete(observation):
             return ControlDecision(
