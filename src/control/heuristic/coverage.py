@@ -252,13 +252,7 @@ class CoverageController(HeuristicControllerBase):
         if not endpoints:
             raise ValueError("coverage planner produced no scan endpoints")
         entry = endpoints[0]
-        transit = self.navigator.plan_grid(
-            start_pose,
-            {entry[:2]},
-            observation.planning_obstacle_mask,
-            self.r_min,
-            observation.planning_map_version,
-        )
+        transit = self._plan_transit_to_pose(start_pose, entry, observation)
         coverage = self.planner.plan(
             self.task.region_bbox,
             entry,
@@ -285,6 +279,31 @@ class CoverageController(HeuristicControllerBase):
             progress_offset_cells=progress_offset_cells,
         )
         self.phase = CoveragePhase.TRANSIT_ASTAR
+
+    def _plan_transit_to_pose(
+        self,
+        start_pose: tuple[float, float, float],
+        target_pose: tuple[float, float, float],
+        observation: ControlObservation,
+    ) -> list[tuple[float, float, float]]:
+        if isinstance(self.navigator, AStarNavigator):
+            return self.navigator.plan_grid(
+                start_pose,
+                {target_pose[:2]},
+                observation.planning_obstacle_mask,
+                self.r_min,
+                observation.planning_map_version,
+                goal_heading_rad=target_pose[2],
+            )
+        # Keep the established custom-navigator test and extension contract;
+        # the route assembly below still installs the true scan-entry heading.
+        return self.navigator.plan_grid(
+            start_pose,
+            {target_pose[:2]},
+            observation.planning_obstacle_mask,
+            self.r_min,
+            observation.planning_map_version,
+        )
 
     def _refresh_conflict_route(self, observation: ControlObservation) -> None:
         """Give a controlled coverage task a new scan orientation after a conflict."""
@@ -350,13 +369,7 @@ class CoverageController(HeuristicControllerBase):
             *observation.self_state.position,
             observation.self_state.heading_rad,
         )
-        transit = self.navigator.plan_grid(
-            start_pose,
-            {suffix[0][:2]},
-            observation.planning_obstacle_mask,
-            self.r_min,
-            observation.planning_map_version,
-        )
+        transit = self._plan_transit_to_pose(start_pose, suffix[0], observation)
         first_scan_range_index = next(
             index
             for index, (start, end) in enumerate(self.scan_ranges)

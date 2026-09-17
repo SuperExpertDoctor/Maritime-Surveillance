@@ -80,6 +80,9 @@ def test_coverage_rig_records_real_motion_and_time_state(dt_min):
         "distance_cells",
         "max_speed_cells_min",
         "obstacle_intersection",
+        "safety_intervened",
+        "safety_interventions",
+        "safety_obstacle_mask_cells",
     }
 
 

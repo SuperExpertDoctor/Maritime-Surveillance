@@ -124,6 +124,9 @@ class CoveragePlanner:
         endpoint_extension = (
             max(along_track_cells, 3.3 * radius) if extend_endpoints else 0.0
         )
+        terminal_extension = (
+            max(along_track_cells, 0.5) if extend_endpoints else 0.0
+        )
         if orientation == "horizontal":
             low_endpoint = float(box.col_start) - endpoint_extension
             high_endpoint = float(box.col_end) + endpoint_extension
@@ -146,11 +149,21 @@ class CoveragePlanner:
                 )
                 if index % 2 == 0:
                     start = (low_endpoint, track)
-                    end = (high_endpoint, track)
+                    end = (
+                        float(box.col_end) + terminal_extension
+                        if index == count - 1
+                        else high_endpoint,
+                        track,
+                    )
                     heading, look = 0.0, "right"
                 else:
                     start = (high_endpoint, track)
-                    end = (low_endpoint, track)
+                    end = (
+                        float(box.col_start) - terminal_extension
+                        if index == count - 1
+                        else low_endpoint,
+                        track,
+                    )
                     heading, look = math.pi, "left"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
         else:
@@ -175,11 +188,21 @@ class CoveragePlanner:
                 )
                 if index % 2 == 0:
                     start = (track, low_endpoint)
-                    end = (track, high_endpoint)
+                    end = (
+                        track,
+                        float(box.row_end) + terminal_extension
+                        if index == count - 1
+                        else high_endpoint,
+                    )
                     heading, look = math.pi / 2.0, "left"
                 else:
                     start = (track, high_endpoint)
-                    end = (track, low_endpoint)
+                    end = (
+                        track,
+                        float(box.row_start) - terminal_extension
+                        if index == count - 1
+                        else low_endpoint,
+                    )
                     heading, look = -math.pi / 2.0, "right"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
         return swaths

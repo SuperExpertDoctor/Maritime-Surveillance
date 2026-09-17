@@ -50,6 +50,23 @@ def test_astar_returns_a_deterministic_direct_curvature_safe_path():
     assert _all_samples_respect_curvature(path, r_min=1.0)
 
 
+def test_astar_can_reach_a_goal_with_a_required_terminal_heading():
+    mask = np.zeros((24, 16), dtype=bool)
+
+    path = AStarNavigator().plan_grid(
+        (2.0, 5.0, 0.0),
+        {(18.0, 5.0)},
+        mask,
+        r_min=1.0,
+        goal_heading_rad=math.pi / 2.0,
+    )
+
+    assert path[-1][:2] == pytest.approx((18.0, 5.0))
+    assert path[-1][2] == pytest.approx(math.pi / 2.0)
+    assert ObstacleAvoider().is_path_safe(path, mask)
+    assert _all_samples_respect_curvature(path, r_min=1.0)
+
+
 def test_astar_detours_around_a_wall_instead_of_using_line_of_sight():
     mask = np.zeros((24, 16), dtype=bool)
     mask[11, :12] = True

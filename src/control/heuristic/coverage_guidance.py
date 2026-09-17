@@ -160,6 +160,19 @@ class CoverageRouteFollower:
         if scan_segment_index is not None:
             desired = tangent - math.atan2(0.5 * cross_track, max(speed, 1e-9))
             turn = _wrap_pi(desired - heading_rad) / dt_min
+        else:
+            upcoming = self._upcoming_scan_index(self._progress)
+            if upcoming is not None:
+                scan_start, _ = self._scan_ranges[upcoming]
+                if self._cumulative[scan_start] - self._progress <= 4.0 * self._r_min:
+                    scan_tangent = self._segment_tangent(scan_start)
+                    heading_error = _wrap_pi(scan_tangent - heading_rad)
+                    # Pre-align only when it reinforces the route's local
+                    # pursuit turn.  A connector may require a U-turn before
+                    # the scan tangent is reachable; forcing that tangent
+                    # early would freeze the aircraft on the connector.
+                    if abs(heading_error) > 0.25 and turn * heading_error > 0.0:
+                        turn = heading_error / dt_min
         turn = self._bounded_turn(turn, speed, self._r_min, action_spec)
 
         tolerance = max(speed * dt_min, 0.05)
@@ -309,6 +322,12 @@ class CoverageRouteFollower:
                 < progress
                 < self._cumulative[end] - margin
             ):
+                return scan_index
+        return None
+
+    def _upcoming_scan_index(self, progress: float) -> int | None:
+        for scan_index, (start, _) in enumerate(self._scan_ranges):
+            if progress < self._cumulative[start]:
                 return scan_index
         return None
 
