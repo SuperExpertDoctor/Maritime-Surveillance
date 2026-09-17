@@ -1,8 +1,8 @@
 # Replay Restoration Acceptance Report
 
-日期：2026-09-17  
-实现分支：`feature/replay-visual-restoration`  
-验证提交：`fb43889d8f154de62cdf420fea21a1029009dd90`  
+日期：2026-09-17
+实现分支：`feature/replay-visual-restoration`
+验证提交：`fb43889d8f154de62cdf420fea21a1029009dd90`
 目标合并分支：`branch1`
 
 ## 结论
