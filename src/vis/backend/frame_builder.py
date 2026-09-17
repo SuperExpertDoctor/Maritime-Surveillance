@@ -594,6 +594,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "episode_id": getattr(state, "episode_id", ""),
         "scenario_seed": getattr(state, "scenario_seed", None),
         "reset_generation": getattr(state, "scenario_generation", 0),
+        "coverage_metrics": state.get_persistent_coverage_stats(),
         "task_area": {
             "width_km": config.grid.resolution[1] * config.grid.cell_size_km,
             "height_km": config.grid.resolution[0] * config.grid.cell_size_km,

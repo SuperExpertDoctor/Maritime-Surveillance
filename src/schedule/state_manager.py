@@ -11,6 +11,7 @@ import numpy as np
 from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
 from src.mission.information_update import InformationUpdatePolicy, ScanRefresh
+from src.mission.coverage_metrics import CoverageMetrics
 from src.mission.contact_store import ContactStore
 from src.mission.contracts import (
     PassiveBearingObservation,
@@ -48,6 +49,7 @@ class StateManager:
         self._vessel_inventory: tuple[dict, ...] = ()
         self.lifecycle_mode = False
         self.information_policy = InformationUpdatePolicy(config)
+        self.coverage_metrics: CoverageMetrics | None = None
         self._last_information_delta = None
         self._uavs = [
             UAVState(
@@ -610,6 +612,26 @@ class StateManager:
         return [event for event in self._events if event["time"] >= since_time]
 
     # Information field facade -------------------------------------
+    def configure_coverage_metrics(self, fixed_mask, episode_id: str) -> None:
+        """Initialize episode-scoped SAR coverage after the map is complete."""
+        coverage = self.config.mission.coverage
+        self.coverage_metrics = CoverageMetrics(
+            episode_id=episode_id,
+            fixed_mask=fixed_mask,
+            cell_size_km=self.config.grid.cell_size_km,
+            windows_min=coverage.windows_min,
+            primary_window_min=coverage.primary_window_min,
+        )
+
+    def get_persistent_coverage_stats(self) -> dict | None:
+        """Return a detached point-in-time snapshot without advancing state."""
+        if self.coverage_metrics is None:
+            return None
+        return self.coverage_metrics.snapshot(
+            now_min=self.current_time,
+            feasible_mask=self.get_searchable_mask(),
+        )
+
     def scan_bbox(self, bbox: BBox, current_time: float, is_track: bool = False):
         return self.information_policy.apply_batch(
             [ScanRefresh(tuple(bbox), "track" if is_track else "search")],

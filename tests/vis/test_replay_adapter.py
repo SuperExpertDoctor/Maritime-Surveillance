@@ -60,3 +60,29 @@ def test_replay_adapter_fills_historical_defaults_and_keeps_routes_empty():
         json.dumps(old, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest() == source
     assert old["uavs"][0] == {"id": "UAV-1", "status": "tracking", "position": [3, 4]}
+
+
+def test_old_replay_keeps_unknown_persistent_coverage_null():
+    old = {"info_matrix": [[1.0]], "value_matrix": [[0.5]]}
+
+    normalized = normalize_replay_frame(old)
+
+    assert normalized["coverage_metrics"] is None
+
+
+def test_new_replay_preserves_persistent_coverage_as_a_deep_copy():
+    coverage = {
+        "schema_version": "persistent-coverage/future",
+        "episode_id": "replay-coverage",
+        "as_of_min": 17.0,
+        "windows": [{"minutes": 60, "covered_cells": 3}],
+    }
+    source = {"coverage_metrics": coverage}
+
+    normalized = normalize_replay_frame(source)
+    assert normalized["coverage_metrics"] == coverage
+    assert normalize_replay_frame(json.loads(json.dumps(source)))["coverage_metrics"] == coverage
+    normalized["coverage_metrics"]["windows"][0]["covered_cells"] = 99
+
+    assert source["coverage_metrics"] == coverage
+    assert coverage["windows"][0]["covered_cells"] == 3

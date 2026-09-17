@@ -219,6 +219,9 @@ class SimulationEngine:
         )
         self.allocator.sm.set_environment_obstacles(self.obstacles, self.obstacle_mask)
         self.allocator.sm.episode_id = self.episode_id
+        self.allocator.sm.configure_coverage_metrics(
+            self._intent_searchable_mask(), self.episode_id,
+        )
         self.intents = IntentStore(
             self._intent_searchable_mask(), config.mission.intent,
         )
@@ -3066,12 +3069,25 @@ class SimulationEngine:
                     uav.sar_look_direction,
                     along_track_cells=uav.sar_along_track_cells,
                 )
+                cells = tuple(sorted({(cell.col, cell.row) for cell in footprint}))
+                footprint = [GridCoord(col, row) for col, row in cells]
                 uav.sar_footprint = footprint
                 for cell in footprint:
                     self._publish_information_delta(
                         sm.scan_cell(cell, current_time, is_track=False),
                         current_time,
                     )
+                sm.coverage_metrics.record_sar(cells, at_min=current_time)
+                if cells:
+                    task = self.control_coordinator.active_task(uav.id)
+                    lease = self.control_coordinator.current_lease(uav.id)
+                    sm.add_event("sar_scan", {
+                        "episode_id": self.episode_id,
+                        "uav_id": uav.id,
+                        "task_id": task.task_id if task is not None else None,
+                        "generation": lease.generation,
+                        "cells": [list(cell) for cell in cells],
+                    })
                 footprint_set = set(footprint)
                 for ship in self.ships:
                     if ship.departed or ship.position not in footprint_set:

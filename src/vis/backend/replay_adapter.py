@@ -45,6 +45,7 @@ def normalize_replay_frame(frame: dict) -> dict:
     result.setdefault("cycle", 0)
     result.setdefault("sim_time_min", 0.0)
     result.setdefault("frame_id", 0)
+    result.setdefault("coverage_metrics", None)
     for key in _LIST_DEFAULTS:
         if not isinstance(result.get(key), list):
             result[key] = []
