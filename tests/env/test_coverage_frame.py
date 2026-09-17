@@ -215,3 +215,43 @@ def test_baseline_deduplicates_equal_events_but_fails_conflicting_payloads(
         assert "conflicting event payload" in run["stopped_reason"]
         frames = [json.loads(line) for line in (tmp_path / "seed-42/frames.jsonl").read_text().splitlines()]
         assert frames[-1]["events"][0]["data"]["cells"] == [[2, 2]]
+
+
+@pytest.mark.parametrize("event_type,first_data,second_data", [
+    ("contact_created", {"contact_id": "C0001"}, {"contact_id": "C0002"}),
+    (
+        "return_triggered",
+        {"uav_id": "U1", "reason": "range_reserve"},
+        {"uav_id": "U1", "reason": "lifecycle_or_task_return"},
+    ),
+])
+@pytest.mark.parametrize("distinct", [False, True])
+def test_baseline_retains_distinct_non_sar_history_and_deduplicates_exact_repeats(
+    tmp_path, monkeypatch, event_type, first_data, second_data, distinct,
+):
+    from scripts import capture_coverage_baseline as capture
+
+    real_capture = capture.capture_frame
+    first = {"type": event_type, "time": 0.0, "data": first_data}
+    second = {"type": event_type, "time": 0.0, "data": second_data if distinct else first_data}
+    assert capture._event_identity("episode", first) == capture._event_identity("episode", second)
+
+    def repeated_history(engine, **kwargs):
+        frame = real_capture(engine, **kwargs)
+        # Both the initial frame and the next frame contain repeated history.
+        frame["events"] = json.loads(json.dumps([first, second, first]))
+        return frame
+
+    monkeypatch.setattr(capture, "capture_frame", repeated_history)
+    summary = capture.capture_baseline(
+        scenario="coverage-open-water", seeds=(42,), steps=1, output_dir=tmp_path,
+    )
+
+    assert summary["status"] == "completed"
+    run = summary["runs"][0]
+    assert run["status"] == "completed"
+    assert run["completed_steps"] == run["actual_end_time_min"] == 1
+    assert run["stopped_reason"] is None
+    events = [json.loads(line) for line in (tmp_path / "seed-42/events.jsonl").read_text().splitlines()]
+    assert events == ([first, second] if distinct else [first])
+    assert run["event_count"] == len(events)

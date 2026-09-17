@@ -160,12 +160,15 @@ def _capture_seed(scenario: str, seed: int, steps: int, output_dir: Path) -> dic
         for event in frame.get("events", ()):
             identity = _event_identity(engine.episode_id, event)
             payload = _stable_json(event)
-            if identity in seen_events:
-                if seen_events[identity] != payload:
+            # Only SAR observations require one payload per identity. Runtime
+            # history may contain distinct contacts or reasons at the same tick.
+            key = identity if event.get("type") == "sar_scan" else (*identity, payload)
+            if key in seen_events:
+                if seen_events[key] != payload:
                     raise ValueError(f"conflicting event payload for identity {identity!r}")
                 continue
             _append_jsonl(events_path, event)
-            seen_events[identity] = payload
+            seen_events[key] = payload
             event_count += 1
 
     status = "completed"
