@@ -72,9 +72,22 @@ Metric measurement: independent real-motion footprint collection; no planned `Co
 Result: PASS
 Evidence and remaining issue: The exact T05 command produced `43 passed`; related navigation/oracle review produced `55 passed`. Independent review passed after fixing physically continuous scan-entry headings, preserving custom navigator compatibility, retaining the exact completion tolerance, removing next-scan projection shortcuts, and retaining a real safety intervention/recovery path. All five audit rows have `missing_cells` empty and `complete=True`. T06 watchdog behavior remains NOT_RUN.
 
+## T06: Progress watchdog, replanning, and visible diagnostics
+
+Focused command and working directory: `python -m pytest tests/control/heuristic/test_coverage_progress.py tests/control/heuristic/test_coverage.py tests/control/test_route_snapshot.py tests/env/test_route_visual_frame.py -q` from repository root
+Related command: `python -m pytest tests/control/test_factory.py tests/control/heuristic/test_coverage_sensor_geometry.py tests/control/test_simulation_ownership.py -q`
+Exit code: 0 for the focused command; the related command has one known T05 integration failure
+Transport: none
+Config hash / seeds / actual simulation end: deterministic controller observations; no live simulation gate
+Raw artifacts: `src/control/heuristic/coverage.py`, `tests/control/heuristic/test_coverage_progress.py`
+Metric measurement: native controller route-progress diagnostics
+Result: PASS for the T06 focused contract
+Evidence and remaining issue: The exact T06 command produced `32 passed in 1.13s`. It covers two replans followed by one `task_failed`, map-version timer behavior, connector non-triggering, alignment timeout, same-timestamp idempotence, null diagnostics, route visibility after failure, generation propagation, and factory wiring. The related command produced `20 passed, 1 failed`; the failure is the pre-existing T05 integration mismatch where the production scheduler can assign a region accepted by the legacy coarse geometry check while the new physical coverage controller rejects its extended turn route. T10/T11 must make candidate edges use the same physical geometry before assignment. The `CoveragePlanner.is_region_feasible` default was restored to the legacy coarse mode so candidate-count behavior does not regress; explicit controller geometry remains enabled.
+
 T01: PASS
 T02: PASS
 T03: PASS (implementation/baseline capture; endurance gate not evaluated)
 T04: PASS
 T05: PASS
-T06-T16: NOT_RUN
+T06: PASS (focused contract; one T05 integration regression tracked above)
+T07-T16: NOT_RUN

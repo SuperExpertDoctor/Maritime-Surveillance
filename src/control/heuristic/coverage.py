@@ -15,6 +15,7 @@ from src.control.common.contracts import (
     ControlObservation,
     ControlRouteSnapshot,
     ControlTask,
+    ControllerContext,
     ControllerEventRequest,
     ObservationSpec,
     OperationMode,
@@ -81,6 +82,9 @@ class CoverageController(HeuristicControllerBase):
         sar_along_track_cells: float | None = None,
         sar_heading_tolerance_rad: float = math.radians(2.0),
         cross_track_tolerance_cells: float = 0.2,
+        progress_timeout_min: float = 10.0,
+        align_timeout_min: float = 8.0,
+        max_stall_replans: int = 2,
     ) -> None:
         if coverage_execution is not None:
             swath_width = coverage_execution.swath_width_cells
@@ -105,6 +109,21 @@ class CoverageController(HeuristicControllerBase):
             or cross_track_tolerance_cells < 0.0
         ):
             raise ValueError("sar_heading_tolerance_rad must be finite and non-negative")
+        if (
+            isinstance(progress_timeout_min, bool)
+            or not math.isfinite(float(progress_timeout_min))
+            or float(progress_timeout_min) <= 0.0
+            or isinstance(align_timeout_min, bool)
+            or not math.isfinite(float(align_timeout_min))
+            or float(align_timeout_min) <= 0.0
+        ):
+            raise ValueError("coverage watchdog timeouts must be finite and positive")
+        if (
+            isinstance(max_stall_replans, bool)
+            or not isinstance(max_stall_replans, int)
+            or max_stall_replans < 0
+        ):
+            raise ValueError("max_stall_replans must be a non-negative integer")
         self._observation_spec = observation_spec
         self._action_spec = action_spec
         self.navigator = navigator or AStarNavigator()
@@ -123,6 +142,9 @@ class CoverageController(HeuristicControllerBase):
         self.sar_along_track_cells = float(sar_along_track_cells)
         self.sar_heading_tolerance_rad = float(sar_heading_tolerance_rad)
         self.cross_track_tolerance_cells = float(cross_track_tolerance_cells)
+        self.progress_timeout_min = float(progress_timeout_min)
+        self.align_timeout_min = float(align_timeout_min)
+        self.max_stall_replans = max_stall_replans
         self.coverage_execution = coverage_execution or CoverageExecutionConfig(
             swath_width_cells=self.swath_width,
             near_range_cells=0.25,
@@ -143,6 +165,20 @@ class CoverageController(HeuristicControllerBase):
         self._stopped = False
         self._completion_event_emitted = False
         self._direction: str | None = None
+        self._generation = 0
+        self._last_progress_cells: float | None = None
+        self._last_progress_time: float | None = None
+        self._align_started_time: float | None = None
+        self._stalled_elapsed = 0.0
+        self._stall_replans = 0
+        self._watchdog_failed = False
+        self._last_guidance: CoverageGuidance | None = None
+        self._last_heading_error_deg: float | None = None
+        self._last_cross_track_error_cells: float | None = None
+
+    def reset(self, context: ControllerContext) -> None:
+        super().reset(context)
+        self._generation = context.generation
 
     @property
     def observation_spec(self) -> ObservationSpec:
@@ -174,6 +210,15 @@ class CoverageController(HeuristicControllerBase):
         self._completion_event_emitted = False
         self._direction = None
         self._plan_route(observation)
+        self._last_progress_cells = self.follower.progress_cells
+        self._last_progress_time = observation.timestamp_min
+        self._align_started_time = None
+        self._stalled_elapsed = 0.0
+        self._stall_replans = 0
+        self._watchdog_failed = False
+        self._last_guidance = None
+        self._last_heading_error_deg = None
+        self._last_cross_track_error_cells = None
 
     def is_complete(self, observation: ControlObservation) -> bool:
         del observation
@@ -199,6 +244,19 @@ class CoverageController(HeuristicControllerBase):
             action_spec=self.action_spec,
         )
         self._update_phase(observation, guidance)
+        watchdog_events, route_changed = self._check_progress_watchdog(
+            observation, guidance
+        )
+        if route_changed:
+            guidance = self.follower.update(
+                position=observation.self_state.position,
+                heading_rad=observation.self_state.heading_rad,
+                speed_cells_min=observation.self_state.speed_cells_min,
+                dt_min=observation.dt_min,
+                action_spec=self.action_spec,
+            )
+            self._update_phase(observation, guidance)
+        self._save_guidance_diagnostics(observation, guidance)
         sensor_mode = (
             SensorMode.SAR
             if self.phase is CoveragePhase.SCANNING
@@ -228,9 +286,131 @@ class CoverageController(HeuristicControllerBase):
             self._completion_event_emitted = True
             return ControlDecision(
                 command,
-                (ControllerEventRequest("search_complete", {"task_id": self.task.task_id}),),
+                tuple(watchdog_events)
+                + (ControllerEventRequest("search_complete", {"task_id": self.task.task_id}),),
             )
-        return ControlDecision(command)
+        return ControlDecision(command, tuple(watchdog_events))
+
+    def _save_guidance_diagnostics(
+        self, observation: ControlObservation, guidance: CoverageGuidance
+    ) -> None:
+        self._last_guidance = guidance
+        scan_index = guidance.scan_segment_index
+        if scan_index is None or scan_index >= len(self.scan_swaths):
+            self._last_heading_error_deg = None
+        else:
+            self._last_heading_error_deg = math.degrees(
+                abs(
+                    _wrap_pi(
+                        self.scan_swaths[scan_index].heading
+                        - observation.self_state.heading_rad
+                    )
+                )
+            )
+        self._last_cross_track_error_cells = guidance.cross_track_error_cells
+
+    def _check_progress_watchdog(
+        self,
+        observation: ControlObservation,
+        guidance: CoverageGuidance,
+    ) -> tuple[tuple[ControllerEventRequest, ...], bool]:
+        """Bound a stalled task without resetting its task-level clock on replans."""
+        now = float(observation.timestamp_min)
+        progress = float(guidance.progress_cells)
+        if self._last_progress_cells is None:
+            self._last_progress_cells = progress
+            self._last_progress_time = now
+        elif progress - self._last_progress_cells > 0.01:
+            self._last_progress_cells = progress
+            self._last_progress_time = now
+
+        is_aligning = (
+            guidance.scan_segment_index is not None
+            and self.phase is CoveragePhase.ALIGN_SCAN
+        )
+        if is_aligning:
+            if self._align_started_time is None:
+                self._align_started_time = now
+        else:
+            self._align_started_time = None
+
+        if self._watchdog_failed or self.phase is CoveragePhase.COMPLETED:
+            return (), False
+
+        progress_elapsed = (
+            now - self._last_progress_time
+            if self._last_progress_time is not None
+            else 0.0
+        )
+        align_elapsed = (
+            now - self._align_started_time
+            if self._align_started_time is not None
+            else 0.0
+        )
+        reason: str | None = None
+        elapsed = 0.0
+        if progress_elapsed >= self.progress_timeout_min:
+            reason = "no_progress"
+            elapsed = progress_elapsed
+        elif align_elapsed >= self.align_timeout_min:
+            reason = "align_stalled"
+            elapsed = align_elapsed
+        if reason is None:
+            return (), False
+
+        attempt = self._stall_replans + 1
+        self._stalled_elapsed += max(0.0, elapsed)
+        payload = {
+            "task_id": self.task.task_id,
+            "generation": self._generation,
+            "reason": reason if attempt <= self.max_stall_replans else "coverage_stalled",
+            "stall_reason": reason,
+            "elapsed": float(elapsed),
+            "stalled_elapsed": float(self._stalled_elapsed),
+            "attempt": attempt,
+        }
+        # Move both clocks before invoking a planner.  This makes a repeated
+        # observation at the same timestamp idempotent even if planning fails.
+        self._last_progress_time = now
+        if is_aligning:
+            self._align_started_time = now
+        else:
+            self._align_started_time = None
+
+        if attempt > self.max_stall_replans:
+            self._watchdog_failed = True
+            self._route_status = "unavailable"
+            return (ControllerEventRequest("task_failed", payload),), False
+
+        self._stall_replans = attempt
+        route_changed = False
+        try:
+            if attempt == 1:
+                self._replan_unflown_suffix(observation)
+            else:
+                self._replan_with_direction(observation)
+            route_changed = True
+        except (CoverageRouteBlockedError, ValueError, RuntimeError):
+            # Preserve the last route for diagnostics, but never publish it as
+            # ready after a watchdog replan failed.
+            self._route_status = "unavailable"
+        return (ControllerEventRequest("coverage_stalled", payload),), route_changed
+
+    def _replan_with_direction(self, observation: ControlObservation) -> None:
+        assert self.task is not None
+        assert self.follower is not None
+        if self.task.region_bbox is None:
+            raise ValueError("coverage task requires region_bbox")
+        width = self.task.region_bbox.col_end - self.task.region_bbox.col_start
+        height = self.task.region_bbox.row_end - self.task.region_bbox.row_start
+        current = self._direction or ("horizontal" if width >= height else "vertical")
+        direction = "vertical" if current == "horizontal" else "horizontal"
+        self._plan_route(
+            observation,
+            direction=direction,
+            progress_offset_cells=self.follower.progress_cells,
+        )
+        self._direction = direction
 
     def _plan_route(
         self,
@@ -320,24 +500,22 @@ class CoverageController(HeuristicControllerBase):
         width = self.task.region_bbox.col_end - self.task.region_bbox.col_start
         height = self.task.region_bbox.row_end - self.task.region_bbox.row_start
         current = self._direction or ("horizontal" if width >= height else "vertical")
-        self._direction = "vertical" if current == "horizontal" else "horizontal"
-        self.follower = None
-        self.route = ()
-        self.scan_ranges = ()
-        self.scan_swaths = ()
-        self.planning_map_version = None
-        self._route_status = "pending"
-        self._plan_route(
-            observation,
-            direction=self._direction,
-            progress_offset_cells=progress_offset_cells,
-        )
+        direction = "vertical" if current == "horizontal" else "horizontal"
+        try:
+            self._plan_route(
+                observation,
+                direction=direction,
+                progress_offset_cells=progress_offset_cells,
+            )
+        except (CoverageRouteBlockedError, ValueError, RuntimeError):
+            self._route_status = "unavailable"
+            raise
+        self._direction = direction
 
     def _refresh_invalidated_route(self, observation: ControlObservation) -> None:
         if observation.planning_map_version == self.planning_map_version:
             return
         assert self.follower is not None
-        self._route_status = "pending"
         unflown = self.route[self.follower.index + 1 :]
         current_pose = (
             *observation.self_state.position,
@@ -346,10 +524,16 @@ class CoverageController(HeuristicControllerBase):
         if self._route_blocked(
             (current_pose, *unflown), observation.planning_obstacle_mask
         ) is not None:
-            self._replan_unflown_suffix(observation)
+            try:
+                self._replan_unflown_suffix(observation)
+            except (CoverageRouteBlockedError, ValueError, RuntimeError):
+                self._route_status = "unavailable"
+                raise
         else:
             self.planning_map_version = observation.planning_map_version
-            self._route_status = "ready"
+            self._route_status = (
+                "unavailable" if self._watchdog_failed else "ready"
+            )
 
     def _replan_unflown_suffix(self, observation: ControlObservation) -> None:
         assert self.follower is not None
@@ -513,7 +697,7 @@ class CoverageController(HeuristicControllerBase):
         task = self.task
         route = (
             self.route
-            if self._route_status == "ready" and not self._stopped
+            if self._route_status in {"ready", "unavailable"} and not self._stopped
             else ()
         )
         follower = self.follower if route else None
@@ -534,7 +718,30 @@ class CoverageController(HeuristicControllerBase):
             self._route_revision,
             self.planning_map_version if route else None,
             status,
+            coverage_progress=self._coverage_progress_snapshot(),
         )
+
+    def _coverage_progress_snapshot(self) -> dict[str, object]:
+        guidance = self._last_guidance
+        follower = self.follower
+        return {
+            "phase": self.phase.value,
+            "progress_cells": (
+                float(guidance.progress_cells) if guidance is not None else None
+            ),
+            "remaining_route_cells": (
+                float(follower.remaining_route_cells)
+                if guidance is not None and follower is not None
+                else None
+            ),
+            "scan_segment_index": (
+                guidance.scan_segment_index if guidance is not None else None
+            ),
+            "heading_error_deg": self._last_heading_error_deg,
+            "cross_track_error_cells": self._last_cross_track_error_cells,
+            "last_progress_min": self._last_progress_time,
+            "stall_replans": self._stall_replans,
+        }
 
 
 __all__ = [

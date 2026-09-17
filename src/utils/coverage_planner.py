@@ -230,7 +230,7 @@ class CoveragePlanner:
         swath_width: float,
         R_min: float,
         obstacle_mask,
-        along_track_cells: float | None = 0.8,
+        along_track_cells: float | None = None,
     ) -> bool:
         """Check every scan line and inter-line Dubins turn against a mask."""
         box = bbox if isinstance(bbox, BBox) else BBox(*bbox)

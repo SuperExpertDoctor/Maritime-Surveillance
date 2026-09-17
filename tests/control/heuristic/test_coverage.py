@@ -315,7 +315,8 @@ def test_coverage_rejects_a_new_obstacle_on_an_unflown_scan_leg(
     with pytest.raises(CoverageRouteBlockedError, match="coverage route blocked"):
         started_controller.act(blocked_observation)
 
-    assert started_controller.route_snapshot().status == "pending"
+    assert started_controller.route_snapshot().status == "unavailable"
+    assert started_controller.route_snapshot().route
 
 
 def test_coverage_replan_starts_at_next_unconsumed_scan_band(

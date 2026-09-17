@@ -88,7 +88,9 @@ def test_controller_emits_scan_direction_heading_and_origin_for_each_swath():
     )
 
     scan_start, scan_end = controller.scan_ranges[0]
-    for pose in controller.route[1 : scan_start + 2]:
+    stable_index = scan_start + 5
+    assert stable_index < scan_end
+    for pose in controller.route[1 : stable_index + 1]:
         scan_observation = replace(
             observation,
             self_state=replace(
@@ -102,8 +104,8 @@ def test_controller_emits_scan_direction_heading_and_origin_for_each_swath():
         observation,
         self_state=replace(
             observation.self_state,
-            position=controller.route[scan_start + 1][:2],
-            heading_rad=controller.route[scan_start + 1][2],
+            position=controller.route[stable_index][:2],
+            heading_rad=controller.route[stable_index][2],
         ),
     )
 

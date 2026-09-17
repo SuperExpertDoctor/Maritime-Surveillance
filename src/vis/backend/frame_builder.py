@@ -117,6 +117,7 @@ def _legacy_task_visual(uav, *, source: str, route_status: str) -> dict:
         "route_status": route_status,
         "route_source": source,
         "observation_started": None,
+        "coverage_progress": None,
     }
 
 
@@ -157,8 +158,13 @@ def _route_visual_data(state, uav, entity, *, planned_limit: int,
             "observation_started": _probe_observation_started(
                 state, uav.id, route,
             ),
+            "coverage_progress": (
+                dict(route.coverage_progress)
+                if route.coverage_progress is not None
+                else None
+            ),
         }
-        if route.status != "ready":
+        if route.status not in {"ready", "unavailable"}:
             return [], [], task_visual, None
         mission = sample_route_overview(route.route, mission_limit)
         if route.next_index >= len(route.route):

@@ -310,6 +310,7 @@ class SimulationEngine:
             action_spec=action_spec,
             contact_config=config.mission.contact,
             coverage_execution=coverage_execution,
+            coverage_config=config.mission.coverage,
         )
         for mode, provider in self._control_providers.items():
             resolved_mode = ControlMode(mode)
@@ -1820,6 +1821,20 @@ class SimulationEngine:
                 uav, tick.observation.timestamp_min,
             )
         for event in tick.emitted_events:
+            event_generation = event.payload.get("generation")
+            if (
+                event_generation is not None
+                and event_generation != tick.lease.generation
+            ):
+                continue
+            event_task_id = event.payload.get("task_id")
+            current_task = self.control_coordinator.active_task(uav.id)
+            if (
+                event_task_id is not None
+                and (current_task is None or event_task_id != current_task.task_id)
+                and (previous_task is None or event_task_id != previous_task.task_id)
+            ):
+                continue
             if event.event_type == "search_complete":
                 self._record_search_completion_event(uav, event, previous_task)
             elif event.event_type == "task_failed":

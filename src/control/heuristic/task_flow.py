@@ -96,6 +96,15 @@ class HeuristicTaskFlow:
         current_task = self._active_task(
             controller, self._pending_tasks.get(lease.uav_id)
         )
+        event_generation = event.payload.get("generation")
+        if event_generation is not None and event_generation != lease.generation:
+            return TaskTransition.unchanged(lease, controller, current_task)
+        event_task_id = event.payload.get("task_id")
+        if (
+            event_task_id is not None
+            and (current_task is None or event_task_id != current_task.task_id)
+        ):
+            return TaskTransition.unchanged(lease, controller, current_task)
         if (
             lease.owner is not ControlOwner.HEURISTIC
             or event.event_type not in EVENT_TRANSITIONS

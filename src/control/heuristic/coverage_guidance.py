@@ -91,6 +91,11 @@ class CoverageRouteFollower:
         return self._progress_offset + self._progress
 
     @property
+    def remaining_route_cells(self) -> float:
+        """Return physical route distance still to be flown."""
+        return max(0.0, self._length - self._progress)
+
+    @property
     def scan_segment_index(self) -> int | None:
         return self._scan_segment_for_progress(self._progress)
 

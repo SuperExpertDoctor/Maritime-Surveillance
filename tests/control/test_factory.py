@@ -19,6 +19,7 @@ from src.control.heuristic.return_to_base import (
     SystemHoldingController,
 )
 from src.control.heuristic.tracking import TrackingController
+from src.mission.config import CoverageConfig
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox
 
@@ -170,6 +171,24 @@ def test_factory_passes_actual_coverage_execution_geometry_to_controller(config)
     assert controller.r_min == pytest.approx(1.75)
     assert controller.sar_along_track_cells == pytest.approx(0.8)
     assert controller.planner.near_range == pytest.approx(0.25)
+
+
+def test_factory_passes_coverage_watchdog_configuration_to_controller(config):
+    coverage_config = CoverageConfig(
+        no_progress_timeout_min=13.0,
+        align_timeout_min=9.0,
+        max_stall_replans=4,
+    )
+    factory = ControlFactory(config.control, coverage_config=coverage_config)
+
+    controller = factory.create_heuristic(
+        "UAV-1",
+        ControlTask("coverage-watchdog", OperationMode.COVERAGE, region_bbox=BBox(1, 1, 5, 5)),
+    )
+
+    assert controller.progress_timeout_min == pytest.approx(13.0)
+    assert controller.align_timeout_min == pytest.approx(9.0)
+    assert controller.max_stall_replans == 4
 
 
 @pytest.mark.parametrize(

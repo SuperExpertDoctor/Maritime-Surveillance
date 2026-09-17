@@ -223,6 +223,7 @@ class ControlCoordinator:
             controller.action_spec,
             episode_id,
             task,
+            generation=current.generation + 1,
         )
         controller.reset(context)
 
@@ -404,6 +405,7 @@ class ControlCoordinator:
                         controller.action_spec,
                         episode_id,
                         task,
+                        generation=current.generation + 1,
                     )
                 )
             prepared.append(
@@ -920,6 +922,7 @@ class ControlCoordinator:
             controller.action_spec,
             episode_id,
             task,
+            generation=self.ownership.current(uav_id).generation,
         )
 
     def _update_invalid_streak(

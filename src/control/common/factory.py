@@ -22,7 +22,7 @@ from src.control.heuristic.return_to_base import (
 )
 from src.control.heuristic.tracking import TrackingController
 from src.control.heuristic.probe import ProbeController
-from src.mission.config import ContactConfig
+from src.mission.config import ContactConfig, CoverageConfig
 from src.schedule.config_loader import ControlConfig
 
 
@@ -42,6 +42,7 @@ class ControlFactory:
         action_spec: ActionSpec | None = None,
         contact_config: ContactConfig | None = None,
         coverage_execution: CoverageExecutionConfig | None = None,
+        coverage_config: CoverageConfig | None = None,
     ) -> None:
         self._config = config
         self._observation_spec = observation_spec or ObservationSpec(
@@ -50,6 +51,7 @@ class ControlFactory:
         )
         self._action_spec = action_spec or ActionSpec(-pi, pi, 0.1, 1.0)
         self._contact_config = contact_config
+        self._coverage_config = coverage_config or CoverageConfig()
         self._coverage_execution = coverage_execution or CoverageExecutionConfig(
             swath_width_cells=2.0,
             near_range_cells=0.25,
@@ -145,6 +147,9 @@ class ControlFactory:
         if task.task_type is OperationMode.COVERAGE:
             return CoverageController(
                 coverage_execution=self._coverage_execution,
+                progress_timeout_min=self._coverage_config.no_progress_timeout_min,
+                align_timeout_min=self._coverage_config.align_timeout_min,
+                max_stall_replans=self._coverage_config.max_stall_replans,
                 **kwargs,
             )
         if task.task_type is OperationMode.TRACK:

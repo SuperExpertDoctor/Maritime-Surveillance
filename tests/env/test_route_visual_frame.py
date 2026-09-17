@@ -104,6 +104,7 @@ def test_route_frame_uses_controller_snapshot_for_bounded_paths_and_metadata():
         "route_status": "ready",
         "route_source": "controller",
         "observation_started": None,
+        "coverage_progress": None,
     }
 
 
@@ -115,8 +116,12 @@ def test_explicit_controller_status_does_not_fallback_to_legacy_entity_routes(st
 
     uav = _frame(state, _entity())["uavs"][0]
 
-    assert uav["planned_path"] == []
-    assert uav["mission_route"] == []
+    if status == "cleared":
+        assert uav["planned_path"] == []
+        assert uav["mission_route"] == []
+    else:
+        assert uav["planned_path"]
+        assert uav["mission_route"]
     assert uav["task_visual"]["route_source"] == "controller"
     assert uav["task_visual"]["route_status"] == status
 

@@ -256,6 +256,9 @@ class ControlRouteSnapshot:
     route_revision: int
     planning_map_version: int | None
     status: str
+    coverage_progress: Mapping[str, object] | None = field(
+        default=None, kw_only=True
+    )
 
     def __post_init__(self) -> None:
         for name in ("task_type", "phase"):
@@ -290,6 +293,14 @@ class ControlRouteSnapshot:
         ):
             raise ValueError(
                 "planning_map_version must be a non-negative integer or None"
+            )
+        if self.coverage_progress is not None:
+            if not isinstance(self.coverage_progress, Mapping):
+                raise ValueError("coverage_progress must be a mapping or None")
+            object.__setattr__(
+                self,
+                "coverage_progress",
+                _immutable_snapshot(self.coverage_progress),
             )
         normalized_route = []
         for pose in self.route:
@@ -380,6 +391,13 @@ class ControllerContext:
     action_spec: ActionSpec
     episode_id: str
     task: ControlTask | None = None
+    generation: int = field(default=0, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise ValueError("generation must be an integer")
+        if self.generation < 0:
+            raise ValueError("generation must be non-negative")
 
 
 @dataclass(frozen=True)
