@@ -9,10 +9,12 @@ from src.control.common.contracts import (
     ActionSpec,
     ControlMode,
     ControlOwner,
-    ControlCommand,
+    ObservationSpec,
+    ControlTask,
     OperationMode,
     SensorMode,
 )
+from src.control.heuristic.coverage import CoverageController
 from src.control.common.executor import UAVDynamicsExecutor
 from src.control.common.observation import ObservationProvider
 from src.control.common.safety import SafetyEnvelope
@@ -37,28 +39,9 @@ def oracle_coverage(events, fixed_cells, *, now_min, window_min, cell_size_km):
     }
 
 
-class _RigController:
-    phase = "scan"
-
-    def __init__(self, speed_cells_min: float, scan_origin: tuple[float, float]):
-        self._speed_cells_min = speed_cells_min
-        self._scan_origin = scan_origin
-
-    def act(self, _observation) -> ControlCommand:
-        return ControlCommand(
-            turn_rate_rad_min=0.0,
-            speed_cells_min=self._speed_cells_min,
-            sensor_mode=SensorMode.SAR,
-            operation_mode=OperationMode.COVERAGE,
-            sar_look_direction="right",
-            sar_scan_heading_rad=0.0,
-            sar_scan_origin=self._scan_origin,
-        )
-
-
 @dataclass
 class CoverageRig:
-    controller: _RigController
+    controller: CoverageController
     entity: UAVEntity
     observations: ObservationProvider
     safety: SafetyEnvelope
@@ -68,7 +51,6 @@ class CoverageRig:
     dt_min: float
     current_time: float = 0.0
     _progress_cells: float = 0.0
-    _max_speed_cells_min: float = 0.0
 
     def tick(self) -> dict:
         before = self.entity.pose
@@ -84,17 +66,20 @@ class CoverageRig:
             current_time=self.current_time,
             dt_min=self.dt_min,
         )
-        requested = self.controller.act(observation)
+        requested = self.controller.act(observation).command
         safe = self.safety.apply(requested, observation, self.dt_min)
         result = self.executor.execute(self.entity, safe, self.dt_min)
         footprint = []
-        if result.applied_command.sensor_mode is SensorMode.SAR:
+        if (
+            result.applied_command.sensor_mode is SensorMode.SAR
+            and self.entity.sar_imaging
+        ):
             footprint = [
                 [cell.col, cell.row]
                 for cell in self.entity.sar_sensor.compute_swath_footprint(
                     self.entity.float_position,
                     self.entity.heading_rad,
-                    "right",
+                    result.applied_command.sar_look_direction,
                     self.entity.sar_along_track_cells,
                 )
             ]
@@ -104,10 +89,8 @@ class CoverageRig:
             if self.bbox.col_start <= col < self.bbox.col_end
             and self.bbox.row_start <= row < self.bbox.row_end
         }
-        self._progress_cells += len(in_bbox)
-        self._max_speed_cells_min = max(
-            self._max_speed_cells_min, result.applied_command.speed_cells_min
-        )
+        if self.controller.follower is not None:
+            self._progress_cells = self.controller.follower.progress_cells
         obstacle_intersection = any(
             self.state.obstacle_mask[col, row]
             for col, row in footprint
@@ -117,13 +100,13 @@ class CoverageRig:
         record = {
             "before_pose": before,
             "after_pose": self.entity.pose,
-            "phase": self.controller.phase,
+            "phase": self.controller.phase.value,
             "applied_command": result.applied_command,
             "footprint": footprint,
             "progress_cells": self._progress_cells,
             "sar_imaging": self.entity.sar_imaging,
             "distance_cells": result.distance_cells,
-            "max_speed_cells_min": self._max_speed_cells_min,
+            "max_speed_cells_min": result.applied_command.speed_cells_min,
             "obstacle_intersection": obstacle_intersection,
         }
         self.current_time += self.dt_min
@@ -136,6 +119,8 @@ class CoverageRig:
         records = []
         while self.current_time < max_minutes:
             records.append(self.tick())
+            if self.controller.follower is not None and self.controller.follower.is_complete:
+                break
         return records
 
 
@@ -165,13 +150,44 @@ def make_coverage_rig(*, bbox, start_pose, swath_cells=1.5, dt_min=1.0):
         grid_shape=(30, 30),
     )
     speed = 160.0 / 10.0 / 60.0
+    action_spec = ActionSpec(-speed, speed, speed, speed)
+    observation_provider = ObservationProvider(config)
+    observation = observation_provider.build(
+        entity,
+        state,
+        events=(),
+        bases=(),
+        control_mode=ControlMode.HEURISTIC,
+        control_owner=ControlOwner.HEURISTIC,
+        operation_mode=OperationMode.COVERAGE,
+        safety_intervened=False,
+        current_time=0.0,
+        dt_min=dt_min,
+    )
+    controller = CoverageController(
+        observation_spec=controller_observation_spec(config),
+        action_spec=action_spec,
+        swath_width=swath_cells,
+        r_min=entity.R_min,
+        sar_along_track_cells=entity.sar_along_track_cells,
+    )
+    controller.start_task(
+        ControlTask("coverage-rig-task", OperationMode.COVERAGE, bbox), observation
+    )
     return CoverageRig(
-        controller=_RigController(speed, (float(start_pose[0]), float(start_pose[1]))),
+        controller=controller,
         entity=entity,
-        observations=ObservationProvider(config),
-        safety=SafetyEnvelope(ActionSpec(-speed, speed, speed, speed)),
-        executor=UAVDynamicsExecutor(),
+        observations=observation_provider,
+        safety=SafetyEnvelope(action_spec),
+        executor=UAVDynamicsExecutor(controller.coverage_execution),
         state=state,
         bbox=bbox,
         dt_min=dt_min,
+    )
+
+
+def controller_observation_spec(config):
+    return ObservationSpec(
+        config.control.observation.schema_version,
+        config.control.observation.local_window_cells,
     )

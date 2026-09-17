@@ -67,7 +67,8 @@ def test_coverage_rig_records_real_motion_and_time_state(dt_min):
     assert rig.current_time == pytest.approx(dt_min)
     assert rig.state.current_time == pytest.approx(dt_min)
     assert rig.entity.fuel_remaining_pct < before_fuel
-    assert record["sar_imaging"] is True
+    assert record["sar_imaging"] is False
+    assert record["phase"] == "transit_astar"
     assert set(record) == {
         "before_pose",
         "after_pose",

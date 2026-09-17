@@ -54,7 +54,7 @@ class DetourNavigator(NavigatorSpy):
         if self.plan_calls == 1:
             return direct
         goal = min(goals)
-        detour_col = max(start[0], goal[0]) + 1.0
+        detour_col = min(start[0], goal[0]) - 1.0
         return [
             tuple(start),
             (detour_col, start[1], 0.0),
@@ -149,6 +149,17 @@ def _with_pose(observation, pose, *, planning_map_version=None, obstacle_mask=No
     )
 
 
+def _advance_to(controller, observation, target_index):
+    """Advance through route samples so tests exercise physical progress."""
+    decision = None
+    stepped_observation = replace(observation, dt_min=max(observation.dt_min, 2.0))
+    for index in range(controller.follower.index + 1, target_index + 1):
+        decision = controller.act(
+            _with_pose(stepped_observation, controller.route[index])
+        )
+    return decision
+
+
 def test_coverage_uses_astar_before_enabling_sar(controller, observation):
     controller.start_task(
         ControlTask("S1", OperationMode.COVERAGE, region_bbox=BBox(10, 10, 15, 15)),
@@ -183,11 +194,7 @@ def test_coverage_enables_sar_only_on_stable_scan_leg(started_controller, observ
     scan_start, scan_end = started_controller.scan_ranges[0]
     interior_index = scan_start + 1
     assert interior_index < scan_end
-    scan_observation = _with_pose(
-        observation, started_controller.route[interior_index]
-    )
-
-    decision = started_controller.act(scan_observation)
+    decision = _advance_to(started_controller, observation, interior_index)
 
     assert started_controller.phase is CoveragePhase.SCANNING
     assert decision.command.sensor_mode is SensorMode.SAR
@@ -196,6 +203,7 @@ def test_coverage_enables_sar_only_on_stable_scan_leg(started_controller, observ
 
 def test_coverage_keeps_sar_off_until_heading_is_stable(started_controller, observation):
     scan_start, _ = started_controller.scan_ranges[0]
+    _advance_to(started_controller, observation, scan_start + 1)
     interior_pose = started_controller.route[scan_start + 1]
     unstable_observation = _with_pose(
         observation,
@@ -212,8 +220,17 @@ def test_coverage_emits_search_complete_once_after_final_scan_pose(
     started_controller, observation
 ):
     decisions = []
-    for pose in started_controller.route[1:-1]:
-        decisions.append(started_controller.act(_with_pose(observation, pose)))
+    target_index = len(started_controller.route) - 1
+    while started_controller.follower.index < target_index:
+        next_index = min(started_controller.follower.index + 1, target_index)
+        decisions.append(
+            started_controller.act(
+                _with_pose(
+                    replace(observation, dt_min=2.0),
+                    started_controller.route[next_index],
+                )
+            )
+        )
     final_observation = _with_pose(observation, started_controller.route[-1])
 
     decision = started_controller.act(final_observation)
@@ -253,9 +270,9 @@ def test_coverage_rejects_a_continuous_route_segment_that_crosses_a_blocked_cell
     controller, observation
 ):
     blocked_mask = np.array(observation.planning_obstacle_mask, copy=True)
-    # The direct A* entry segment is (2, 10) -> (10, 9.75).  This cell is
+    # The direct A* entry segment is (2, 10) -> (5.05, 10.2).  This cell is
     # crossed by the segment, but neither endpoint is inside it.
-    blocked_mask[4, 9] = True
+    blocked_mask[4, 10] = True
     blocked_observation = replace(observation, planning_obstacle_mask=blocked_mask)
 
     with pytest.raises(CoverageRouteBlockedError, match="coverage route blocked"):
@@ -271,9 +288,8 @@ def test_coverage_rejects_a_new_obstacle_on_an_unflown_scan_leg(
     started_controller, observation
 ):
     scan_start, scan_end = started_controller.scan_ranges[0]
-    current_observation = _with_pose(
-        observation, started_controller.route[scan_start]
-    )
+    _advance_to(started_controller, observation, scan_start)
+    current_observation = _with_pose(observation, started_controller.route[scan_start])
     started_controller.act(current_observation)
     current_index = started_controller.follower.index
     assert scan_start <= current_index < scan_end - 1
@@ -303,8 +319,7 @@ def test_coverage_replan_starts_at_next_unconsumed_scan_band(
         observation,
     )
     first_scan_end = controller.scan_ranges[0][1]
-    for pose in controller.route[1 : first_scan_end + 1]:
-        controller.act(_with_pose(observation, pose))
+    _advance_to(controller, observation, first_scan_end)
     previous_index = controller.follower.index
     next_scan_start = next(
         start for start, end in controller.scan_ranges if end > previous_index
@@ -313,7 +328,8 @@ def test_coverage_replan_starts_at_next_unconsumed_scan_band(
     blocked_mask = np.array(observation.planning_obstacle_mask, copy=True)
     # The prior connector swings through this cell, while the detour to the
     # second band remains free.  It must not restart at the first scan entry.
-    blocked_mask[17, 10] = True
+    blocked_pose = controller.route[first_scan_end + 1]
+    blocked_mask[math.floor(blocked_pose[0]), math.floor(blocked_pose[1])] = True
     replan_observation = _with_pose(
         observation,
         controller.route[previous_index],
@@ -341,6 +357,7 @@ def test_coverage_stop_before_final_pose_is_not_complete_and_is_idempotent(
 
 def test_coverage_rejects_disallowed_operation_mode(started_controller, observation):
     scan_start, _ = started_controller.scan_ranges[0]
+    _advance_to(started_controller, observation, scan_start + 1)
     restricted_observation = replace(
         _with_pose(observation, started_controller.route[scan_start + 1]),
         action_mask=ActionMask(

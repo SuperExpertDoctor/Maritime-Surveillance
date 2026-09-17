@@ -9,6 +9,7 @@ import math
 
 from src.control.common.contracts import (
     ActionSpec,
+    ControlCommand,
     ControlDecision,
     CoverageExecutionConfig,
     ControlObservation,
@@ -23,10 +24,10 @@ from src.control.common.contracts import (
 from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
 from src.control.heuristic.base import (
     HeuristicControllerBase,
-    RouteFollower,
     _wrap_pi,
     next_route_index,
 )
+from src.control.heuristic.coverage_guidance import CoverageGuidance, CoverageRouteFollower
 from src.control.heuristic.navigation import AStarNavigator
 from src.utils.coverage_planner import CoveragePath, CoveragePlanner, ScanSwath
 
@@ -132,7 +133,7 @@ class CoverageController(HeuristicControllerBase):
         )
         self.phase = CoveragePhase.CREATED
         self.task: ControlTask | None = None
-        self.follower: RouteFollower | None = None
+        self.follower: CoverageRouteFollower | None = None
         self.route: tuple[tuple[float, float, float], ...] = ()
         self.scan_ranges: tuple[tuple[int, int], ...] = ()
         self.scan_swaths: tuple[ScanSwath, ...] = ()
@@ -190,13 +191,14 @@ class CoverageController(HeuristicControllerBase):
             raise RuntimeError("start_task must be called before act")
         self._refresh_conflict_route(observation)
         self._refresh_invalidated_route(observation)
-        command = self.follower.next_command(
-            observation,
-            self.action_spec,
-            SensorMode.OFF,
-            self.operation_mode,
+        guidance = self.follower.update(
+            position=observation.self_state.position,
+            heading_rad=observation.self_state.heading_rad,
+            speed_cells_min=observation.self_state.speed_cells_min,
+            dt_min=observation.dt_min,
+            action_spec=self.action_spec,
         )
-        self._update_phase(observation)
+        self._update_phase(observation, guidance)
         sensor_mode = (
             SensorMode.SAR
             if self.phase is CoveragePhase.SCANNING
@@ -205,11 +207,14 @@ class CoverageController(HeuristicControllerBase):
         )
         operation_mode = self.operation_mode
         self._validate_command_modes(sensor_mode, operation_mode, observation)
-        command = replace(
-            command, sensor_mode=sensor_mode, operation_mode=operation_mode
+        command = ControlCommand(
+            turn_rate_rad_min=guidance.turn_rate_rad_min,
+            speed_cells_min=guidance.speed_cells_min,
+            sensor_mode=sensor_mode,
+            operation_mode=operation_mode,
         )
         if sensor_mode is SensorMode.SAR:
-            scan_index = self._scan_segment_index()
+            scan_index = guidance.scan_segment_index
             if scan_index is None:
                 raise RuntimeError("SAR enabled without an active scan swath")
             swath = self.scan_swaths[scan_index]
@@ -233,7 +238,12 @@ class CoverageController(HeuristicControllerBase):
         assert self.task is not None
         start_pose = (*observation.self_state.position, observation.self_state.heading_rad)
         initial_coverage = self.planner.plan(
-            self.task.region_bbox, start_pose, self.swath_width, self.r_min, direction
+            self.task.region_bbox,
+            start_pose,
+            self.swath_width,
+            self.r_min,
+            direction,
+            along_track_cells=self.sar_along_track_cells,
         )
         endpoints = scan_endpoint_poses(initial_coverage)
         if not endpoints:
@@ -247,7 +257,12 @@ class CoverageController(HeuristicControllerBase):
             observation.planning_map_version,
         )
         coverage = self.planner.plan(
-            self.task.region_bbox, entry, self.swath_width, self.r_min, direction
+            self.task.region_bbox,
+            entry,
+            self.swath_width,
+            self.r_min,
+            direction,
+            along_track_cells=self.sar_along_track_cells,
         )
         offset = len(transit) - 1
         route = tuple(transit) + tuple(coverage.waypoints[1:])
@@ -379,21 +394,29 @@ class CoverageController(HeuristicControllerBase):
         if len(scan_ranges) != len(scan_swaths):
             raise ValueError("scan_ranges and scan_swaths must have matching lengths")
         self.scan_swaths = tuple(scan_swaths)
-        self.follower = RouteFollower(self.route)
+        self.follower = CoverageRouteFollower(
+            self.route,
+            scan_ranges=scan_ranges,
+            r_min=self.r_min,
+        )
         self.planning_map_version = planning_map_version
         self._route_revision += 1
         self._route_status = "ready"
 
-    def _update_phase(self, observation: ControlObservation) -> None:
+    def _update_phase(
+        self, observation: ControlObservation, guidance: CoverageGuidance
+    ) -> None:
         assert self.follower is not None
-        if self.follower.is_complete:
+        if guidance.is_complete:
             self.phase = CoveragePhase.COMPLETED
             return
-        index = self.follower.index
-        if not self.scan_ranges or index < self.scan_ranges[0][0]:
+        if guidance.scan_segment_index is None and (
+            not self.scan_ranges
+            or self.follower.index < self.scan_ranges[0][0]
+        ):
             self.phase = CoveragePhase.TRANSIT_ASTAR
             return
-        scan_index = self._scan_segment_index()
+        scan_index = guidance.scan_segment_index
         if scan_index is not None:
             desired_heading = self.scan_swaths[scan_index].heading
             heading_error = abs(
@@ -401,7 +424,11 @@ class CoverageController(HeuristicControllerBase):
             )
             self.phase = (
                 CoveragePhase.SCANNING
-                if heading_error <= self.sar_heading_tolerance_rad
+                if (
+                    heading_error <= self.sar_heading_tolerance_rad
+                    and guidance.cross_track_error_cells
+                    <= self.cross_track_tolerance_cells
+                )
                 else CoveragePhase.ALIGN_SCAN
             )
             return
@@ -409,15 +436,7 @@ class CoverageController(HeuristicControllerBase):
 
     def _scan_segment_index(self) -> int | None:
         assert self.follower is not None
-        index = self.follower.index
-        return next(
-            (
-                scan_index
-                for scan_index, (start, end) in enumerate(self.scan_ranges)
-                if start < index < end
-            ),
-            None,
-        )
+        return self.follower.scan_segment_index
 
     @staticmethod
     def _route_blocked(

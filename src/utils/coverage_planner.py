@@ -51,6 +51,7 @@ class CoveragePlanner:
         swath_width: float,
         R_min: float,
         direction: str | None = None,
+        along_track_cells: float | None = None,
     ) -> CoveragePath:
         box = bbox if isinstance(bbox, BBox) else BBox(*bbox)
         width = box.col_end - box.col_start
@@ -59,11 +60,22 @@ class CoveragePlanner:
             raise ValueError("bbox must have positive area")
         if swath_width <= 0:
             raise ValueError("swath_width must be positive")
+        use_sensor_geometry = along_track_cells is not None
+        along_track = 1.0 if along_track_cells is None else float(along_track_cells)
+        if not math.isfinite(along_track) or along_track <= 0:
+            raise ValueError("along_track_cells must be finite and positive")
         if direction not in (None, "horizontal", "vertical"):
             raise ValueError("direction must be horizontal, vertical, or None")
 
         orientation = direction or ("horizontal" if width >= height else "vertical")
-        swaths = self._build_swaths(box, swath_width, R_min, orientation)
+        swaths = self._build_swaths(
+            box,
+            swath_width,
+            R_min,
+            orientation,
+            along_track,
+            extend_endpoints=use_sensor_geometry,
+        )
         if swaths and math.dist(tuple(start_pose[:2]), swaths[0].end) < math.dist(
             tuple(start_pose[:2]), swaths[0].start
         ):
@@ -98,17 +110,34 @@ class CoveragePlanner:
         return result
 
     def _build_swaths(
-        self, box: BBox, width: float, radius: float, orientation: str
+        self,
+        box: BBox,
+        width: float,
+        radius: float,
+        orientation: str,
+        along_track_cells: float = 0.8,
+        extend_endpoints: bool = True,
     ) -> list[ScanSwath]:
         swaths: list[ScanSwath] = []
+        # The controller needs physical settling distance after each U-turn;
+        # otherwise the first edge cells are passed before SAR is stable.
+        endpoint_extension = (
+            max(along_track_cells, 3.3 * radius) if extend_endpoints else 0.0
+        )
         if orientation == "horizontal":
-            low_endpoint = float(box.col_start)
-            high_endpoint = float(box.col_end)
+            low_endpoint = float(box.col_start) - endpoint_extension
+            high_endpoint = float(box.col_end) + endpoint_extension
             count = int(math.ceil((box.row_end - box.row_start) / width))
             for index in range(count):
                 band_start = box.row_start + index * width
                 band_end = min(box.row_end, band_start + width)
-                track = max(0.0, band_start - self.near_range)
+                # Put the first cell centre safely inside the near/far range;
+                # the far boundary is exclusive in SARSensor.
+                track = (
+                    band_start + 0.5 - self.near_range - 0.05
+                    if extend_endpoints
+                    else max(0.0, band_start - self.near_range)
+                )
                 footprint = tuple(
                     GridCoord(c, r)
                     for c in range(box.col_start, box.col_end)
@@ -125,13 +154,19 @@ class CoveragePlanner:
                     heading, look = math.pi, "left"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
         else:
-            low_endpoint = float(box.row_start)
-            high_endpoint = float(box.row_end)
+            low_endpoint = float(box.row_start) - endpoint_extension
+            high_endpoint = float(box.row_end) + endpoint_extension
             count = int(math.ceil((box.col_end - box.col_start) / width))
             for index in range(count):
                 band_start = box.col_start + index * width
                 band_end = min(box.col_end, band_start + width)
-                track = max(0.0, band_start - self.near_range)
+                # Put the first cell centre safely inside the near/far range;
+                # the far boundary is exclusive in SARSensor.
+                track = (
+                    band_start + 0.5 - self.near_range - 0.05
+                    if extend_endpoints
+                    else max(0.0, band_start - self.near_range)
+                )
                 footprint = tuple(
                     GridCoord(c, r)
                     for c in range(int(math.floor(band_start)), int(math.ceil(band_end)))
@@ -178,7 +213,14 @@ class CoveragePlanner:
         width = box.col_end - box.col_start
         height = box.row_end - box.row_start
         orientation = "horizontal" if width >= height else "vertical"
-        swaths = self._build_swaths(box, swath_width, R_min, orientation)
+        swaths = self._build_swaths(
+            box,
+            swath_width,
+            R_min,
+            orientation,
+            along_track_cells=1.0,
+            extend_endpoints=False,
+        )
         previous: ScanSwath | None = None
         for swath in swaths:
             if not self._poses_are_free(self.sample_scan_line(swath), obstacle_mask):
