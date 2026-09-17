@@ -43,6 +43,27 @@ def test_red_failure_does_not_advance_clock_or_move_vessels(monkeypatch):
     assert engine.blocked_role == "red_commander"
 
 
+def test_run_stops_after_publishing_one_terminal_model_block_frame():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=BlockedGateway())
+    target = next(ship for ship in engine.ships if ship.vessel_class == "type_ii")
+    engine.surveillance_stages.set_fact(target.id, "sar", True, 0.0, "fixture-sar")
+    uav = engine.uavs[0]
+    target._col = float(uav.position.col)
+    target._row = float(uav.position.row)
+    published = []
+
+    summary = engine.run(
+        steps=5,
+        on_step=lambda current_engine, result: published.append(
+            (current_engine.clock.time, result["trigger_type"])
+        ),
+    )
+
+    assert summary["steps"] == 0
+    assert engine.runtime_status == "paused_model"
+    assert published == [(0.0, "model_blocked")]
+
+
 def test_valid_red_plan_is_installed_before_ship_motion():
     engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=BlockedGateway())
     target = next(ship for ship in engine.ships if ship.vessel_class == "type_ii")

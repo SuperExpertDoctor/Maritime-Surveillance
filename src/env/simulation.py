@@ -2417,9 +2417,12 @@ class SimulationEngine:
 
     def run(self, steps: int = 480, on_step=None) -> dict:
         for _ in range(steps):
+            previous_time = self.clock.time
             result = self.step()
             if on_step is not None:
                 on_step(self, result)
+            if self.clock.time == previous_time or self.runtime_status != "running":
+                break
         return self.summary()
 
     def summary(self) -> dict:
