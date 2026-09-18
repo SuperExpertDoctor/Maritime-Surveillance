@@ -325,6 +325,7 @@ export default function App() {
         onClose={() => setSidebarOpen(false)}
         lastLlmCycle={displayedLlmCycle}
         readOnly={readOnly}
+        connectionStatus={mode === "live" ? live.status : replayConnectionStatus}
         selection={selectedBBox}
         onClearSelection={() => setSelectedBBox(null)}
         selectedContactId={selectedContactId}

@@ -2,6 +2,7 @@ import { Bot, CircleX, Crosshair, MousePointer2, Plane, Radio, RadioTower, Radar
 import { UAV_STATUS_COLORS } from "../renderer/colors";
 import { uavDisplayState } from "../renderer/displayState";
 import ContactPanel from "./ContactPanel";
+import CoveragePanel from "./CoveragePanel";
 import IntentPanel from "./IntentPanel";
 
 const STATUS_LABELS = {
@@ -34,6 +35,7 @@ export default function RightSidebar({
   onClose,
   lastLlmCycle,
   readOnly,
+  connectionStatus,
   selection,
   onClearSelection,
   selectedContactId,
@@ -88,9 +90,11 @@ export default function RightSidebar({
           <section className="sidebar-section overview-grid" aria-label="任务概览">
             <Metric label="仿真时间" value={frame.timestamp || "--:--:--"} />
             <Metric label="决策周期" value={`#${frame.cycle ?? 0}`} />
-            <Metric label="海域覆盖" value={`${coverage.toFixed(1)}%`} emphasized />
+            <Metric label="累计观测覆盖" value={`${coverage.toFixed(1)}%`} emphasized title="含光电历史扫描，不代表持续 SAR 搜索覆盖" />
             <Metric label="观测接触" value={contacts.length || ships.filter((ship) => ship.is_detected).length} />
           </section>
+
+          <CoveragePanel frame={frame} connectionStatus={connectionStatus} readOnly={readOnly} />
 
           <section className="sidebar-section vessel-editor" aria-label="初始化船舶编辑">
             <div className="section-heading">
@@ -284,8 +288,8 @@ export default function RightSidebar({
   );
 }
 
-function Metric({ label, value, emphasized }) {
-  return <div className={emphasized ? "metric emphasized" : "metric"}><span>{label}</span><strong>{value}</strong></div>;
+function Metric({ label, value, emphasized, title }) {
+  return <div className={emphasized ? "metric emphasized" : "metric"} title={title}><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function Situation({ label, value, tone }) {

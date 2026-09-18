@@ -168,4 +168,19 @@ Evidence: heavyweight decision failures count once per decision; the configured 
 
 Result: PASS for offline failure-control contracts. External model availability is not evaluated.
 
-T14-T16: NOT_RUN
+## T14: Right-sidebar persistent SAR coverage panel
+
+Commands:
+
+```bash
+npm run build
+npx playwright test tests/coverage-metrics.spec.js tests/mixed-maritime.spec.js
+```
+
+Exit code: 0. Vite production build passed (`✓ built in 34.63s`); the combined browser run passed `15 tests in 27.6s` (4 new coverage tests and 11 existing mixed-maritime tests). The focused rerun after the replay fixture route correction also passed.
+
+Evidence: `CoveragePanel` reads only `frame.coverage_metrics`, defaults to 60 minutes, switches among the authoritative 30/60/120 windows, computes selected-window overdue coverage from `cumulative_pct - window.coverage_pct`, and keeps null values as `—`. The panel exposes the named region, pressed window buttons, progressbar semantics, fixed-domain area, unseen/overdue values, simulation timestamp, partial-window state, paused-model state, live disconnect state, replay state, unsupported schema, and missing historical metric state. Existing `frameFixture`/`installFrameSocket` were extracted into `tests/helpers/frameSocket.js`; the live push, new episode reset, replay seek fixture, and disconnect paths are covered without a second state store.
+
+Result: PASS for T14 offline/browser contracts. The browser fixture validates UI behavior; a real production WebSocket/replay evidence pass remains part of T16.
+
+T15-T16: NOT_RUN
