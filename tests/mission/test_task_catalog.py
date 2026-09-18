@@ -179,3 +179,59 @@ def test_catalog_rejects_contact_when_target_to_base_return_exceeds_range(state)
     )
 
     assert tasks[0].feasible_uav_ids == ()
+
+
+def test_catalog_uses_geometry_key_for_regular_search_and_preserves_fragment_id(state):
+    regular_bbox = (8, 8, 12, 13)
+    fragment_bbox = (8, 8, 12, 12)
+    source = CandidateSource([
+        {
+            **_search_candidate(regular_bbox),
+            "task_id": "search-000017-8-8-4-5",
+            "kind": "search",
+        },
+        {
+            **_search_candidate(fragment_bbox),
+            "task_id": "fragment:8:8:12:12:unserved-1",
+            "kind": "search",
+        },
+    ])
+
+    tasks = TaskCatalog(candidate_extractor=source).build(
+        state, (), (), now_min=10.0,
+    )
+
+    assert len(tasks) == 2
+    assert tasks[0].task_id == "search:8:8:12:13"
+    assert tasks[1].task_id == "fragment:8:8:12:12:unserved-1"
+    assert tasks[0].task_id != tasks[1].task_id
+
+
+def test_catalog_regular_search_id_is_stable_when_extractor_order_changes(state):
+    first_source = CandidateSource([
+        _search_candidate((2, 3, 7, 7)),
+        _search_candidate((9, 4, 13, 9)),
+    ])
+    second_source = CandidateSource([
+        {
+            **_search_candidate((9, 4, 13, 9)),
+            "task_id": "search-000002-9-4-4-5",
+        },
+        {
+            **_search_candidate((2, 3, 7, 7)),
+            "task_id": "search-000001-2-3-5-4",
+        },
+    ])
+
+    first = TaskCatalog(candidate_extractor=first_source).build(
+        state, (), (), now_min=10.0,
+    )
+    second = TaskCatalog(candidate_extractor=second_source).build(
+        state, (), (), now_min=10.0,
+    )
+
+    assert {task.task_id for task in first} == {
+        "search:2:3:7:7",
+        "search:9:4:13:9",
+    }
+    assert {task.task_id for task in second} == {task.task_id for task in first}

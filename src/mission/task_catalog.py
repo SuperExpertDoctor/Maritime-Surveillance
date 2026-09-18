@@ -166,7 +166,11 @@ class TaskCatalog:
             return None
         key = ("search", bbox)
         supplied_task_id = candidate.get("task_id")
-        if isinstance(supplied_task_id, str) and supplied_task_id:
+        if isinstance(supplied_task_id, str) and supplied_task_id.startswith("fragment:"):
+            task_id = supplied_task_id
+        elif candidate.get("kind", "search") == "search":
+            task_id = "search:" + ":".join(str(value) for value in bbox)
+        elif isinstance(supplied_task_id, str) and supplied_task_id:
             task_id = supplied_task_id
         else:
             task_id = self._task_id(key)

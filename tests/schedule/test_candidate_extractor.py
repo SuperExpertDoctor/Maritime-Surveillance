@@ -103,6 +103,25 @@ def test_unassigned_active_search_region_does_not_lock_candidate_pool(sm):
     )
 
 
+def test_active_search_region_with_unknown_uav_does_not_lock_candidate_pool(sm):
+    from src.schedule.datatypes import Region
+
+    active = Region(
+        id="S-unknown-uav",
+        bbox=BBox(8, 8, 16, 14),
+        type="search",
+        assigned_uav_id="UAV-missing",
+    )
+    sm.set_search_regions([active])
+
+    result = CandidateExtractor().extract(sm)
+
+    assert any(
+        _bboxes_overlap(candidate["bbox"], active.bbox)
+        for candidate in result.candidate_regions
+    )
+
+
 def test_candidate_bbox_within_size_range(sm):
     """候选区域面积应在合理范围内。"""
     extractor = CandidateExtractor()

@@ -7,7 +7,7 @@ Return exactly one JSON object with this schema:
   "selected_task_ids": ["task ids in priority order"],
   "preempt_uav_ids": ["ordinary-search UAV ids actually being preempted"],
   "defer_reason": null,
-  "notes": "short operational explanation"
+  "notes": "short operational explanation, at most 160 characters"
 }
 
 Select only supplied candidate task IDs. Search candidates already contain a
@@ -22,6 +22,11 @@ your selection. Existing approved
 or executing tasks remain in force unless an explicitly legal ordinary search
 UAV is preempted for a new probe or track. Returning, refueling, safety, active
 probe, and valid tracking work must not be preempted.
+When coverage_constraint is present, satisfy required_new_search_count with the
+supplied representative_task_ids and include every must_service_task_ids entry
+unless the server reports that the floor is infeasible. Do not invent tasks or
+append hidden representatives. The validator rejects notes longer than 160
+characters.
 
 The optional strategy_memories in the snapshot are advisory evidence from
 validated earlier episodes. Use them only to prioritize the supplied tasks.

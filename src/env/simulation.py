@@ -428,6 +428,7 @@ class SimulationEngine:
         self.last_result: dict = {"trigger_type": "none", "action": None}
         self._runtime_status = "running"
         self._blocked_role: str | None = None
+        self._decision_failure_streak = 0
         self._retired_command_results: dict[str, CommandResult] = {}
         self._publish_runtime_state()
 
@@ -895,6 +896,36 @@ class SimulationEngine:
         self._blocked_role = blocked_role
         self._publish_runtime_state()
 
+    def _record_decision_maker_failure(self, result: dict) -> None:
+        """Count one completed heavy decision and pause on bounded failure."""
+        interaction = result.get("llm_cycle") or {}
+        category = (
+            interaction.get("failure_category")
+            or self.allocator.mission_scheduler.last_selection_failure_category
+            or "unknown"
+        )
+        stage = interaction.get("failure_stage") or "transport"
+        self._decision_failure_streak += 1
+        self.allocator.sm.add_event("mission_model_failure", {
+            "failure_category": category,
+            "failure_stage": stage,
+            "consecutive_failures": self._decision_failure_streak,
+            "snapshot_id": result.get("snapshot_id"),
+        })
+        threshold = self.config.mission.coverage.max_consecutive_decision_failures
+        immediate_pause = category in {
+            "http_401", "http_402", "http_403", "configuration",
+        }
+        if immediate_pause or self._decision_failure_streak >= threshold:
+            self.allocator.trigger_manager.clear_heavy_retry()
+            self._set_runtime_state("paused_model", "decision_maker")
+            self.allocator.sm.add_event("mission_model_paused", {
+                "blocked_role": "decision_maker",
+                "failure_category": category,
+                "failure_stage": stage,
+                "consecutive_failures": self._decision_failure_streak,
+            })
+
     def _create_ships(self) -> list[Ship]:
         return create_ship_population(
             self.config,
@@ -1238,6 +1269,11 @@ class SimulationEngine:
                     result.get("trigger_type") == "light"
                     and result.get("action") == "approved_tasks_deferred"
                 )
+                if result.get("trigger_type") == "heavy":
+                    if decision_succeeded:
+                        self._decision_failure_streak = 0
+                    else:
+                        self._record_decision_maker_failure(result)
                 self._outcome_evaluator.record_decision_latency(
                     snapshot_frozen_wall=timing["snapshot_frozen_wall"],
                     decision_finished_wall=(
@@ -1274,6 +1310,36 @@ class SimulationEngine:
     def retry_blocked_decision(self) -> None:
         """Retry a model decision without advancing simulation time."""
         if self.runtime_status != "paused_model":
+            return
+        if self.blocked_role == "decision_maker":
+            result, batch = self.allocator.mission_step(
+                self.clock.time,
+                active_tasks=tuple(self._mission_task_records.values()),
+                intents=self.intents.intents(),
+                intent_statuses=self._evaluate_intent_statuses(self.clock.time),
+                force_heavy=True,
+            )
+            if batch is not None and self.apply_assignment_batch(batch):
+                self.allocator.trigger_manager.clear_heavy_retry()
+                self._decision_failure_streak = 0
+                self._set_runtime_state("running")
+                self.last_result = result
+                self.allocator.sm.add_event("mission_model_retry_succeeded", {
+                    "snapshot_id": result.get("snapshot_id"),
+                    "selection_call_id": batch.selection_call_id,
+                })
+            else:
+                self._set_runtime_state("paused_model", "decision_maker")
+                self.allocator.sm.add_event("mission_model_retry_failed", {
+                    "snapshot_id": result.get("snapshot_id"),
+                    "failure_category": (
+                        self.allocator.mission_scheduler.last_selection_failure_category
+                        or "apply"
+                    ),
+                    "errors": list(
+                        self.allocator.mission_scheduler.last_selection_errors
+                    ),
+                })
             return
         try:
             self._prepare_red_decision(self.clock.time)
@@ -1920,7 +1986,10 @@ class SimulationEngine:
     ) -> None:
         """Defer route completion until this tick's real SAR footprint is recorded."""
         task_id = event.payload.get("task_id")
-        generation = event.payload.get("generation", lease_generation)
+        # Completion events are asynchronous and must carry the generation
+        # they were emitted for. Falling back to the current lease can turn an
+        # old generation's event into a completion for a reassigned task.
+        generation = event.payload.get("generation")
         if not isinstance(task_id, str) or not task_id:
             return
         if (
@@ -2792,6 +2861,7 @@ class SimulationEngine:
         lease = self.control_coordinator.quarantine_uav(
             uav.id, current_time=current_time, reason=reason,
         )
+        self._publish_control_routes()
         uav.status = "failed"
         state = sm.get_uav(uav.id)
         if state is not None:

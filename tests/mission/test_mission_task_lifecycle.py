@@ -214,6 +214,28 @@ def test_incomplete_route_is_blocked_with_missing_cells_and_never_counted_comple
     assert incomplete["data"]["missing_cells"]
 
 
+def test_completion_without_generation_cannot_complete_current_task():
+    engine, uav, task = _coverage_task_fixture()
+    generation = engine.control_coordinator.current_lease(uav.id).generation
+    event = ControlEvent(
+        1,
+        1.0,
+        "coverage_route_finished",
+        "controller",
+        uav.id,
+        {"task_id": task.task_id},
+    )
+
+    engine._queue_pending_coverage_completion(uav, event, task, generation)
+    engine._finalize_coverage_completions(1.0)
+
+    assert engine._mission_task_records[task.task_id].status == "approved"
+    assert not any(
+        item["task_id"] == task.task_id
+        for item in engine._pending_coverage_completions
+    )
+
+
 def test_state_step_does_not_replace_task_sar_progress_with_legacy_scan_times():
     engine, _uav, task = _coverage_task_fixture()
     generation = engine.control_coordinator.current_lease("UAV-1").generation

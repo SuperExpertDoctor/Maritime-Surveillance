@@ -137,6 +137,7 @@ class ControlCoordinator:
         self._last_tick_times: dict[str, float | None] = {
             uav_id: None for uav_id in self._configured_modes
         }
+        self._quarantined_uavs: set[str] = set()
         self._episode_ids: dict[str, str] = {}
         self._sortie_numbers: dict[str, int] = {}
         self._next_event_sequence = 1
@@ -245,6 +246,7 @@ class ControlCoordinator:
             else:
                 self._pending_tasks[uav_id] = task
             self._operation_modes[uav_id] = OperationMode.IDLE
+            self._quarantined_uavs.discard(uav_id)
             self._episode_ids[uav_id] = episode_id
             self._sortie_numbers[uav_id] = sortie_number
             self._invalid_streaks[uav_id] = 0
@@ -764,6 +766,8 @@ class ControlCoordinator:
 
         with self._lock:
             current = self.ownership.current(uav_id)
+            if uav_id in self._quarantined_uavs:
+                return current
             already_quiet = (
                 uav_id not in self._controllers
                 and uav_id not in self._pending_tasks
@@ -774,8 +778,9 @@ class ControlCoordinator:
                 and current.owner is ControlOwner.SYSTEM
             )
             if already_quiet:
-                lease = current
+                lease = self.ownership.release_to_system(current, current_time)
                 old_controller = None
+                self._quarantined_uavs.add(uav_id)
             else:
                 lease = self.ownership.release_to_system(current, current_time)
                 old_controller = self._controllers.pop(uav_id, None)
@@ -787,6 +792,7 @@ class ControlCoordinator:
                 self._last_applied_commands[uav_id] = None
                 self._last_safety_intervened[uav_id] = False
                 self._last_tick_times[uav_id] = None
+                self._quarantined_uavs.add(uav_id)
 
         if old_controller is not None:
             self._stop_controller(old_controller, StopReason.FAILED)

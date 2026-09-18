@@ -12,6 +12,7 @@ from functools import lru_cache
 from src.mission.contracts import (
     Assignment,
     AssignmentBatch,
+    ContactSnapshot,
     FeasibleEdge,
     MissionSelection,
     MissionSnapshot,
@@ -20,6 +21,7 @@ from src.mission.contracts import (
     UavResource,
 )
 from src.mission.strategy_memory import StrategyMemoryStore
+from src.mission.trajectory_features import select_keypoints
 from src.mission.prompt_window import PromptWindow
 
 
@@ -69,6 +71,86 @@ def _jsonable(value):
     return value
 
 
+def _candidate_payload(candidate: TaskCandidate) -> dict:
+    payload = _jsonable(candidate)
+    if "_information_version" in payload:
+        payload["information_version"] = payload.pop("_information_version")
+    return payload
+
+
+def _active_task_payload(task: TaskRecord) -> dict:
+    return _jsonable(task)
+
+
+def _assessment_payload(assessment) -> dict | None:
+    if assessment is None:
+        return None
+    return {
+        "assessment_id": assessment.assessment_id,
+        "history_revision": assessment.history_revision,
+        "assessed_at_min": assessment.assessed_at_min,
+        "vessel_class": assessment.vessel_class,
+        "confidence": assessment.confidence,
+        "evidence_sample_ids": list(assessment.evidence_sample_ids),
+        "reasons": list(assessment.reasons),
+        "alternative_explanations": list(assessment.alternative_explanations),
+    }
+
+
+def _contact_payload(contact: ContactSnapshot) -> dict:
+    """Serialize only public contact evidence needed for mission selection."""
+    def sample_payload(sample) -> dict:
+        return {
+            "sample_id": sample.sample_id,
+            "observed_at_min": sample.observed_at_min,
+            "source": sample.source,
+            "source_id": sample.source_id,
+            "position_cells": sample.position_cells,
+            "velocity_cells_min": sample.velocity_cells_min,
+            "measured_range_cells": sample.measured_range_cells,
+            "navigation_context": sample.navigation_context,
+        }
+
+    return {
+        "contact_id": contact.contact_id,
+        "revision": contact.revision,
+        "state": contact.state,
+        "vessel_class": contact.vessel_class,
+        "ais_mmsi": contact.ais_mmsi,
+        "first_seen_min": contact.first_seen_min,
+        "last_seen_min": contact.last_seen_min,
+        "estimated_position_cells": contact.estimated_position_cells,
+        "estimated_velocity_cells_min": contact.estimated_velocity_cells_min,
+        "uncertainty_cells": contact.uncertainty_cells,
+        "assigned_uav_id": contact.assigned_uav_id,
+        "active_probe_id": contact.active_probe_id,
+        "last_assessment": _assessment_payload(contact.last_assessment),
+        "cleared_at_min": contact.cleared_at_min,
+        "next_probe_not_before_min": contact.next_probe_not_before_min,
+        "class_confidence": contact.class_confidence,
+        "class_evidence_ids": list(contact.class_evidence_ids),
+        "activity": contact.activity,
+        "activity_confidence": contact.activity_confidence,
+        "activity_evidence_ids": list(contact.activity_evidence_ids),
+        "samples": [
+            sample_payload(sample)
+            for sample in select_keypoints(contact.samples, 12)
+        ],
+    }
+
+
+def _prompt_budget_field(payload: dict) -> str:
+    snapshot = payload.get("snapshot", {})
+    field_sizes = []
+    for field, value in snapshot.items():
+        try:
+            size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        except (TypeError, ValueError):
+            size = 0
+        field_sizes.append((size, field))
+    return max(field_sizes, default=(0, "snapshot"))[1]
+
+
 def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
     if isinstance(payload, MissionSelection):
         return payload, []
@@ -104,6 +186,8 @@ def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
         errors.append("invalid_defer_reason")
     if not isinstance(payload["notes"], str):
         errors.append("notes_must_be_string")
+    elif len(payload["notes"]) > 160:
+        errors.append("notes_too_long")
     if errors:
         return None, errors
     information_version = payload.get("information_version", 0)
@@ -472,6 +556,24 @@ def _validate_selection(
         for task_id in selected_task_ids
         if task_id in known_tasks
     ]
+    coverage_constraint = snapshot.coverage_constraint
+    if coverage_constraint is not None:
+        selected_representatives = (
+            set(selected_task_ids)
+            & set(coverage_constraint.representative_task_ids)
+        )
+        if coverage_constraint.required_new_search_count > len(selected_representatives):
+            errors.append(
+                "coverage_floor_not_met:"
+                f"{coverage_constraint.required_new_search_count}"
+            )
+        if (
+            coverage_constraint.required_new_search_count > 0
+            and not set(coverage_constraint.must_service_task_ids).issubset(
+                selected_representatives
+            )
+        ):
+            errors.append("coverage_oldest_not_selected")
     selected_contacts = [task.contact_id for task in selected_tasks if task.contact_id]
     if len(set(selected_contacts)) != len(selected_contacts):
         errors.append("duplicate_contact")
@@ -733,6 +835,8 @@ class MissionScheduler:
         self.last_selection_success = False
         self.last_selection_errors: tuple[str, ...] = ()
         self.last_selection_failure_category: str | None = None
+        self.last_selection_failure_stage: str | None = None
+        self.last_selection_timing: dict = {}
 
     def validate_selection(
         self,
@@ -859,21 +963,44 @@ class MissionScheduler:
             or not math.isfinite(float(deadline_monotonic))
         ):
             raise ValueError("deadline_monotonic must be a finite number")
+        started = time.perf_counter()
+        prompt_started = time.perf_counter()
         payload = self._prompt_payload(snapshot)
-        visible_task_ids = frozenset(
-            candidate.get("task_id")
-            for candidate in payload.get("snapshot", {}).get("candidates", ())
-            if isinstance(candidate, dict) and candidate.get("task_id")
-        )
+        prompt_finished = time.perf_counter()
+        prompt_bytes = len(json.dumps(
+            payload, ensure_ascii=False, allow_nan=False,
+        ).encode("utf-8"))
+        self.last_selection_timing = {
+            "prompt_seconds": prompt_finished - prompt_started,
+            "prompt_bytes": prompt_bytes,
+            "llm_seconds": 0.0,
+            "validation_seconds": 0.0,
+            "matching_seconds": 0.0,
+            "total_seconds": 0.0,
+        }
         self.last_selection_payload = payload
         self.last_selection_response = None
         self.last_selection_call_id = None
         self.last_selection_success = False
         self.last_selection_errors = ()
         self.last_selection_failure_category = None
-        if self._deadline_expired(deadline_monotonic):
-            self._fail_selection("decision_deadline_exceeded", "timeout")
+        self.last_selection_failure_stage = None
+        if prompt_bytes > 100 * 1024:
+            self._fail_selection(
+                f"prompt_budget_exceeded:{_prompt_budget_field(payload)}",
+                "prompt_budget",
+                "prompt",
+            )
             return None
+        visible_task_ids = frozenset(
+            candidate.get("task_id")
+            for candidate in payload.get("snapshot", {}).get("candidates", ())
+            if isinstance(candidate, dict) and candidate.get("task_id")
+        )
+        if self._deadline_expired(deadline_monotonic):
+            self._fail_selection("decision_deadline_exceeded", "timeout", "preparation")
+            return None
+        gateway_started = time.perf_counter()
         if self.selection_provider is not None:
             raw = self.selection_provider(snapshot, payload)
             call_id = "selection-provider"
@@ -895,20 +1022,29 @@ class MissionScheduler:
                 transport_deadline_monotonic=(
                     deadline_monotonic - self.postprocess_reserve_seconds
                 ),
+                max_tokens=1536,
             )
             call_id = result.call_id
             success = result.success
             response = result.payload
             failure_category = result.failure_category
         else:
-            self._fail_selection("model_selection_unavailable", "transport")
+            self._fail_selection("model_selection_unavailable", "transport", "transport")
             return None
+        gateway_finished = time.perf_counter()
+        gateway_elapsed = gateway_finished - gateway_started
+        gateway_validation = float(getattr(result, "validation_seconds", 0.0)) \
+            if self.gateway is not None and self.selection_provider is None else 0.0
+        self.last_selection_timing["llm_seconds"] = max(
+            0.0, gateway_elapsed - gateway_validation,
+        )
+        self.last_selection_timing["validation_seconds"] += gateway_validation
         self.last_selection_call_id = call_id
         self.last_selection_response = response
         self.last_selection_success = bool(success)
         self.last_selection_failure_category = failure_category
         if self._deadline_expired(deadline_monotonic):
-            self._fail_selection("decision_deadline_exceeded", "timeout")
+            self._fail_selection("decision_deadline_exceeded", "timeout", "transport")
             return None
         if not success or response is None:
             self.last_selection_errors = (
@@ -916,27 +1052,40 @@ class MissionScheduler:
                 if failure_category == "timeout"
                 else ("model_selection_unavailable",)
             )
+            self.last_selection_failure_stage = (
+                "validation" if failure_category == "validation" else "transport"
+            )
+            self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
+        validation_started = time.perf_counter()
         errors = self.validate_selection(
             response,
             snapshot,
             visible_task_ids=visible_task_ids,
         )
+        self.last_selection_timing["validation_seconds"] += (
+            time.perf_counter() - validation_started
+        )
         if self._deadline_expired(deadline_monotonic):
-            self._fail_selection("decision_deadline_exceeded", "timeout")
+            self._fail_selection("decision_deadline_exceeded", "timeout", "validation")
             return None
         if errors:
             self.last_selection_errors = tuple(errors)
             self.last_selection_failure_category = "validation"
+            self.last_selection_failure_stage = "validation"
+            self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
         parsed, parse_errors = _selection_object(response)
         if self._deadline_expired(deadline_monotonic):
-            self._fail_selection("decision_deadline_exceeded", "timeout")
+            self._fail_selection("decision_deadline_exceeded", "timeout", "validation")
             return None
         if parsed is None or parse_errors:
             self.last_selection_errors = tuple(parse_errors)
             self.last_selection_failure_category = "validation"
+            self.last_selection_failure_stage = "validation"
+            self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
+        matching_started = time.perf_counter()
         try:
             assignments = self.pair_selected_tasks(
                 parsed,
@@ -946,10 +1095,17 @@ class MissionScheduler:
         except ValueError as exc:
             self.last_selection_errors = (str(exc),)
             self.last_selection_failure_category = "validation"
+            self.last_selection_failure_stage = "matching"
+            self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
+        self.last_selection_timing["matching_seconds"] = (
+            time.perf_counter() - matching_started
+        )
         if self._deadline_expired(deadline_monotonic):
-            self._fail_selection("decision_deadline_exceeded", "timeout")
+            self._fail_selection("decision_deadline_exceeded", "timeout", "matching")
             return None
+        self.last_selection_timing["total_seconds"] = time.perf_counter() - started
+        self.last_selection_failure_stage = None
         return AssignmentBatch(
             snapshot.snapshot_id,
             assignments,
@@ -961,10 +1117,26 @@ class MissionScheduler:
     def _deadline_expired(deadline_monotonic: float) -> bool:
         return time.perf_counter() >= deadline_monotonic
 
-    def _fail_selection(self, error: str, category: str) -> None:
+    def _fail_selection(
+        self,
+        error: str,
+        category: str,
+        stage: str = "transport",
+    ) -> None:
         self.last_selection_success = False
         self.last_selection_errors = (error,)
         self.last_selection_failure_category = category
+        self.last_selection_failure_stage = stage
+        if self.last_selection_timing:
+            self.last_selection_timing["total_seconds"] = (
+                max(
+                    self.last_selection_timing.get("total_seconds", 0.0),
+                    self.last_selection_timing.get("prompt_seconds", 0.0)
+                    + self.last_selection_timing.get("llm_seconds", 0.0)
+                    + self.last_selection_timing.get("validation_seconds", 0.0)
+                    + self.last_selection_timing.get("matching_seconds", 0.0),
+                )
+            )
 
     def selection_interaction(self) -> dict:
         """Return the complete, redacted decision trace for the public frame."""
@@ -1035,6 +1207,8 @@ class MissionScheduler:
             "success": bool(self.last_selection_success),
             "errors": list(self.last_selection_errors),
             "failure_category": self.last_selection_failure_category,
+            "failure_stage": self.last_selection_failure_stage,
+            "timing": dict(self.last_selection_timing),
         }
         for key in ("episode_id", "snapshot_id", "sim_time_min", "memory_version"):
             if key in call:
@@ -1042,76 +1216,117 @@ class MissionScheduler:
         return interaction
 
     def _prompt_payload(self, snapshot: MissionSnapshot) -> dict:
-        full = _jsonable(snapshot)
-        full["information_version"] = snapshot.information_version
-        full.pop("_information_version", None)
-        candidates = list(full["candidates"])
-        for candidate in candidates:
-            if "_information_version" in candidate:
-                candidate["information_version"] = candidate.pop("_information_version")
-        if len(candidates) > self.max_tasks_in_prompt:
+        prompt_limit = min(self.max_tasks_in_prompt, 40)
+        all_candidates = tuple(snapshot.candidates)
+        candidate_count = len(all_candidates)
+        explicit_window = bool(snapshot.prompt_task_ids)
+        prompt_sources: dict[str, str] = {}
+        prompt_skip_cycles: dict[str, int] = {}
+        fairness_bound_cycles = 0
+
+        if explicit_window:
+            candidate_by_id = {task.task_id: task for task in all_candidates}
+            ordered_tasks = [
+                candidate_by_id[task_id]
+                for task_id in snapshot.prompt_task_ids
+                if task_id in candidate_by_id
+            ][:prompt_limit]
+            prompt_sources = dict(snapshot.prompt_sources)
+            fairness_bound_cycles = math.ceil(
+                candidate_count / max(1, min(8, prompt_limit))
+            ) if candidate_count else 0
+            geometry_filtered = False
+        else:
             edge_ids = {edge.task_id for edge in snapshot.feasible_edges}
             prompt_candidates = [
-                task for task in snapshot.candidates
-                if task.task_id in edge_ids
-            ] or list(snapshot.candidates)
-            window = self.prompt_window.select(
-                prompt_candidates,
-                self.max_tasks_in_prompt,
-                cycle=max(0, int(snapshot.sim_time_min)),
-            )
-            window_ids = {task.task_id for task in window.tasks}
-            ordered_tasks = [
-                *window.tasks,
-                *(task for task in prompt_candidates if task.task_id not in window_ids),
+                task for task in all_candidates if task.task_id in edge_ids
+            ] or list(all_candidates)
+            if len(prompt_candidates) > prompt_limit:
+                window = self.prompt_window.select(
+                    prompt_candidates,
+                    prompt_limit,
+                    cycle=max(0, int(snapshot.sim_time_min)),
+                )
+                window_ids = {task.task_id for task in window.tasks}
+                ordered_tasks = [
+                    *window.tasks,
+                    *(task for task in prompt_candidates if task.task_id not in window_ids),
+                ]
+                prompt_sources = window.sources
+                prompt_skip_cycles = window.skip_cycles
+                fairness_bound_cycles = window.fairness_bound_cycles
+            else:
+                ordered_tasks = prompt_candidates
+            candidate_payloads = [
+                _candidate_payload(task) for task in ordered_tasks
             ]
-            full["candidates"] = [_jsonable(task) for task in ordered_tasks]
-            for candidate in full["candidates"]:
-                if "_information_version" in candidate:
-                    candidate["information_version"] = candidate.pop("_information_version")
-            full["prompt_sources"] = window.sources
-            full["prompt_skip_cycles"] = window.skip_cycles
-            full["prompt_fairness_bound_cycles"] = window.fairness_bound_cycles
-            full["candidates_truncated"] = True
-            full["candidate_count"] = len(candidates)
-        else:
-            full["candidates_truncated"] = False
-            full["candidate_count"] = len(candidates)
-        candidates_before_filter = full.get("candidates", ())
-        full["candidates"], geometry_filtered = _filter_prompt_candidates(
-            candidates_before_filter, self.max_tasks_in_prompt,
-        )
-        full["candidates_truncated"] = bool(
-            full.get("candidates_truncated")
-            or len(full["candidates"]) < len(candidates_before_filter)
-        )
-        full["prompt_geometry_filtered"] = geometry_filtered
-        prompt_task_ids = {
-            candidate.get("task_id")
-            for candidate in full.get("candidates", ())
-            if isinstance(candidate, dict) and candidate.get("task_id")
-        }
-        for metadata_key in ("prompt_sources", "prompt_skip_cycles"):
-            metadata = full.get(metadata_key)
-            if isinstance(metadata, dict):
-                full[metadata_key] = {
-                    task_id: value
-                    for task_id, value in metadata.items()
-                    if task_id in prompt_task_ids
-                }
-        prompt_edges = [
-            edge
-            for edge in full.get("feasible_edges", ())
-            if isinstance(edge, dict) and edge.get("task_id") in prompt_task_ids
-        ]
-        if len(snapshot.feasible_edges) > self.max_tasks_in_prompt * 2:
-            full["feasible_edges"] = _compact_prompt_edges(
-                prompt_edges, prompt_task_ids,
+            selected_payloads, geometry_filtered = _filter_prompt_candidates(
+                candidate_payloads, prompt_limit,
             )
-            full["feasible_edges_compacted"] = True
-        else:
-            full["feasible_edges"] = prompt_edges
-            full["feasible_edges_compacted"] = False
+            ordered_tasks = [
+                task for task, candidate in zip(ordered_tasks, candidate_payloads)
+                if candidate.get("task_id") in {
+                    selected.get("task_id") for selected in selected_payloads
+                }
+            ]
+
+        prompt_candidate_payloads = [
+            _candidate_payload(task) for task in ordered_tasks
+        ]
+        prompt_task_ids = {
+            candidate["task_id"]
+            for candidate in prompt_candidate_payloads
+            if candidate.get("task_id")
+        }
+        prompt_sources = {
+            task_id: source
+            for task_id, source in prompt_sources.items()
+            if task_id in prompt_task_ids
+        }
+        prompt_skip_cycles = {
+            task_id: value
+            for task_id, value in prompt_skip_cycles.items()
+            if task_id in prompt_task_ids
+        }
+        prompt_edges = [
+            _jsonable(edge)
+            for edge in snapshot.feasible_edges
+            if edge.task_id in prompt_task_ids
+        ]
+        full = {
+            "snapshot_id": snapshot.snapshot_id,
+            "sim_time_min": snapshot.sim_time_min,
+            "candidates": prompt_candidate_payloads,
+            "candidate_count": candidate_count,
+            "candidates_truncated": len(prompt_candidate_payloads) < candidate_count,
+            "available_uav_ids": list(snapshot.available_uav_ids),
+            "preemptible_uav_ids": list(snapshot.preemptible_uav_ids),
+            "uav_generations": [list(item) for item in snapshot.uav_generations],
+            "resources": [_jsonable(resource) for resource in snapshot.resources],
+            "feasible_edges": _compact_prompt_edges(prompt_edges, prompt_task_ids),
+            "feasible_edges_compacted": True,
+            "active_tasks": [
+                _active_task_payload(task) for task in snapshot.active_tasks
+            ],
+            "contacts": [
+                _contact_payload(contact)
+                for contact in snapshot.contacts[:20]
+            ],
+            "intents": [_jsonable(intent) for intent in snapshot.intents],
+            "intent_statuses": [
+                _jsonable(status) for status in snapshot.intent_statuses
+            ],
+            "memory_version": snapshot.memory_version,
+            "planning_map_version": snapshot.planning_map_version,
+            "reviewer_summary": str(snapshot.reviewer_summary)[:1200],
+            "information_version": snapshot.information_version,
+            "prompt_sources": prompt_sources,
+            "prompt_skip_cycles": prompt_skip_cycles,
+            "prompt_fairness_bound_cycles": fairness_bound_cycles,
+            "prompt_geometry_filtered": geometry_filtered,
+        }
+        if snapshot.coverage_constraint is not None:
+            full["coverage_constraint"] = _jsonable(snapshot.coverage_constraint)
         strategy_context = _strategy_context(snapshot)
         memories = ()
         if self.strategy_memory_store is not None:

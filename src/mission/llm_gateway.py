@@ -7,7 +7,7 @@ import os
 import re
 import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 from uuid import uuid4
 
@@ -38,6 +38,7 @@ class ModelResult:
     payload: dict | None
     errors: tuple[str, ...]
     failure_category: str | None
+    validation_seconds: float = field(default=0.0, compare=False)
 
 
 class OpenAICompatibleTransport:
@@ -287,12 +288,14 @@ class LLMGateway:
         validate: Callable[[dict], tuple[str, ...]],
         deadline_monotonic: float | None = None,
         transport_deadline_monotonic: float | None = None,
+        max_tokens: int | None = None,
     ) -> ModelResult:
         return self._request(
             role=role, snapshot_id=snapshot_id, system_prompt=system_prompt,
             user_payload=user_payload, validate=validate,
             deadline_monotonic=deadline_monotonic,
             transport_deadline_monotonic=transport_deadline_monotonic,
+            max_tokens=max_tokens,
         )
 
     def request_text(
@@ -378,6 +381,7 @@ class LLMGateway:
             "attempts": [],
             "raw_attempts": [],
             "validation_errors": [],
+            "validation_seconds": 0.0,
             "success": False,
             "failure_category": None,
         }
@@ -467,7 +471,13 @@ class LLMGateway:
                 except (TypeError, ValueError) as exc:
                     last_errors = (f"response is not valid JSON: {exc}",)
                 else:
-                    last_errors = tuple(validate(payload))
+                    validation_started = time.perf_counter()
+                    try:
+                        last_errors = tuple(validate(payload))
+                    finally:
+                        call["validation_seconds"] += (
+                            time.perf_counter() - validation_started
+                        )
             if self._deadline_expired(deadline_monotonic):
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
@@ -475,7 +485,14 @@ class LLMGateway:
                 break
             if not last_errors:
                 call["success"] = True
-                return ModelResult(call_id, True, payload, (), None)
+                return ModelResult(
+                    call_id,
+                    True,
+                    payload,
+                    (),
+                    None,
+                    float(call["validation_seconds"]),
+                )
 
             failure_category = "validation"
             attempt["errors"] = self.redact_log(last_errors)
@@ -499,6 +516,7 @@ class LLMGateway:
             payload=None,
             errors=tuple(self._redact(error) for error in last_errors),
             failure_category=failure_category,
+            validation_seconds=float(call["validation_seconds"]),
         )
 
     @staticmethod

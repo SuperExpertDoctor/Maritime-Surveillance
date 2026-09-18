@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.mission.coverage_policy import CoveragePolicy
 from src.mission.contracts import Intent
 from src.mission.prompt_window import CandidatePool, PoolCandidate
 from src.schedule.datatypes import BBox, GridCoord
@@ -35,10 +36,181 @@ class CandidateExtractor:
             if callable(is_operational) and not is_operational(uav_id):
                 continue
             uav = get_uav(uav_id) if callable(get_uav) else None
-            if uav is not None and getattr(uav, "assigned_region_id", None) != region.id:
+            if uav is None:
+                continue
+            if getattr(uav, "assigned_region_id", None) != region.id:
                 continue
             regions.append(region)
         return tuple(regions)
+
+    @staticmethod
+    def _coverage_context(sm: StateManager):
+        """Return the fixed SAR responsibility inputs when configured.
+
+        Legacy state-manager fixtures intentionally have no coverage metrics;
+        those callers keep the historical information freshness behavior.
+        Production episodes always configure the metrics after the map is
+        frozen, so the scheduler can distinguish SAR timestamps from EO/info
+        refreshes and weather availability.
+        """
+        metrics = getattr(sm, "coverage_metrics", None)
+        if metrics is None or not hasattr(metrics, "fixed_mask"):
+            return None
+        coverage_config = getattr(getattr(sm.config, "mission", None), "coverage", None)
+        primary_window = int(getattr(coverage_config, "primary_window_min", 60))
+        fixed = np.asarray(metrics.fixed_mask, dtype=bool)
+        last_sar = np.asarray(metrics.last_scan_matrix(), dtype=float)
+        feasible = np.asarray(sm.get_searchable_mask(), dtype=bool)
+        assigned = np.zeros(fixed.shape, dtype=bool)
+        for region in CandidateExtractor._valid_active_search_regions(sm):
+            bbox = region.bbox
+            assigned[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end] = True
+        return {
+            "policy": CoveragePolicy(fixed, primary_window_min=primary_window),
+            "fixed": fixed,
+            "last_sar": last_sar,
+            "feasible": feasible,
+            "assigned": assigned,
+        }
+
+    @staticmethod
+    def _mark_bboxes(mask: np.ndarray, candidates) -> None:
+        for candidate in candidates:
+            bbox = candidate.get("bbox") if isinstance(candidate, dict) else getattr(candidate, "bbox", None)
+            if bbox is None:
+                continue
+            mask[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end] = True
+
+    @staticmethod
+    def _candidate_id(bbox: BBox, *, prefix: str = "search") -> str:
+        return f"{prefix}:{bbox.col_start}:{bbox.row_start}:{bbox.col_end}:{bbox.row_end}"
+
+    @staticmethod
+    def _candidate_age(
+        bbox: BBox,
+        last_sar: np.ndarray,
+        now_min: float,
+        primary_window_min: int,
+    ) -> float:
+        patch = last_sar[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
+        finite = patch[np.isfinite(patch)]
+        due = finite[finite <= now_min - primary_window_min]
+        if due.size:
+            return float(np.min(due))
+        return 0.0 if np.any(~np.isfinite(patch)) else float(now_min)
+
+    def _coverage_fragment_candidates(
+        self,
+        sm: StateManager,
+        occupied: np.ndarray,
+        regular_union: np.ndarray,
+        values: np.ndarray,
+        info: np.ndarray,
+        seen: np.ndarray,
+        context: dict,
+    ) -> tuple[list[dict], list[dict]]:
+        """Enumerate small residual SAR candidates and auditable geometry gaps."""
+        fixed = context["fixed"]
+        feasible = context["feasible"]
+        last_sar = context["last_sar"]
+        now = float(sm.current_time)
+        policy = context["policy"]
+        classes = policy.classify(
+            now_min=now,
+            last_sar=last_sar,
+            feasible_mask=feasible,
+            assigned_mask=context["assigned"],
+            legal_candidate_mask=regular_union,
+        )
+        due = fixed & ~classes["fresh"] & feasible & ~occupied & ~regular_union
+        if not np.any(due):
+            return [], []
+
+        gc = sm.config.grid
+        cols, rows = fixed.shape
+        max_area = min(19, max(1, (cols - 2) * (rows - 2)))
+        swath_width = sm.config.sensor.sar.swath_km / sm.config.grid.cell_size_km
+        uavs = sm.get_all_uavs()
+        reference = uavs[0] if uavs else None
+        r_min = float(getattr(reference, "R_min", 1.0))
+        along_track = getattr(reference, "sar_along_track_cells", None)
+        fragments: list[dict] = []
+        accepted_boxes: set[tuple[int, int, int, int]] = set()
+        served = np.zeros_like(due, dtype=bool)
+
+        for width in range(1, min(cols - 1, max_area) + 1):
+            for height in range(1, min(rows - 1, max_area // width) + 1):
+                area = width * height
+                if area > max_area or max(width, height) / min(width, height) > gc.aspect_ratio_max:
+                    continue
+                for c0 in range(1, cols - width):
+                    c1 = c0 + width
+                    for r0 in range(1, rows - height):
+                        r1 = r0 + height
+                        bbox = BBox(c0, r0, c1, r1)
+                        patch_due = due[c0:c1, r0:r1]
+                        if not np.any(patch_due):
+                            continue
+                        patch_occupied = occupied[c0:c1, r0:r1]
+                        if np.any(patch_occupied):
+                            continue
+                        if not np.all(fixed[c0:c1, r0:r1] & feasible[c0:c1, r0:r1]):
+                            continue
+                        if not self._has_turning_clearance(bbox, sm.obstacle_mask):
+                            continue
+                        if self._distance_to_bases(bbox, sm.get_base_positions()) < (
+                            sm.config.environment.base_task_min_distance_cells
+                        ):
+                            continue
+                        try:
+                            route_ok = self.coverage_planner.is_region_feasible(
+                                bbox,
+                                swath_width,
+                                r_min,
+                                sm.obstacle_mask,
+                                along_track_cells=along_track,
+                            )
+                        except (TypeError, ValueError, IndexError):
+                            route_ok = False
+                        if not route_ok:
+                            continue
+                        bbox_key = tuple(bbox)
+                        if bbox_key in accepted_boxes:
+                            continue
+                        accepted_boxes.add(bbox_key)
+                        patch = values[c0:c1, r0:r1]
+                        patch_info = info[c0:c1, r0:r1]
+                        fragments.append({
+                            "task_id": self._candidate_id(bbox, prefix="fragment"),
+                            "kind": "search",
+                            "bbox": bbox,
+                            "cell_count": area,
+                            "total_value": float(patch.sum()),
+                            "avg_info": float(patch_info.mean()) if patch_info.size else 0.0,
+                            "unseen_count": int((~seen[c0:c1, r0:r1]).sum()),
+                            "eligible_since_min": self._candidate_age(
+                                bbox,
+                                last_sar,
+                                now,
+                                policy.primary_window_min,
+                            ),
+                            "coverage_class": "waiting_due",
+                            "fragment": True,
+                        })
+                        served[c0:c1, r0:r1] |= patch_due
+
+        deferred = due & ~served
+        alerts = [
+            {
+                "task_id": self._candidate_id(BBox(col, row, col + 1, row + 1), prefix="fragment"),
+                "bbox": BBox(col, row, col + 1, row + 1),
+                "area": 1,
+                "reason": "deferred_geometry",
+                "coverage_class": "geometry",
+            }
+            for col, row in zip(*np.where(deferred))
+        ]
+        return fragments, alerts
 
     def extract_pool(
         self,
@@ -58,11 +230,19 @@ class CandidateExtractor:
             else np.asarray(snapshot.value, dtype=float)
         if V.shape != (cols, rows) or not np.isfinite(V).all():
             raise ValueError("scheduling_value must be a finite grid-sized matrix")
-        seen = np.isfinite(sm.get_last_scan_matrix())
+        coverage_context = self._coverage_context(sm)
+        last_sar = (
+            coverage_context["last_sar"]
+            if coverage_context is not None
+            else np.asarray(sm.get_last_scan_matrix(), dtype=float)
+        )
+        seen = np.isfinite(last_sar)
         searchable = sm.get_searchable_mask()
         occupied = np.zeros((cols, rows), dtype=bool)
         occupied |= np.asarray(getattr(sm, "obstacle_mask", occupied), dtype=bool)
         occupied |= np.asarray(getattr(sm, "land_mask", occupied), dtype=bool)
+        if coverage_context is not None:
+            occupied |= ~coverage_context["fixed"]
         for col, row in sm.get_base_positions():
             if 0 <= col < cols and 0 <= row < rows:
                 occupied[col, row] = True
@@ -118,7 +298,7 @@ class CandidateExtractor:
                         )
                         candidate_number += 1
                         candidates.append(PoolCandidate(
-                            task_id=f"search-{candidate_number:06d}-{col}-{row}-{width}-{height}",
+                            task_id=self._candidate_id(bbox),
                             kind="search",
                             bbox=tuple(bbox),
                             cells=cells,
@@ -134,9 +314,60 @@ class CandidateExtractor:
                                 + 0.2 * (unseen_count / area)
                             ),
                             information_version=snapshot.version,
+                            eligible_since_min=(
+                                self._candidate_age(
+                                    bbox,
+                                    last_sar,
+                                    sm.current_time,
+                                    coverage_context["policy"].primary_window_min,
+                                )
+                                if coverage_context is not None else 0.0
+                            ),
                         ))
                         covered[bbox.col_start:bbox.col_end,
                                 bbox.row_start:bbox.row_end] = True
+        fragment_alerts: list[dict] = []
+        if coverage_context is not None:
+            fragment_dicts, fragment_alerts = self._coverage_fragment_candidates(
+                sm,
+                occupied,
+                covered,
+                V,
+                np.asarray(
+                    snapshot.info if hasattr(snapshot, "info") else sm.get_info_matrix(),
+                    dtype=float,
+                ),
+                seen,
+                coverage_context,
+            )
+            for fragment in fragment_dicts:
+                bbox = fragment["bbox"]
+                cells = tuple(
+                    (col, row)
+                    for col in range(bbox.col_start, bbox.col_end)
+                    for row in range(bbox.row_start, bbox.row_end)
+                )
+                area = fragment["cell_count"]
+                total = fragment["total_value"]
+                candidates.append(PoolCandidate(
+                    task_id=fragment["task_id"],
+                    kind="search",
+                    bbox=tuple(bbox),
+                    cells=cells,
+                    total_value=total,
+                    mean_value=total / max(area, 1),
+                    max_value=float(V[bbox.col_start:bbox.col_end,
+                                      bbox.row_start:bbox.row_end].max()),
+                    unseen_fraction=fragment["unseen_count"] / max(area, 1),
+                    utility=total / max(area, 1),
+                    information_version=snapshot.version,
+                    eligible_since_min=fragment["eligible_since_min"],
+                ))
+                covered[
+                    bbox.col_start:bbox.col_end,
+                    bbox.row_start:bbox.row_end,
+                ] = True
+
         high_value = (V >= gc.candidate_value_threshold) & searchable & ~occupied
         unschedulable = tuple(
             (int(col), int(row))
@@ -179,7 +410,13 @@ class CandidateExtractor:
             V = V.copy()
         active_intents = tuple(intent for intent in intents if intent.lifecycle == "active")
         info = sm.get_info_matrix()
-        seen = np.isfinite(sm.get_last_scan_matrix())
+        coverage_context = self._coverage_context(sm)
+        last_sar = (
+            coverage_context["last_sar"]
+            if coverage_context is not None
+            else np.asarray(sm.get_last_scan_matrix(), dtype=float)
+        )
+        seen = np.isfinite(last_sar)
         searchable = sm.get_searchable_mask()
         searchable_cells = int(searchable.sum())
         unique_coverage = (
@@ -193,6 +430,8 @@ class CandidateExtractor:
         occupied = np.zeros((cols, rows), dtype=bool)
         occupied |= getattr(sm, "obstacle_mask", occupied)
         occupied |= getattr(sm, "land_mask", occupied)
+        if coverage_context is not None:
+            occupied |= ~coverage_context["fixed"]
         for col, row in sm.get_base_positions():
             occupied[col, row] = True
         # A one-cell flight margin lets a radius-1 Dubins U-turn bulge
@@ -204,7 +443,7 @@ class CandidateExtractor:
         for tr in sm.get_track_regions():
             b = tr.bbox
             occupied[b.col_start:b.col_end, b.row_start:b.row_end] = True
-        active_search = sm.get_active_search_regions()
+        active_search = self._valid_active_search_regions(sm)
         # Completed regions remain visible in history but are no longer an
         # active airspace reservation.  Once their information decays, they
         # must be eligible for a fresh SAR revisit.
@@ -311,6 +550,61 @@ class CandidateExtractor:
         # short-horizon projection so the LLM can explicitly plan hand-off.
         candidates.extend(self._handoff_candidates(sm, occupied, V, info, seen))
 
+        coverage_fragment_alerts: list[dict] = []
+        if coverage_context is not None:
+            regular_union = np.zeros((cols, rows), dtype=bool)
+            self._mark_bboxes(regular_union, candidates)
+            fragment_candidates, coverage_fragment_alerts = (
+                self._coverage_fragment_candidates(
+                    sm,
+                    occupied,
+                    regular_union,
+                    V,
+                    info,
+                    seen,
+                    coverage_context,
+                )
+            )
+            candidates.extend(fragment_candidates)
+
+        for candidate in candidates:
+            bbox = candidate.get("bbox")
+            if bbox is None:
+                continue
+            if candidate.get("task_id"):
+                continue
+            prefix = "handoff" if candidate.get("target_group_id") else "search"
+            suffix = (
+                f":{candidate['target_group_id']}"
+                if prefix == "handoff" else ""
+            )
+            candidate["task_id"] = self._candidate_id(bbox, prefix=prefix) + suffix
+
+        coverage_order: dict[str, int] = {}
+        if coverage_context is not None and candidates:
+            estimated = {
+                candidate["task_id"]: max(
+                    1.0,
+                    float(candidate.get("cell_count", 1))
+                    / max(
+                        sm.config.sensor.sar.swath_km / sm.config.grid.cell_size_km,
+                        1.0,
+                    ),
+                )
+                for candidate in candidates
+                if candidate.get("task_id")
+            }
+            ranked = coverage_context["policy"].rank_search_candidates(
+                candidates,
+                now_min=sm.current_time,
+                last_sar=last_sar,
+                estimated_minutes=estimated,
+            )
+            coverage_order = {
+                candidate["task_id"]: index
+                for index, candidate in enumerate(ranked)
+            }
+
         # Cap final candidates at K and keep them mutually disjoint so a model
         # can safely copy the supplied candidate list as its additions.
         base_positions = sm.get_base_positions()
@@ -333,6 +627,8 @@ class CandidateExtractor:
             )
             if item.get("target_group_id"):
                 return (-2, distance, -item["total_value"])
+            if coverage_order:
+                return (coverage_order.get(item["task_id"], len(coverage_order)),)
             if sm.lifecycle_mode:
                 return (-unseen_density, distance,
                         abs(area - gc.search_min_cells),
@@ -397,6 +693,8 @@ class CandidateExtractor:
 
         # Step 6: fragment detection
         fragments = self._detect_fragments(sm, occupied, gc)
+        if coverage_fragment_alerts:
+            fragments.extend(coverage_fragment_alerts)
 
         return CandidateResult(
             candidate_regions=candidates,

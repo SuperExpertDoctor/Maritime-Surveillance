@@ -618,6 +618,42 @@ class TaskRecord:
 
 
 @dataclass(frozen=True)
+class CoverageConstraint:
+    """Resource floor for ordinary search work in one mission snapshot."""
+
+    desired_search_count: int
+    active_search_count: int
+    required_new_search_count: int
+    representative_task_ids: tuple[str, ...]
+    must_service_task_ids: tuple[str, ...]
+    infeasible_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "desired_search_count",
+            "active_search_count",
+            "required_new_search_count",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.required_new_search_count > self.desired_search_count:
+            raise ValueError("required_new_search_count exceeds desired_search_count")
+        representatives = tuple(self.representative_task_ids)
+        must_service = tuple(self.must_service_task_ids)
+        if any(not isinstance(item, str) or not item for item in representatives):
+            raise ValueError("representative_task_ids must contain non-empty strings")
+        if any(item not in representatives for item in must_service):
+            raise ValueError("must_service_task_ids must be representatives")
+        if self.infeasible_reason is not None and (
+            not isinstance(self.infeasible_reason, str) or not self.infeasible_reason
+        ):
+            raise ValueError("infeasible_reason must be non-empty when provided")
+        object.__setattr__(self, "representative_task_ids", representatives)
+        object.__setattr__(self, "must_service_task_ids", must_service)
+
+
+@dataclass(frozen=True)
 class MissionSnapshot:
     snapshot_id: str
     sim_time_min: float
@@ -635,6 +671,9 @@ class MissionSnapshot:
     planning_map_version: int
     reviewer_summary: str
     _information_version: int = field(default=0, repr=False, kw_only=True)
+    prompt_task_ids: tuple[str, ...] = field(default=(), kw_only=True)
+    prompt_sources: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
+    coverage_constraint: CoverageConstraint | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", tuple(self.candidates))
@@ -647,6 +686,16 @@ class MissionSnapshot:
         object.__setattr__(self, "contacts", tuple(self.contacts))
         object.__setattr__(self, "intents", tuple(self.intents))
         object.__setattr__(self, "intent_statuses", tuple(self.intent_statuses))
+        object.__setattr__(self, "prompt_task_ids", tuple(self.prompt_task_ids))
+        object.__setattr__(
+            self,
+            "prompt_sources",
+            tuple(tuple(item) for item in self.prompt_sources),
+        )
+        if self.coverage_constraint is not None and not isinstance(
+            self.coverage_constraint, CoverageConstraint
+        ):
+            raise ValueError("coverage_constraint must be CoverageConstraint or None")
 
     @property
     def information_version(self) -> int:
@@ -764,6 +813,7 @@ __all__ = [
     "ContactAssessment",
     "CommandResult",
     "CovarianceKernel",
+    "CoverageConstraint",
     "EvasiveManeuverFact",
     "EvidenceKind",
     "EvidenceRecord",

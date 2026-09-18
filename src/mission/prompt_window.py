@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from src.mission.coverage_policy import CoverageCandidateWindow
+
 
 @dataclass(frozen=True)
 class CandidatePool:
@@ -33,10 +35,7 @@ class PoolCandidate:
     unseen_fraction: float
     utility: float
     information_version: int
-
-    @property
-    def eligible_since_min(self) -> float:
-        return 0.0
+    eligible_since_min: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -205,4 +204,10 @@ class PromptWindow:
         return x // 5, y // 5
 
 
-__all__ = ["CandidatePool", "PoolCandidate", "PromptSelection", "PromptWindow"]
+__all__ = [
+    "CandidatePool",
+    "CoverageCandidateWindow",
+    "PoolCandidate",
+    "PromptSelection",
+    "PromptWindow",
+]

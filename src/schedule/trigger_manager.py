@@ -225,3 +225,7 @@ class TriggerManager:
         if self._heavy_retry_at is None or retry_at > self._heavy_retry_at:
             self._heavy_retry_at = retry_at
             self._heavy_retry_reason = reason.strip()
+
+    def clear_heavy_retry(self) -> None:
+        """Discard an automatic retry once an operator decision succeeds."""
+        self._heavy_retry_at = None

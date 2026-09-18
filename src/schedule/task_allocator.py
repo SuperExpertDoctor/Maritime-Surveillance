@@ -5,7 +5,7 @@ from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
 from src.schedule.llm_client import LLMClient
 from src.schedule.llm_reviewer import LLMReviewer
 from src.schedule.hungarian import hungarian_pair
-from src.schedule.trigger_manager import TriggerManager
+from src.schedule.trigger_manager import TriggerDecision, TriggerManager
 from src.schedule.datatypes import Region, BBox
 import math
 import numpy as np
@@ -24,6 +24,11 @@ from src.mission.contracts import (
     TaskCandidate,
     TaskRecord,
     UavResource,
+)
+from src.mission.coverage_policy import (
+    CoverageCandidateWindow,
+    CoveragePolicy,
+    build_coverage_constraint,
 )
 from src.mission.mission_scheduler import MissionScheduler
 from src.mission.task_catalog import TaskCatalog
@@ -112,9 +117,15 @@ class TaskAllocator:
         candidates = self.task_catalog.build(
             self.sm, published_contacts, published_intents, now,
         )
+        prompt_window = self._coverage_prompt_window(candidates, now)
         resources = self._mission_resources()
         available = tuple(sorted(uav.id for uav in self.sm.get_available_uavs()))
-        active_records = tuple(active_tasks)
+        active_records = tuple(
+            record
+            for record in active_tasks
+            if record.assigned_uav_id is None
+            or self.sm.is_uav_operational(record.assigned_uav_id)
+        )
         active_by_id = {record.task_id: record for record in active_records}
         preemptible = tuple(sorted(
             resource.uav_id
@@ -123,13 +134,40 @@ class TaskAllocator:
             and self._ordinary_search_resource(resource, active_by_id)
         ))
         planning_map_version = int(self.sm.obstacle_version)
+        edge_candidates = (
+            prompt_window.tasks if prompt_window is not None else candidates
+        )
         edges = self._mission_edges(
-            candidates,
+            edge_candidates,
             resources,
             published_contacts,
             planning_map_version,
             active_tasks=active_records,
         )
+        coverage_constraint = None
+        if prompt_window is not None and getattr(self.sm, "coverage_metrics", None) is not None:
+            coverage_config = getattr(self.config.mission, "coverage", None)
+            healthy_count = sum(
+                self.sm.is_uav_operational(uav.id)
+                for uav in self.sm.get_all_uavs()
+            )
+            active_search_count = sum(
+                record.status in {"approved", "executing"}
+                and record.assigned_uav_id is not None
+                and record.kind in _SEARCH_TASK_KINDS
+                and self.sm.is_uav_operational(record.assigned_uav_id)
+                for record in active_records
+            )
+            coverage_constraint = build_coverage_constraint(
+                healthy_count=healthy_count,
+                active_search_count=active_search_count,
+                available_ids=available,
+                representatives=prompt_window.representative_task_ids,
+                edges=edges,
+                fraction=float(
+                    getattr(coverage_config, "min_search_uav_fraction", 0.4)
+                ),
+            )
         self._mission_snapshot_counter += 1
         snapshot_id = f"mission:{now:g}:{self._mission_snapshot_counter}"
         snapshot = MissionSnapshot(
@@ -154,9 +192,83 @@ class TaskAllocator:
                 if reviewer_summary is None else reviewer_summary
             ),
             _information_version=int(getattr(self.sm, "information_version", 0)),
+            prompt_task_ids=(
+                tuple(task.task_id for task in prompt_window.tasks)
+                if prompt_window is not None else ()
+            ),
+            prompt_sources=(
+                prompt_window.sources if prompt_window is not None else ()
+            ),
+            coverage_constraint=coverage_constraint,
         )
         self._last_mission_snapshot = snapshot
         return snapshot
+
+    def _coverage_prompt_window(
+        self,
+        candidates: tuple[TaskCandidate, ...],
+        now_min: float,
+    ) -> CoverageCandidateWindow | None:
+        """Freeze one bounded candidate window before route-edge construction."""
+        metrics = getattr(self.sm, "coverage_metrics", None)
+        coverage_config = getattr(self.config.mission, "coverage", None)
+        ordinary_reserve = int(getattr(coverage_config, "ordinary_prompt_reserve", 8))
+        capacity = self.mission_scheduler.max_tasks_in_prompt
+        if metrics is None or not hasattr(metrics, "fixed_mask"):
+            ordered = tuple(sorted(
+                candidates,
+                key=lambda task: (
+                    0 if task.kind not in _SEARCH_TASK_KINDS else 1,
+                    -int(task.priority == "high"),
+                    -float(task.utility),
+                    float(task.eligible_since_min),
+                    task.task_id,
+                ),
+            ))
+            return CoveragePolicy(np.ones((1, 1), dtype=bool)).select_window(
+                ordered,
+                ordinary_reserve=min(ordinary_reserve, capacity),
+                capacity=capacity,
+                now_min=now_min,
+            )
+        primary_window = int(getattr(coverage_config, "primary_window_min", 60))
+        policy = CoveragePolicy(metrics.fixed_mask, primary_window_min=primary_window)
+        search_tasks = tuple(
+            task for task in candidates
+            if task.kind in _SEARCH_TASK_KINDS and task.bbox is not None
+        )
+        estimates = {
+            task.task_id: max(0.1, float(task.estimated_duration_min))
+            for task in search_tasks
+        }
+        ranked_search = policy.rank_search_candidates(
+            search_tasks,
+            now_min=now_min,
+            last_sar=metrics.last_scan_matrix(),
+            estimated_minutes=estimates,
+            primary_window_min=primary_window,
+        )
+        urgent = tuple(
+            sorted(
+                (
+                    task for task in candidates
+                    if task not in search_tasks
+                ),
+                key=lambda task: (
+                    -int(task.priority == "high"),
+                    -float(task.utility),
+                    float(task.eligible_since_min),
+                    task.task_id,
+                ),
+            )
+        )
+        ranked = (*urgent, *ranked_search)
+        return policy.select_window(
+            ranked,
+            ordinary_reserve=min(ordinary_reserve, capacity),
+            capacity=capacity,
+            now_min=now_min,
+        )
 
     def set_strategy_memory_version(self, version: str) -> None:
         """Pin the memory manifest used by all snapshots in this episode."""
@@ -188,20 +300,28 @@ class TaskAllocator:
         active_tasks: tuple[TaskRecord, ...] = (),
         intents: tuple[Intent, ...] = (),
         intent_statuses: tuple[IntentStatus, ...] = (),
+        force_heavy: bool = False,
     ) -> tuple[dict, object | None]:
         """Run one unified scheduling decision without mutating mission state."""
+        if not isinstance(force_heavy, bool):
+            raise TypeError("force_heavy must be a bool")
         self.last_decision_timing = None
-        self.sm.step(current_time)
-        if self.sm.last_information_delta is not None:
-            self.trigger_manager.notify_information_delta(
-                self.sm.last_information_delta,
-                time=current_time,
-            )
-        new_memory = self.reviewer.step(current_time, self.sm)
-        if new_memory:
-            self.llm_client.set_reviewer_memory(new_memory)
-
-        decision = self.trigger_manager.check(current_time)
+        if force_heavy:
+            # Operator retry is deliberately decision-only: no ship, sensor,
+            # UAV, fuel, information-field, or reviewer tick occurs here.
+            self.sm.current_time = float(current_time)
+            decision = TriggerDecision("heavy", "operator_retry")
+        else:
+            self.sm.step(current_time)
+            if self.sm.last_information_delta is not None:
+                self.trigger_manager.notify_information_delta(
+                    self.sm.last_information_delta,
+                    time=current_time,
+                )
+            new_memory = self.reviewer.step(current_time, self.sm)
+            if new_memory:
+                self.llm_client.set_reviewer_memory(new_memory)
+            decision = self.trigger_manager.check(current_time)
         if decision.trigger_type == "none":
             return {"trigger_type": "none", "action": None}, None
         if decision.trigger_type == "light":
@@ -230,13 +350,26 @@ class TaskAllocator:
         if batch is None:
             errors = self.mission_scheduler.last_selection_errors
             failure_reason = errors[0] if errors else "decision_failed"
+        selection_timing = dict(self.mission_scheduler.last_selection_timing)
+        selection_timing.setdefault("prompt_seconds", 0.0)
+        selection_timing.setdefault("prompt_bytes", 0)
+        selection_timing.setdefault("llm_seconds", 0.0)
+        selection_timing.setdefault("validation_seconds", 0.0)
+        selection_timing.setdefault("matching_seconds", 0.0)
+        selection_timing.setdefault(
+            "total_seconds", decision_finished_wall - snapshot_frozen_wall,
+        )
         self.last_decision_timing = {
             "snapshot_frozen_wall": snapshot_frozen_wall,
             "decision_finished_wall": decision_finished_wall,
+            "snapshot_seconds": snapshot_frozen_wall - wall_started,
             "elapsed_before_snapshot_seconds": snapshot_frozen_wall - wall_started,
-            "llm_seconds": decision_finished_wall - snapshot_frozen_wall,
-            "validation_seconds": 0.0,
-            "matching_seconds": 0.0,
+            "prompt_seconds": selection_timing["prompt_seconds"],
+            "prompt_bytes": selection_timing["prompt_bytes"],
+            "llm_seconds": selection_timing["llm_seconds"],
+            "validation_seconds": selection_timing["validation_seconds"],
+            "matching_seconds": selection_timing["matching_seconds"],
+            "total_seconds": decision_finished_wall - wall_started,
             "failure_reason": failure_reason,
         }
         interaction = self.mission_scheduler.selection_interaction()
@@ -262,6 +395,9 @@ class TaskAllocator:
                 "prompt_fairness_bound_cycles"
             ),
             "timing": {
+                "snapshot_seconds": self.last_decision_timing["snapshot_seconds"],
+                "prompt_seconds": self.last_decision_timing["prompt_seconds"],
+                "prompt_bytes": self.last_decision_timing["prompt_bytes"],
                 "elapsed_before_snapshot_seconds": self.last_decision_timing[
                     "elapsed_before_snapshot_seconds"
                 ],
@@ -284,6 +420,10 @@ class TaskAllocator:
                     self.mission_scheduler.last_selection_failure_category
                     or "unknown"
                 ),
+                "failure_stage": (
+                    self.mission_scheduler.last_selection_failure_stage
+                    or "unknown"
+                ),
                 "error_codes": list(self.mission_scheduler.last_selection_errors),
                 "available_count": len(snapshot.available_uav_ids),
             })
@@ -294,6 +434,10 @@ class TaskAllocator:
                 "reason": failure_reason or "decision_failed",
                 "errors": list(self.mission_scheduler.last_selection_errors),
                 "call_id": self.mission_scheduler.last_selection_call_id,
+                "failure_stage": (
+                    self.mission_scheduler.last_selection_failure_stage
+                    or "unknown"
+                ),
                 "retry_at_min": current_time + 1.0,
             })
         self.sm.add_event("mission_decision", {
@@ -457,25 +601,12 @@ class TaskAllocator:
             record.task_id: self._active_task_candidate(record, resources)
             for record in active_tasks
             if record.status in {"approved", "executing"}
+            and (
+                record.assigned_uav_id is None
+                or self.sm.is_uav_operational(record.assigned_uav_id)
+            )
         }
-        # The snapshot keeps the complete legal pool for auditing and
-        # fairness, while route geometry is evaluated for the bounded prompt
-        # window. This keeps a large rectangle pool from turning one decision
-        # into thousands of repeated A* plans.
-        if len(candidates) > self.mission_scheduler.max_tasks_in_prompt:
-            ranked = sorted(
-                candidates,
-                key=lambda task: (
-                    0 if task.task_id.startswith("investigation:") else 1,
-                    0 if task.kind in {"probe", "track"} else 1,
-                    -int(task.priority == "high"),
-                    -float(task.utility),
-                    task.task_id,
-                ),
-            )[: self.mission_scheduler.max_tasks_in_prompt]
-        else:
-            ranked = candidates
-        tasks_by_id = {candidate.task_id: candidate for candidate in ranked}
+        tasks_by_id = {candidate.task_id: candidate for candidate in candidates}
         tasks_by_id.update(active_candidates)
         edges = []
         for task in tasks_by_id.values():

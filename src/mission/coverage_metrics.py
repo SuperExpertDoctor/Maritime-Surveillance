@@ -54,6 +54,11 @@ class CoverageMetrics:
         self._last_sar = np.full(fixed.shape, -np.inf, dtype=float)
         self._last_record_min: float | None = None
 
+    @property
+    def fixed_mask(self) -> np.ndarray:
+        """Return a detached copy of the episode's static SAR denominator."""
+        return self._fixed.copy()
+
     @staticmethod
     def _time(value: object, name: str) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):

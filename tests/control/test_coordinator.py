@@ -775,6 +775,21 @@ def test_quarantine_uav_clears_control_state_without_installing_holding():
     ) is quarantined
 
 
+def test_initial_idle_quarantine_advances_generation_once():
+    coordinator, *_ = make_runtime({"UAV-1": ControlMode.HEURISTIC})
+    uav = make_uav("UAV-1")
+
+    first = coordinator.quarantine_uav(
+        uav.id, current_time=0.0, reason="initial_failure"
+    )
+    second = coordinator.quarantine_uav(
+        uav.id, current_time=1.0, reason="duplicate"
+    )
+
+    assert first.generation == 1
+    assert second is first
+
+
 @pytest.mark.parametrize(
     "plan_update, message",
     [

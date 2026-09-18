@@ -117,4 +117,55 @@ Result: PASS
 Evidence and remaining issue: The required cross-module command produced `37 passed in 9.24s`; the focused cleanup/resource/candidate command produced `39 passed in 5.99s`. Quarantine increments the lease generation, stops and removes the controller, clears pending tasks/events/saved coverage/last command, and remains idempotent without installing holding. Emergency failure closes mission records and task SAR service state, releases contacts/probes/tracks/search regions and base reservations, removes refuelling queue entries without counting a refuel, marks the UAV failed at its last position, and emits one failure event. Failed UAVs are excluded from available resources, task-catalog prompt resources, mission resources, assignment preflight, and invalid active-search occupancy. Frontend frames expose `operational_status`/`failure_reason` and display `故障停用`.
 
 T08: PASS
-T09-T16: NOT_RUN
+
+## T09: Whole-domain responsibility, stable geometry IDs, and fragments
+
+Command: `python -m pytest tests/mission/test_coverage_policy.py tests/mission/test_coverage_prompt_window.py tests/mission/test_task_catalog.py tests/schedule/test_candidate_extractor.py -q`
+
+Exit code: 0; result: `43 passed` in the focused rerun before T10/T11 additions. The final combined policy/window/candidate/catalog run produced `47 passed in 7.04s`.
+
+Evidence: `CoveragePolicy` classifies the fixed SAR domain from actual SAR timestamps, candidate IDs use stable half-open bboxes, stale/failed/unknown UAV reservations are excluded, and residual due cells can produce bounded 1--19 cell fragment candidates or explicit `deferred_geometry` alerts. Complete candidate enumeration is separated from the prompt cap.
+
+Result: PASS for the focused T09 contracts. Long-duration coverage and independent replay checks remain T15/T16 work.
+
+## T10: One bounded candidate window and physical edge reuse
+
+Command: `python -m pytest tests/mission/test_coverage_policy.py tests/mission/test_coverage_prompt_window.py tests/mission/test_prompt_window.py tests/schedule/test_candidate_extractor.py -q`
+
+Exit code: 0; result: `47 passed in 7.04s` (including the bounded-window and legacy prompt regressions). The allocator freezes one window before constructing feasible edges and carries its IDs and source metadata into `MissionSnapshot`.
+
+Evidence: ordinary search representatives are selected before the remaining urgent/fair slots, feasible edges are built from the frozen IDs, and the scheduler no longer applies a second independent candidate truncation for production snapshots.
+
+Result: PASS for T10 focused contracts. The prior T06 physical-route mismatch is covered by the T10/T11 integration reruns below.
+
+## T11: Feasible search-resource floor
+
+Command: `python -m pytest tests/mission/test_coverage_prompt_window.py tests/mission/test_mission_scheduler.py tests/mission/test_mission_task_lifecycle.py -q`
+
+Exit code: 0; result: the policy/scheduler/lifecycle subset passed (`26` scheduler tests in the current scheduler run, plus the coverage contracts and lifecycle regression suite). Maximum matching, oldest representative protection, generation-safe active task filtering, and explicit infeasible reasons are exercised.
+
+Evidence: `CoverageConstraint` is part of the immutable snapshot; selection validation rejects a floor shortfall or omission of `must_service_task_ids`, while no-feasible-edge cases remain explicitly explainable instead of fabricating an assignment.
+
+Result: PASS for focused T11 contracts. Live model behavior is not implied.
+
+## T12: Prompt compression and stage timings
+
+Command: `python -m pytest tests/mission/test_coverage_decision_budget.py tests/mission/test_llm_gateway.py tests/mission/test_mission_scheduler.py tests/mission/test_strategy_memory.py -q`
+
+Exit code: 0; result: `3 + 71 + 26 + 11` focused tests passed across the pressure, gateway, scheduler, and memory runs. A separate scheduler/memory rerun produced `37 passed in 24.95s`; the prompt pressure contract produced `3 passed in 2.63s`.
+
+Evidence: prompt serialization is an explicit allowlist, limits candidates to 40, contacts to 20, and selected contact samples to 12; it preserves generations, active records, edges, coverage constraints, and source metadata. The 1000-contact/600-sample pressure fixture stayed below 100 KiB without mutating the full snapshot. Decision-maker calls pass `max_tokens=1536`; gateway callback validation time is separated from transport time; interaction timing records preparation/prompt/model/validation/matching/total and prompt bytes. Over-budget input fails as `prompt_budget_exceeded:<field>`.
+
+Result: PASS for offline T12 contracts. Real online model latency remains NOT_RUN.
+
+## T13: Consecutive decision failures, pause, and role retry
+
+Command: `python -m pytest tests/mission/test_coverage_model_failure.py tests/mission/test_failure_paths.py tests/env/test_server_runtime.py -q`
+
+Exit code: 0; result: T13 unit contracts `5 passed in 3.33s`; the existing failure/runtime integration selection produced `27 passed in 655.94s`.
+
+Evidence: heavyweight decision failures count once per decision; the configured third failure pauses with `blocked_role=decision_maker`, 401/402/403/configuration categories pause immediately, paused steps do not tick the clock, and operator retry uses `force_heavy=True` without ship/sensor/control stepping. Successful retry clears the streak and failed retry remains paused. Red commander retry behavior remains on its existing path.
+
+Result: PASS for offline failure-control contracts. External model availability is not evaluated.
+
+T14-T16: NOT_RUN
