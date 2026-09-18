@@ -70,13 +70,35 @@ def test_track_regions_are_excluded(sm):
 def test_active_search_regions_are_excluded(sm):
     from src.schedule.datatypes import Region
 
-    active = Region(id="S-active", bbox=BBox(8, 8, 16, 14), type="search")
+    active = Region(
+        id="S-active",
+        bbox=BBox(8, 8, 16, 14),
+        type="search",
+        assigned_uav_id="UAV-1",
+    )
     sm.set_search_regions([active])
+    sm.update_uav_status(
+        "UAV-1", "searching", GridCoord(8, 8), assigned_region_id=active.id,
+    )
 
     result = CandidateExtractor().extract(sm)
 
     assert all(
         not _bboxes_overlap(candidate["bbox"], active.bbox)
+        for candidate in result.candidate_regions
+    )
+
+
+def test_unassigned_active_search_region_does_not_lock_candidate_pool(sm):
+    from src.schedule.datatypes import Region
+
+    active = Region(id="S-unassigned", bbox=BBox(8, 8, 16, 14), type="search")
+    sm.set_search_regions([active])
+
+    result = CandidateExtractor().extract(sm)
+
+    assert any(
+        _bboxes_overlap(candidate["bbox"], active.bbox)
         for candidate in result.candidate_regions
     )
 

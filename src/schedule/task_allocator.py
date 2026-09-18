@@ -394,6 +394,8 @@ class TaskAllocator:
         )
         resources = []
         for uav in self.sm.get_all_uavs():
+            if not self.sm.is_uav_operational(uav.id):
+                continue
             resources.append(UavResource(
                 uav_id=uav.id,
                 position_cells=(float(uav.position.col), float(uav.position.row)),

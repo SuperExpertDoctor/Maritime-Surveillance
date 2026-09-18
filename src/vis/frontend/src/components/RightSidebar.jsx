@@ -220,7 +220,7 @@ export default function RightSidebar({
           </section>
 
           <section className="sidebar-section uav-section">
-            <div className="section-heading"><span>飞行单元</span><small>{uavs.filter((uav) => uav.status !== "idle").length} ACTIVE</small></div>
+            <div className="section-heading"><span>飞行单元</span><small>{uavs.filter((uav) => uav.operational_status !== "failed" && uav.status !== "idle").length} ACTIVE</small></div>
             <div className="uav-list">
               {uavs.map((uav) => {
                 const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";

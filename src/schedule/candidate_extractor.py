@@ -22,6 +22,24 @@ class CandidateExtractor:
         self.coverage_planner = CoveragePlanner(sample_step=0.25)
         self._pool_geometry_cache: dict[tuple[int, tuple[int, int, int, int]], bool] = {}
 
+    @staticmethod
+    def _valid_active_search_regions(sm: StateManager):
+        """Return search reservations that still belong to an operational UAV."""
+        is_operational = getattr(sm, "is_uav_operational", None)
+        get_uav = getattr(sm, "get_uav", None)
+        regions = []
+        for region in sm.get_active_search_regions():
+            uav_id = region.assigned_uav_id
+            if not uav_id:
+                continue
+            if callable(is_operational) and not is_operational(uav_id):
+                continue
+            uav = get_uav(uav_id) if callable(get_uav) else None
+            if uav is not None and getattr(uav, "assigned_region_id", None) != region.id:
+                continue
+            regions.append(region)
+        return tuple(regions)
+
     def extract_pool(
         self,
         sm: StateManager,
@@ -52,7 +70,10 @@ class CandidateExtractor:
         occupied[-1, :] = True
         occupied[:, 0] = True
         occupied[:, -1] = True
-        for region in (*sm.get_track_regions(), *sm.get_active_search_regions()):
+        for region in (
+            *sm.get_track_regions(),
+            *self._valid_active_search_regions(sm),
+        ):
             bbox = region.bbox
             occupied[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end] = True
 
@@ -187,7 +208,7 @@ class CandidateExtractor:
         # Completed regions remain visible in history but are no longer an
         # active airspace reservation.  Once their information decays, they
         # must be eligible for a fresh SAR revisit.
-        for region in active_search:
+        for region in self._valid_active_search_regions(sm):
             b = region.bbox
             occupied[b.col_start:b.col_end, b.row_start:b.row_end] = True
 

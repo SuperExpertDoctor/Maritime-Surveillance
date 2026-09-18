@@ -48,6 +48,14 @@ class BaseStation:
             self._hangar.append(uav_id)
         return True
 
+    def remove_uav(self, uav_id: str) -> bool:
+        """Remove a UAV from refuelling service without completing it."""
+        removed = uav_id in self._refueling_queue or uav_id in self._hangar
+        self._refueling_queue.pop(uav_id, None)
+        if uav_id in self._hangar:
+            self._hangar.remove(uav_id)
+        return removed
+
     def step(self, dt_min: float) -> list[str]:
         """推进 dt 分钟。返回加油完成的 UAV ID 列表。"""
         ready = []

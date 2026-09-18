@@ -67,6 +67,24 @@ class OperationRegistry:
         if uav is not None:
             uav.sensor_mode = applied_command.sensor_mode.value
 
+    def release_uav(
+        self,
+        uav_id: str,
+        *,
+        current_time: float,
+        reason: str,
+    ) -> None:
+        """Release every operation binding owned by one failed UAV."""
+        self._release_binding(uav_id)
+        for contact in self._state_manager.contacts.list_snapshots():
+            if contact.assigned_uav_id == uav_id:
+                self._state_manager.release_contact_reservation(
+                    contact.contact_id, uav_id, current_time, reason,
+                )
+        for probe in self._state_manager.get_probe_sessions():
+            if probe.uav_id == uav_id:
+                self._state_manager.clear_probe_session(probe.probe_id)
+
     @staticmethod
     def _resolve_track_contact(
         command: ControlCommand,

@@ -54,6 +54,9 @@ function probeDisplayState(taskVisual) {
 
 /** Return the one display state shared by map, sidebar, and details. */
 export function uavDisplayState(uav = {}) {
+  if (uav.operational_status === "failed") {
+    return { label: "故障停用", tone: "failed", phase: "failed" };
+  }
   const taskVisual = uav.task_visual;
   if (taskVisual && taskVisual.route_source !== "none") {
     if (taskVisual.route_status === "cleared") {
@@ -69,4 +72,3 @@ export function uavDisplayState(uav = {}) {
 export function taskDisplayLabel(uav) {
   return uavDisplayState(uav).label;
 }
-

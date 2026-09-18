@@ -31,6 +31,7 @@ _OPERATION_BY_STATUS = {
     "returning": "return",
     "holding": "holding",
     "refueling": "idle",
+    "failed": "idle",
 }
 
 
@@ -146,11 +147,21 @@ class StateManager:
     def get_uav(self, uav_id: str) -> Optional[UAVState]:
         return next((uav for uav in self._uavs if uav.id == uav_id), None)
 
+    def is_uav_operational(self, uav_id: str) -> bool:
+        """Return whether a UAV may participate in new mission work."""
+        uav = self.get_uav(uav_id)
+        return bool(
+            uav is not None
+            and getattr(uav, "operational_status", "available") != "failed"
+            and getattr(uav, "status", "idle") != "failed"
+        )
+
     def get_available_uavs(self) -> list[UAVState]:
         return [
             uav
             for uav in self._uavs
-            if uav.control_mode == "heuristic"
+            if self.is_uav_operational(uav.id)
+            and uav.control_mode == "heuristic"
             and uav.control_owner == "system"
             and uav.status in {"idle", "holding"}
             and uav.operation_mode in {"idle", "holding"}

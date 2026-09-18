@@ -1331,6 +1331,8 @@ class SimulationEngine:
             resource = resources.get(assignment.uav_id)
             if candidate is None or resource is None:
                 return False
+            if not self.allocator.sm.is_uav_operational(assignment.uav_id):
+                return False
             if assignment.uav_id not in candidate.feasible_uav_ids:
                 return False
             edge = edges.get((assignment.task_id, assignment.uav_id))
@@ -2658,12 +2660,163 @@ class SimulationEngine:
     def _enter_emergency_failure(
         self, uav: UAVEntity, reason: str, error: Exception
     ) -> None:
+        """Freeze one airframe and release every mission binding it owned."""
+        if uav.id in self._emergency_failures:
+            return
+
+        current_time = float(self.clock.time)
+        sm = self.allocator.sm
+        active_task = self.control_coordinator.active_task(uav.id)
+        if active_task is None:
+            active_task = self._coordinator_tasks.get(uav.id)
+        lease = self.control_coordinator.current_lease(uav.id)
+
+        if active_task is not None and active_task.task_type in {
+            OperationMode.COVERAGE,
+            OperationMode.PROBE,
+            OperationMode.TRACK,
+        }:
+            self._close_mission_task(
+                uav.id,
+                active_task,
+                status="blocked",
+                reason=reason,
+                current_time=current_time,
+                coverage_generation=(
+                    lease.generation
+                    if active_task.task_type is OperationMode.COVERAGE
+                    else None
+                ),
+            )
+
+        # A stale coordinator mirror or an already detached task record must
+        # not keep the failed UAV in the prompt's active-task snapshot.
+        for task_id, record in tuple(self._mission_task_records.items()):
+            if record.assigned_uav_id != uav.id:
+                continue
+            if record.status in {"completed", "cancelled", "blocked"}:
+                continue
+            self._mission_task_records[task_id] = replace(
+                record,
+                status="blocked",
+                assigned_uav_id=None,
+                finished_at_min=current_time,
+                release_reason=reason,
+            )
+
+        # Keep the failed area's responsibility visible and reusable by a
+        # healthy UAV. The old task record remains blocked for audit purposes.
+        for region in sm.get_search_regions():
+            if region.assigned_uav_id == uav.id:
+                region.assigned_uav_id = None
+                if region.status == "stale":
+                    region.status = "active"
+        sm.clear_uav_assignment(uav.id)
+
+        contact_ids = {
+            contact.contact_id
+            for contact in sm.contacts.list_snapshots()
+            if contact.assigned_uav_id == uav.id
+        }
+        if active_task is not None and active_task.target_contact_id:
+            contact_ids.add(active_task.target_contact_id)
+        for contact_id in sorted(contact_ids):
+            self._clear_surveillance_contact(contact_id, current_time, reason)
+        self.control_coordinator.operation_registry.release_uav(
+            uav.id, current_time=current_time, reason=reason,
+        )
+        for region in tuple(sm.get_track_regions()):
+            if region.assigned_uav_id == uav.id:
+                sm.release_track_region(
+                    region.id, source_uav_id=uav.id, create_marker=False,
+                )
+
+        service = sm.coverage_service
+        if service is not None:
+            for (assigned_uav_id, task_id), generation in tuple(
+                self._coverage_assignment_generations.items()
+            ):
+                if assigned_uav_id != uav.id:
+                    continue
+                try:
+                    service.close(
+                        task_id, generation, reason, uav_id=uav.id,
+                    )
+                except ValueError:
+                    pass
+                self._coverage_assignment_generations.pop(
+                    (assigned_uav_id, task_id), None,
+                )
+
+        # Remove both in-flight and waiting base reservations. No refuel
+        # completion is recorded for an airframe that failed in the queue.
+        self._return_base_by_uav.pop(uav.id, None)
+        self._holding_base_by_uav.pop(uav.id, None)
+        for base in self.bases:
+            base.remove_uav(uav.id)
+
+        self._coordinator_tasks.pop(uav.id, None)
+        self._pending_coverage_completions = [
+            item for item in self._pending_coverage_completions
+            if item.get("uav_id") != uav.id
+        ]
+        self._search_started_at.pop(uav.id, None)
+        self._tracking_started_at.pop(uav.id, None)
+        self._ais_tracking_started_at.pop(uav.id, None)
+        self._ais_measurements.pop(uav.id, None)
+        uav.assigned_region = None
+        uav.target_group_id = None
+        uav.waypoints = []
+        uav.planned_path = []
+        uav.mission_route = []
+        uav._wp_index = 0
+        uav._transit_end_index = 0
+        uav._scan_ranges = []
+        uav._mission_kind = ""
+        uav.avoidance_path = []
+        uav._avoidance_index = 0
+        uav.eo_fov = None
+        uav.sar_look_direction = None
+        uav.sar_footprint = []
+        uav.sar_aperture_track = []
+        uav._clear_sar_acquisition()
+        uav.search_complete_pending = False
+        uav.last_requested_command = None
+        uav.last_applied_command = None
+        uav.last_safety_interventions = ()
+        uav.request_active_mode("standby")
+        uav.sensor_mode = "off"
+
         self._emergency_failures[uav.id] = reason
         self._outcome_evaluator.invalidate(reason)
-        uav.sensor_mode = "off"
+        lease = self.control_coordinator.quarantine_uav(
+            uav.id, current_time=current_time, reason=reason,
+        )
+        uav.status = "failed"
+        state = sm.get_uav(uav.id)
+        if state is not None:
+            state.operational_status = "failed"
+            state.failure_reason = reason
+            sm.update_uav_status(
+                uav.id,
+                "failed",
+                uav.position,
+                fuel_remaining_pct=uav.fuel_remaining_pct,
+                heading_deg=uav.heading_deg,
+                sensor_mode="off",
+            )
+            sm.update_uav_control(
+                uav.id,
+                self.control_coordinator.configured_mode(uav.id).value,
+                lease.owner.value,
+                OperationMode.IDLE.value,
+                lease.generation,
+                False,
+            )
+
         self.allocator.trigger_manager.notify_event(
             "emergency_failure",
-            time=self.clock.time,
+            time=current_time,
             uav_id=uav.id,
             reason=reason,
             error=str(error),

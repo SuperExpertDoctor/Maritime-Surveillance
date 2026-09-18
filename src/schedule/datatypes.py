@@ -39,6 +39,8 @@ class UAVState:
     controller_generation: int = 0
     safety_intervened: bool = False
     last_reassigned_at_min: float = 0.0
+    operational_status: str = "available"  # "available" | "failed"
+    failure_reason: Optional[str] = None
 
 
 @dataclass

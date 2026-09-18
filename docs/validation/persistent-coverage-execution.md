@@ -104,4 +104,17 @@ Result: PASS
 Evidence and remaining issue: Service and lifecycle tests produced `48 passed`; the broader related command produced `57 passed`. Route completion now emits `coverage_route_finished`, is held until the same tick's SAR footprint has been recorded, and only then either closes as complete or blocks with an auditable missing-cell list. Completion is queued as `search_complete` for the next control tick, so a completed coverage controller enters holding without a same-tick lease transition. Start validation is performed before assignment commit, and service identity carries `(task_id, generation, uav_id)` so local lease generations can safely be reused by a different UAV. The prior T06 scheduler/physical-route mismatch remains tracked for T10/T11.
 
 T07: PASS
-T08-T16: NOT_RUN
+
+## T08: Failure release and UAV quarantine
+
+Command and working directory: `python -m pytest tests/mission/test_coverage_failure_cleanup.py tests/control/test_coordinator.py tests/mission/test_mission_task_lifecycle.py tests/mission/test_contact_release.py tests/control/test_ownership.py -q` from repository root
+Exit code: 0
+Transport: none; failure fixture uses the real SimulationEngine, coordinator lease, CoverageService, task records, and BaseStation queue
+Config hash / seeds / actual simulation end: deterministic fixture; no live-model gate
+Raw artifacts: `src/control/common/coordinator.py`, `src/control/common/operation_registry.py`, `src/env/simulation.py`, `src/schedule/{datatypes,state_manager,task_allocator}.py`, `src/mission/task_catalog.py`, frame and display state changes
+Metric measurement: native task/resource lifecycle contract
+Result: PASS
+Evidence and remaining issue: The required cross-module command produced `37 passed in 9.24s`; the focused cleanup/resource/candidate command produced `39 passed in 5.99s`. Quarantine increments the lease generation, stops and removes the controller, clears pending tasks/events/saved coverage/last command, and remains idempotent without installing holding. Emergency failure closes mission records and task SAR service state, releases contacts/probes/tracks/search regions and base reservations, removes refuelling queue entries without counting a refuel, marks the UAV failed at its last position, and emits one failure event. Failed UAVs are excluded from available resources, task-catalog prompt resources, mission resources, assignment preflight, and invalid active-search occupancy. Frontend frames expose `operational_status`/`failure_reason` and display `故障停用`.
+
+T08: PASS
+T09-T16: NOT_RUN

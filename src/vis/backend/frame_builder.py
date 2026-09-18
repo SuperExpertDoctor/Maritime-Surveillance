@@ -414,6 +414,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         uav_frame = {
             "id": u.id,
             "status": u.status,
+            "operational_status": getattr(u, "operational_status", "available"),
+            "failure_reason": getattr(u, "failure_reason", None),
             "position": position,
             "heading_deg": _heading_from_motion(trail, fallback_heading),
             "remaining_range_km": round(u.fuel_remaining_pct * max_range),

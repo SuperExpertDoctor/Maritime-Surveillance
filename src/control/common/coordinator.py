@@ -744,6 +744,65 @@ class ControlCoordinator:
             self._stop_controller(old_controller, StopReason.COMPLETED)
         return lease
 
+    def quarantine_uav(
+        self,
+        uav_id: str,
+        *,
+        current_time: float,
+        reason: str,
+    ) -> ControlLease:
+        """Atomically remove a failed UAV from the command path.
+
+        Quarantine deliberately leaves no SYSTEM holding controller.  A failed
+        airframe must remain physically where the failure occurred until a
+        separate recovery authority has established a safe action.
+        """
+        self._require_uav(uav_id)
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        if not isinstance(reason, str) or not reason.strip():
+            raise ControlCoordinatorError("quarantine reason must be non-empty")
+
+        with self._lock:
+            current = self.ownership.current(uav_id)
+            already_quiet = (
+                uav_id not in self._controllers
+                and uav_id not in self._pending_tasks
+                and not self._queued_events[uav_id]
+                and uav_id not in self._task_flow._saved_coverage_tasks
+                and self._operation_modes[uav_id] is OperationMode.IDLE
+                and self._last_applied_commands[uav_id] is None
+                and current.owner is ControlOwner.SYSTEM
+            )
+            if already_quiet:
+                lease = current
+                old_controller = None
+            else:
+                lease = self.ownership.release_to_system(current, current_time)
+                old_controller = self._controllers.pop(uav_id, None)
+                self._pending_tasks.pop(uav_id, None)
+                self._queued_events[uav_id] = []
+                self._task_flow.clear_saved_coverage(uav_id)
+                self._operation_modes[uav_id] = OperationMode.IDLE
+                self._invalid_streaks[uav_id] = 0
+                self._last_applied_commands[uav_id] = None
+                self._last_safety_intervened[uav_id] = False
+                self._last_tick_times[uav_id] = None
+
+        if old_controller is not None:
+            self._stop_controller(old_controller, StopReason.FAILED)
+
+        state = self.state_manager.get_uav(uav_id)
+        if state is not None:
+            self.state_manager.update_uav_control(
+                uav_id,
+                self._configured_modes[uav_id].value,
+                lease.owner.value,
+                OperationMode.IDLE.value,
+                lease.generation,
+                False,
+            )
+        return lease
+
     def step_uav(
         self,
         uav: UAVEntity,

@@ -744,6 +744,37 @@ def test_work_controller_can_promote_to_system_holding_before_refuel():
     assert ownership.current("UAV-1") is lease
 
 
+def test_quarantine_uav_clears_control_state_without_installing_holding():
+    coordinator, ownership, state_manager, *_ = make_runtime(
+        {"UAV-1": ControlMode.HEURISTIC}
+    )
+    start_heuristic(coordinator)
+    uav = make_uav("UAV-1")
+    coordinator.step_uav(uav, current_time=1.0)
+    coordinator._task_flow._saved_coverage_tasks[uav.id] = coverage_task("S1")
+    old_lease = coordinator.current_lease(uav.id)
+
+    quarantined = coordinator.quarantine_uav(
+        uav.id, current_time=2.0, reason="no_safe_recovery_path"
+    )
+
+    assert quarantined.owner is ControlOwner.SYSTEM
+    assert quarantined.generation == old_lease.generation + 1
+    assert coordinator.controller(uav.id) is None
+    assert coordinator.active_task(uav.id) is None
+    assert coordinator.operation_mode(uav.id) is OperationMode.IDLE
+    assert coordinator._queued_events[uav.id] == []
+    assert uav.id not in coordinator._task_flow._saved_coverage_tasks
+    assert coordinator._last_applied_commands[uav.id] is None
+    assert coordinator.route_snapshot(uav.id).route.status == "cleared"
+    assert ownership.current(uav.id) is quarantined
+    assert state_manager.get_uav(uav.id).operation_mode == "idle"
+
+    assert coordinator.quarantine_uav(
+        uav.id, current_time=3.0, reason="duplicate"
+    ) is quarantined
+
+
 @pytest.mark.parametrize(
     "plan_update, message",
     [

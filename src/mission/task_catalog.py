@@ -372,6 +372,9 @@ class TaskCatalog:
         resources = []
         getter = getattr(state, "get_all_uavs", None)
         for uav in getter() if callable(getter) else ():
+            is_operational = getattr(state, "is_uav_operational", None)
+            if callable(is_operational) and not is_operational(uav.id):
+                continue
             status = str(getattr(uav, "status", "idle")).lower()
             operation = str(getattr(uav, "operation_mode", status)).lower()
             current_task_id = getattr(uav, "assigned_region_id", None)
