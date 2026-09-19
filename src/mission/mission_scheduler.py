@@ -5,8 +5,9 @@ import math
 import os
 import time
 import json
+import logging
 from copy import deepcopy
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from functools import lru_cache
 
 from src.mission.contracts import (
@@ -57,6 +58,42 @@ _ORDINARY_SEARCH_OPERATIONS = {
 }
 _ACTIVE_RECORD_STATUSES = {"approved", "executing"}
 _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, eq=False)
+class PairingResult:
+    """Post-selection pairing result with explicit validation state."""
+
+    assignments: tuple[Assignment, ...] = ()
+    errors: tuple[str, ...] = ()
+    is_valid: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "assignments", tuple(self.assignments))
+        object.__setattr__(self, "errors", tuple(self.errors))
+        if not isinstance(self.is_valid, bool):
+            raise TypeError("is_valid must be a bool")
+
+    def __iter__(self):
+        return iter(self.assignments)
+
+    def __len__(self) -> int:
+        return len(self.assignments)
+
+    def __getitem__(self, index):
+        return self.assignments[index]
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, PairingResult):
+            return (
+                self.assignments == other.assignments
+                and self.errors == other.errors
+                and self.is_valid == other.is_valid
+            )
+        if isinstance(other, (tuple, list)):
+            return self.assignments == tuple(other)
+        return NotImplemented
 
 
 def _jsonable(value):
@@ -745,35 +782,92 @@ def validate_selection(
     )
 
 
+def _selection_ids_for_log(selection) -> tuple[str, ...]:
+    if isinstance(selection, MissionSelection):
+        return tuple(selection.selected_task_ids)
+    if isinstance(selection, dict):
+        selected = selection.get("selected_task_ids", ())
+        return tuple(selected) if isinstance(selected, (list, tuple)) else ()
+    return ()
+
+
+def _pair_selected_tasks(
+    selection: MissionSelection | dict,
+    snapshot: MissionSnapshot,
+    *,
+    reassignment_cooldown_min: float,
+    allow_probe_preempt_search: bool,
+    allow_intent_preempt_search: bool,
+    visible_task_ids: frozenset[str] | None = None,
+) -> PairingResult:
+    """Validate and pair selected work without leaking post-validation exceptions."""
+    try:
+        errors = _validate_selection(
+            selection,
+            snapshot,
+            reassignment_cooldown_min=reassignment_cooldown_min,
+            allow_probe_preempt_search=allow_probe_preempt_search,
+            allow_intent_preempt_search=allow_intent_preempt_search,
+            visible_task_ids=visible_task_ids,
+        )
+        if errors:
+            return PairingResult((), tuple(errors), False)
+        parsed, parse_errors = _selection_object(selection)
+        if parsed is None or parse_errors:
+            return PairingResult((), tuple(parse_errors), False)
+        options = _edge_options(
+            parsed,
+            snapshot,
+            reassignment_cooldown_min,
+            allow_probe_preempt_search=allow_probe_preempt_search,
+            allow_intent_preempt_search=allow_intent_preempt_search,
+        )
+        matching = _minimum_cost_matching(
+            parsed.selected_task_ids,
+            options,
+            _resource_maps(snapshot),
+            frozenset(parsed.preempt_uav_ids),
+        )
+        if matching is None:
+            return PairingResult((), ("infeasible_assignment",), False)
+        resources = _resource_maps(snapshot)
+        assignments = tuple(
+            Assignment(
+                task_id,
+                matching[task_id].uav_id,
+                resources[matching[task_id].uav_id].generation,
+                resources[matching[task_id].uav_id].current_task_id,
+            )
+            for task_id in parsed.selected_task_ids
+        )
+        return PairingResult(assignments, (), True)
+    except Exception as exc:
+        snapshot_id = getattr(snapshot, "snapshot_id", "unknown")
+        _LOGGER.exception(
+            "pair_selected_tasks failed: exception_type=%s snapshot_id=%s "
+            "selected_task_ids=%s",
+            type(exc).__name__,
+            snapshot_id,
+            _selection_ids_for_log(selection),
+        )
+        return PairingResult(
+            (),
+            (f"pairing_exception:{type(exc).__name__}",),
+            False,
+        )
+
+
 def pair_selected_tasks(
     selection: MissionSelection | dict,
     snapshot: MissionSnapshot,
-) -> tuple[Assignment, ...]:
+) -> PairingResult:
     """Pair selected work on legal edges at minimum total transit cost."""
-    errors = validate_selection(selection, snapshot)
-    if errors:
-        raise ValueError("; ".join(errors))
-    selection, parse_errors = _selection_object(selection)
-    if selection is None or parse_errors:
-        raise ValueError("; ".join(parse_errors))
-    options = _edge_options(selection, snapshot, DEFAULT_REASSIGNMENT_COOLDOWN_MIN)
-    matching = _minimum_cost_matching(
-        selection.selected_task_ids,
-        options,
-        _resource_maps(snapshot),
-        frozenset(selection.preempt_uav_ids),
-    )
-    if matching is None:
-        raise ValueError("infeasible_assignment")
-    resources = _resource_maps(snapshot)
-    return tuple(
-        Assignment(
-            task_id,
-            matching[task_id].uav_id,
-            resources[matching[task_id].uav_id].generation,
-            resources[matching[task_id].uav_id].current_task_id,
-        )
-        for task_id in selection.selected_task_ids
+    return _pair_selected_tasks(
+        selection,
+        snapshot,
+        reassignment_cooldown_min=DEFAULT_REASSIGNMENT_COOLDOWN_MIN,
+        allow_probe_preempt_search=True,
+        allow_intent_preempt_search=False,
     )
 
 
@@ -869,47 +963,26 @@ class MissionScheduler:
             visible_task_ids=visible_task_ids,
         )
 
+    @staticmethod
+    def _selection_schema_errors(payload) -> tuple[str, ...]:
+        """Return only structural errors eligible for LLM correction."""
+        _parsed, errors = _selection_object(payload)
+        return tuple(errors)
+
     def pair_selected_tasks(
         self,
         selection: MissionSelection | dict,
         snapshot: MissionSnapshot,
         *,
         visible_task_ids: frozenset[str] | None = None,
-    ) -> tuple[Assignment, ...]:
-        errors = self.validate_selection(
+    ) -> PairingResult:
+        return _pair_selected_tasks(
             selection,
             snapshot,
-            visible_task_ids=visible_task_ids,
-        )
-        if errors:
-            raise ValueError("; ".join(errors))
-        parsed, parse_errors = _selection_object(selection)
-        if parsed is None or parse_errors:
-            raise ValueError("; ".join(parse_errors))
-        options = _edge_options(
-            parsed,
-            snapshot,
-            self.reassignment_cooldown_min,
+            reassignment_cooldown_min=self.reassignment_cooldown_min,
             allow_probe_preempt_search=self.allow_probe_preempt_search,
             allow_intent_preempt_search=self.allow_intent_preempt_search,
-        )
-        matching = _minimum_cost_matching(
-            parsed.selected_task_ids,
-            options,
-            _resource_maps(snapshot),
-            frozenset(parsed.preempt_uav_ids),
-        )
-        if matching is None:
-            raise ValueError("infeasible_assignment")
-        resources = _resource_maps(snapshot)
-        return tuple(
-            Assignment(
-                task_id,
-                matching[task_id].uav_id,
-                resources[matching[task_id].uav_id].generation,
-                resources[matching[task_id].uav_id].current_task_id,
-            )
-            for task_id in parsed.selected_task_ids
+            visible_task_ids=visible_task_ids,
         )
 
     def pair_approved_tasks(
@@ -1028,7 +1101,11 @@ class MissionScheduler:
                 snapshot_id=snapshot.snapshot_id,
                 system_prompt=self.system_prompt,
                 user_payload=payload,
-                validate=lambda candidate: self.validate_selection(
+                # The gateway may correct only the response schema.  Snapshot
+                # semantics and assignment feasibility are post-selection
+                # checks and must not trigger an unbounded model correction.
+                validate=self._selection_schema_errors,
+                post_validate=lambda candidate: self.validate_selection(
                     candidate,
                     snapshot,
                     visible_task_ids=visible_task_ids,
@@ -1072,55 +1149,43 @@ class MissionScheduler:
             )
             self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
-        validation_started = time.perf_counter()
-        errors = self.validate_selection(
-            response,
-            snapshot,
-            visible_task_ids=visible_task_ids,
-        )
-        self.last_selection_timing["validation_seconds"] += (
-            time.perf_counter() - validation_started
-        )
-        if self._deadline_expired(deadline_monotonic):
-            self._fail_selection("decision_deadline_exceeded", "timeout", "validation")
-            return None
-        if errors:
-            self.last_selection_errors = tuple(errors)
-            self.last_selection_failure_category = "validation"
-            self.last_selection_failure_stage = "validation"
-            self.last_selection_timing["total_seconds"] = time.perf_counter() - started
-            return None
         parsed, parse_errors = _selection_object(response)
         if self._deadline_expired(deadline_monotonic):
             self._fail_selection("decision_deadline_exceeded", "timeout", "validation")
             return None
         if parsed is None or parse_errors:
-            self.last_selection_errors = tuple(parse_errors)
-            self.last_selection_failure_category = "validation"
-            self.last_selection_failure_stage = "validation"
+            self._finalize_selection(
+                success=False,
+                errors=tuple(parse_errors),
+                category="validation",
+                stage="validation",
+            )
             self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
         matching_started = time.perf_counter()
-        try:
-            assignments = self.pair_selected_tasks(
-                parsed,
-                snapshot,
-                visible_task_ids=visible_task_ids,
-            )
-        except ValueError as exc:
-            self.last_selection_errors = (str(exc),)
-            self.last_selection_failure_category = "validation"
-            self.last_selection_failure_stage = "matching"
-            self.last_selection_timing["total_seconds"] = time.perf_counter() - started
-            return None
+        pairing = self.pair_selected_tasks(
+            parsed,
+            snapshot,
+            visible_task_ids=visible_task_ids,
+        )
         self.last_selection_timing["matching_seconds"] = (
             time.perf_counter() - matching_started
         )
         if self._deadline_expired(deadline_monotonic):
             self._fail_selection("decision_deadline_exceeded", "timeout", "matching")
             return None
+        if not pairing.is_valid:
+            self._finalize_selection(
+                success=False,
+                errors=("selection_post_validation_failed", *pairing.errors),
+                category="validation",
+                stage="matching",
+            )
+            self.last_selection_timing["total_seconds"] = time.perf_counter() - started
+            return None
+        assignments = pairing.assignments
+        self._finalize_selection(success=True)
         self.last_selection_timing["total_seconds"] = time.perf_counter() - started
-        self.last_selection_failure_stage = None
         return AssignmentBatch(
             snapshot.snapshot_id,
             assignments,
@@ -1132,16 +1197,32 @@ class MissionScheduler:
     def _deadline_expired(deadline_monotonic: float) -> bool:
         return time.perf_counter() >= deadline_monotonic
 
+    def _finalize_selection(
+        self,
+        *,
+        success: bool,
+        errors: tuple[str, ...] = (),
+        category: str | None = None,
+        stage: str | None = None,
+    ) -> None:
+        """Publish one authoritative final state for the selection trace."""
+        self.last_selection_success = bool(success)
+        self.last_selection_errors = tuple(errors)
+        self.last_selection_failure_category = None if success else category
+        self.last_selection_failure_stage = None if success else stage
+
     def _fail_selection(
         self,
         error: str,
         category: str,
         stage: str = "transport",
     ) -> None:
-        self.last_selection_success = False
-        self.last_selection_errors = (error,)
-        self.last_selection_failure_category = category
-        self.last_selection_failure_stage = stage
+        self._finalize_selection(
+            success=False,
+            errors=(error,),
+            category=category,
+            stage=stage,
+        )
         if self.last_selection_timing:
             self.last_selection_timing["total_seconds"] = (
                 max(
@@ -1421,6 +1502,7 @@ __all__ = [
     "MissionScheduler",
     "MissionSelection",
     "MissionSnapshot",
+    "PairingResult",
     "TaskRecord",
     "UavResource",
     "pair_selected_tasks",

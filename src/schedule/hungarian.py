@@ -3,6 +3,10 @@ from typing import Optional
 from src.schedule.datatypes import BBox
 
 
+class AssignmentBackendUnavailable(RuntimeError):
+    """The optimal assignment backend is not available in this runtime."""
+
+
 def _bbox_center(bbox: BBox) -> tuple[float, float]:
     return (
         (bbox.col_start + bbox.col_end) / 2.0,
@@ -35,8 +39,13 @@ def _hungarian_greedy(n_uavs: int, n_regions: int,
     return result
 
 
-def hungarian_pair(uavs: list[dict], regions: list[dict]) -> list[tuple[str, str]]:
-    """Hungarian 算法最小总距离配对（scipy 最优；回退到贪心）。
+def hungarian_pair(
+    uavs: list[dict],
+    regions: list[dict],
+    *,
+    scheduler_mode: str = "production",
+) -> list[tuple[str, str]]:
+    """Hungarian 算法最小总距离配对。
 
     输入:
       uavs: [{"id": str, "position": GridCoord}, ...]
@@ -44,6 +53,9 @@ def hungarian_pair(uavs: list[dict], regions: list[dict]) -> list[tuple[str, str
     输出:
       [(uav_id, region_id), ...]
     """
+    if scheduler_mode not in {"production", "fixture"}:
+        raise ValueError("scheduler_mode must be production or fixture")
+
     n_uavs = len(uavs)
     n_regions = len(regions)
 
@@ -72,8 +84,12 @@ def hungarian_pair(uavs: list[dict], regions: list[dict]) -> list[tuple[str, str
             if i < n_uavs and j < n_regions:
                 result.append((uavs[i]["id"], regions[j]["id"]))
         return result
-    except ImportError:
-        pass
+    except ImportError as exc:
+        if scheduler_mode == "fixture":
+            return _hungarian_greedy(n_uavs, n_regions, cost, uavs, regions)
+        raise AssignmentBackendUnavailable(
+            "scipy and numpy are required for production assignment"
+        ) from exc
 
-    # 回退到贪心配对
-    return _hungarian_greedy(n_uavs, n_regions, cost, uavs, regions)
+
+__all__ = ["AssignmentBackendUnavailable", "hungarian_pair"]

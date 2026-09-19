@@ -49,6 +49,26 @@ def test_handoff_candidates_respect_contact_clearance_and_recheck_cooldown(sm, r
     assert CandidateExtractor()._handoff_candidates(*args) == []
 
 
+def test_relay_candidate_value_has_no_fake_1000_bonus(sm):
+    sm.record_target_observation("G-contact", GridCoord(20, 16), "UAV-1", 50.0)
+    shape = sm.config.grid.resolution
+    values = np.ones(shape, dtype=float)
+    info = np.zeros(shape, dtype=float)
+    occupied = np.zeros(shape, dtype=bool)
+    seen = np.zeros(shape, dtype=bool)
+    extractor = CandidateExtractor()
+    extractor._has_turning_clearance = lambda *_args: True
+
+    candidates = extractor._handoff_candidates(sm, occupied, values, info, seen)
+
+    assert candidates
+    candidate = candidates[0]
+    bbox = candidate["bbox"]
+    assert candidate["total_value"] == pytest.approx(
+        float(values[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end].sum())
+    )
+
+
 def test_black_cells_become_candidates(sm):
     """黑态势 cell 应形成候选区域。"""
     extractor = CandidateExtractor()

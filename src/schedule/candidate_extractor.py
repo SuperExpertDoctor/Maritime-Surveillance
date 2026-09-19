@@ -816,7 +816,7 @@ class CandidateExtractor:
                     "cell_count": side * side,
                     # The priority comes from the observed contact, not from
                     # an unobserved target or a fabricated information value.
-                    "total_value": float(patch_value.sum()) + 1000.0,
+                    "total_value": float(patch_value.sum()),
                     "avg_info": float(patch_info.mean()),
                     "unseen_count": int((~seen[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]).sum()),
                     "target_group_id": report.contact_id,

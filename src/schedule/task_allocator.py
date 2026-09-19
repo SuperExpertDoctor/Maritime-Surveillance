@@ -4,15 +4,17 @@ from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
 from src.schedule.llm_client import LLMClient
 from src.schedule.llm_reviewer import LLMReviewer
-from src.schedule.hungarian import hungarian_pair
+from src.schedule.hungarian import AssignmentBackendUnavailable, hungarian_pair
 from src.schedule.trigger_manager import TriggerDecision, TriggerManager
 from src.schedule.datatypes import Region, BBox
+from src.schedule.output_validator import compute_iou
 import math
 import numpy as np
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.env.dubins import DubinsPath
 from src.utils.search_route_planner import SearchRouteRequest, plan_search_route
 import time
+import logging
 
 from src.mission.contracts import (
     AssignmentBatch,
@@ -36,6 +38,7 @@ from src.mission.strategy_memory import StrategyMemoryStore
 
 
 _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
+_LOGGER = logging.getLogger(__name__)
 
 
 class TaskAllocator:
@@ -47,8 +50,13 @@ class TaskAllocator:
         *,
         llm_gateway=None,
         strategy_memory_store: StrategyMemoryStore | None = None,
+        scheduler_mode: str = "mission",
     ):
+        if scheduler_mode not in {"mission", "legacy"}:
+            raise ValueError("scheduler_mode must be mission or legacy")
         self.config = config
+        self.scheduler_mode = scheduler_mode
+        self._legacy_search_id_warnings: set[str] = set()
         self.sm = StateManager(config)
         self.ivt = InfoValueTable(self.sm)
         self.extractor = CandidateExtractor()
@@ -314,10 +322,8 @@ class TaskAllocator:
         return self._last_mission_snapshot
 
     def uses_legacy_scheduler(self) -> bool:
-        """Detect explicit test/compatibility overrides of the old path."""
-        step_function = getattr(self.step, "__func__", None)
-        decide_function = getattr(self.llm_client.decide, "__func__", None)
-        return step_function is not TaskAllocator.step or decide_function is not LLMClient.decide
+        """Return the explicitly configured scheduler path."""
+        return self.scheduler_mode == "legacy"
 
     def decide_mission(self, now_min: float | None = None, **kwargs):
         """Run T11 selection on a fresh snapshot; T12 owns application."""
@@ -357,7 +363,11 @@ class TaskAllocator:
             return {"trigger_type": "none", "action": None}, None
         if decision.trigger_type == "light":
             return self._handle_light_mission_trigger(
-                current_time, decision, active_tasks,
+                current_time,
+                decision,
+                active_tasks,
+                intents=intents,
+                intent_statuses=intent_statuses,
             )
 
         wall_started = time.perf_counter()
@@ -500,6 +510,9 @@ class TaskAllocator:
         current_time: float,
         decision,
         active_tasks: tuple[TaskRecord, ...],
+        *,
+        intents: tuple[Intent, ...] = (),
+        intent_statuses: tuple[IntentStatus, ...] = (),
     ) -> tuple[dict, AssignmentBatch | None]:
         """Re-pair only approved work; light events cannot create work."""
         del decision
@@ -507,6 +520,8 @@ class TaskAllocator:
         snapshot = self.build_mission_snapshot(
             current_time,
             active_tasks=active_tasks,
+            intents=intents,
+            intent_statuses=intent_statuses,
         )
         snapshot_frozen_wall = time.perf_counter()
         approved_ids = tuple(
@@ -662,7 +677,10 @@ class TaskAllocator:
                     continue
                 transit_distance, mission_distance, endpoint = route_metrics
                 transit = transit_distance / max(resource.speed_cells_min, 1e-6)
-                if task.task_id.startswith(("search-", "investigation:", "direction:")):
+                if (
+                    self._legacy_search_task_id(task.task_id)
+                    or task.task_id.startswith(("investigation:", "direction:"))
+                ):
                     return_range = min(
                         (math.dist(endpoint, tuple(map(float, base)))
                          for base in bases),
@@ -749,6 +767,19 @@ class TaskAllocator:
             expected_information_gain=0.0,
         )
 
+    def _legacy_search_task_id(self, task_id: str) -> bool:
+        """Recognize old IDs once at the compatibility boundary."""
+        if not isinstance(task_id, str) or not task_id.startswith("search-"):
+            return False
+        if task_id not in self._legacy_search_id_warnings:
+            self._legacy_search_id_warnings.add(task_id)
+            _LOGGER.warning(
+                "legacy search task id accepted once: task_id=%s; "
+                "production IDs must use search:<bbox>",
+                task_id,
+            )
+        return True
+
     def _mission_route_metrics(
         self,
         resource: UavResource,
@@ -779,7 +810,7 @@ class TaskAllocator:
         start = (*resource.position_cells, float(resource.heading_rad))
         try:
             if task.kind in _SEARCH_TASK_KINDS and (
-                task.task_id.startswith("search-")
+                self._legacy_search_task_id(task.task_id)
                 or task.task_id.startswith("investigation:")
                 or task.task_id.startswith("direction:")
             ):
@@ -1026,10 +1057,19 @@ class TaskAllocator:
             return {"trigger_type": "light", "action": "no_eligible_regions"}
 
         # Hungarian pairing
-        pairs = hungarian_pair(
-            [{"id": u.id, "position": u.position} for u in eligible_uavs],
-            unassigned,
-        )
+        try:
+            pairs = hungarian_pair(
+                [{"id": u.id, "position": u.position} for u in eligible_uavs],
+                unassigned,
+            )
+        except AssignmentBackendUnavailable as exc:
+            self._record_assignment_backend_failure("light", current_time, exc)
+            return {
+                "trigger_type": "light",
+                "action": "assignment_backend_unavailable",
+                "pairs": [],
+                "error": str(exc),
+            }
 
         # Update UAV statuses with assignments
         for uav_id, region_id in pairs:
@@ -1135,7 +1175,7 @@ class TaskAllocator:
             if matched_id not in assigned_ids:
                 for prev_id, prev_r in prev_by_id.items():
                     if prev_id not in assigned_ids:
-                        iou = self._iou(bbox, prev_r.bbox)
+                        iou = compute_iou(bbox, prev_r.bbox)
                         if iou >= self.config.grid.stability_iou_threshold:
                             matched_id = prev_id
                             break
@@ -1189,10 +1229,14 @@ class TaskAllocator:
             for region in regions
             if region.assigned_uav_id is None
         ]
-        pairs = hungarian_pair(
-            [{"id": uav.id, "position": uav.position} for uav in eligible_uavs],
-            unassigned,
-        )
+        try:
+            pairs = hungarian_pair(
+                [{"id": uav.id, "position": uav.position} for uav in eligible_uavs],
+                unassigned,
+            )
+        except AssignmentBackendUnavailable as exc:
+            self._record_assignment_backend_failure("heavy", self.sm.current_time, exc)
+            return []
         by_id = {region.id: region for region in regions}
         for uav_id, region_id in pairs:
             uav = self.sm.get_uav(uav_id)
@@ -1209,6 +1253,24 @@ class TaskAllocator:
             if row is not None:
                 row.assigned_uav_id = uav_id
         return pairs
+
+    def _record_assignment_backend_failure(
+        self,
+        trigger_type: str,
+        current_time: float,
+        error: AssignmentBackendUnavailable,
+    ) -> None:
+        _LOGGER.error(
+            "assignment backend unavailable: trigger_type=%s time=%s error=%s",
+            trigger_type,
+            current_time,
+            error,
+        )
+        self.sm.add_event("assignment_backend_unavailable", {
+            "trigger_type": trigger_type,
+            "time": float(current_time),
+            "error": str(error),
+        })
 
     def _finish_heavy_trigger(
         self,
@@ -1241,18 +1303,3 @@ class TaskAllocator:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _iou(a: BBox, b: BBox) -> float:
-        """Intersection-over-Union of two bounding boxes."""
-        if a.col_end <= b.col_start or b.col_end <= a.col_start:
-            return 0.0
-        if a.row_end <= b.row_start or b.row_end <= a.row_start:
-            return 0.0
-        inter_w = min(a.col_end, b.col_end) - max(a.col_start, b.col_start)
-        inter_h = min(a.row_end, b.row_end) - max(a.row_start, b.row_start)
-        inter = inter_w * inter_h
-        area_a = (a.col_end - a.col_start) * (a.row_end - a.row_start)
-        area_b = (b.col_end - b.col_start) * (b.row_end - b.row_start)
-        union = area_a + area_b - inter
-        return inter / union if union > 0 else 0.0

@@ -126,11 +126,20 @@ class LLMClient:
         required_search_regions: int = 0,
     ) -> dict:
         system_prompt, user_prompt = self.prompt_builder.build(
-            sm, ivt, candidate_result, self._reviewer_memory, required_search_regions,
+            sm,
+            ivt,
+            candidate_result,
+            self._reviewer_memory,
+            required_search_regions,
+            available_uav_ids=tuple(uav.id for uav in sm.get_available_uavs()),
+            uav_count=self.config.uav.count,
         )
         reserved_regions = sm.get_active_search_regions()
         tracks = sm.get_track_regions()
-        remaining_slots = max(0, 10 - len(tracks) - len(reserved_regions))
+        remaining_slots = max(
+            0,
+            self.config.uav.count - len(tracks) - len(reserved_regions),
+        )
 
         def validate_plan(payload: dict) -> tuple[str, ...]:
             errors = self._schema_errors(payload)
@@ -194,6 +203,7 @@ class LLMClient:
 
     @staticmethod
     def _parse_json(raw: str) -> dict | None:
+        """Compatibility alias for the gateway's single JSON parser."""
         try:
             return parse_object(raw)
         except (TypeError, ValueError):

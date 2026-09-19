@@ -497,7 +497,10 @@ class _FixtureGateway:
                      validate, **_kwargs) -> ModelResult:
         if role == "decision_maker":
             snapshot = user_payload.get("snapshot", {})
-            payload, errors = self._build_decision_selection(snapshot, validate)
+            selection_validator = _kwargs.get("post_validate") or validate
+            payload, errors = self._build_decision_selection(
+                snapshot, selection_validator,
+            )
         elif role == "contact_assessor":
             features = user_payload.get("features", {})
             sample_ids = list(dict.fromkeys(
