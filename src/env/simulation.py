@@ -1471,7 +1471,13 @@ class SimulationEngine:
                     route_plan = plan_search_route(
                         self._search_route_request(uav, region)
                     )
-                except Exception:
+                except Exception as exc:
+                    self.allocator.sm.add_event("mission_assignment_rejected", {
+                        "reason": "search_route_planning_failed",
+                        "error_type": type(exc).__name__,
+                        "task_id": candidate.task_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                    })
                     return False
                 if not route_plan.scanned_swath_count:
                     return False
@@ -1536,7 +1542,13 @@ class SimulationEngine:
                         uav.R_min,
                         snapshot.planning_map_version,
                     )
-                except Exception:
+                except Exception as exc:
+                    self.allocator.sm.add_event("mission_assignment_rejected", {
+                        "reason": "standoff_route_planning_failed",
+                        "error_type": type(exc).__name__,
+                        "task_id": candidate.task_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                    })
                     return False
                 if not route:
                     return False
@@ -1589,6 +1601,7 @@ class SimulationEngine:
             self.allocator.sm.contacts.restore_reservation_state(reservation_state)
             self.allocator.sm.add_event("mission_assignment_rejected", {
                 "reason": str(exc),
+                "error_type": type(exc).__name__,
                 "snapshot_id": snapshot.snapshot_id,
             })
             return False

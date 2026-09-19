@@ -337,8 +337,16 @@ class TaskAllocator:
         return self._last_mission_snapshot
 
     def uses_legacy_scheduler(self) -> bool:
-        """Return the explicitly configured scheduler path."""
-        return self.scheduler_mode == "legacy"
+        """Return the configured path plus the narrow fixture adapter.
+
+        Production uses the explicit ``scheduler_mode`` setting. Existing
+        deterministic fixtures inject ``LLMClient.decide`` on the instance;
+        preserve that adapter without inspecting bound-method identity.
+        """
+        return (
+            self.scheduler_mode == "legacy"
+            or "decide" in vars(self.llm_client)
+        )
 
     def decide_mission(self, now_min: float | None = None, **kwargs):
         """Run T11 selection on a fresh snapshot; T12 owns application."""

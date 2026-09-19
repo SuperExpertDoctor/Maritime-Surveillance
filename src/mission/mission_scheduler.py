@@ -1287,7 +1287,7 @@ class MissionScheduler:
             if callable(resolve_binding):
                 try:
                     model = resolve_binding("decision_maker").get("model")
-                except Exception:
+                except (AttributeError, KeyError, TypeError):
                     model = None
         interaction = {
             "call_id": call_id,
