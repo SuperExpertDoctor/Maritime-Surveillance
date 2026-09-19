@@ -462,3 +462,8 @@ class ConfigLoader:
                 data.get("emitter", {}), EmitterConfig, "sensor.emitter",
             ),
         )
+
+
+def search_min_cells(config: AppConfig) -> int:
+    """Return the configured minimum search-region area."""
+    return config.grid.search_min_cells

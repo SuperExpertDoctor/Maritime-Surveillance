@@ -1,18 +1,23 @@
 ﻿from src.schedule.config_loader import AppConfig
+from collections import OrderedDict
+from dataclasses import replace
+
 from src.schedule.state_manager import StateManager
 from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
 from src.schedule.llm_client import LLMClient
 from src.schedule.llm_reviewer import LLMReviewer
-from src.schedule.hungarian import hungarian_pair
+from src.schedule.hungarian import AssignmentBackendUnavailable, hungarian_pair
 from src.schedule.trigger_manager import TriggerDecision, TriggerManager
 from src.schedule.datatypes import Region, BBox
+from src.schedule.output_validator import compute_iou
 import math
 import numpy as np
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.env.dubins import DubinsPath
 from src.utils.search_route_planner import SearchRouteRequest, plan_search_route
 import time
+import logging
 
 from src.mission.contracts import (
     AssignmentBatch,
@@ -36,6 +41,8 @@ from src.mission.strategy_memory import StrategyMemoryStore
 
 
 _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
+_LOGGER = logging.getLogger(__name__)
+_CACHE_MISS = object()
 
 
 class TaskAllocator:
@@ -47,8 +54,21 @@ class TaskAllocator:
         *,
         llm_gateway=None,
         strategy_memory_store: StrategyMemoryStore | None = None,
+        scheduler_mode: str = "mission",
+        route_cache_limit: int = 512,
+        metrics_cache_limit: int = 512,
     ):
+        if scheduler_mode not in {"mission", "legacy"}:
+            raise ValueError("scheduler_mode must be mission or legacy")
+        for name, limit in (
+            ("route_cache_limit", route_cache_limit),
+            ("metrics_cache_limit", metrics_cache_limit),
+        ):
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError(f"{name} must be a positive integer")
         self.config = config
+        self.scheduler_mode = scheduler_mode
+        self._legacy_search_id_warnings: set[str] = set()
         self.sm = StateManager(config)
         self.ivt = InfoValueTable(self.sm)
         self.extractor = CandidateExtractor()
@@ -85,10 +105,13 @@ class TaskAllocator:
             primitive_length=heuristic.astar_primitive_length_cells,
             sample_step=heuristic.path_sample_step_cells,
         )
-        self._mission_route_cache: dict[tuple, float | None] = {}
-        self._mission_route_metrics_cache: dict[
+        self._mission_route_cache: OrderedDict[tuple, float | None] = OrderedDict()
+        self._mission_route_metrics_cache: OrderedDict[
             tuple, tuple[float, float, tuple[float, float]] | None
-        ] = {}
+        ] = OrderedDict()
+        self._route_cache_limit = int(route_cache_limit)
+        self._metrics_cache_limit = int(metrics_cache_limit)
+        self._route_cache_version: int | None = None
         self._last_mission_snapshot: MissionSnapshot | None = None
         self.last_decision_timing: dict | None = None
 
@@ -314,10 +337,16 @@ class TaskAllocator:
         return self._last_mission_snapshot
 
     def uses_legacy_scheduler(self) -> bool:
-        """Detect explicit test/compatibility overrides of the old path."""
-        step_function = getattr(self.step, "__func__", None)
-        decide_function = getattr(self.llm_client.decide, "__func__", None)
-        return step_function is not TaskAllocator.step or decide_function is not LLMClient.decide
+        """Return the configured path plus the narrow fixture adapter.
+
+        Production uses the explicit ``scheduler_mode`` setting. Existing
+        deterministic fixtures inject ``LLMClient.decide`` on the instance;
+        preserve that adapter without inspecting bound-method identity.
+        """
+        return (
+            self.scheduler_mode == "legacy"
+            or "decide" in vars(self.llm_client)
+        )
 
     def decide_mission(self, now_min: float | None = None, **kwargs):
         """Run T11 selection on a fresh snapshot; T12 owns application."""
@@ -357,7 +386,11 @@ class TaskAllocator:
             return {"trigger_type": "none", "action": None}, None
         if decision.trigger_type == "light":
             return self._handle_light_mission_trigger(
-                current_time, decision, active_tasks,
+                current_time,
+                decision,
+                active_tasks,
+                intents=intents,
+                intent_statuses=intent_statuses,
             )
 
         wall_started = time.perf_counter()
@@ -500,14 +533,33 @@ class TaskAllocator:
         current_time: float,
         decision,
         active_tasks: tuple[TaskRecord, ...],
+        *,
+        intents: tuple[Intent, ...] = (),
+        intent_statuses: tuple[IntentStatus, ...] = (),
     ) -> tuple[dict, AssignmentBatch | None]:
         """Re-pair only approved work; light events cannot create work."""
         del decision
         wall_started = time.perf_counter()
-        snapshot = self.build_mission_snapshot(
-            current_time,
-            active_tasks=active_tasks,
-        )
+        previous = self._last_mission_snapshot
+        if previous is None:
+            snapshot = self.build_mission_snapshot(
+                current_time,
+                active_tasks=active_tasks,
+                intents=intents,
+                intent_statuses=intent_statuses,
+            )
+        else:
+            # Light events are allowed to re-pair approved work only. Reuse
+            # the last frozen candidate/edge graph instead of rebuilding all
+            # geometry and information matrices for a pairing-only tick.
+            snapshot = replace(
+                previous,
+                sim_time_min=float(current_time),
+                active_tasks=tuple(active_tasks),
+                intents=tuple(intents),
+                intent_statuses=tuple(intent_statuses),
+            )
+            self._last_mission_snapshot = snapshot
         snapshot_frozen_wall = time.perf_counter()
         approved_ids = tuple(
             task.task_id
@@ -662,7 +714,10 @@ class TaskAllocator:
                     continue
                 transit_distance, mission_distance, endpoint = route_metrics
                 transit = transit_distance / max(resource.speed_cells_min, 1e-6)
-                if task.task_id.startswith(("search-", "investigation:", "direction:")):
+                if (
+                    self._legacy_search_task_id(task.task_id)
+                    or task.task_id.startswith(("investigation:", "direction:"))
+                ):
                     return_range = min(
                         (math.dist(endpoint, tuple(map(float, base)))
                          for base in bases),
@@ -749,6 +804,19 @@ class TaskAllocator:
             expected_information_gain=0.0,
         )
 
+    def _legacy_search_task_id(self, task_id: str) -> bool:
+        """Recognize old IDs once at the compatibility boundary."""
+        if not isinstance(task_id, str) or not task_id.startswith("search-"):
+            return False
+        if task_id not in self._legacy_search_id_warnings:
+            self._legacy_search_id_warnings.add(task_id)
+            _LOGGER.warning(
+                "legacy search task id accepted once: task_id=%s; "
+                "production IDs must use search:<bbox>",
+                task_id,
+            )
+        return True
+
     def _mission_route_metrics(
         self,
         resource: UavResource,
@@ -756,6 +824,12 @@ class TaskAllocator:
         target: tuple[float, float],
         planning_map_version: int,
     ) -> tuple[float, float, tuple[float, float]] | None:
+        self._prepare_route_caches(planning_map_version)
+        scan_revision = int(getattr(
+            self.sm.information_policy,
+            "mutation_version",
+            self.sm.information_version,
+        ))
         key = (
             "mission-metrics",
             planning_map_version,
@@ -768,18 +842,17 @@ class TaskAllocator:
             tuple(task.bbox)
             if task.bbox is not None
             else tuple(round(value, 6) for value in target),
-            np.isfinite(self.sm.get_last_scan_matrix()).tobytes()
-            if task.kind in _SEARCH_TASK_KINDS
-            else None,
+            scan_revision if task.kind in _SEARCH_TASK_KINDS else None,
         )
         cache = self._mission_route_metrics_cache
-        if key in cache:
-            return cache[key]
+        cached = self._cache_get(cache, key)
+        if cached is not _CACHE_MISS:
+            return cached
 
         start = (*resource.position_cells, float(resource.heading_rad))
         try:
             if task.kind in _SEARCH_TASK_KINDS and (
-                task.task_id.startswith("search-")
+                self._legacy_search_task_id(task.task_id)
                 or task.task_id.startswith("investigation:")
                 or task.task_id.startswith("direction:")
             ):
@@ -858,7 +931,7 @@ class TaskAllocator:
                     )
         except (PathNotFoundError, RuntimeError, TypeError, ValueError):
             result = None
-        cache[key] = result
+        self._cache_set(cache, key, result, self._metrics_cache_limit)
         return result
 
     def _mission_route_distance(
@@ -880,13 +953,15 @@ class TaskAllocator:
         base: tuple[float, float],
         planning_map_version: int,
     ) -> float | None:
+        self._prepare_route_caches(planning_map_version)
         key = (
             "return", planning_map_version, resource.uav_id, resource.generation,
             tuple(round(value, 6) for value in target),
             tuple(round(value, 6) for value in base),
         )
-        if key in self._mission_route_cache:
-            return self._mission_route_cache[key]
+        cached = self._cache_get(self._mission_route_cache, key)
+        if cached is not _CACHE_MISS:
+            return cached
         heading = math.atan2(base[1] - target[1], base[0] - target[0])
         try:
             direct = DubinsPath.compute(
@@ -897,7 +972,10 @@ class TaskAllocator:
                 direct.waypoints, self.sm.obstacle_mask,
             ):
                 distance = float(direct.total_length)
-                self._mission_route_cache[key] = distance
+                self._cache_set(
+                    self._mission_route_cache, key, distance,
+                    self._route_cache_limit,
+                )
                 return distance
             path = self._mission_navigator.plan_grid(
                 (*target, heading), {base}, self.sm.obstacle_mask, 1.0,
@@ -909,8 +987,32 @@ class TaskAllocator:
             distance = None
         else:
             distance = self._path_length(path)
-        self._mission_route_cache[key] = distance
+        self._cache_set(
+            self._mission_route_cache, key, distance, self._route_cache_limit,
+        )
         return distance
+
+    def _prepare_route_caches(self, planning_map_version: int) -> None:
+        version = int(planning_map_version)
+        if self._route_cache_version == version:
+            return
+        self._mission_route_cache.clear()
+        self._mission_route_metrics_cache.clear()
+        self._route_cache_version = version
+
+    @staticmethod
+    def _cache_get(cache: OrderedDict, key):
+        if key not in cache:
+            return _CACHE_MISS
+        cache.move_to_end(key)
+        return cache[key]
+
+    @staticmethod
+    def _cache_set(cache: OrderedDict, key, value, limit: int) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
 
     def _quick_standoff_path(
         self,
@@ -1026,10 +1128,19 @@ class TaskAllocator:
             return {"trigger_type": "light", "action": "no_eligible_regions"}
 
         # Hungarian pairing
-        pairs = hungarian_pair(
-            [{"id": u.id, "position": u.position} for u in eligible_uavs],
-            unassigned,
-        )
+        try:
+            pairs = hungarian_pair(
+                [{"id": u.id, "position": u.position} for u in eligible_uavs],
+                unassigned,
+            )
+        except AssignmentBackendUnavailable as exc:
+            self._record_assignment_backend_failure("light", current_time, exc)
+            return {
+                "trigger_type": "light",
+                "action": "assignment_backend_unavailable",
+                "pairs": [],
+                "error": str(exc),
+            }
 
         # Update UAV statuses with assignments
         for uav_id, region_id in pairs:
@@ -1135,7 +1246,7 @@ class TaskAllocator:
             if matched_id not in assigned_ids:
                 for prev_id, prev_r in prev_by_id.items():
                     if prev_id not in assigned_ids:
-                        iou = self._iou(bbox, prev_r.bbox)
+                        iou = compute_iou(bbox, prev_r.bbox)
                         if iou >= self.config.grid.stability_iou_threshold:
                             matched_id = prev_id
                             break
@@ -1189,10 +1300,14 @@ class TaskAllocator:
             for region in regions
             if region.assigned_uav_id is None
         ]
-        pairs = hungarian_pair(
-            [{"id": uav.id, "position": uav.position} for uav in eligible_uavs],
-            unassigned,
-        )
+        try:
+            pairs = hungarian_pair(
+                [{"id": uav.id, "position": uav.position} for uav in eligible_uavs],
+                unassigned,
+            )
+        except AssignmentBackendUnavailable as exc:
+            self._record_assignment_backend_failure("heavy", self.sm.current_time, exc)
+            return []
         by_id = {region.id: region for region in regions}
         for uav_id, region_id in pairs:
             uav = self.sm.get_uav(uav_id)
@@ -1209,6 +1324,24 @@ class TaskAllocator:
             if row is not None:
                 row.assigned_uav_id = uav_id
         return pairs
+
+    def _record_assignment_backend_failure(
+        self,
+        trigger_type: str,
+        current_time: float,
+        error: AssignmentBackendUnavailable,
+    ) -> None:
+        _LOGGER.error(
+            "assignment backend unavailable: trigger_type=%s time=%s error=%s",
+            trigger_type,
+            current_time,
+            error,
+        )
+        self.sm.add_event("assignment_backend_unavailable", {
+            "trigger_type": trigger_type,
+            "time": float(current_time),
+            "error": str(error),
+        })
 
     def _finish_heavy_trigger(
         self,
@@ -1241,18 +1374,3 @@ class TaskAllocator:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _iou(a: BBox, b: BBox) -> float:
-        """Intersection-over-Union of two bounding boxes."""
-        if a.col_end <= b.col_start or b.col_end <= a.col_start:
-            return 0.0
-        if a.row_end <= b.row_start or b.row_end <= a.row_start:
-            return 0.0
-        inter_w = min(a.col_end, b.col_end) - max(a.col_start, b.col_start)
-        inter_h = min(a.row_end, b.row_end) - max(a.row_start, b.row_start)
-        inter = inter_w * inter_h
-        area_a = (a.col_end - a.col_start) * (a.row_end - a.row_start)
-        area_b = (b.col_end - b.col_start) * (b.row_end - b.row_start)
-        union = area_a + area_b - inter
-        return inter / union if union > 0 else 0.0

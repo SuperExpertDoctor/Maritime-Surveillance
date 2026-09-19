@@ -16,6 +16,23 @@ def test_square_bbox_has_three_gapless_swaths():
     assert [swath.look_direction for swath in path.swaths] == ["right", "left", "right"]
 
 
+def test_fractional_swath_exports_real_footprints_and_required_cells():
+    path = CoveragePlanner(sample_step=0.2, near_range=0.25).plan(
+        BBox(10, 10, 16, 14), (6, 12, 0), swath_width=1.5, R_min=1.0,
+        along_track_cells=0.8, bounds=(30, 30),
+    )
+
+    required = {
+        GridCoord(col, row)
+        for col in range(10, 16)
+        for row in range(10, 14)
+    }
+    assert path.required_cells == frozenset(required)
+    assert path.scan_footprints
+    assert path.covered_cells <= path.required_cells
+    assert path.covered_cells == set().union(*path.scan_footprints)
+
+
 def test_long_bbox_scans_along_long_axis():
     path = CoveragePlanner().plan(BBox(0, 0, 10, 3), (-2, -2, 0), 2, 1)
     assert len(path.swaths) == 2
@@ -68,6 +85,20 @@ def test_region_feasibility_checks_extended_sensor_scan_geometry():
 
     assert not planner.is_region_feasible(
         bbox, 1.5, 1.0, mask, along_track_cells=0.8
+    )
+
+
+def test_region_feasibility_honors_explicit_direction():
+    planner = CoveragePlanner(sample_step=0.2)
+    bbox = BBox(5, 5, 11, 15)
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[4, 5] = True
+
+    assert not planner.is_region_feasible(
+        bbox, 2.0, 1.0, mask, direction="vertical"
+    )
+    assert planner.is_region_feasible(
+        bbox, 2.0, 1.0, mask, direction="horizontal"
     )
 
 

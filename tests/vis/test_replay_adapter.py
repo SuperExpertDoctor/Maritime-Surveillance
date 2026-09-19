@@ -2,6 +2,8 @@ from copy import deepcopy
 import hashlib
 import json
 
+import pytest
+
 from src.vis.backend.replay_adapter import normalize_replay_frame
 
 
@@ -27,6 +29,17 @@ def test_old_replay_is_normalized_without_rewriting_source():
     assert vessel["surveillance_stage"] == "undetected"
     assert new["initial_vessel_count"] == 8
     assert old == original
+
+
+def test_replay_adapter_overwrites_a_stale_live_mode():
+    normalized = normalize_replay_frame({"mode": "live"})
+
+    assert normalized["mode"] == "replay"
+
+
+def test_replay_adapter_rejects_non_list_scenario_vessels():
+    with pytest.raises(TypeError, match="scenario_vessels must be a list"):
+        normalize_replay_frame({"scenario_vessels": {"id": "not-a-list"}})
 
 
 def test_replay_adapter_defaults_type_i_ais_and_does_not_share_nested_state():

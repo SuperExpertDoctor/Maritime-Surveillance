@@ -126,7 +126,7 @@ class RecoveryPlanner:
                 continue
             if not _poses_match(path[0], start_pose):
                 continue
-            if path[-1][:2] != tuple(map(float, base.position)):
+            if not _poses_match(path[-1], base.position):
                 continue
             if _route_blocked(path, planning_obstacle_mask):
                 continue
@@ -224,7 +224,7 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise ValueError(
                 "RecoveryPlan path must start at the current observation pose"
             )
-        if route[-1][:2] != tuple(map(float, plan.base_position)):
+        if not _poses_match(route[-1], plan.base_position):
             raise ValueError("RecoveryPlan path must end at base_position")
         if not all(
             math.isfinite(value) and value >= 0.0
@@ -328,7 +328,7 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise self._fail_recovery(
                 observation, "replanned route does not start at current observation pose"
             )
-        if route[-1][:2] != tuple(map(float, self.recovery_plan.base_position)):
+        if not _poses_match(route[-1], self.recovery_plan.base_position):
             raise self._fail_recovery(
                 observation, "replanned route does not end at the reserved base"
             )
@@ -537,12 +537,14 @@ def _normalise_route(path: Sequence[Sequence[float]]) -> tuple[Pose, ...]:
 
 def _poses_match(actual: Sequence[float], expected: Sequence[float]) -> bool:
     """Match route origins within 1e-6 cells and wrapped radians."""
-    if len(actual) != 3 or len(expected) != 3:
+    if len(actual) < 2 or len(expected) < 2:
         return False
     position_matches = (
         math.dist(actual[:2], expected[:2])
         <= ROUTE_ORIGIN_POSITION_TOLERANCE_CELLS
     )
+    if len(actual) < 3 or len(expected) < 3:
+        return position_matches
     heading_delta = (actual[2] - expected[2] + math.pi) % (2.0 * math.pi) - math.pi
     return (
         position_matches
@@ -568,6 +570,7 @@ __all__ = [
     "RecoveryCandidate",
     "RecoveryPlanner",
     "ReturnToBaseController",
+    "_poses_match",
     "SystemHoldingController",
     "legacy_return_endpoints",
     "path_length_cells",

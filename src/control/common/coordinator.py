@@ -35,13 +35,16 @@ from src.control.common.ownership import (
     ControlOwnershipError,
 )
 from src.control.common.safety import (
+    ControlOutcome,
     InvalidControlCommand,
     SafetyEnvelope,
     SafetyIntervention,
     SafetyResult,
+    UnsafeControlState,
 )
 from src.control.heuristic.base import HeuristicControllerBase
 from src.control.heuristic.return_to_base import ReturnToBaseController
+from src.control.heuristic.return_to_base import _poses_match
 from src.control.heuristic.task_flow import EVENT_TRANSITIONS, HeuristicTaskFlow
 from src.env.uav_entity import UAVEntity
 from src.schedule.config_loader import ControlConfig
@@ -56,6 +59,16 @@ class ControlTickResult:
     safety: SafetyResult
     execution: ExecutionResult
     emitted_events: tuple[ControlEvent, ...]
+
+    @property
+    def outcome(self) -> ControlOutcome:
+        """Classify a successful tick without changing the frozen fields."""
+        kinds = {item.kind for item in self.safety.interventions}
+        if "sensor_mode_masked" in kinds:
+            return ControlOutcome.MASKED
+        if kinds:
+            return ControlOutcome.CLIPPED
+        return ControlOutcome.CLEAN
 
 
 class ControlCoordinatorError(RuntimeError):
@@ -133,6 +146,9 @@ class ControlCoordinator:
         }
         self._last_safety_intervened = {
             uav_id: False for uav_id in self._configured_modes
+        }
+        self._last_control_outcomes = {
+            uav_id: ControlOutcome.CLEAN for uav_id in self._configured_modes
         }
         self._last_tick_times: dict[str, float | None] = {
             uav_id: None for uav_id in self._configured_modes
@@ -252,6 +268,7 @@ class ControlCoordinator:
             self._invalid_streaks[uav_id] = 0
             self._last_applied_commands[uav_id] = None
             self._last_safety_intervened[uav_id] = False
+            self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
             self._last_tick_times[uav_id] = None
         if old_controller is not None and old_controller is not controller:
             self._stop_controller(old_controller, StopReason.CANCELLED)
@@ -290,12 +307,17 @@ class ControlCoordinator:
                 f"cannot assign a task while {uav_id} is returning"
             )
 
+        if task.task_type is not OperationMode.COVERAGE:
+            self._save_active_coverage(uav_id)
+
         with self._lock:
             latest = self.ownership.current(uav_id)
             if latest != current:
                 raise StaleControlCommand(
                     self._stale_message(uav_id, current, latest)
                 )
+            if task.task_type is OperationMode.COVERAGE:
+                self._task_flow.clear_saved_coverage(uav_id)
             if current.owner is ControlOwner.SYSTEM:
                 lease = self.ownership.acquire(
                     uav_id,
@@ -462,7 +484,10 @@ class ControlCoordinator:
                 episode_id,
                 sortie_number,
             ), _ in zip(prepared, leases):
-                self._task_flow.clear_saved_coverage(uav_id)
+                if task.task_type is OperationMode.COVERAGE:
+                    self._task_flow.clear_saved_coverage(uav_id)
+                else:
+                    self._save_active_coverage(uav_id)
                 old_controller = self._controllers.get(uav_id)
                 if old_controller is not None and old_controller is not controller:
                     old_controllers.append(old_controller)
@@ -475,6 +500,7 @@ class ControlCoordinator:
                     self._invalid_streaks[uav_id] = 0
                     self._last_applied_commands[uav_id] = None
                     self._last_safety_intervened[uav_id] = False
+                    self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
                     self._last_tick_times[uav_id] = None
 
         for controller in old_controllers:
@@ -497,6 +523,7 @@ class ControlCoordinator:
             raise ControlCoordinatorError(
                 f"return revocation requires a work owner for {uav_id}"
             )
+        self._save_active_coverage(uav_id)
         task = ControlTask(
             recovery_plan.reservation_id,
             OperationMode.RETURN,
@@ -514,7 +541,8 @@ class ControlCoordinator:
                 raise StaleControlCommand(
                     self._stale_message(uav_id, current, latest)
                 )
-            self._task_flow.clear_saved_coverage(uav_id)
+            if task.task_type is OperationMode.COVERAGE:
+                self._task_flow.clear_saved_coverage(uav_id)
             lease = self.ownership.replace(
                 current,
                 ControlOwner.SYSTEM,
@@ -555,6 +583,12 @@ class ControlCoordinator:
         self._require_uav(uav_id)
         with self._lock:
             return self._last_safety_intervened[uav_id]
+
+    def control_outcome(self, uav_id: str) -> ControlOutcome:
+        """Return the last explicit control outcome for a UAV."""
+        self._require_uav(uav_id)
+        with self._lock:
+            return self._last_control_outcomes[uav_id]
 
     def active_task(self, uav_id: str) -> ControlTask | None:
         """Return a task snapshot for lifecycle and compatibility bookkeeping."""
@@ -680,6 +714,7 @@ class ControlCoordinator:
         """Transfer a finished work controller into system-owned holding."""
         self._require_uav(uav_id)
         self._validate_time(current_time, "current_time", allow_zero=True)
+        self._save_active_coverage(uav_id)
         task = ControlTask(
             task_id or f"holding:{uav_id}:{current_time}",
             OperationMode.HOLDING,
@@ -741,6 +776,7 @@ class ControlCoordinator:
             self._operation_modes[uav_id] = OperationMode.IDLE
             self._last_applied_commands[uav_id] = None
             self._last_safety_intervened[uav_id] = False
+            self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
             self._last_tick_times[uav_id] = None
         if old_controller is not None:
             self._stop_controller(old_controller, StopReason.COMPLETED)
@@ -791,6 +827,7 @@ class ControlCoordinator:
                 self._invalid_streaks[uav_id] = 0
                 self._last_applied_commands[uav_id] = None
                 self._last_safety_intervened[uav_id] = False
+                self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
                 self._last_tick_times[uav_id] = None
                 self._quarantined_uavs.add(uav_id)
 
@@ -808,6 +845,19 @@ class ControlCoordinator:
                 False,
             )
         return lease
+
+    def _save_active_coverage(self, uav_id: str) -> None:
+        """Save only active coverage before a temporary lifecycle interruption."""
+        task = self.active_task(uav_id)
+        if task is None or task.task_type is not OperationMode.COVERAGE:
+            return
+        snapshot = self.route_snapshot(uav_id)
+        self._task_flow.save_coverage_task(
+            uav_id,
+            task,
+            generation=self.current_lease(uav_id).generation,
+            route=snapshot.route.route,
+        )
 
     def step_uav(
         self,
@@ -892,9 +942,13 @@ class ControlCoordinator:
                 safety = self.safety.apply(decision.command, observation, dt_min)
             except InvalidControlCommand as exc:
                 self._raise_rejected_command(uav_id, exc)
-            invalid_streak = self._update_invalid_streak(
-                uav_id, safety.interventions
+            except UnsafeControlState:
+                self._last_control_outcomes[uav_id] = ControlOutcome.UNSAFE
+                raise
+            self._last_control_outcomes[uav_id] = self._safety_outcome(
+                safety.interventions
             )
+            invalid_streak = self._update_invalid_streak(uav_id)
             if invalid_streak >= self.config.safety.max_invalid_commands:
                 raise EmergencyRevokeRequired(uav_id, invalid_streak)
             execution = self.executor.execute(uav, safety, dt_min)
@@ -993,12 +1047,9 @@ class ControlCoordinator:
     def _update_invalid_streak(
         self,
         uav_id: str,
-        interventions: Sequence[SafetyIntervention],
     ) -> int:
-        if interventions:
-            self._invalid_streaks[uav_id] += 1
-        else:
-            self._invalid_streaks[uav_id] = 0
+        # A command that safety can legally adjust is not an invalid command.
+        self._invalid_streaks[uav_id] = 0
         return self._invalid_streaks[uav_id]
 
     def _raise_rejected_command(
@@ -1006,10 +1057,19 @@ class ControlCoordinator:
     ) -> None:
         with self._lock:
             self._invalid_streaks[uav_id] += 1
+            self._last_control_outcomes[uav_id] = ControlOutcome.INVALID
             invalid_streak = self._invalid_streaks[uav_id]
         if invalid_streak >= self.config.safety.max_invalid_commands:
             raise EmergencyRevokeRequired(uav_id, invalid_streak) from error
         raise error
+
+    @staticmethod
+    def _safety_outcome(
+        interventions: Sequence[SafetyIntervention],
+    ) -> ControlOutcome:
+        if any(item.kind == "sensor_mode_masked" for item in interventions):
+            return ControlOutcome.MASKED
+        return ControlOutcome.CLIPPED if interventions else ControlOutcome.CLEAN
 
     def _queue_decision_events(
         self,
@@ -1133,10 +1193,7 @@ class ControlCoordinator:
             raise ControlCoordinatorError(
                 "RecoveryPlan path_length_cells does not match path"
             )
-        if not all(
-            math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9)
-            for actual, expected in zip(plan.path[-1][:2], plan.base_position)
-        ):
+        if not _poses_match(plan.path[-1], plan.base_position):
             raise ControlCoordinatorError(
                 "RecoveryPlan path must end at base_position"
             )
@@ -1161,7 +1218,7 @@ class ControlCoordinator:
     def _validate_time(
         value: float, name: str, *, allow_zero: bool = False
     ) -> None:
-        lower_bound = 0.0 if allow_zero else 0.0
+        lower_bound = 0.0
         if (
             isinstance(value, bool)
             or not isinstance(value, int | float)
@@ -1209,6 +1266,7 @@ class ControlCoordinator:
 __all__ = [
     "ControlCoordinator",
     "ControlCoordinatorError",
+    "ControlOutcome",
     "ControlTickResult",
     "EmergencyRevokeRequired",
     "StaleControlCommand",

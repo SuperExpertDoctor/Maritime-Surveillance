@@ -58,16 +58,24 @@ class PromptBuilder:
     def build(self, sm: StateManager, ivt: InfoValueTable,
               candidate_result: CandidateResult,
               reviewer_memory: str = "",
-              required_search_regions: int = 0) -> tuple[str, str]:
+              required_search_regions: int = 0,
+              *,
+              available_uav_ids: tuple[str, ...] | None = None,
+              uav_count: int | None = None) -> tuple[str, str]:
         """返回 (system_prompt, user_prompt)"""
         user = self._build_user_prompt(
             sm, ivt, candidate_result, reviewer_memory, required_search_regions,
+            available_uav_ids=available_uav_ids,
+            uav_count=uav_count,
         )
         return self.system_prompt, user
 
     def _build_user_prompt(self, sm: StateManager, ivt: InfoValueTable,
                            candidate_result: CandidateResult, reviewer_memory: str,
-                           required_search_regions: int) -> str:
+                           required_search_regions: int,
+                           *,
+                           available_uav_ids: tuple[str, ...] | None = None,
+                           uav_count: int | None = None) -> str:
         parts = []
 
         grid = sm.config.grid
@@ -172,21 +180,26 @@ class PromptBuilder:
         # UAV 可用状态
         parts.append("\n【UAV 可用状态】")
         all_uavs = sm.get_all_uavs()
-        available = [u for u in all_uavs if u.status == "idle"]
-        in_use = [u for u in all_uavs if u.status != "idle"]
+        available_ids = tuple(
+            u.id for u in sm.get_available_uavs()
+        ) if available_uav_ids is None else tuple(available_uav_ids)
+        available_id_set = set(available_ids)
+        available = [u for u in all_uavs if u.id in available_id_set]
+        in_use = [u for u in all_uavs if u.id not in available_id_set]
         retained = sm.get_active_search_regions()
         pending = sum(region.assigned_uav_id is None for region in retained)
-        if sm.lifecycle_mode:
-            new_capacity = max(
-                0,
-                10 - len(sm.get_track_regions()) - len(retained),
-            )
-        else:
-            new_capacity = max(0, len(available) - pending)
+        configured_count = sm.config.uav.count if uav_count is None else int(uav_count)
+        occupied_slots = len(sm.get_track_regions()) + len(retained)
+        new_capacity = max(
+            0,
+            min(configured_count, len(available) if not sm.lifecycle_mode else configured_count)
+            - (occupied_slots if sm.lifecycle_mode else pending),
+        )
         parts.append(
             f"现役搜索区将原样保留{len(retained)}个，其中待续派{pending}个；"
             f"本轮只输出新增区域，新增上限{new_capacity}个。"
         )
+        parts.append(f"配置UAV总数上限: {configured_count}架")
         parts.append(f"现可用UAV: {len(available)}架")
         for u in in_use:
             parts.append(f"  {u.id}: {u.status}, 油量{u.fuel_remaining_pct:.0%}, "

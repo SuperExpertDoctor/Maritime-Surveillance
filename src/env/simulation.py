@@ -52,7 +52,11 @@ from src.control.common.factory import ControlFactory, ControlProvider
 from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
 from src.control.common.ownership import ControlOwnership
-from src.control.common.safety import SafetyEnvelope
+from src.control.common.safety import (
+    ProbeValidationError,
+    SafetyEnvelope,
+    UnsafeControlState,
+)
 from src.control.heuristic.navigation import AStarNavigator
 from src.control.heuristic.return_to_base import (
     NoSafeRecoveryPath,
@@ -628,6 +632,16 @@ class SimulationEngine:
         now = float(self.clock.time)
         sm = self.allocator.sm
         contact_ids = set(plan.contact_ids)
+        removed_mmsis = {
+            contact.ais_mmsi
+            for contact in sm.contacts.list_snapshots()
+            if contact.contact_id in contact_ids and contact.ais_mmsi
+        }
+        removed_ship = next(
+            (ship for ship in self.ships if ship.id == plan.vessel_id), None
+        )
+        if removed_ship is not None and removed_ship.ais_signal is not None:
+            removed_mmsis.add(removed_ship.ais_signal.mmsi)
         probe_ids = {
             probe.probe_id
             for probe in sm.get_probe_sessions()
@@ -726,6 +740,13 @@ class SimulationEngine:
             "revision": plan.revision + 1,
             "contact_ids": list(plan.contact_ids),
         })
+        remaining_mmsis = {
+            ship.ais_signal.mmsi
+            for ship in self.ships
+            if ship.ais_signal is not None
+        }
+        for mmsi in removed_mmsis - remaining_mmsis:
+            self._ais_history.pop(mmsi, None)
 
     def _create_scenario_vessel(self, command: VesselCommand) -> Ship:
         x, y = map(float, command.position_cells)
@@ -1450,7 +1471,13 @@ class SimulationEngine:
                     route_plan = plan_search_route(
                         self._search_route_request(uav, region)
                     )
-                except Exception:
+                except Exception as exc:
+                    self.allocator.sm.add_event("mission_assignment_rejected", {
+                        "reason": "search_route_planning_failed",
+                        "error_type": type(exc).__name__,
+                        "task_id": candidate.task_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                    })
                     return False
                 if not route_plan.scanned_swath_count:
                     return False
@@ -1515,7 +1542,13 @@ class SimulationEngine:
                         uav.R_min,
                         snapshot.planning_map_version,
                     )
-                except Exception:
+                except Exception as exc:
+                    self.allocator.sm.add_event("mission_assignment_rejected", {
+                        "reason": "standoff_route_planning_failed",
+                        "error_type": type(exc).__name__,
+                        "task_id": candidate.task_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                    })
                     return False
                 if not route:
                     return False
@@ -1568,6 +1601,7 @@ class SimulationEngine:
             self.allocator.sm.contacts.restore_reservation_state(reservation_state)
             self.allocator.sm.add_event("mission_assignment_rejected", {
                 "reason": str(exc),
+                "error_type": type(exc).__name__,
                 "snapshot_id": snapshot.snapshot_id,
             })
             return False
@@ -1902,11 +1936,17 @@ class SimulationEngine:
                     started_at_min=tick.observation.timestamp_min,
                 )
         command = tick.execution.applied_command
+        previous_target = uav.target_group_id
         if command.operation_mode is OperationMode.TRACK:
             uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
                 command.target_contact_id, command.target_contact_id)
             if command.target_contact_id:
                 uav._mission_kind = "track_entry"
+                if (
+                    previous_target != uav.target_group_id
+                    or uav.id not in self._tracking_started_at
+                ):
+                    self._tracking_started_at[uav.id] = tick.observation.timestamp_min
         elif command.operation_mode is OperationMode.PROBE:
             uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
                 command.target_contact_id, command.target_contact_id)
@@ -2640,6 +2680,10 @@ class SimulationEngine:
         reason = (
             "invalid_command_limit"
             if isinstance(error, EmergencyRevokeRequired)
+            else "probe_validation_error"
+            if isinstance(error, ProbeValidationError)
+            else "unsafe_control_state"
+            if isinstance(error, UnsafeControlState)
             else "controller_fault"
         )
         self.allocator.trigger_manager.notify_event(
@@ -3346,11 +3390,8 @@ class SimulationEngine:
                 )
                 if ship is None:
                     continue
-                emitter_position = self._position_from_history(
-                    self._ship_position_history.get(ship.id, []), sample_time,
-                ) or ship.float_position
                 position = self._passive_position_resolver.release(
-                    group, emitter_position,
+                    group,
                 )
                 if position is not None:
                     positions.append(position)

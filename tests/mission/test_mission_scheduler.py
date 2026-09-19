@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+import src.mission.mission_scheduler as mission_scheduler_module
 from src.mission.contracts import (
     MissionSelection,
     TaskCandidate,
@@ -16,6 +17,7 @@ from src.mission.mission_scheduler import (
     FeasibleEdge,
     MissionScheduler,
     MissionSnapshot,
+    PairingResult,
     TaskRecord,
     _minimum_cost_matching,
     pair_selected_tasks,
@@ -441,7 +443,55 @@ def test_scheduler_rejects_selection_hidden_by_this_prompt_payload():
     )
 
     assert scheduler.decide(snapshot) is None
-    assert scheduler.last_selection_errors == ("selected_task_not_visible:S2",)
+    assert scheduler.last_selection_errors == (
+        "selection_post_validation_failed",
+        "selected_task_not_visible:S2",
+    )
+
+
+def test_pairing_failure_rewrites_selection_success_false():
+    snapshot = _snapshot(
+        [_task("Q1")],
+        [_resource("U1")],
+        [_edge("Q1", "U1", 1.0)],
+        available=("U1",),
+    )
+    scheduler = MissionScheduler(
+        selection_provider=lambda current, _payload: _selection(current, ["Q1"]),
+    )
+    scheduler.pair_selected_tasks = lambda *args, **kwargs: PairingResult(
+        assignments=(), errors=("route_unavailable",), is_valid=False,
+    )
+
+    assert scheduler.decide(snapshot) is None
+    assert scheduler.last_selection_success is False
+    assert scheduler.last_selection_errors[0] == "selection_post_validation_failed"
+    interaction = scheduler.selection_interaction()
+    assert interaction["success"] is False
+    assert interaction["validation"]["is_valid"] is False
+    assert interaction["errors"]
+
+
+def test_pairing_exception_is_logged_with_exception_type_and_context(capsys, monkeypatch):
+    snapshot = _snapshot(
+        [_task("Q1")],
+        [_resource("U1")],
+        [_edge("Q1", "U1", 1.0)],
+        available=("U1",),
+    )
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("route graph exploded")
+
+    monkeypatch.setattr(mission_scheduler_module, "_minimum_cost_matching", explode)
+    result = pair_selected_tasks(_selection(snapshot, ["Q1"]), snapshot)
+    log_output = capsys.readouterr().err
+
+    assert result.is_valid is False
+    assert result.errors
+    assert "RuntimeError" in log_output
+    assert snapshot.snapshot_id in log_output
+    assert "pair_selected_tasks" in log_output
 
 
 def test_approved_active_task_can_be_selected_on_its_original_id():

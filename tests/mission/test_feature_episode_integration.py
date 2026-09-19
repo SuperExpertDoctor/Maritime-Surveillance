@@ -17,6 +17,7 @@ from src.control.common.contracts import (
 )
 from src.env.simulation import SimulationEngine
 from src.mission.episode_logger import EpisodeLogger
+from src.mission.contracts import Intent, IntentStatus
 from src.mission.outcome_evaluator import OutcomeEvaluator, EpisodeOutcome
 from src.mission.strategy_memory import (
     StrategyMemory,
@@ -83,6 +84,37 @@ def test_reviewer_failure_keeps_unified_scheduler_and_existing_work_path():
     assert batch is not None
     assert allocator.mission_scheduler.last_selection_success is True
     assert not allocator.uses_legacy_scheduler()
+
+
+def test_light_snapshot_contains_intents_and_statuses():
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    intent = Intent(
+        "I-light", 1, "freshness", (8, 8, 12, 13), "search_priority", "high",
+        1.0, 0.0, 30.0, None, "active",
+    )
+    status = IntentStatus(
+        "I-light", 1, 1.0, 20, 0, 20, 0, 0.0, 0.0, None, (), "unserved",
+    )
+
+    allocator._handle_light_mission_trigger(
+        1.0,
+        TriggerDecision("light", reason="test"),
+        (),
+        intents=(intent,),
+        intent_statuses=(status,),
+    )
+
+    assert allocator.last_mission_snapshot.intents == (intent,)
+    assert allocator.last_mission_snapshot.intent_statuses == (status,)
+
+
+def test_scheduler_mode_does_not_change_when_method_is_wrapped(monkeypatch):
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    original_step = allocator.step
+    monkeypatch.setattr(allocator, "step", lambda current_time: original_step(current_time))
+
+    assert allocator.scheduler_mode == "mission"
+    assert allocator.uses_legacy_scheduler() is False
 
 
 def test_episode_logger_attaches_episode_id_to_every_record(tmp_path):

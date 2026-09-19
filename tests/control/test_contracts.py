@@ -1,6 +1,7 @@
 import math
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, fields
+import json
 
 import numpy as np
 import pytest
@@ -156,10 +157,30 @@ def test_control_event_request_deep_freezes_nested_payload():
     assert request.payload == {
         "metadata": {"task_id": "task-1"},
         "phases": ("transit",),
-        "tags": frozenset({"priority"}),
+        "tags": ("priority",),
     }
     with pytest.raises(TypeError):
         request.payload["metadata"]["task_id"] = "task-3"
+
+
+def test_snapshot_detaches_ndarray_and_custom_mutable_payload():
+    class MutablePayload:
+        def __init__(self):
+            self.labels = ["initial"]
+
+    array = np.array([1.0, 2.0], dtype=np.float32)
+    custom = MutablePayload()
+    request = ControllerEventRequest(
+        event_type="snapshot",
+        payload={"array": array, "custom": custom},
+    )
+
+    array[0] = 99.0
+    custom.labels.append("mutated")
+
+    assert request.payload["array"] == (1.0, 2.0)
+    assert request.payload["custom"] == {"labels": ("initial",)}
+    json.dumps(request.payload, allow_nan=False)
 
 
 def test_control_event_deep_freezes_nested_payload():

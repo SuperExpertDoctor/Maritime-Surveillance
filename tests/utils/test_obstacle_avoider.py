@@ -5,7 +5,7 @@ import pytest
 
 from src.env.dubins import DubinsPath
 from src.env.obstacle import Thunderstorm, obstacle_grid_mask
-from src.utils.obstacle_avoider import ObstacleAvoider
+from src.utils.obstacle_avoider import ObstacleAvoider, ObstaclePlanningTimeout
 
 
 def path_length(path):
@@ -39,3 +39,29 @@ def test_deterministic_anchor_fallback_finds_safe_dubins_route():
 
     assert planner.is_path_safe(path, mask)
     assert all(not storm.contains(pose[:2], safety_margin=1.0) for pose in path)
+
+
+def test_planning_timeout_is_an_explicit_failure_with_timing_metadata():
+    mask = np.zeros((20, 20), dtype=bool)
+    planner = ObstacleAvoider(planning_timeout_seconds=0.0)
+
+    with pytest.raises(ObstaclePlanningTimeout, match="deadline"):
+        planner.plan_path((1, 2, 0), (15, 12, math.pi / 2), mask, 1)
+
+    assert planner.last_plan_stats["status"] == "timeout"
+    assert planner.last_plan_stats["elapsed_seconds"] >= 0.0
+
+
+def test_anchor_evaluation_respects_the_global_budget():
+    storm = Thunderstorm((8, 5), size=2)
+    mask = obstacle_grid_mask([storm], resolution=(20, 12))
+    planner = ObstacleAvoider(
+        max_iterations=0,
+        max_anchor_candidates=4,
+        seed=2,
+    )
+
+    with pytest.raises(RuntimeError, match="collision-free"):
+        planner.plan_path((1, 5, 0), (16, 5, 0), mask, 1)
+
+    assert planner.last_plan_stats["anchor_evaluated"] <= 4

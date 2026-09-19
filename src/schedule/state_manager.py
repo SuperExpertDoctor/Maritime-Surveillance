@@ -3,13 +3,22 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass, replace
+from collections import OrderedDict
 from typing import Iterable, Mapping, Optional
 import math
 
 import numpy as np
 
 from src.schedule.config_loader import AppConfig
-from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
+from src.schedule.datatypes import (
+    BBox,
+    GridCoord,
+    Marker,
+    Region,
+    TargetReport,
+    UAVState,
+    grid_bbox_from_center,
+)
 from src.mission.information_update import InformationUpdatePolicy, ScanRefresh
 from src.mission.coverage_metrics import CoverageMetrics
 from src.mission.coverage_service import CoverageService
@@ -71,6 +80,7 @@ class StateManager:
         self._markers: list[Marker] = []
         self._marker_counter = 0
         self._events: list[dict] = []
+        self._event_sequence = 0
         self._intent_events: list[dict] = []
         self._published_intents: tuple = ()
         self._published_intent_statuses: tuple = ()
@@ -93,6 +103,12 @@ class StateManager:
         self.obstacle_version = 0
         self.land_mask = np.zeros(config.grid.resolution, dtype=bool)
         self._base_positions: tuple[tuple[int, int], ...] = (config.environment.base_position,)
+        self._bbox_info_cache: OrderedDict[tuple, float] = OrderedDict()
+        self._bbox_value_cache: OrderedDict[tuple, float] = OrderedDict()
+        self._matrix_cache_key: tuple[float, int] | None = None
+        self._cached_info_matrix: np.ndarray | None = None
+        self._cached_value_matrix: np.ndarray | None = None
+        self._bbox_cache_limit = 512
 
     def step(self, current_time: float) -> None:
         self.current_time = current_time
@@ -310,6 +326,8 @@ class StateManager:
         normalized = np.array(mask, dtype=np.bool_, copy=True)
         if not np.array_equal(self.obstacle_mask, normalized):
             self.obstacle_version += 1
+            self._bbox_info_cache.clear()
+            self._bbox_value_cache.clear()
         self.obstacle_mask = normalized
 
     def set_land_mask(self, mask) -> None:
@@ -556,14 +574,10 @@ class StateManager:
             return existing
         self._track_region_counter += 1
         col, row = center
-        half = 2
         region = Region(
             id=f"T{self._track_region_counter}",
-            bbox=BBox(
-                max(0, col - half),
-                max(0, row - half),
-                min(self.config.grid.resolution[1], col + half),
-                min(self.config.grid.resolution[0], row + half),
+            bbox=grid_bbox_from_center(
+                GridCoord(col, row), 2, tuple(self.config.grid.resolution)
             ),
             type="track",
             priority="high",
@@ -579,11 +593,8 @@ class StateManager:
             if region.id != region_id:
                 continue
             col, row = new_center
-            region.bbox = BBox(
-                max(0, col - 2),
-                max(0, row - 2),
-                min(self.config.grid.resolution[1], col + 2),
-                min(self.config.grid.resolution[0], row + 2),
+            region.bbox = grid_bbox_from_center(
+                GridCoord(col, row), 2, tuple(self.config.grid.resolution)
             )
             return
 
@@ -618,7 +629,13 @@ class StateManager:
 
     # Events ---------------------------------------------------------
     def add_event(self, event_type: str, data: dict) -> None:
-        self._events.append({"type": event_type, "time": self.current_time, "data": data})
+        self._event_sequence += 1
+        self._events.append({
+            "event_id": f"{self.episode_id or 'episode'}:{self._event_sequence}",
+            "type": event_type,
+            "time": self.current_time,
+            "data": deepcopy(data),
+        })
 
     def record_intent_event(self, result) -> None:
         """Retain a bounded, JSON-ready view of command application results."""
@@ -645,8 +662,25 @@ class StateManager:
             deepcopy(self._published_intent_statuses),
         )
 
-    def get_recent_events(self, since_time: float) -> list[dict]:
-        return [event for event in self._events if event["time"] >= since_time]
+    def get_recent_events(
+        self,
+        since_time: float,
+        *,
+        until_time: float | None = None,
+        include_since: bool = True,
+    ) -> list[dict]:
+        """Return detached events in a bounded, optionally half-open window."""
+        lower = (
+            (lambda timestamp: timestamp >= since_time)
+            if include_since
+            else (lambda timestamp: timestamp > since_time)
+        )
+        upper = lambda timestamp: until_time is None or timestamp <= until_time
+        return [
+            deepcopy(event)
+            for event in self._events
+            if lower(event["time"]) and upper(event["time"])
+        ]
 
     # Information field facade -------------------------------------
     def configure_coverage_metrics(self, fixed_mask, episode_id: str) -> None:
@@ -800,13 +834,15 @@ class StateManager:
         )
 
     def get_info_matrix(self):
-        return self.information_policy.info_matrix(self.current_time)
+        info, _value = self._cached_matrices()
+        return info.copy()
 
     def get_last_scan_matrix(self):
         return self.information_policy.last_scan_time
 
     def get_value_matrix(self):
-        return self.information_policy.value_matrix(self.current_time)
+        _info, value = self._cached_matrices()
+        return value.copy()
 
     def get_searchable_mask(self) -> np.ndarray:
         """Return cells that can be searched under the operational rules."""
@@ -839,14 +875,61 @@ class StateManager:
         }
 
     def get_avg_info_in_bbox(self, bbox: BBox) -> float:
+        key = self._bbox_cache_key(bbox)
+        cached = self._bbox_info_cache.get(key)
+        if cached is not None:
+            self._bbox_info_cache.move_to_end(key)
+            return cached
         c0, r0, c1, r1 = bbox
-        patch = self.get_info_matrix()[c0:c1, r0:r1]
-        return float(np.mean(patch)) if patch.size else 0.0
+        patch = self._cached_matrices()[0][c0:c1, r0:r1]
+        value = float(np.mean(patch)) if patch.size else 0.0
+        self._remember_bbox_value(self._bbox_info_cache, key, value)
+        return value
 
     def get_avg_value_in_bbox(self, bbox: BBox) -> float:
+        key = self._bbox_cache_key(bbox)
+        cached = self._bbox_value_cache.get(key)
+        if cached is not None:
+            self._bbox_value_cache.move_to_end(key)
+            return cached
         c0, r0, c1, r1 = bbox
-        patch = self.get_value_matrix()[c0:c1, r0:r1]
-        return float(np.mean(patch)) if patch.size else 0.0
+        patch = self._cached_matrices()[1][c0:c1, r0:r1]
+        value = float(np.mean(patch)) if patch.size else 0.0
+        self._remember_bbox_value(self._bbox_value_cache, key, value)
+        return value
+
+    def _cached_matrices(self) -> tuple[np.ndarray, np.ndarray]:
+        revision = int(getattr(
+            self.information_policy,
+            "mutation_version",
+            self.information_policy.version,
+        ))
+        key = (float(self.current_time), revision)
+        if key != self._matrix_cache_key:
+            info, _strategic, _timeliness, value = self.information_policy.matrices(
+                self.current_time,
+            )
+            self._matrix_cache_key = key
+            self._cached_info_matrix = info
+            self._cached_value_matrix = value
+        return self._cached_info_matrix, self._cached_value_matrix
+
+    def _bbox_cache_key(self, bbox: BBox) -> tuple:
+        return (
+            int(self.obstacle_version),
+            *self._cached_matrix_key(),
+            tuple(bbox),
+        )
+
+    def _cached_matrix_key(self) -> tuple[float, int]:
+        self._cached_matrices()
+        return self._matrix_cache_key
+
+    def _remember_bbox_value(self, cache: OrderedDict, key: tuple, value: float) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._bbox_cache_limit:
+            cache.popitem(last=False)
 
 
 __all__ = ["StateManager"]

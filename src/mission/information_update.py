@@ -54,6 +54,7 @@ class InformationUpdatePolicy:
         self._last_scan_time = np.full((self.cols, self.rows), -np.inf, dtype=float)
         self._track_scan = np.zeros((self.cols, self.rows), dtype=bool)
         self._version = 0
+        self._mutation_version = 0
         self._recent_deltas: list[InfoFieldDelta] = []
         self._urgent_subjects: set[tuple] = set()
         self._passive_position_sources: dict[str, frozenset[str]] = {}
@@ -63,6 +64,11 @@ class InformationUpdatePolicy:
     @property
     def version(self) -> int:
         return self._version
+
+    @property
+    def mutation_version(self) -> int:
+        """Increment for every committed scan/evidence mutation."""
+        return self._mutation_version
 
     @property
     def last_scan_time(self) -> np.ndarray:
@@ -381,6 +387,7 @@ class InformationUpdatePolicy:
         self._passive_position_sources.update(passive_position_sources)
         if not changed:
             return None
+        self._mutation_version += 1
         after = self.matrices(now_min)[3]
         return self._commit_delta(
             self._committed_value,

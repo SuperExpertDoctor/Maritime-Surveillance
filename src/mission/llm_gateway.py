@@ -286,10 +286,14 @@ class LLMGateway:
         system_prompt: str,
         user_payload: dict,
         validate: Callable[[dict], tuple[str, ...]],
+        post_validate: Callable[[dict], tuple[str, ...]] | None = None,
         deadline_monotonic: float | None = None,
         transport_deadline_monotonic: float | None = None,
         max_tokens: int | None = None,
     ) -> ModelResult:
+        # Fixture gateways may use this to construct deterministic legal
+        # responses; production correction retries use only ``validate``.
+        del post_validate
         return self._request(
             role=role, snapshot_id=snapshot_id, system_prompt=system_prompt,
             user_payload=user_payload, validate=validate,

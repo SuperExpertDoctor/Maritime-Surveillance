@@ -386,21 +386,30 @@ def rank_search_candidates(
     if not isinstance(estimated_minutes, Mapping):
         raise ValueError("estimated_minutes must be a mapping")
 
-    normalized: list[tuple[Any, str, tuple[int, int, int, int], tuple[tuple[int, int], ...]]] = []
+    normalized: list[
+        tuple[Any, str, tuple[int, int, int, int], tuple[tuple[int, int], ...], np.ndarray]
+    ] = []
     for candidate in tuple(candidates):
         task_id = _candidate_value(candidate, "task_id")
         if not isinstance(task_id, str) or not task_id:
             raise ValueError("candidate task_id must be a non-empty string")
         bbox = _bbox(_candidate_value(candidate, "bbox"), task_id)
         cells = _candidate_cells(candidate, bbox, last.shape, task_id)
-        normalized.append((candidate, task_id, bbox, cells))
+        normalized.append((
+            candidate,
+            task_id,
+            bbox,
+            cells,
+            np.asarray(cells, dtype=np.intp),
+        ))
 
     ranked = sorted(
         normalized,
-        key=lambda item: _rank_key(
+        key=lambda item: _rank_key_vectorized(
             item[1],
             item[2],
             item[3],
+            item[4],
             now,
             last,
             estimated_minutes,
@@ -419,7 +428,29 @@ def _rank_key(
     estimated_minutes: Mapping[str, Real],
     primary_window_min: int,
 ) -> tuple[int, float, int, float, int, tuple[int, int, int, int]]:
-    timestamps = np.asarray([last[col, row] for col, row in cells], dtype=float)
+    return _rank_key_vectorized(
+        task_id,
+        bbox,
+        cells,
+        np.asarray(cells, dtype=np.intp),
+        now,
+        last,
+        estimated_minutes,
+        primary_window_min,
+    )
+
+
+def _rank_key_vectorized(
+    task_id: str,
+    bbox: tuple[int, int, int, int],
+    cells: tuple[tuple[int, int], ...],
+    coordinates: np.ndarray,
+    now: float,
+    last: np.ndarray,
+    estimated_minutes: Mapping[str, Real],
+    primary_window_min: int,
+) -> tuple[int, float, int, float, int, tuple[int, int, int, int]]:
+    timestamps = last[coordinates[:, 0], coordinates[:, 1]]
     unseen = ~np.isfinite(timestamps)
     due = unseen | (timestamps <= now - primary_window_min)
     unseen_count = int(np.count_nonzero(unseen))
@@ -499,6 +530,37 @@ def _candidate_cells(
         raise ValueError(f"candidate {task_id!r} must contain at least one cell")
 
     cols, rows = shape
+    try:
+        coordinates = np.asarray(cells)
+    except (TypeError, ValueError):
+        coordinates = np.asarray((), dtype=object)
+    if (
+        coordinates.ndim == 2
+        and coordinates.shape[1] == 2
+        and np.issubdtype(coordinates.dtype, np.integer)
+    ):
+        if (
+            np.any(coordinates[:, 0] < 0)
+            or np.any(coordinates[:, 0] >= cols)
+            or np.any(coordinates[:, 1] < 0)
+            or np.any(coordinates[:, 1] >= rows)
+        ):
+            raise ValueError(f"candidate {task_id!r} cell is outside last_sar")
+        encoded = coordinates[:, 0] * rows + coordinates[:, 1]
+        if np.unique(encoded).size != len(cells):
+            raise ValueError(f"candidate {task_id!r} contains duplicate cells")
+        if isinstance(cells, tuple) and all(
+            isinstance(cell, tuple)
+            and len(cell) == 2
+            and all(isinstance(value, (int, np.integer)) for value in cell)
+            for cell in cells
+        ):
+            return cells
+        return tuple(
+            (int(col), int(row))
+            for col, row in coordinates.tolist()
+        )
+
     normalized: list[tuple[int, int]] = []
     for cell in cells:
         if not isinstance(cell, (tuple, list)) or len(cell) != 2:

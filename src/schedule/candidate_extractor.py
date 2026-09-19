@@ -1,5 +1,5 @@
 ﻿import math
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,9 +19,13 @@ class CandidateResult:
 
 
 class CandidateExtractor:
-    def __init__(self):
+    def __init__(self, *, geometry_cache_limit: int = 2048):
+        if isinstance(geometry_cache_limit, bool) or not isinstance(geometry_cache_limit, int) or geometry_cache_limit < 1:
+            raise ValueError("geometry_cache_limit must be a positive integer")
         self.coverage_planner = CoveragePlanner(sample_step=0.25)
-        self._pool_geometry_cache: dict[tuple[int, tuple[int, int, int, int]], bool] = {}
+        self._pool_geometry_cache: OrderedDict[tuple[int, int, int, int], bool] = OrderedDict()
+        self._pool_geometry_cache_limit = int(geometry_cache_limit)
+        self._pool_geometry_cache_version: int | None = None
 
     @staticmethod
     def _valid_active_search_regions(sm: StateManager):
@@ -128,7 +132,7 @@ class CandidateExtractor:
 
         gc = sm.config.grid
         cols, rows = fixed.shape
-        max_area = min(19, max(1, (cols - 2) * (rows - 2)))
+        max_area = min(gc.search_max_cells, max(1, (cols - 2) * (rows - 2)))
         swath_width = sm.config.sensor.sar.swath_km / sm.config.grid.cell_size_km
         uavs = sm.get_all_uavs()
         reference = uavs[0] if uavs else None
@@ -141,6 +145,8 @@ class CandidateExtractor:
         for width in range(1, min(cols - 1, max_area) + 1):
             for height in range(1, min(rows - 1, max_area // width) + 1):
                 area = width * height
+                if area < gc.search_min_cells:
+                    continue
                 if area > max_area or max(width, height) / min(width, height) > gc.aspect_ratio_max:
                     continue
                 for c0 in range(1, cols - width):
@@ -275,18 +281,7 @@ class CandidateExtractor:
                         bbox = BBox(col, row, col + width, row + height)
                         if self._rect_sum(occupied_prefix, bbox) > 0:
                             continue
-                        key = (int(getattr(sm, "obstacle_version", 0)), tuple(bbox))
-                        feasible = self._pool_geometry_cache.get(key)
-                        if feasible is None:
-                            # The clearance envelope is a conservative,
-                            # constant-time certificate for this pool. Full
-                            # Dubins sampling remains in the final edge and
-                            # assignment validators, so enumeration does not
-                            # run the same geometry planner thousands of times.
-                            feasible = self._has_turning_clearance(
-                                bbox, sm.obstacle_mask,
-                            )
-                            self._pool_geometry_cache[key] = feasible
+                        feasible = self._pool_geometry_feasible(sm, bbox)
                         if not feasible:
                             continue
                         total = self._rect_sum(value_prefix, bbox)
@@ -378,6 +373,7 @@ class CandidateExtractor:
             unschedulable_cells=unschedulable,
             geometry_version=int(getattr(sm, "obstacle_version", 0)),
             information_version=snapshot.version,
+            fragment_alerts=tuple(fragment_alerts),
         )
 
     @staticmethod
@@ -701,6 +697,27 @@ class CandidateExtractor:
             fragment_alerts=fragments,
         )
 
+    def _pool_geometry_feasible(self, sm: StateManager, bbox: BBox) -> bool:
+        version = int(getattr(sm, "obstacle_version", 0))
+        if self._pool_geometry_cache_version != version:
+            self._pool_geometry_cache.clear()
+            self._pool_geometry_cache_version = version
+        key = tuple(bbox)
+        cached = self._pool_geometry_cache.get(key)
+        if cached is not None:
+            self._pool_geometry_cache.move_to_end(key)
+            return cached
+        # The clearance envelope is a conservative, constant-time certificate
+        # for this pool. Full Dubins sampling remains in the final edge and
+        # assignment validators, so enumeration does not run the same
+        # geometry planner thousands of times.
+        feasible = self._has_turning_clearance(bbox, sm.obstacle_mask)
+        self._pool_geometry_cache[key] = feasible
+        self._pool_geometry_cache.move_to_end(key)
+        while len(self._pool_geometry_cache) > self._pool_geometry_cache_limit:
+            self._pool_geometry_cache.popitem(last=False)
+        return feasible
+
     @staticmethod
     def _matching_intent_ids(bbox: BBox, intents: tuple[Intent, ...]) -> tuple[str, ...]:
         return tuple(
@@ -813,7 +830,7 @@ class CandidateExtractor:
                     "cell_count": side * side,
                     # The priority comes from the observed contact, not from
                     # an unobserved target or a fabricated information value.
-                    "total_value": float(patch_value.sum()) + 1000.0,
+                    "total_value": float(patch_value.sum()),
                     "avg_info": float(patch_info.mean()),
                     "unseen_count": int((~seen[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]).sum()),
                     "target_group_id": report.contact_id,

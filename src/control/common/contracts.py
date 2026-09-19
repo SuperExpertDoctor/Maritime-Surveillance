@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 import math
 from typing import Literal
@@ -52,7 +52,7 @@ class StopReason(str, Enum):
 Pose = tuple[float, float, float]
 
 
-class _FrozenMapping(Mapping):
+class _FrozenMapping(dict):
     """Immutable mapping for contract payloads that also has to be copyable.
 
     ``types.MappingProxyType`` gives the immutability these snapshots need but
@@ -62,42 +62,69 @@ class _FrozenMapping(Mapping):
     identity operation, so ``__deepcopy__`` returns ``self``.
     """
 
-    __slots__ = ("_data",)
+    __slots__ = ()
 
     def __init__(self, data: Mapping) -> None:
-        self._data = {
+        dict.__init__(self, {
             key: _immutable_snapshot(item) for key, item in data.items()
-        }
-
-    def __getitem__(self, key: object) -> object:
-        return self._data[key]
-
-    def __iter__(self):
-        return iter(self._data)
-
-    def __len__(self) -> int:
-        return len(self._data)
+        })
 
     def __repr__(self) -> str:
-        return f"frozen_mapping({self._data!r})"
+        return f"frozen_mapping({dict.__repr__(self)})"
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Mapping):
-            return self._data == dict(other)
+            return dict(self) == dict(other)
         return NotImplemented
 
     def __deepcopy__(self, memo: dict) -> "_FrozenMapping":
         return self
 
+    def _immutable(self, *args, **kwargs):
+        raise TypeError("frozen mapping is immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _immutable
+
 
 def _immutable_snapshot(value: object) -> object:
+    if isinstance(value, Enum):
+        return _immutable_snapshot(value.value)
+    if isinstance(value, np.ndarray):
+        return _immutable_snapshot(value.tolist())
+    if isinstance(value, np.generic):
+        return _immutable_snapshot(value.item())
     if isinstance(value, Mapping):
         return _FrozenMapping(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _FrozenMapping({
+            item.name: _immutable_snapshot(getattr(value, item.name))
+            for item in fields(value)
+        })
     if isinstance(value, list | tuple):
         return tuple(_immutable_snapshot(item) for item in value)
     if isinstance(value, set | frozenset):
-        return frozenset(_immutable_snapshot(item) for item in value)
-    return value
+        return tuple(
+            _immutable_snapshot(item)
+            for item in sorted(value, key=repr)
+        )
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("snapshot payload contains a non-finite float")
+        return value
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    attributes = {}
+    if hasattr(value, "__dict__"):
+        attributes.update(vars(value))
+    for cls in type(value).__mro__:
+        for name in getattr(cls, "__slots__", ()):
+            if isinstance(name, str) and hasattr(value, name):
+                attributes.setdefault(name, getattr(value, name))
+    if attributes:
+        return _FrozenMapping(attributes)
+    raise TypeError(
+        f"unsupported mutable snapshot payload: {type(value).__name__}"
+    )
 
 
 @dataclass(frozen=True)
