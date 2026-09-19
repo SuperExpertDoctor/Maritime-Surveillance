@@ -426,6 +426,79 @@ def test_empty_text_response_has_bounded_corrections_and_no_payload(
     }
 
 
+def _reject_over_ten_characters(text):
+    return () if len(text) <= 10 else (f"text is {len(text)} characters",)
+
+
+def test_text_validation_errors_are_corrected_with_exact_assistant_output(
+    scripted_transport,
+):
+    raw = "an overlong reviewer memory"
+    transport = scripted_transport({"reviewer": [raw, "short"]})
+    gateway = LLMGateway(transport=transport)
+
+    result = gateway.request_text(
+        role="reviewer",
+        snapshot_id="review-validated",
+        system_prompt="review system",
+        user_payload={"events": []},
+        validate_text=_reject_over_ten_characters,
+    )
+
+    assert result.success
+    assert result.payload == {"text": "short"}
+    correction = json.loads(transport.calls[1]["messages"][-1]["content"])
+    assert correction == {
+        "type": "validation_correction",
+        "errors": [f"text is {len(raw)} characters"],
+        "instruction": "Return a non-empty corrected text response.",
+    }
+    assert transport.calls[1]["messages"][-2] == {"role": "assistant", "content": raw}
+    assert gateway.call_log[-1]["attempts"][0]["errors"] == [
+        f"text is {len(raw)} characters"
+    ]
+
+
+def test_continuous_text_validation_failure_returns_no_business_payload(
+    scripted_transport,
+):
+    raw = "a much longer reviewer memory"
+    transport = scripted_transport({"reviewer": [raw] * 3})
+    gateway = LLMGateway(transport=transport)
+
+    result = gateway.request_text(
+        role="reviewer",
+        snapshot_id="review-validated",
+        system_prompt="review system",
+        user_payload={"events": []},
+        validate_text=_reject_over_ten_characters,
+    )
+
+    assert not result.success
+    assert result.payload is None
+    assert result.failure_category == "validation"
+    assert result.errors == (f"text is {len(raw)} characters",)
+    assert len(transport.calls) == 3
+
+
+def test_text_request_without_a_validator_still_only_requires_nonempty_text(
+    scripted_transport,
+):
+    raw = "  an overlong reviewer memory that no validator was asked to bound\n"
+    transport = scripted_transport({"reviewer": [raw]})
+    gateway = LLMGateway(transport=transport)
+
+    result = gateway.request_text(
+        role="reviewer",
+        snapshot_id="review-unvalidated",
+        system_prompt="review system",
+        user_payload={"events": []},
+    )
+
+    assert result.success
+    assert result.payload == {"text": raw}
+
+
 @pytest.mark.parametrize("text_mode", [False, True])
 def test_logs_redact_secrets_in_all_fields_without_changing_wire_messages(
     monkeypatch, scripted_transport, text_mode,

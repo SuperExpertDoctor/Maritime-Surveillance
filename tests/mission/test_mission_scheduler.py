@@ -10,6 +10,7 @@ from src.mission.contracts import (
     TaskCandidate,
     UavResource,
 )
+from src.mission.llm_gateway import LLMGateway
 from src.mission.mission_scheduler import (
     Assignment,
     FeasibleEdge,
@@ -20,6 +21,7 @@ from src.mission.mission_scheduler import (
     pair_selected_tasks,
     validate_selection,
 )
+from tests.mission.conftest import ScriptedTransport
 
 
 def _task(task_id, *, kind="search", contact_id=None, bbox=None):
@@ -229,6 +231,67 @@ def test_selection_rejects_stale_snapshot_and_unused_preemption():
         _selection(no_edge_for_preempt, ["Q1"], preempt=("U1",)),
         no_edge_for_preempt,
     ))
+
+
+@pytest.mark.parametrize("value", [True, False, -1, 1.5, "1", None, [], {}])
+def test_selection_rejects_malformed_information_version(value):
+    snapshot = _snapshot(
+        [_task("Q1")],
+        [_resource("U1")],
+        [_edge("Q1", "U1", 1.0)],
+        available=("U1",),
+    )
+    payload = _selection(snapshot, ["Q1"])
+    payload["information_version"] = value
+
+    assert validate_selection(payload, snapshot) == ("invalid_information_version",)
+
+
+def test_selection_accepts_matching_information_version_and_reports_stale():
+    snapshot = replace(
+        _snapshot(
+            [_task("Q1")],
+            [_resource("U1")],
+            [_edge("Q1", "U1", 1.0)],
+            available=("U1",),
+        ),
+        _information_version=3,
+    )
+
+    matched = _selection(snapshot, ["Q1"])
+    matched["information_version"] = 3
+    assert validate_selection(matched, snapshot) == ()
+
+    stale = _selection(snapshot, ["Q1"])
+    stale["information_version"] = 2
+    assert validate_selection(stale, snapshot) == ("stale_information_version",)
+
+
+def test_scheduler_retries_a_selection_with_a_malformed_information_version():
+    snapshot = _snapshot(
+        [_task("Q1")],
+        [_resource("U1")],
+        [_edge("Q1", "U1", 1.0)],
+        available=("U1",),
+    )
+    malformed = _selection(snapshot, ["Q1"])
+    malformed["information_version"] = True
+    transport = ScriptedTransport({
+        "decision_maker": [
+            json.dumps(malformed),
+            json.dumps(_selection(snapshot, ["Q1"])),
+        ],
+    })
+    scheduler = MissionScheduler(gateway=LLMGateway(transport=transport))
+
+    batch = scheduler.decide(snapshot)
+
+    assert batch is not None
+    assert [item.task_id for item in batch.assignments] == ["Q1"]
+    assert len(transport.calls) == 2
+    correction = json.loads(transport.calls[1]["messages"][-1]["content"])
+    assert correction["type"] == "validation_correction"
+    assert correction["errors"] == ["invalid_information_version"]
 
 
 def test_full_capacity_probe_preempts_only_ordinary_search_after_cooldown():

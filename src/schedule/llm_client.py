@@ -1,6 +1,8 @@
 """Legacy schedule wrappers over the role-isolated LongCat gateway."""
 from __future__ import annotations
 
+import re
+
 from src.mission.llm_gateway import LLMConfigurationError, LLMGateway, ModelResult, parse_object
 from src.schedule.candidate_extractor import CandidateResult
 from src.schedule.config_loader import AppConfig
@@ -8,6 +10,38 @@ from src.schedule.info_value_table import InfoValueTable
 from src.schedule.output_validator import validate
 from src.schedule.prompt_builder import PromptBuilder
 from src.schedule.state_manager import StateManager
+
+
+REVIEWER_MEMORY_LIMIT = 200
+
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Reviewer memory is quoted verbatim into the next decision prompt, so reject
+# text that could impersonate prompt structure instead of staying a summary.
+_IMPERSONATION_MARKERS = (
+    "```", "<|", "<system", "</system", "[system]", "<assistant",
+    "system:", "assistant:", "developer:",
+    "ignore previous", "ignore all previous", "ignore the above",
+    "disregard previous", "忽略以上", "忽略上述", "忽略之前", "忽略前述",
+)
+
+
+def reviewer_memory_errors(text) -> tuple[str, ...]:
+    """Validate reviewer free text before it can reach the decision prompt."""
+    if not isinstance(text, str) or not text.strip():
+        return ("reviewer memory is empty",)
+    stripped = text.strip()
+    errors = []
+    if len(stripped) > REVIEWER_MEMORY_LIMIT:
+        errors.append(
+            f"reviewer memory is {len(stripped)} characters: "
+            f"must be at most {REVIEWER_MEMORY_LIMIT}"
+        )
+    if _CONTROL_CHARACTER.search(stripped):
+        errors.append("reviewer memory must be a single line of plain text")
+    lowered = stripped.lower()
+    if any(marker in lowered for marker in _IMPERSONATION_MARKERS):
+        errors.append("reviewer memory must not contain prompt-structure text")
+    return tuple(errors)
 
 
 class LLMClient:
@@ -138,11 +172,12 @@ class LLMClient:
         result = self.gateway.request_text(
             role="reviewer", snapshot_id=snapshot_id,
             system_prompt=system_prompt, user_payload={"prompt": user_prompt},
+            validate_text=reviewer_memory_errors,
         )
         self.last_reviewer_interaction = self._interaction(result, system_prompt, user_prompt)
         if not result.success:
             return ""
-        return result.payload["text"].strip()[:200]
+        return result.payload["text"].strip()
 
     def _interaction(self, result: ModelResult, system_prompt: str, user_prompt: str) -> dict:
         # Synchronous wrappers: the latest call is the request just completed.
@@ -165,4 +200,4 @@ class LLMClient:
             return None
 
 
-__all__ = ["LLMClient", "LLMConfigurationError"]
+__all__ = ["LLMClient", "LLMConfigurationError", "reviewer_memory_errors"]

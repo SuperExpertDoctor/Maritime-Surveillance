@@ -305,12 +305,13 @@ class LLMGateway:
         snapshot_id: str,
         system_prompt: str,
         user_payload: dict,
+        validate_text: Callable[[str], tuple[str, ...]] | None = None,
         deadline_monotonic: float | None = None,
         transport_deadline_monotonic: float | None = None,
     ) -> ModelResult:
         return self._request(
             role=role, snapshot_id=snapshot_id, system_prompt=system_prompt,
-            user_payload=user_payload, validate=None,
+            user_payload=user_payload, validate=None, validate_text=validate_text,
             deadline_monotonic=deadline_monotonic,
             transport_deadline_monotonic=transport_deadline_monotonic,
         )
@@ -339,6 +340,7 @@ class LLMGateway:
         system_prompt: str,
         user_payload: dict | None,
         validate: Callable[[dict], tuple[str, ...]] | None,
+        validate_text: Callable[[str], tuple[str, ...]] | None = None,
         user_content: str | None = None,
         attempt_limit: int | None = None,
         max_tokens: int | None = None,
@@ -464,7 +466,17 @@ class LLMGateway:
             call["raw_attempts"].append(self._redact(raw))
             if validate is None:
                 payload = {"text": raw}
-                last_errors = () if raw.strip() else ("response text is empty",)
+                validation_started = time.perf_counter()
+                try:
+                    last_errors = (
+                        tuple(validate_text(raw))
+                        if validate_text is not None
+                        else (() if raw.strip() else ("response text is empty",))
+                    )
+                finally:
+                    call["validation_seconds"] += (
+                        time.perf_counter() - validation_started
+                    )
             else:
                 try:
                     payload = parse_object(raw)

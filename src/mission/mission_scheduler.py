@@ -194,7 +194,11 @@ def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
     if (isinstance(information_version, bool)
             or not isinstance(information_version, int)
             or information_version < 0):
+        # The field is optional, so omission still means "no version supplied".
+        # A present but malformed value must be rejected rather than coerced,
+        # otherwise a wrong version could pass the staleness check.
         errors.append("invalid_information_version")
+        return None, errors
     return MissionSelection(
         schema_version,
         snapshot_id,
@@ -202,7 +206,7 @@ def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
         tuple(preempt),
         defer_reason,
         payload["notes"],
-        _information_version=information_version if isinstance(information_version, int) else 0,
+        _information_version=information_version,
     ), []
 
 
