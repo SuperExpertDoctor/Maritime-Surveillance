@@ -11,6 +11,7 @@ from src.control.common.contracts import (
     ControllerEventRequest, ObservationSpec, OperationMode, SensorMode,
     StopReason,
 )
+from src.control.common.safety import ProbeValidationError
 from src.control.heuristic.base import (
     HeuristicControllerBase,
     RouteFollower,
@@ -66,7 +67,9 @@ class ProbeController(HeuristicControllerBase):
 
     def start_task(self, task: ControlTask, observation: ControlObservation) -> None:
         if task.task_type is not OperationMode.PROBE or not task.target_contact_id or not task.probe_id:
-            raise ValueError("probe tasks require PROBE, target_contact_id, and probe_id")
+            raise ProbeValidationError(
+                "probe tasks require PROBE, target_contact_id, and probe_id",
+            )
         self.task = task
         self._route = None
         self._route_phase = None
@@ -254,16 +257,22 @@ class ProbeController(HeuristicControllerBase):
         position = tuple(map(float, contact.estimated_position))
         velocity = tuple(map(float, contact.estimated_velocity))
         if len(position) != 2 or len(velocity) != 2:
-            raise ValueError("contact position and velocity must contain two values")
+            raise ProbeValidationError(
+                "contact position and velocity must contain two values",
+            )
         if not all(math.isfinite(value) for value in (*position, *velocity)):
-            raise ValueError("contact position and velocity must be finite")
+            raise ProbeValidationError(
+                "contact position and velocity must be finite",
+            )
         horizon = self._prediction_horizon(observation)
         return tuple(position[index] + velocity[index] * horizon for index in range(2))
 
     def _prediction_horizon(self, observation: ControlObservation) -> float:
         dt_min = float(observation.dt_min)
         if not math.isfinite(dt_min) or dt_min <= 0.0:
-            raise ValueError("observation dt_min must be finite and positive")
+            raise ProbeValidationError(
+                "observation dt_min must be finite and positive",
+            )
         return min(dt_min, float(self._config.max_sample_gap_min))
 
     def _blocked_decision(self, observation: ControlObservation, reason: str) -> ControlDecision:
@@ -319,7 +328,7 @@ class ProbeController(HeuristicControllerBase):
             return "baseline", self._config.baseline_standoff_cells
         if phase in {"closing", "near"}:
             return "near", self._config.near_standoff_cells
-        raise ValueError(f"unsupported probe phase {phase}")
+        raise ProbeValidationError(f"unsupported probe phase {phase}")
 
     @staticmethod
     def _pose(observation: ControlObservation) -> tuple[float, float, float]:
@@ -338,9 +347,9 @@ class ProbeController(HeuristicControllerBase):
     @staticmethod
     def _validate(command: ControlCommand, observation: ControlObservation) -> None:
         if command.operation_mode not in observation.action_mask.allowed_operation_modes:
-            raise ValueError("operation mode is absent from action mask")
+            raise ProbeValidationError("operation mode is absent from action mask")
         if command.sensor_mode not in observation.action_mask.allowed_sensor_modes:
-            raise ValueError("sensor mode is absent from action mask")
+            raise ProbeValidationError("sensor mode is absent from action mask")
 
     def route_snapshot(self) -> ControlRouteSnapshot:
         task = self.task
@@ -370,4 +379,4 @@ class ProbeController(HeuristicControllerBase):
         )
 
 
-__all__ = ["ProbeController"]
+__all__ = ["ProbeController", "ProbeValidationError"]

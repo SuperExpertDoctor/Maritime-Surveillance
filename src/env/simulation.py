@@ -52,7 +52,11 @@ from src.control.common.factory import ControlFactory, ControlProvider
 from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
 from src.control.common.ownership import ControlOwnership
-from src.control.common.safety import SafetyEnvelope, UnsafeControlState
+from src.control.common.safety import (
+    ProbeValidationError,
+    SafetyEnvelope,
+    UnsafeControlState,
+)
 from src.control.heuristic.navigation import AStarNavigator
 from src.control.heuristic.return_to_base import (
     NoSafeRecoveryPath,
@@ -2663,6 +2667,8 @@ class SimulationEngine:
         reason = (
             "invalid_command_limit"
             if isinstance(error, EmergencyRevokeRequired)
+            else "probe_validation_error"
+            if isinstance(error, ProbeValidationError)
             else "unsafe_control_state"
             if isinstance(error, UnsafeControlState)
             else "controller_fault"

@@ -7,6 +7,7 @@ from src.control.common.contracts import (
     ControlMode,
     UavRouteSnapshot,
 )
+from src.control.heuristic.return_to_base import _poses_match
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
 from tests.control.test_coordinator import DeterministicController, make_runtime
@@ -53,6 +54,10 @@ def test_route_contract_freezes_nested_route_and_validates_progress():
         ControlRouteSnapshot("t", "probe", "baseline", None, (), 0, -1, None, "ready")
     with pytest.raises(ValueError, match="status"):
         ControlRouteSnapshot("t", "probe", "baseline", None, (), 0, 0, None, "unknown")
+
+
+def test_recovery_pose_matching_accepts_a_two_dimensional_base_with_tolerance():
+    assert _poses_match((8.0000001, 5.0000001, 2.0 * 3.141592653589793), (8.0, 5.0))
 
 
 def test_state_manager_rejects_stale_route_lifecycle_and_blocks_old_revival():

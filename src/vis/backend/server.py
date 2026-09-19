@@ -30,6 +30,7 @@ from src.mission.intent_commands import (
     IntentCommandService,
     QueueFull,
 )
+from src.mission.vessel_commands import CommandConflict as VesselCommandConflict
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend.replay_adapter import normalize_replay_frame
@@ -320,7 +321,7 @@ def create_app(
         try:
             result = live_engine.vessel_commands.enqueue(command)
         except Exception as exc:
-            if exc.__class__.__name__ == "CommandConflict":
+            if isinstance(exc, VesselCommandConflict):
                 return _api_error("command_conflict", str(exc), 409)
             return _api_error("invalid_request", str(exc), 422)
         return JSONResponse(_vessel_result_payload(result), status_code=202)
@@ -347,7 +348,7 @@ def create_app(
         try:
             result = live_engine.vessel_commands.enqueue(command)
         except Exception as exc:
-            if exc.__class__.__name__ == "CommandConflict":
+            if isinstance(exc, VesselCommandConflict):
                 return _api_error("command_conflict", str(exc), 409)
             return _api_error("invalid_request", str(exc), 422)
         return JSONResponse(_vessel_result_payload(result), status_code=202)
@@ -376,7 +377,7 @@ def create_app(
         try:
             result = live_engine.vessel_commands.enqueue(command)
         except Exception as exc:
-            if exc.__class__.__name__ == "CommandConflict":
+            if isinstance(exc, VesselCommandConflict):
                 return _api_error("command_conflict", str(exc), 409)
             return _api_error("invalid_request", str(exc), 422)
         return JSONResponse(_vessel_result_payload(result), status_code=202)

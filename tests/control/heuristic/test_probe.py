@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.control.common.contracts import (
     ActionSpec,
@@ -19,6 +20,7 @@ from src.control.common.contracts import (
 )
 from src.control.common.observation import ObservationProvider
 from src.control.heuristic.navigation import PathNotFoundError
+from src.control.heuristic.probe import ProbeValidationError
 from src.mission.contracts import ContactSnapshot, ProbeSession
 from src.schedule.config_loader import ConfigLoader
 
@@ -192,6 +194,21 @@ def test_missing_contact_does_not_advance_the_frozen_probe_session():
 
     assert decision.command.operation_mode is OperationMode.HOLDING
     assert not [event for event in decision.events if event.event_type == "probe_phase_changed"]
+
+
+def test_probe_validation_errors_are_control_errors_with_reason():
+    controller = _controller(NavigatorSpy())
+    observation = _observation(probe=_probe())
+    invalid_contact = replace(
+        _contact(), estimated_velocity=(float("nan"), 0.0),
+    )
+
+    with pytest.raises(ProbeValidationError, match="finite") as caught:
+        controller._predicted_contact_position(
+            observation, invalid_contact,
+        )
+
+    assert caught.value.code == "probe_validation"
 
 
 def test_awaiting_assessment_keeps_probe_reservation_until_assessment():

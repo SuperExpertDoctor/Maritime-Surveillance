@@ -11,6 +11,7 @@ from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend import server
 from src.vis.backend.server import broadcast_frame_sync, create_app
+from src.mission.vessel_commands import CommandConflict as VesselCommandConflict
 from src.vis.backend.frame_builder import build_frame
 
 
@@ -124,6 +125,31 @@ def test_runtime_vessel_ais_patch_accepts_only_strict_boolean_payload():
     assert invalid.status_code == 422
     assert valid.status_code == 202
     assert valid.json()["status"] == "queued"
+
+
+def test_vessel_command_conflict_subclasses_are_reported_as_conflicts(monkeypatch):
+    app, engine = _runtime_app()
+
+    class DerivedConflict(VesselCommandConflict):
+        pass
+
+    def raise_conflict(_command):
+        raise DerivedConflict("same command id has another payload")
+
+    monkeypatch.setattr(engine.vessel_commands, "enqueue", raise_conflict)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/vessels",
+            json={
+                "episode_id": engine.episode_id,
+                "command_id": "conflict-subclass",
+                "vessel_class": "type_i",
+                "position_cells": [10.0, 10.0],
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "command_conflict"
 
 
 def test_vessel_mutation_stays_open_after_first_step():

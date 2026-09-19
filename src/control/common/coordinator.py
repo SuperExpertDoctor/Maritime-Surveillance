@@ -44,6 +44,7 @@ from src.control.common.safety import (
 )
 from src.control.heuristic.base import HeuristicControllerBase
 from src.control.heuristic.return_to_base import ReturnToBaseController
+from src.control.heuristic.return_to_base import _poses_match
 from src.control.heuristic.task_flow import EVENT_TRANSITIONS, HeuristicTaskFlow
 from src.env.uav_entity import UAVEntity
 from src.schedule.config_loader import ControlConfig
@@ -1192,10 +1193,7 @@ class ControlCoordinator:
             raise ControlCoordinatorError(
                 "RecoveryPlan path_length_cells does not match path"
             )
-        if not all(
-            math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9)
-            for actual, expected in zip(plan.path[-1][:2], plan.base_position)
-        ):
+        if not _poses_match(plan.path[-1], plan.base_position):
             raise ControlCoordinatorError(
                 "RecoveryPlan path must end at base_position"
             )

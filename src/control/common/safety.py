@@ -28,16 +28,35 @@ class ControlOutcome(str, Enum):
     UNSAFE = "unsafe"
 
 
-class InvalidControlCommand(ValueError):
+class ControlError(Exception):
+    """Base for errors that require a control-layer recovery policy."""
+
+    code = "control_error"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        self.code = code or type(self).code
+        super().__init__(message)
+
+
+class InvalidControlCommand(ControlError, ValueError):
     """Raised when a controller command cannot be applied safely."""
 
     outcome = ControlOutcome.INVALID
+    code = "invalid_control_command"
 
 
-class UnsafeControlState(RuntimeError):
+class ProbeValidationError(ControlError, ValueError):
+    """Raised when frozen probe evidence cannot satisfy its control contract."""
+
+    outcome = ControlOutcome.UNSAFE
+    code = "probe_validation"
+
+
+class UnsafeControlState(ControlError, RuntimeError):
     """Raised when no legal motion can avoid the published safety mask."""
 
     outcome = ControlOutcome.UNSAFE
+    code = "unsafe_control_state"
 
 
 @dataclass(frozen=True)
@@ -260,8 +279,10 @@ class SafetyEnvelope:
 
 
 __all__ = [
+    "ControlError",
     "ControlOutcome",
     "InvalidControlCommand",
+    "ProbeValidationError",
     "SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN",
     "SafetyEnvelope",
     "SafetyIntervention",
