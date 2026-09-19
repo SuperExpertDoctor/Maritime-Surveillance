@@ -13,12 +13,18 @@ class CandidatePool:
     unschedulable_cells: tuple[tuple[int, int], ...]
     geometry_version: int
     information_version: int
+    fragment_alerts: tuple[dict, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", tuple(self.candidates))
         object.__setattr__(self, "unschedulable_cells", tuple(
             tuple(int(value) for value in cell) for cell in self.unschedulable_cells
         ))
+        object.__setattr__(
+            self,
+            "fragment_alerts",
+            tuple(dict(alert) for alert in self.fragment_alerts),
+        )
         if self.geometry_version < 0 or self.information_version < 0:
             raise ValueError("candidate pool versions must be non-negative")
 

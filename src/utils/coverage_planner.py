@@ -24,10 +24,16 @@ class CoveragePath:
     waypoints: list[Pose] = field(default_factory=list)
     total_length: float = 0.0
     scan_ranges: list[tuple[int, int]] = field(default_factory=list)
+    required_cells: frozenset[GridCoord] = field(default_factory=frozenset)
+
+    @property
+    def scan_footprints(self) -> tuple[tuple[GridCoord, ...], ...]:
+        """Return the per-swath SAR projections used by the plan."""
+        return tuple(swath.footprint for swath in self.swaths)
 
     @property
     def covered_cells(self) -> set[GridCoord]:
-        return {cell for swath in self.swaths for cell in swath.footprint}
+        return set().union(*(set(footprint) for footprint in self.scan_footprints)) if self.swaths else set()
 
 
 class CoveragePlanner:
@@ -101,7 +107,12 @@ class CoveragePlanner:
                 )
                 for swath in swaths
             ]
-        result = CoveragePath(swaths=swaths)
+        required_cells = frozenset(
+            GridCoord(col, row)
+            for col in range(box.col_start, box.col_end)
+            for row in range(box.row_start, box.row_end)
+        )
+        result = CoveragePath(swaths=swaths, required_cells=required_cells)
         current = tuple(map(float, start_pose))
 
         for swath in swaths:
@@ -297,7 +308,58 @@ class CoveragePlanner:
                         end = (end[0], clamp(end[1], row_floor, row_limit))
                     heading, look = -math.pi / 2.0, "right"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
-        return swaths
+        return [
+            ScanSwath(
+                swath.start,
+                swath.end,
+                swath.look_direction,
+                self._project_swath_footprint(
+                    swath,
+                    box,
+                    width,
+                    along_track_cells,
+                ),
+                swath.heading,
+            )
+            for swath in swaths
+        ]
+
+    def _project_swath_footprint(
+        self,
+        swath: ScanSwath,
+        box: BBox,
+        swath_width: float,
+        along_track_cells: float,
+    ) -> tuple[GridCoord, ...]:
+        """Project the instantaneous SAR aperture along the scan line.
+
+        The planner and the runtime sensor use the same cell-centre test. A
+        planned lane therefore cannot claim a cell merely because it lies in
+        a nominal rectangular band while the actual near/far aperture misses
+        that cell.
+        """
+        side_x, side_y = self._side_vector(swath.heading, swath.look_direction)
+        forward_x, forward_y = math.cos(swath.heading), math.sin(swath.heading)
+        far = self.near_range + swath_width
+        half_along = along_track_cells / 2.0
+        projected: set[GridCoord] = set()
+        for x, y, _heading in self._sample_line(swath.start, swath.end, swath.heading):
+            for col in range(box.col_start, box.col_end):
+                for row in range(box.row_start, box.row_end):
+                    dx, dy = col + 0.5 - x, row + 0.5 - y
+                    cross = dx * side_x + dy * side_y
+                    along = dx * forward_x + dy * forward_y
+                    if self.near_range <= cross < far and abs(along) <= half_along:
+                        projected.add(GridCoord(col, row))
+        return tuple(sorted(projected, key=lambda cell: (cell.col, cell.row)))
+
+    @staticmethod
+    def _side_vector(heading: float, look_direction: str) -> tuple[float, float]:
+        if look_direction == "right":
+            return -math.sin(heading), math.cos(heading)
+        if look_direction == "left":
+            return math.sin(heading), -math.cos(heading)
+        raise ValueError("look_direction must be 'left' or 'right'")
 
     def _sample_line(
         self, start: tuple[float, float], end: tuple[float, float], heading: float
@@ -323,6 +385,7 @@ class CoveragePlanner:
         R_min: float,
         obstacle_mask,
         along_track_cells: float | None = None,
+        direction: str | None = None,
     ) -> bool:
         """Check every scan line and inter-line Dubins turn against a mask."""
         box = bbox if isinstance(bbox, BBox) else BBox(*bbox)
@@ -338,7 +401,7 @@ class CoveragePlanner:
             box,
             width,
             height,
-            None,
+            direction,
             along_track,
             R_min,
             tuple(obstacle_mask.shape),

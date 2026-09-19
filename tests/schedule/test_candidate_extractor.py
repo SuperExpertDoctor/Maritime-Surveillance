@@ -134,6 +134,26 @@ def test_candidate_bbox_within_size_range(sm):
         assert area <= sm.config.grid.search_max_cells, "Area unexpectedly large"
 
 
+def test_subminimum_coverage_fragment_is_alert_only(sm):
+    from src.schedule.datatypes import Region
+
+    fixed = np.zeros(sm.config.grid.resolution, dtype=bool)
+    fixed[10:18, 10:18] = True
+    sm.configure_coverage_metrics(fixed, "fragment-fixture")
+    sm._previous_search_regions = [Region("S-fragment", BBox(10, 10, 18, 18), "search")]
+    sm._track_regions = [Region("T-fragment", BBox(13, 13, 17, 17), "track")]
+    for region in sm._track_regions:
+        region.assigned_uav_id = None
+
+    pool = CandidateExtractor().extract_pool(sm)
+
+    assert all(
+        len(candidate.cells) >= sm.config.grid.search_min_cells
+        for candidate in pool.candidates
+    )
+    assert pool.fragment_alerts
+
+
 def test_initial_candidates_use_sortie_sized_tiles(sm):
     result = CandidateExtractor().extract(sm)
     assert result.candidate_regions

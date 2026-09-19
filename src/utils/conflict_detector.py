@@ -33,7 +33,7 @@ def detect_conflicts(
     cell_size_km: float = 10.0,
     time_horizon_steps: int = 30,
     min_separation_cells: float = 0.5,
-    min_prediction_offset: int = 1,
+    min_prediction_offset: int = 0,
     ignore_common_prefix: bool = False,
 ) -> list[PathConflict]:
     """Detect spatiotemporal conflicts across UAV planned paths.
@@ -67,18 +67,21 @@ def detect_conflicts(
         for uav_b in active[index + 1:]:
             path_a = uav_a["planned_path"][:time_horizon_steps]
             path_b = uav_b["planned_path"][:time_horizon_steps]
-            horizon = min(len(path_a), len(path_b))
+            horizon = min(time_horizon_steps, max(len(path_a), len(path_b)))
             paths_have_separated = not ignore_common_prefix
             for offset in range(min_prediction_offset, horizon):
                 if ignore_common_prefix and not paths_have_separated:
                     paths_have_separated = any(
-                        math.dist(path_a[prior][:2], path_b[prior][:2]) > 1e-6
+                        math.dist(
+                            _pose_at(path_a, prior)[:2],
+                            _pose_at(path_b, prior)[:2],
+                        ) > 1e-6
                         for prior in range(offset + 1)
                     )
                     if not paths_have_separated:
                         continue
-                current_a = path_a[offset][:2]
-                current_b = path_b[offset][:2]
+                current_a = _pose_at(path_a, offset)[:2]
+                current_b = _pose_at(path_b, offset)[:2]
                 distance = math.dist(current_a, current_b)
                 closest = (
                     ((current_a[0] + current_b[0]) / 2.0),
@@ -90,8 +93,8 @@ def detect_conflicts(
                 # separation of their simultaneous segments as well so a
                 # crossing in transit or inside a scan region is actionable.
                 if offset > 0:
-                    previous_a = path_a[offset - 1][:2]
-                    previous_b = path_b[offset - 1][:2]
+                    previous_a = _pose_at(path_a, offset - 1)[:2]
+                    previous_b = _pose_at(path_b, offset - 1)[:2]
                     segment_distance, segment_point = _moving_segment_distance(
                         previous_a, current_a, previous_b, current_b
                     )
@@ -112,6 +115,11 @@ def detect_conflicts(
                     break
 
     return conflicts
+
+
+def _pose_at(path: Sequence[Sequence[float]], offset: int) -> Sequence[float]:
+    """Treat a completed path as stationary through the comparison horizon."""
+    return path[min(offset, len(path) - 1)]
 
 
 def _moving_segment_distance(

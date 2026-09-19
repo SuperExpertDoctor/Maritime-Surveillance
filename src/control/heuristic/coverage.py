@@ -167,6 +167,7 @@ class CoverageController(HeuristicControllerBase):
         self._stopped = False
         self._completion_event_emitted = False
         self._direction: str | None = None
+        self._uncovered_cells: frozenset[tuple[int, int]] = frozenset()
         self._generation = 0
         self._last_progress_cells: float | None = None
         self._last_progress_time: float | None = None
@@ -211,6 +212,12 @@ class CoverageController(HeuristicControllerBase):
         self._stopped = False
         self._completion_event_emitted = False
         self._direction = None
+        bbox = task.region_bbox
+        self._uncovered_cells = frozenset(
+            (col, row)
+            for col in range(bbox.col_start, bbox.col_end)
+            for row in range(bbox.row_start, bbox.row_end)
+        )
         self._plan_route(observation)
         self._last_progress_cells = self.follower.progress_cells
         self._last_progress_time = observation.timestamp_min
@@ -437,6 +444,15 @@ class CoverageController(HeuristicControllerBase):
             along_track_cells=self.sar_along_track_cells,
             bounds=tuple(observation.planning_obstacle_mask.shape),
         )
+        if direction is None:
+            direction = (
+                "horizontal"
+                if initial_coverage.swaths
+                and abs(math.cos(initial_coverage.swaths[0].heading))
+                >= abs(math.sin(initial_coverage.swaths[0].heading))
+                else "vertical"
+            )
+        self._direction = direction
         endpoints = scan_endpoint_poses(initial_coverage)
         if not endpoints:
             raise ValueError("coverage planner produced no scan endpoints")
@@ -599,9 +615,21 @@ class CoverageController(HeuristicControllerBase):
             *observation.self_state.position,
             observation.self_state.heading_rad,
         )
-        if self._route_blocked(
+        blocked = self._route_blocked(
             (current_pose, *unflown), observation.planning_obstacle_mask
-        ) is not None:
+        )
+        if blocked is not None:
+            blocked_segment, blocked_cell = blocked
+            suffix_start = self.follower.index + 1
+            absolute_segment = suffix_start + blocked_segment - 1
+            if self._segment_is_scan_leg(absolute_segment):
+                self._route_status = "unavailable"
+                self.planning_map_version = observation.planning_map_version
+                raise CoverageRouteBlockedError(
+                    absolute_segment,
+                    blocked_cell,
+                    observation.planning_map_version,
+                )
             try:
                 self._replan_unflown_suffix(observation)
             except (CoverageRouteBlockedError, ValueError, RuntimeError) as suffix_error:
@@ -798,6 +826,9 @@ class CoverageController(HeuristicControllerBase):
                 return index + 1
         return len(self.route)
 
+    def _segment_is_scan_leg(self, segment_index: int) -> bool:
+        return any(start <= segment_index < end for start, end in self.scan_ranges)
+
     def _set_route(
         self,
         route: Sequence[tuple[float, float, float]],
@@ -892,11 +923,7 @@ class CoverageController(HeuristicControllerBase):
 
     def route_snapshot(self) -> ControlRouteSnapshot:
         task = self.task
-        route = (
-            self.route
-            if self._route_status in {"ready", "unavailable"} and not self._stopped
-            else ()
-        )
+        route = self.route if self._route_status == "ready" and not self._stopped else ()
         follower = self.follower if route else None
         status = self._route_status
         if task is None:
@@ -938,6 +965,8 @@ class CoverageController(HeuristicControllerBase):
             "cross_track_error_cells": self._last_cross_track_error_cells,
             "last_progress_min": self._last_progress_time,
             "stall_replans": self._stall_replans,
+            "uncovered_cells": tuple(sorted(self._uncovered_cells))
+            if self._route_status == "unavailable" else (),
         }
 
 

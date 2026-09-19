@@ -128,7 +128,7 @@ class CandidateExtractor:
 
         gc = sm.config.grid
         cols, rows = fixed.shape
-        max_area = min(19, max(1, (cols - 2) * (rows - 2)))
+        max_area = min(gc.search_max_cells, max(1, (cols - 2) * (rows - 2)))
         swath_width = sm.config.sensor.sar.swath_km / sm.config.grid.cell_size_km
         uavs = sm.get_all_uavs()
         reference = uavs[0] if uavs else None
@@ -141,6 +141,8 @@ class CandidateExtractor:
         for width in range(1, min(cols - 1, max_area) + 1):
             for height in range(1, min(rows - 1, max_area // width) + 1):
                 area = width * height
+                if area < gc.search_min_cells:
+                    continue
                 if area > max_area or max(width, height) / min(width, height) > gc.aspect_ratio_max:
                     continue
                 for c0 in range(1, cols - width):
@@ -378,6 +380,7 @@ class CandidateExtractor:
             unschedulable_cells=unschedulable,
             geometry_version=int(getattr(sm, "obstacle_version", 0)),
             information_version=snapshot.version,
+            fragment_alerts=tuple(fragment_alerts),
         )
 
     @staticmethod

@@ -9,7 +9,15 @@ import math
 import numpy as np
 
 from src.schedule.config_loader import AppConfig
-from src.schedule.datatypes import BBox, GridCoord, Marker, Region, TargetReport, UAVState
+from src.schedule.datatypes import (
+    BBox,
+    GridCoord,
+    Marker,
+    Region,
+    TargetReport,
+    UAVState,
+    grid_bbox_from_center,
+)
 from src.mission.information_update import InformationUpdatePolicy, ScanRefresh
 from src.mission.coverage_metrics import CoverageMetrics
 from src.mission.coverage_service import CoverageService
@@ -556,14 +564,10 @@ class StateManager:
             return existing
         self._track_region_counter += 1
         col, row = center
-        half = 2
         region = Region(
             id=f"T{self._track_region_counter}",
-            bbox=BBox(
-                max(0, col - half),
-                max(0, row - half),
-                min(self.config.grid.resolution[1], col + half),
-                min(self.config.grid.resolution[0], row + half),
+            bbox=grid_bbox_from_center(
+                GridCoord(col, row), 2, tuple(self.config.grid.resolution)
             ),
             type="track",
             priority="high",
@@ -579,11 +583,8 @@ class StateManager:
             if region.id != region_id:
                 continue
             col, row = new_center
-            region.bbox = BBox(
-                max(0, col - 2),
-                max(0, row - 2),
-                min(self.config.grid.resolution[1], col + 2),
-                min(self.config.grid.resolution[0], row + 2),
+            region.bbox = grid_bbox_from_center(
+                GridCoord(col, row), 2, tuple(self.config.grid.resolution)
             )
             return
 

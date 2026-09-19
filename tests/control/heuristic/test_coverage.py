@@ -404,7 +404,8 @@ def test_coverage_rejects_a_new_obstacle_on_an_unflown_scan_leg(
         started_controller.act(blocked_observation)
 
     assert started_controller.route_snapshot().status == "unavailable"
-    assert started_controller.route_snapshot().route
+    assert started_controller.route_snapshot().route == ()
+    assert started_controller.route_snapshot().coverage_progress["uncovered_cells"]
 
 
 def test_coverage_replan_starts_at_next_unconsumed_scan_band(
