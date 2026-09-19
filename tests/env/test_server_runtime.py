@@ -1,6 +1,7 @@
 import builtins
 import asyncio
 import json
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -331,3 +332,152 @@ def test_mp4_export_transcodes_browser_recording_and_returns_download(tmp_path, 
     assert response.headers["content-type"] == "video/mp4"
     assert response.headers["content-disposition"].endswith('filename="uav-mission-replay.mp4"')
     assert response.content == b"mp4"
+
+
+def test_replay_total_uses_incremental_index_without_o_n_rescan(tmp_path, monkeypatch):
+    replay = tmp_path / "growing.jsonl"
+    replay.write_text('{"frame_id": 1}\n', encoding="utf-8")
+    monkeypatch.setattr(server, "OUTPUT_DIR", str(tmp_path))
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+
+    with TestClient(app) as client:
+        assert client.get("/api/replay", params={"file": replay.name}).json()["total"] == 1
+        index = app.state._replay_indexes[realpath(replay)]
+        assert index.total == 1
+        first_scan_offset = index.scanned_offset
+        replay.write_text(
+            '{"frame_id": 1}\n{"frame_id": 2}\n', encoding="utf-8",
+        )
+        assert client.get("/api/replay", params={"file": replay.name}).json()["total"] == 2
+
+    assert index.scanned_offset > first_scan_offset
+    assert index.incremental_refreshes == 2
+
+
+def test_mp4_upload_rejected_while_streaming_past_limit(monkeypatch):
+    monkeypatch.setattr(server, "_MAX_VIDEO_UPLOAD_BYTES", 4)
+    monkeypatch.setattr(server, "_find_ffmpeg", lambda: (_ for _ in ()).throw(AssertionError("encoder lookup must wait")))
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+
+    class _StreamingRequest:
+        headers = {}
+
+        async def stream(self):
+            yield b"abc"
+            yield b"de"
+
+    route = next(item for item in app.routes if getattr(item, "path", None) == "/api/export/mp4")
+    response = asyncio.run(route.endpoint(_StreamingRequest()))
+
+    assert response.status_code == 413
+
+
+def test_broadcast_uses_snapshot_of_clients_and_keeps_new_client():
+    app = SimpleNamespace(state=SimpleNamespace(_live_clients=set()))
+
+    class _Client:
+        def __init__(self, name):
+            self.name = name
+            self.messages = []
+
+        async def send_text(self, payload):
+            self.messages.append(payload)
+            if self.name == "first":
+                app.state._live_clients.add(second)
+
+    first = _Client("first")
+    second = _Client("second")
+    app.state._live_clients.add(first)
+
+    asyncio.run(server.broadcast_payload(app, {"frame_id": 1}))
+
+    assert first.messages
+    assert not second.messages
+    assert second in app.state._live_clients
+
+
+def test_websocket_initial_frame_is_serialized_before_registration(monkeypatch):
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+    observed = []
+
+    def build_initial(application):
+        observed.append(set(application.state._live_clients))
+        return {"frame_id": 0}
+
+    monkeypatch.setattr(server, "_build_frame_inner", build_initial)
+
+    class _WebSocket:
+        async def accept(self):
+            pass
+
+        async def send_text(self, _payload):
+            pass
+
+        async def receive_text(self):
+            raise asyncio.TimeoutError
+
+        async def close(self, **_kwargs):
+            pass
+
+    route = next(item for item in app.routes if getattr(item, "path", None) == "/ws/live")
+    asyncio.run(route.endpoint(_WebSocket()))
+
+    assert observed == [set()]
+
+
+def test_idle_timeout_logs_close_code_1001(monkeypatch):
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+    close_calls = []
+    logged = []
+    monkeypatch.setattr(server, "_build_frame_inner", lambda _app: {"frame_id": 0})
+    monkeypatch.setattr(
+        server._LOGGER,
+        "info",
+        lambda *args, **_kwargs: logged.append(args),
+    )
+
+    class _WebSocket:
+        async def accept(self):
+            pass
+
+        async def send_text(self, _payload):
+            pass
+
+        async def receive_text(self):
+            raise asyncio.TimeoutError
+
+        async def close(self, **kwargs):
+            close_calls.append(kwargs)
+
+    route = next(item for item in app.routes if getattr(item, "path", None) == "/ws/live")
+    asyncio.run(route.endpoint(_WebSocket()))
+
+    assert close_calls == [{"code": 1001, "reason": "idle timeout"}]
+    assert any("code=1001" in args[0] for args in logged)
+    assert any("idle timeout" in args[-1] for args in logged)
+
+
+def test_replay_truncated_jsonl_returns_partial_result_and_error_metadata(tmp_path, monkeypatch):
+    replay = tmp_path / "truncated.jsonl"
+    replay.write_text('{"frame_id": 1}\n{"frame_id": 2', encoding="utf-8")
+    monkeypatch.setattr(server, "OUTPUT_DIR", str(tmp_path))
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+
+    with TestClient(app) as client:
+        response = client.get("/api/replay", params={"file": replay.name})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert [frame["frame_id"] for frame in payload["frames"]] == [1]
+    assert payload["truncated"] is True
+    assert payload["next_offset"] == 1
+
+    replay.write_text('{"frame_id": 1}\nnot-json\n', encoding="utf-8")
+    app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
+    with TestClient(app) as client:
+        corrupt = client.get("/api/replay", params={"file": replay.name})
+    assert corrupt.status_code == 422
+
+
+def realpath(path):
+    return str(path.resolve())

@@ -8,6 +8,7 @@
   - /api/config        只读配置参数
 """
 import json
+import logging
 import math
 import os
 import asyncio
@@ -15,7 +16,7 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse, FileResponse
@@ -38,6 +39,53 @@ from src.vis.backend.replay_adapter import normalize_replay_frame
 OUTPUT_DIR = "outputs"
 _FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 _MAX_VIDEO_UPLOAD_BYTES = 250 * 1024 * 1024
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class _ReplayIndex:
+    """Append-only byte index for complete JSONL records."""
+
+    identity: tuple[int, int]
+    scanned_offset: int = 0
+    total: int = 0
+    line_offsets: list[int] = field(default_factory=list)
+    incremental_refreshes: int = 0
+
+
+def _refresh_replay_index(path: str, stat, index: _ReplayIndex | None) -> _ReplayIndex:
+    """Extend an index from its last complete newline, or rebuild it safely."""
+    identity = (int(stat.st_dev), int(stat.st_ino))
+    if (
+        index is None
+        or index.identity != identity
+        or int(stat.st_size) < index.scanned_offset
+    ):
+        index = _ReplayIndex(identity)
+
+    if int(stat.st_size) <= index.scanned_offset:
+        return index
+
+    start = index.scanned_offset
+    with open(path, "rb") as handle:
+        handle.seek(start)
+        payload = handle.read()
+
+    cursor = 0
+    while True:
+        newline = payload.find(b"\n", cursor)
+        if newline < 0:
+            break
+        index.line_offsets.append(start + cursor)
+        index.total += 1
+        cursor = newline + 1
+    index.scanned_offset = start + cursor
+    index.incremental_refreshes += 1
+    return index
+
+
+def _replay_error(message: str, status_code: int = 422, **metadata):
+    return JSONResponse({"error": message, **metadata}, status_code=status_code)
 
 
 def _find_ffmpeg() -> str | None:
@@ -138,6 +186,8 @@ def create_app(
         app.state.bases = getattr(engine, "bases", None)
         app.state.current_cycle = int(getattr(state_manager, "cycle", 0))
     app.state._live_clients = set()
+    app.state._live_send_locks = {}
+    app.state._replay_indexes = {}
     app.state.event_loop = None
     app.state.replay_mode = bool(replay_mode)
     app.state.intent_service = (
@@ -162,22 +212,42 @@ def create_app(
 
     @app.websocket("/ws/live")
     async def websocket_live(ws: WebSocket):
+        # Build and serialize before registration so a slow initial read does
+        # not expose a half-initialized client to the live broadcaster.
+        initial_payload = json.dumps(
+            _build_frame_inner(app), ensure_ascii=False,
+        )
         await ws.accept()
+        send_lock = asyncio.Lock()
+        app.state._live_send_locks[ws] = send_lock
         app.state._live_clients.add(ws)
         try:
             # A newly connected dashboard must not wait for the next simulation
             # step, especially when a completed run is being held for review.
-            await ws.send_json(_build_frame_inner(app))
+            async with send_lock:
+                await ws.send_text(initial_payload)
             while True:
                 # 保持连接，由仿真主循环通过 broadcast_frame() 推送
                 # 客户端可发送心跳，服务端回复 pong
                 data = await asyncio.wait_for(ws.receive_text(), timeout=30.0)
                 if data == "ping":
-                    await ws.send_text("pong")
-        except (WebSocketDisconnect, asyncio.TimeoutError):
-            pass
+                    async with send_lock:
+                        await ws.send_text("pong")
+        except WebSocketDisconnect as exc:
+            _LOGGER.info(
+                "websocket disconnect code=%s reason=%s",
+                getattr(exc, "code", None), getattr(exc, "reason", ""),
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.info("websocket disconnect code=1001 reason=idle timeout")
+            try:
+                async with send_lock:
+                    await ws.close(code=1001, reason="idle timeout")
+            except Exception:
+                _LOGGER.debug("failed to close idle websocket", exc_info=True)
         finally:
             app.state._live_clients.discard(ws)
+            app.state._live_send_locks.pop(ws, None)
 
     @app.get("/api/replay/list")
     async def replay_list():
@@ -207,39 +277,45 @@ def create_app(
         if not os.path.isfile(requested_path):
             return JSONResponse({"error": "file not found"}, status_code=404)
 
-        # A live run writes its JSONL file incrementally.  Reuse a count only
-        # while the file metadata is unchanged, otherwise replay would remain
-        # stuck at the partial total first observed by a browser client.
-        cache_key = f"_replay_total_{file}"
         stat = os.stat(requested_path)
-        fingerprint = (stat.st_mtime_ns, stat.st_size)
-        cached = getattr(app.state, cache_key, None)
-        if cached is None or cached[0] != fingerprint:
-            with open(requested_path, "r", encoding="utf-8") as handle:
-                total = sum(1 for _ in handle)
-            setattr(app.state, cache_key, (fingerprint, total))
-        else:
-            total = cached[1]
+        index = _refresh_replay_index(
+            requested_path,
+            stat,
+            app.state._replay_indexes.get(requested_path),
+        )
+        app.state._replay_indexes[requested_path] = index
 
         frames: list[dict] = []
         try:
-            with open(requested_path, "r", encoding="utf-8") as handle:
-                for index, line in enumerate(handle):
-                    if index < offset:
-                        continue
-                    if index >= offset + limit:
-                        break
-                    if line.strip():
-                        frames.append(normalize_replay_frame(json.loads(line)))
-        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            end = min(offset + limit, index.total)
+            if offset < end:
+                with open(requested_path, "rb") as handle:
+                    handle.seek(index.line_offsets[offset])
+                    for line_number in range(offset, end):
+                        line = handle.readline()
+                        if not line.endswith(b"\n"):
+                            break
+                        if line.strip():
+                            frames.append(
+                                normalize_replay_frame(json.loads(line))
+                            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            return _replay_error(
+                str(exc),
+                422,
+                line_offset=line_number if "line_number" in locals() else offset,
+            )
+        except OSError as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
         return JSONResponse({
             "frames": frames,
-            "total": total,
+            "total": index.total,
             "offset": offset,
             "limit": limit,
-            "has_more": (offset + limit) < total,
+            "has_more": (offset + limit) < index.total,
+            "truncated": int(stat.st_size) > index.scanned_offset,
+            "next_offset": min(offset + limit, index.total),
         })
 
     @app.get("/api/export/capabilities")
@@ -248,15 +324,32 @@ def create_app(
 
     @app.post("/api/export/mp4")
     async def export_mp4(request: Request):
-        payload = await request.body()
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "invalid content length"}, status_code=400)
+            if declared_length < 0:
+                return JSONResponse({"error": "invalid content length"}, status_code=400)
+            if declared_length > _MAX_VIDEO_UPLOAD_BYTES:
+                return JSONResponse({"error": "video payload exceeds 250 MB"}, status_code=413)
+
+        payload = bytearray()
+        async for chunk in request.stream():
+            if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                return JSONResponse({"error": "video payload must be bytes"}, status_code=400)
+            if len(payload) + len(chunk) > _MAX_VIDEO_UPLOAD_BYTES:
+                return JSONResponse({"error": "video payload exceeds 250 MB"}, status_code=413)
+            payload.extend(chunk)
         if not payload:
             return JSONResponse({"error": "empty video payload"}, status_code=400)
-        if len(payload) > _MAX_VIDEO_UPLOAD_BYTES:
-            return JSONResponse({"error": "video payload exceeds 250 MB"}, status_code=413)
         if not _find_ffmpeg():
             return JSONResponse({"error": "MP4 encoder is unavailable"}, status_code=503)
         try:
-            work_dir, output = await asyncio.to_thread(_transcode_webm_to_mp4, payload)
+            work_dir, output = await asyncio.to_thread(
+                _transcode_webm_to_mp4, bytes(payload),
+            )
         except subprocess.TimeoutExpired:
             return JSONResponse({"error": "MP4 encoding timed out"}, status_code=504)
         except RuntimeError as exc:
@@ -993,15 +1086,24 @@ async def broadcast_frame(app: FastAPI) -> None:
 async def broadcast_payload(app: FastAPI, frame: dict) -> None:
     """Send a pre-built live frame without touching replay persistence."""
     # 广播给所有直播客户端
-    clients = getattr(app.state, "_live_clients", set())
+    clients = tuple(getattr(app.state, "_live_clients", set()))
+    send_locks = getattr(app.state, "_live_send_locks", {})
     dead = set()
     payload = json.dumps(frame, ensure_ascii=False)
     for ws in clients:
         try:
-            await ws.send_text(payload)
+            send_lock = send_locks.get(ws)
+            if send_lock is None:
+                await ws.send_text(payload)
+            else:
+                async with send_lock:
+                    await ws.send_text(payload)
         except Exception:
+            _LOGGER.info("live websocket send failed", exc_info=True)
             dead.add(ws)
-    app.state._live_clients -= dead
+    for ws in dead:
+        app.state._live_clients.discard(ws)
+        send_locks.pop(ws, None)
 
 
 def broadcast_frame_sync(
