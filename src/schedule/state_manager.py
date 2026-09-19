@@ -79,6 +79,7 @@ class StateManager:
         self._markers: list[Marker] = []
         self._marker_counter = 0
         self._events: list[dict] = []
+        self._event_sequence = 0
         self._intent_events: list[dict] = []
         self._published_intents: tuple = ()
         self._published_intent_statuses: tuple = ()
@@ -619,7 +620,13 @@ class StateManager:
 
     # Events ---------------------------------------------------------
     def add_event(self, event_type: str, data: dict) -> None:
-        self._events.append({"type": event_type, "time": self.current_time, "data": data})
+        self._event_sequence += 1
+        self._events.append({
+            "event_id": f"{self.episode_id or 'episode'}:{self._event_sequence}",
+            "type": event_type,
+            "time": self.current_time,
+            "data": deepcopy(data),
+        })
 
     def record_intent_event(self, result) -> None:
         """Retain a bounded, JSON-ready view of command application results."""
@@ -646,8 +653,25 @@ class StateManager:
             deepcopy(self._published_intent_statuses),
         )
 
-    def get_recent_events(self, since_time: float) -> list[dict]:
-        return [event for event in self._events if event["time"] >= since_time]
+    def get_recent_events(
+        self,
+        since_time: float,
+        *,
+        until_time: float | None = None,
+        include_since: bool = True,
+    ) -> list[dict]:
+        """Return detached events in a bounded, optionally half-open window."""
+        lower = (
+            (lambda timestamp: timestamp >= since_time)
+            if include_since
+            else (lambda timestamp: timestamp > since_time)
+        )
+        upper = lambda timestamp: until_time is None or timestamp <= until_time
+        return [
+            deepcopy(event)
+            for event in self._events
+            if lower(event["time"]) and upper(event["time"])
+        ]
 
     # Information field facade -------------------------------------
     def configure_coverage_metrics(self, fixed_mask, episode_id: str) -> None:

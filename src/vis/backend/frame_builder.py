@@ -1,7 +1,9 @@
 ﻿"""从 StateManager 构建 WebSocket/JSONL 帧 JSON。"""
 import math
 from dataclasses import asdict
+from collections.abc import Mapping
 
+from src.control.common.contracts import _immutable_snapshot
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 
@@ -74,6 +76,16 @@ def _transit_progress(entity) -> float | None:
 
 def _enum_value(value):
     return getattr(value, "value", value)
+
+
+def _json_snapshot(value):
+    """Convert immutable contract payloads into detached JSON containers."""
+    value = _immutable_snapshot(value)
+    if isinstance(value, Mapping):
+        return {key: _json_snapshot(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_snapshot(item) for item in value]
+    return value
 
 
 def _probe_observation_started(state, uav_id: str, route) -> bool | None:
@@ -159,7 +171,7 @@ def _route_visual_data(state, uav, entity, *, planned_limit: int,
                 state, uav.id, route,
             ),
             "coverage_progress": (
-                dict(route.coverage_progress)
+                _json_snapshot(route.coverage_progress)
                 if route.coverage_progress is not None
                 else None
             ),
@@ -384,7 +396,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         if show_beam and entity is not None and entity.sar_look_direction is not None:
             beam = entity.sar_sensor.compute_swath_beam(
                 entity.float_position,
-                entity.sar_scan_heading_rad or entity.heading_rad,
+                (
+                    entity.heading_rad
+                    if entity.sar_scan_heading_rad is None
+                    else entity.sar_scan_heading_rad
+                ),
                 entity.sar_look_direction,
                 along_track_cells=entity.sar_along_track_cells,
             )
@@ -517,7 +533,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         })
 
     # 近期事件（本帧内新事件）
-    recent_events = state.get_recent_events(state.current_time - 1.0)
+    recent_events = state.get_recent_events(
+        state.current_time - 1.0,
+        until_time=state.current_time,
+        include_since=False,
+    )
 
     coverage = state.get_coverage_stats()
     published_intents, published_intent_statuses = (

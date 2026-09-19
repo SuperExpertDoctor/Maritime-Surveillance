@@ -41,7 +41,7 @@ def normalize_replay_frame(frame: dict) -> dict:
     result = deepcopy(frame)
     result.setdefault("schema_version", "mission-frame/v2")
     result.setdefault("visual_schema_version", "mission-visual/v1")
-    result.setdefault("mode", "replay")
+    result["mode"] = "replay"
     result.setdefault("cycle", 0)
     result.setdefault("sim_time_min", 0.0)
     result.setdefault("frame_id", 0)
@@ -64,8 +64,11 @@ def normalize_replay_frame(frame: dict) -> dict:
         normalized_uavs.append(item)
     result["uavs"] = normalized_uavs
 
+    raw_vessels = result.get("scenario_vessels", [])
+    if not isinstance(raw_vessels, list):
+        raise TypeError("scenario_vessels must be a list")
     normalized: list[dict] = []
-    for index, raw in enumerate(result.get("scenario_vessels") or ()):
+    for index, raw in enumerate(raw_vessels):
         if not isinstance(raw, dict):
             raise TypeError("scenario_vessels entries must be objects")
 

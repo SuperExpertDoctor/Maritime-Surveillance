@@ -5,6 +5,10 @@ import pytest
 
 from scripts.evaluate_mixed_maritime import _FixtureGateway
 from src.env.simulation import SimulationEngine
+from src.control.common.contracts import (
+    ControlRouteSnapshot,
+    UavRouteSnapshot,
+)
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_builder import build_frame
@@ -67,6 +71,71 @@ def test_frame_coverage_is_pure_json_safe_and_timestamp_aligned():
     assert json.dumps(sm.get_recent_events(0.0), sort_keys=True) == events_before
     assert sm.information_policy.version == version_before
     assert pure["coverage_metrics"] == sm.get_persistent_coverage_stats()
+
+
+def test_frame_publisher_can_deepcopy_state_without_mappingproxy_error():
+    engine = SimulationEngine(
+        ConfigLoader.load(),
+        seed=42,
+        llm_gateway=_FixtureGateway(),
+        episode_id="coverage-snapshot-test",
+    )
+    route = ControlRouteSnapshot(
+        task_id="coverage-1",
+        task_type="coverage",
+        phase="coverage",
+        target_contact_id=None,
+        route=((1.0, 1.0, 0.0),),
+        next_index=0,
+        route_revision=1,
+        planning_map_version=1,
+        status="ready",
+        coverage_progress={"nested": {"cells": np.array([1, 2])}},
+    )
+    engine.allocator.sm.set_control_route(
+        "UAV-1", UavRouteSnapshot("coverage-snapshot-test", 0, route),
+    )
+
+    frame = _frame(engine, realtime=True, include_matrices=False)
+
+    json.dumps(frame, allow_nan=False)
+    assert frame["uavs"][0]["task_visual"]["coverage_progress"] == {
+        "nested": {"cells": [1, 2]},
+    }
+
+
+def test_zero_heading_is_preserved_in_sar_beam_geometry():
+    engine = SimulationEngine(
+        ConfigLoader.load(),
+        seed=42,
+        llm_gateway=_FixtureGateway(),
+        episode_id="heading-zero-test",
+    )
+    uav = engine.uavs[0]
+    uav.sar_look_direction = "left"
+    uav.sar_imaging = True
+    uav.sar_scan_heading_rad = 0.0
+
+    frame = _frame(engine, realtime=True, include_matrices=False)
+
+    assert frame["uavs"][0]["sar_beam"]["heading"] == 0.0
+
+
+def test_event_window_does_not_duplicate_boundary_event():
+    config = ConfigLoader.load()
+    state = StateManager(config)
+    state.episode_id = "event-window-test"
+    state.current_time = 1.0
+    state.add_event("boundary", {"value": 1})
+    first = build_frame(state, 0, config, include_matrices=False)
+
+    state.current_time = 2.0
+    second = build_frame(state, 0, config, include_matrices=False)
+
+    assert [event["event_id"] for event in first["events"]] == [
+        "event-window-test:1",
+    ]
+    assert second["events"] == []
 
 
 def test_reset_configures_a_fresh_metric_for_the_new_episode():

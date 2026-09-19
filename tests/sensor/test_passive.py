@@ -1,3 +1,5 @@
+import math
+
 from src.mission.config import PassiveConfig
 from src.sensor.passive import PassivePositionResolver, PassiveSensor
 
@@ -45,14 +47,16 @@ def test_hard_range_rejects_observation_without_consuming_detection_result():
     assert _observe(sensor, "UAV-1", source=(11.0, 0.0)) is None
 
 
-def test_two_distinct_uavs_same_group_release_sample_true_position():
+def test_two_distinct_uavs_same_group_release_sample_noisy_position_without_truth():
     sensor = _sensor()
     observations = [_observe(sensor, "UAV-1"), _observe(sensor, "UAV-2")]
 
-    position = PassivePositionResolver().release(observations, (5.25, 5.75))
+    position = PassivePositionResolver().release(observations, (500.0, 500.0))
 
     assert position is not None
-    assert position.position_cells == (5.25, 5.75)
+    assert math.dist(position.position_cells, (500.0, 500.0)) > 100.0
+    assert math.isfinite(position.position_cells[0])
+    assert math.isfinite(position.position_cells[1])
     assert position.source_observation_ids == tuple(
         item.observation_id for item in sorted(observations, key=lambda item: item.observer_uav_id)
     )
@@ -67,3 +71,13 @@ def test_duplicate_uav_or_different_group_never_releases_position():
 
     assert resolver.release([one, duplicate], (5.0, 5.0)) is None
     assert resolver.release([one, different_sample], (5.0, 5.0)) is None
+
+
+def test_passive_position_uses_measured_bearings_instead_of_emitter_truth():
+    sensor = _sensor()
+    observations = [_observe(sensor, "UAV-1"), _observe(sensor, "UAV-2")]
+
+    estimated = PassivePositionResolver().release(observations, (5.0, 5.0))
+
+    assert estimated is not None
+    assert estimated.position_cells != (5.0, 5.0)

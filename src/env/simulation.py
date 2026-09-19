@@ -3377,11 +3377,8 @@ class SimulationEngine:
                 )
                 if ship is None:
                     continue
-                emitter_position = self._position_from_history(
-                    self._ship_position_history.get(ship.id, []), sample_time,
-                ) or ship.float_position
                 position = self._passive_position_resolver.release(
-                    group, emitter_position,
+                    group,
                 )
                 if position is not None:
                     positions.append(position)
