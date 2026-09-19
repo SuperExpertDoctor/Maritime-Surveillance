@@ -623,13 +623,28 @@ class CoverageController(HeuristicControllerBase):
             suffix_start = self.follower.index + 1
             absolute_segment = suffix_start + blocked_segment - 1
             if self._segment_is_scan_leg(absolute_segment):
-                self._route_status = "unavailable"
-                self.planning_map_version = observation.planning_map_version
-                raise CoverageRouteBlockedError(
-                    absolute_segment,
-                    blocked_cell,
-                    observation.planning_map_version,
-                )
+                if blocked_segment <= 0:
+                    self._route_status = "unavailable"
+                    self.planning_map_version = observation.planning_map_version
+                    raise CoverageRouteBlockedError(
+                        absolute_segment,
+                        blocked_cell,
+                        observation.planning_map_version,
+                    )
+                try:
+                    self._detour_invalidated_suffix(observation)
+                except (CoverageRouteBlockedError, ValueError, RuntimeError):
+                    try:
+                        self._replan_with_direction(observation)
+                    except (CoverageRouteBlockedError, ValueError, RuntimeError):
+                        self._route_status = "unavailable"
+                        self.planning_map_version = observation.planning_map_version
+                        raise CoverageRouteBlockedError(
+                            absolute_segment,
+                            blocked_cell,
+                            observation.planning_map_version,
+                        )
+                return
             try:
                 self._replan_unflown_suffix(observation)
             except (CoverageRouteBlockedError, ValueError, RuntimeError) as suffix_error:
@@ -741,17 +756,34 @@ class CoverageController(HeuristicControllerBase):
                 and not bool(mask[col, row])
             )
 
-        start_index = blocked_segment
-        if not pose_is_free(sequence[start_index]):
-            raise CoverageRouteBlockedError(
-                blocked_segment,
-                blocked_cell,
-                observation.planning_map_version,
-            )
-        candidates = range(
-            blocked_segment + 2,
-            min(len(sequence), blocked_segment + 48),
+        lookback = max(
+            4,
+            int(math.ceil(self.r_min / max(self.planner.sample_step, 0.2))),
         )
+        start_index = max(0, blocked_segment - lookback)
+        if not pose_is_free(sequence[start_index]):
+            # A traversed-cell check can report the segment endpoint after it
+            # has entered the blocked cell. Walk back to the last known-safe
+            # pose instead of attempting to plan from inside the obstacle.
+            while start_index > 0 and not pose_is_free(sequence[start_index]):
+                start_index -= 1
+            if not pose_is_free(sequence[start_index]):
+                raise CoverageRouteBlockedError(
+                    blocked_segment,
+                    blocked_cell,
+                    observation.planning_map_version,
+                )
+        candidate_start = max(blocked_segment + 2, start_index + 2)
+        candidate_end = len(sequence)
+        candidates = sorted({
+            *range(candidate_start, candidate_end, 4),
+            *(
+                end
+                for _, end in self.scan_ranges
+                if candidate_start <= end < candidate_end
+            ),
+            candidate_end - 1,
+        })
         for goal_index in candidates:
             goal = sequence[goal_index]
             if not pose_is_free(goal):

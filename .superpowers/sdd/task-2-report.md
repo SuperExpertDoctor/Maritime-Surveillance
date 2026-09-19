@@ -40,6 +40,24 @@ Result: `9 passed in 3.93s`.
 
 `git diff --check` passed. The planned simulation integration command remains environment-blocked by the repository's mandatory `LONGCAT_API_KEY` assertion; supplying a dummy key starts the live decision path and was stopped after it entered a long external call. No Task 2 assertion failure was observed.
 
+## Weather Replan Follow-up
+
+The existing weather-replan gate exposed a curvature-detour boundary case: the
+blocked segment could enter a storm before the stored route pose, and the old
+48-sample candidate window retained an unsafe suffix. The controller now backs
+up by a bounded turn-radius lookback, searches sparse downstream route
+boundaries through the route end, and accepts a route only after the existing
+full safety check. Immediate scan-leg blockage remains fail-closed.
+
+Verification:
+
+```text
+pytest tests/control/heuristic/test_coverage.py tests/control/heuristic/test_coverage_closed_loop.py tests/control/heuristic/test_coverage_sensor_geometry.py -q
+39 passed in 1.84s
+pytest tests/mission/test_feature_control_integration.py::test_weather_replan_changes_controller_route_and_preserves_unaffected_task -q
+1 passed in 128.00s
+```
+
 ## Files Changed
 
 - `src/utils/coverage_planner.py`
