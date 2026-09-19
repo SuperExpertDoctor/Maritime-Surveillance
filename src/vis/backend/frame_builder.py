@@ -177,9 +177,9 @@ def _route_visual_data(state, uav, entity, *, planned_limit: int,
             ]
             if entity is not None
             else [
-                float(u.position.col),
-                float(u.position.row),
-                math.radians(float(u.heading_deg)),
+                float(uav.position.col),
+                float(uav.position.row),
+                math.radians(float(uav.heading_deg)),
             ]
         )
         return (

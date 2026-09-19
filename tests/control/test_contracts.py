@@ -1,4 +1,5 @@
 import math
+from copy import deepcopy
 from dataclasses import FrozenInstanceError, fields
 
 import numpy as np
@@ -14,6 +15,7 @@ from src.control.common.contracts import (
     ControlMode,
     ControlObservation,
     ControlOwner,
+    ControlRouteSnapshot,
     ControllerEventRequest,
     CoverageExecutionConfig,
     HazardObservation,
@@ -22,6 +24,7 @@ from src.control.common.contracts import (
     RecoveryPlan,
     SensorMode,
     UAVObservation,
+    UavRouteSnapshot,
 )
 
 
@@ -179,6 +182,41 @@ def test_control_event_deep_freezes_nested_payload():
     }
     with pytest.raises(TypeError):
         event.payload["metadata"]["task_id"] = "task-3"
+
+
+def test_frozen_payloads_survive_deepcopy_because_publication_copies_them():
+    """Frame publication deep-copies scheduler state, so frozen payloads must copy.
+
+    ``MappingProxyType`` supplied the immutability but cannot be deep-copied, so
+    the first frame published while a coverage route was in flight raised
+    ``TypeError: cannot pickle 'mappingproxy' object`` and killed the process.
+    """
+    progress = {"phase": "coverage", "progress_cells": 12.0}
+
+    route = ControlRouteSnapshot(
+        task_id="task-1",
+        task_type="coverage",
+        phase="coverage",
+        target_contact_id=None,
+        route=((1.0, 2.0, 0.0),),
+        next_index=0,
+        route_revision=1,
+        planning_map_version=1,
+        status="ready",
+        coverage_progress=progress,
+    )
+    progress["phase"] = "return"
+
+    assert route.coverage_progress == {"phase": "coverage", "progress_cells": 12.0}
+    with pytest.raises(TypeError):
+        route.coverage_progress["phase"] = "return"
+
+    envelope = deepcopy(UavRouteSnapshot("episode-1", 1, route))
+
+    assert envelope.route.coverage_progress == {
+        "phase": "coverage",
+        "progress_cells": 12.0,
+    }
 
 
 def test_control_observation_owns_read_only_array_snapshots():

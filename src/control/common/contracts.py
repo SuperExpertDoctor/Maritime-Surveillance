@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 import math
-from types import MappingProxyType
 from typing import Literal
 
 import numpy as np
@@ -53,11 +52,47 @@ class StopReason(str, Enum):
 Pose = tuple[float, float, float]
 
 
+class _FrozenMapping(Mapping):
+    """Immutable mapping for contract payloads that also has to be copyable.
+
+    ``types.MappingProxyType`` gives the immutability these snapshots need but
+    cannot itself be deep-copied, and consumers do copy them: frame publication
+    takes a ``deepcopy`` of the whole scheduler state so that historical frames
+    are not mutated by later steps.  Copying a deeply immutable mapping is the
+    identity operation, so ``__deepcopy__`` returns ``self``.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Mapping) -> None:
+        self._data = {
+            key: _immutable_snapshot(item) for key, item in data.items()
+        }
+
+    def __getitem__(self, key: object) -> object:
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"frozen_mapping({self._data!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return self._data == dict(other)
+        return NotImplemented
+
+    def __deepcopy__(self, memo: dict) -> "_FrozenMapping":
+        return self
+
+
 def _immutable_snapshot(value: object) -> object:
     if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _immutable_snapshot(item) for key, item in value.items()}
-        )
+        return _FrozenMapping(value)
     if isinstance(value, list | tuple):
         return tuple(_immutable_snapshot(item) for item in value)
     if isinstance(value, set | frozenset):

@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+from src.control.common.contracts import ControlRouteSnapshot, UavRouteSnapshot
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_builder import build_frame
@@ -49,3 +50,39 @@ def test_compact_live_frame_omits_matrices_without_changing_replay_shape():
     assert "value_matrix" not in compact
     assert len(replay["info_matrix"]) == config.grid.resolution[0]
     assert len(replay["value_matrix"]) == config.grid.resolution[0]
+
+
+def test_publishing_a_frame_while_a_coverage_route_exists(tmp_path):
+    """A recorded coverage route must not break frame publication.
+
+    Regression: the snapshot deep-copy raised
+    ``TypeError: cannot pickle 'mappingproxy' object`` on the first frame after
+    a coverage route was recorded, killing the whole simulation process.
+    """
+    config = ConfigLoader.load()
+    state = StateManager(config)
+    state.episode_id = "episode-1"
+    state.update_uav_control(
+        "UAV-2", "heuristic", "heuristic", "coverage", 1, False,
+    )
+    route = ControlRouteSnapshot(
+        task_id="task-1",
+        task_type="coverage",
+        phase="coverage",
+        target_contact_id=None,
+        route=((1.0, 2.0, 0.0), (3.0, 4.0, 0.0)),
+        next_index=0,
+        route_revision=1,
+        planning_map_version=1,
+        status="ready",
+        coverage_progress={"phase": "coverage", "progress_cells": 12.0},
+    )
+    state.set_control_route("UAV-2", UavRouteSnapshot("episode-1", 1, route))
+    publisher = FramePublisher(FrameLogger(str(tmp_path)))
+    engine = _engine_with_time(config, state)
+
+    publisher.push_snapshot(engine, {}, total_steps=1)
+
+    assert publisher.flush(timeout=5)
+    publisher.close()
+    assert publisher.record_count == 1
