@@ -1,4 +1,7 @@
 ﻿from src.schedule.config_loader import AppConfig
+from collections import OrderedDict
+from dataclasses import replace
+
 from src.schedule.state_manager import StateManager
 from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
@@ -39,6 +42,7 @@ from src.mission.strategy_memory import StrategyMemoryStore
 
 _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
 _LOGGER = logging.getLogger(__name__)
+_CACHE_MISS = object()
 
 
 class TaskAllocator:
@@ -51,9 +55,17 @@ class TaskAllocator:
         llm_gateway=None,
         strategy_memory_store: StrategyMemoryStore | None = None,
         scheduler_mode: str = "mission",
+        route_cache_limit: int = 512,
+        metrics_cache_limit: int = 512,
     ):
         if scheduler_mode not in {"mission", "legacy"}:
             raise ValueError("scheduler_mode must be mission or legacy")
+        for name, limit in (
+            ("route_cache_limit", route_cache_limit),
+            ("metrics_cache_limit", metrics_cache_limit),
+        ):
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError(f"{name} must be a positive integer")
         self.config = config
         self.scheduler_mode = scheduler_mode
         self._legacy_search_id_warnings: set[str] = set()
@@ -93,10 +105,13 @@ class TaskAllocator:
             primitive_length=heuristic.astar_primitive_length_cells,
             sample_step=heuristic.path_sample_step_cells,
         )
-        self._mission_route_cache: dict[tuple, float | None] = {}
-        self._mission_route_metrics_cache: dict[
+        self._mission_route_cache: OrderedDict[tuple, float | None] = OrderedDict()
+        self._mission_route_metrics_cache: OrderedDict[
             tuple, tuple[float, float, tuple[float, float]] | None
-        ] = {}
+        ] = OrderedDict()
+        self._route_cache_limit = int(route_cache_limit)
+        self._metrics_cache_limit = int(metrics_cache_limit)
+        self._route_cache_version: int | None = None
         self._last_mission_snapshot: MissionSnapshot | None = None
         self.last_decision_timing: dict | None = None
 
@@ -517,12 +532,26 @@ class TaskAllocator:
         """Re-pair only approved work; light events cannot create work."""
         del decision
         wall_started = time.perf_counter()
-        snapshot = self.build_mission_snapshot(
-            current_time,
-            active_tasks=active_tasks,
-            intents=intents,
-            intent_statuses=intent_statuses,
-        )
+        previous = self._last_mission_snapshot
+        if previous is None:
+            snapshot = self.build_mission_snapshot(
+                current_time,
+                active_tasks=active_tasks,
+                intents=intents,
+                intent_statuses=intent_statuses,
+            )
+        else:
+            # Light events are allowed to re-pair approved work only. Reuse
+            # the last frozen candidate/edge graph instead of rebuilding all
+            # geometry and information matrices for a pairing-only tick.
+            snapshot = replace(
+                previous,
+                sim_time_min=float(current_time),
+                active_tasks=tuple(active_tasks),
+                intents=tuple(intents),
+                intent_statuses=tuple(intent_statuses),
+            )
+            self._last_mission_snapshot = snapshot
         snapshot_frozen_wall = time.perf_counter()
         approved_ids = tuple(
             task.task_id
@@ -787,6 +816,12 @@ class TaskAllocator:
         target: tuple[float, float],
         planning_map_version: int,
     ) -> tuple[float, float, tuple[float, float]] | None:
+        self._prepare_route_caches(planning_map_version)
+        scan_revision = int(getattr(
+            self.sm.information_policy,
+            "mutation_version",
+            self.sm.information_version,
+        ))
         key = (
             "mission-metrics",
             planning_map_version,
@@ -799,13 +834,12 @@ class TaskAllocator:
             tuple(task.bbox)
             if task.bbox is not None
             else tuple(round(value, 6) for value in target),
-            np.isfinite(self.sm.get_last_scan_matrix()).tobytes()
-            if task.kind in _SEARCH_TASK_KINDS
-            else None,
+            scan_revision if task.kind in _SEARCH_TASK_KINDS else None,
         )
         cache = self._mission_route_metrics_cache
-        if key in cache:
-            return cache[key]
+        cached = self._cache_get(cache, key)
+        if cached is not _CACHE_MISS:
+            return cached
 
         start = (*resource.position_cells, float(resource.heading_rad))
         try:
@@ -889,7 +923,7 @@ class TaskAllocator:
                     )
         except (PathNotFoundError, RuntimeError, TypeError, ValueError):
             result = None
-        cache[key] = result
+        self._cache_set(cache, key, result, self._metrics_cache_limit)
         return result
 
     def _mission_route_distance(
@@ -911,13 +945,15 @@ class TaskAllocator:
         base: tuple[float, float],
         planning_map_version: int,
     ) -> float | None:
+        self._prepare_route_caches(planning_map_version)
         key = (
             "return", planning_map_version, resource.uav_id, resource.generation,
             tuple(round(value, 6) for value in target),
             tuple(round(value, 6) for value in base),
         )
-        if key in self._mission_route_cache:
-            return self._mission_route_cache[key]
+        cached = self._cache_get(self._mission_route_cache, key)
+        if cached is not _CACHE_MISS:
+            return cached
         heading = math.atan2(base[1] - target[1], base[0] - target[0])
         try:
             direct = DubinsPath.compute(
@@ -928,7 +964,10 @@ class TaskAllocator:
                 direct.waypoints, self.sm.obstacle_mask,
             ):
                 distance = float(direct.total_length)
-                self._mission_route_cache[key] = distance
+                self._cache_set(
+                    self._mission_route_cache, key, distance,
+                    self._route_cache_limit,
+                )
                 return distance
             path = self._mission_navigator.plan_grid(
                 (*target, heading), {base}, self.sm.obstacle_mask, 1.0,
@@ -940,8 +979,32 @@ class TaskAllocator:
             distance = None
         else:
             distance = self._path_length(path)
-        self._mission_route_cache[key] = distance
+        self._cache_set(
+            self._mission_route_cache, key, distance, self._route_cache_limit,
+        )
         return distance
+
+    def _prepare_route_caches(self, planning_map_version: int) -> None:
+        version = int(planning_map_version)
+        if self._route_cache_version == version:
+            return
+        self._mission_route_cache.clear()
+        self._mission_route_metrics_cache.clear()
+        self._route_cache_version = version
+
+    @staticmethod
+    def _cache_get(cache: OrderedDict, key):
+        if key not in cache:
+            return _CACHE_MISS
+        cache.move_to_end(key)
+        return cache[key]
+
+    @staticmethod
+    def _cache_set(cache: OrderedDict, key, value, limit: int) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
 
     def _quick_standoff_path(
         self,

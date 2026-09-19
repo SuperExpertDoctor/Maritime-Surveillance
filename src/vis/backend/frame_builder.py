@@ -2,6 +2,7 @@
 import math
 from dataclasses import asdict
 from collections.abc import Mapping
+from functools import lru_cache
 
 from src.control.common.contracts import _immutable_snapshot
 from src.schedule.state_manager import StateManager
@@ -737,17 +738,30 @@ def _format_time(minutes: float) -> str:
 def _task_cells(region) -> list[list[int]]:
     """Expose task areas as explicit, slightly irregular grid-cell sets."""
     bbox = region.bbox
-    seed = sum(ord(char) for char in region.id)
+    return [list(cell) for cell in _task_cells_cached(
+        str(region.id), tuple(bbox),
+    )]
+
+
+@lru_cache(maxsize=2048)
+def _task_cells_cached(region_id: str, bbox: tuple[int, int, int, int]) -> tuple[tuple[int, int], ...]:
+    """Cache deterministic task geometry while returning immutable cells."""
+    sparse_edge_period = 5
+    seed = sum(ord(char) for char in region_id)
     cells = []
-    for col in range(bbox.col_start, bbox.col_end):
-        for row in range(bbox.row_start, bbox.row_end):
+    for col in range(bbox[0], bbox[2]):
+        for row in range(bbox[1], bbox[3]):
             edge_distance = min(
-                col - bbox.col_start,
-                bbox.col_end - 1 - col,
-                row - bbox.row_start,
-                bbox.row_end - 1 - row,
+                col - bbox[0],
+                bbox[2] - 1 - col,
+                row - bbox[1],
+                bbox[3] - 1 - row,
             )
-            if edge_distance == 0 and (col * 13 + row * 7 + seed) % 5 == 0:
+            _, sparse_edge_remainder = divmod(
+                col * 13 + row * 7 + seed,
+                sparse_edge_period,
+            )
+            if edge_distance == 0 and sparse_edge_remainder == 0:
                 continue
-            cells.append([col, row])
-    return cells
+            cells.append((col, row))
+    return tuple(cells)

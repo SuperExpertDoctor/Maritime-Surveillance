@@ -5,8 +5,13 @@ import argparse
 import json
 import math
 import os
+import statistics
+import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -17,9 +22,125 @@ if PROJECT_ROOT not in sys.path:
 
 from src.env.simulation import SimulationEngine  # noqa: E402
 from src.schedule.config_loader import ConfigLoader  # noqa: E402
+from src.schedule.task_allocator import TaskAllocator  # noqa: E402
+from src.mission.coverage_policy import rank_search_candidates  # noqa: E402
 
 
 CHECKPOINTS = (120, 240, 360, 480)
+
+
+@dataclass(frozen=True)
+class _HotspotCandidate:
+    task_id: str
+    bbox: tuple[int, int, int, int]
+
+    @property
+    def cells(self):
+        return tuple(
+            (col, row)
+            for col in range(self.bbox[0], self.bbox[2])
+            for row in range(self.bbox[1], self.bbox[3])
+        )
+
+
+def _hotspot_fixture():
+    shape = (614, 611)
+    last_sar = np.full(shape, -np.inf, dtype=float)
+    last_sar[::7, ::11] = 0.0
+    candidates = []
+    estimated = {}
+    for index in range(256):
+        col = 2 + (index * 17) % 570
+        row = 2 + (index * 23) % 560
+        candidate = _HotspotCandidate(
+            f"search:{index}", (col, row, col + 24, row + 24)
+        )
+        candidates.append(candidate)
+        estimated[candidate.task_id] = 12.0
+    return candidates, last_sar, estimated
+
+
+def _head_sha() -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    value = result.stdout.strip()
+    return value or None
+
+
+def evaluate_branch1_hotspots(repeat: int = 10, seed: int = 42) -> dict:
+    """Measure the deterministic scheduling/cache hot paths used by Task 9."""
+    if repeat < 1:
+        raise ValueError("repeat must be positive")
+    seed = int(seed)  # The fixture is deterministic; retain the CLI seed contract.
+    candidates, last_sar, estimated = _hotspot_fixture()
+    rank_times_ms = []
+    for _ in range(repeat):
+        started = time.perf_counter()
+        ranked = rank_search_candidates(
+            candidates,
+            now_min=120.0,
+            last_sar=last_sar,
+            estimated_minutes=estimated,
+        )
+        rank_times_ms.append((time.perf_counter() - started) * 1000.0)
+        if len(ranked) != len(candidates):
+            raise RuntimeError("hotspot fixture changed candidate cardinality")
+
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    snapshot = allocator.build_mission_snapshot(0.0)
+    light_times_ms = []
+    for index in range(repeat):
+        started = time.perf_counter()
+        allocator._handle_light_mission_trigger(
+            float(index + 1),
+            SimpleNamespace(),
+            snapshot.active_tasks,
+            intents=snapshot.intents,
+            intent_statuses=snapshot.intent_statuses,
+        )
+        light_times_ms.append((time.perf_counter() - started) * 1000.0)
+
+    def percentile(values, fraction):
+        ordered = sorted(values)
+        position = (len(ordered) - 1) * fraction
+        lower = int(math.floor(position))
+        upper = int(math.ceil(position))
+        if lower == upper:
+            return ordered[lower]
+        weight = position - lower
+        return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+    return {
+        "scenario": "branch1-hotspots",
+        "status": "finished",
+        "seed": seed,
+        "head_sha": _head_sha(),
+        "repeat": repeat,
+        "fixture_cells": int(last_sar.size),
+        "rank_search_candidates_ms": {
+            "p50": round(statistics.median(rank_times_ms), 3),
+            "p95": round(percentile(rank_times_ms, 0.95), 3),
+        },
+        "light_snapshot_ms": {
+            "p50": round(statistics.median(light_times_ms), 3),
+            "p95": round(percentile(light_times_ms, 0.95), 3),
+        },
+        "cache_peak_entries": {
+            "route": len(allocator._mission_route_cache),
+            "metrics": len(allocator._mission_route_metrics_cache),
+            "geometry": allocator.extractor._pool_geometry_cache_limit,
+            "task_cells": 2048,
+        },
+        "thresholds": {
+            "route": 512,
+            "metrics": 512,
+            "geometry": 2048,
+        },
+    }
 
 
 def _timeliness_metrics(engine: SimulationEngine) -> dict[str, float]:
@@ -198,10 +319,16 @@ def evaluate(steps: int = 480, seed: int = 42) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scenario", choices=("branch1-hotspots",))
+    parser.add_argument("--repeat", type=int, default=10)
     parser.add_argument("--steps", type=int, default=480)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    print(json.dumps(evaluate(args.steps, args.seed), ensure_ascii=False, indent=2))
+    if args.scenario == "branch1-hotspots":
+        payload = evaluate_branch1_hotspots(args.repeat, args.seed)
+    else:
+        payload = evaluate(args.steps, args.seed)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

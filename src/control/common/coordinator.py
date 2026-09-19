@@ -1218,7 +1218,7 @@ class ControlCoordinator:
     def _validate_time(
         value: float, name: str, *, allow_zero: bool = False
     ) -> None:
-        lower_bound = 0.0 if allow_zero else 0.0
+        lower_bound = 0.0
         if (
             isinstance(value, bool)
             or not isinstance(value, int | float)

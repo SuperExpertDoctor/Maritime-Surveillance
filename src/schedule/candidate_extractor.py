@@ -1,5 +1,5 @@
 ﻿import math
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,9 +19,13 @@ class CandidateResult:
 
 
 class CandidateExtractor:
-    def __init__(self):
+    def __init__(self, *, geometry_cache_limit: int = 2048):
+        if isinstance(geometry_cache_limit, bool) or not isinstance(geometry_cache_limit, int) or geometry_cache_limit < 1:
+            raise ValueError("geometry_cache_limit must be a positive integer")
         self.coverage_planner = CoveragePlanner(sample_step=0.25)
-        self._pool_geometry_cache: dict[tuple[int, tuple[int, int, int, int]], bool] = {}
+        self._pool_geometry_cache: OrderedDict[tuple[int, int, int, int], bool] = OrderedDict()
+        self._pool_geometry_cache_limit = int(geometry_cache_limit)
+        self._pool_geometry_cache_version: int | None = None
 
     @staticmethod
     def _valid_active_search_regions(sm: StateManager):
@@ -277,18 +281,7 @@ class CandidateExtractor:
                         bbox = BBox(col, row, col + width, row + height)
                         if self._rect_sum(occupied_prefix, bbox) > 0:
                             continue
-                        key = (int(getattr(sm, "obstacle_version", 0)), tuple(bbox))
-                        feasible = self._pool_geometry_cache.get(key)
-                        if feasible is None:
-                            # The clearance envelope is a conservative,
-                            # constant-time certificate for this pool. Full
-                            # Dubins sampling remains in the final edge and
-                            # assignment validators, so enumeration does not
-                            # run the same geometry planner thousands of times.
-                            feasible = self._has_turning_clearance(
-                                bbox, sm.obstacle_mask,
-                            )
-                            self._pool_geometry_cache[key] = feasible
+                        feasible = self._pool_geometry_feasible(sm, bbox)
                         if not feasible:
                             continue
                         total = self._rect_sum(value_prefix, bbox)
@@ -703,6 +696,27 @@ class CandidateExtractor:
             candidate_regions=candidates,
             fragment_alerts=fragments,
         )
+
+    def _pool_geometry_feasible(self, sm: StateManager, bbox: BBox) -> bool:
+        version = int(getattr(sm, "obstacle_version", 0))
+        if self._pool_geometry_cache_version != version:
+            self._pool_geometry_cache.clear()
+            self._pool_geometry_cache_version = version
+        key = tuple(bbox)
+        cached = self._pool_geometry_cache.get(key)
+        if cached is not None:
+            self._pool_geometry_cache.move_to_end(key)
+            return cached
+        # The clearance envelope is a conservative, constant-time certificate
+        # for this pool. Full Dubins sampling remains in the final edge and
+        # assignment validators, so enumeration does not run the same
+        # geometry planner thousands of times.
+        feasible = self._has_turning_clearance(bbox, sm.obstacle_mask)
+        self._pool_geometry_cache[key] = feasible
+        self._pool_geometry_cache.move_to_end(key)
+        while len(self._pool_geometry_cache) > self._pool_geometry_cache_limit:
+            self._pool_geometry_cache.popitem(last=False)
+        return feasible
 
     @staticmethod
     def _matching_intent_ids(bbox: BBox, intents: tuple[Intent, ...]) -> tuple[str, ...]:
