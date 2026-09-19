@@ -170,12 +170,16 @@ class CoveragePolicy:
                 continue
             seen_ids.add(task_id)
             normalized.append(task)
-        search_kinds = {"search", "direction_search", "investigation"}
+        # Only ordinary SAR rectangles consume the standing coverage reserve.
+        # Direction and passive-investigation tasks are urgent information
+        # work even though they carry a search-shaped bbox.
+        search_kinds = {"search"}
         ordinary = [
             task for task in normalized
             if getattr(task, "kind", "search") in search_kinds
         ]
-        urgent = [task for task in normalized if task not in ordinary]
+        ordinary_ids = {task.task_id for task in ordinary}
+        urgent = [task for task in normalized if task.task_id not in ordinary_ids]
         reserve_count = min(ordinary_reserve, capacity, len(ordinary))
         urgent_count = min(capacity - reserve_count, len(urgent))
 
@@ -194,15 +198,44 @@ class CoveragePolicy:
                 break
         selected = [*urgent[:urgent_count], *representative_ordinary]
         selected_ids = {task.task_id for task in selected}
+
+        def task_box(task: Any) -> tuple[float, float, float, float] | None:
+            bbox = getattr(task, "bbox", None)
+            if bbox is None:
+                return None
+            return tuple(float(value) for value in bbox)
+
+        selected_boxes = [
+            box for task in selected if (box := task_box(task)) is not None
+        ]
+
+        # Keep the prompt useful after the representative reserve.  A dense
+        # candidate pool often contains many overlapping windows around the
+        # same representative; spending the remaining capacity on those
+        # windows leaves otherwise healthy UAVs without legal successor work.
+        for task in normalized:
+            if len(selected) >= capacity or task.task_id in selected_ids:
+                continue
+            box = task_box(task)
+            if task.task_id not in ordinary_ids or box is None:
+                continue
+            if any(_boxes_overlap(box, other) for other in selected_boxes):
+                continue
+            selected.append(task)
+            selected_ids.add(task.task_id)
+            selected_boxes.append(box)
+
         for task in normalized:
             if len(selected) >= capacity:
                 break
-            if task.task_id in selected_ids:
+            if task.task_id in selected_ids or task.task_id in ordinary_ids:
                 continue
             selected.append(task)
             selected_ids.add(task.task_id)
 
-        ordinary_selected = [task for task in selected if task in ordinary]
+        ordinary_selected = [
+            task for task in selected if task.task_id in ordinary_ids
+        ]
         representatives: list[str] = []
         representative_boxes: list[tuple[float, float, float, float]] = []
         for task in ordinary_selected:
@@ -216,8 +249,9 @@ class CoveragePolicy:
             representative_boxes.append(normalized_bbox)
 
         sources = []
+        urgent_ids = {task.task_id for task in urgent}
         for task in selected:
-            source = "urgent" if task in urgent else "ordinary"
+            source = "urgent" if task.task_id in urgent_ids else "ordinary"
             sources.append((task.task_id, source))
         return CoverageCandidateWindow(
             tasks=tuple(selected),
@@ -332,10 +366,13 @@ def rank_search_candidates(
 ) -> tuple[Any, ...]:
     """Rank search candidates without changing their identity or order data.
 
-    The key is ``(unseen first, oldest due time, due density, bbox)``.  An
-    unseen cell has episode age zero; otherwise age is represented by its
-    actual SAR timestamp.  Missing route estimates use the candidate cell
-    count as a conservative one-cell-per-minute estimate.
+    The key is ``(unseen first, oldest due time, regular work, due density,
+    shorter task, bbox)``.  An unseen cell has episode age zero; otherwise age
+    is represented by its actual SAR timestamp.  Residual ``fragment:*``
+    candidates are deliberately considered after complete search rectangles
+    at the same freshness so short edge strips do not consume a sortie before
+    the broad domain pass is complete.  Missing route estimates use the
+    candidate cell count as a conservative one-cell-per-minute estimate.
     """
     now = _time(now_min, "now_min")
     if (
@@ -381,7 +418,7 @@ def _rank_key(
     last: np.ndarray,
     estimated_minutes: Mapping[str, Real],
     primary_window_min: int,
-) -> tuple[int, float, float, tuple[int, int, int, int]]:
+) -> tuple[int, float, int, float, int, tuple[int, int, int, int]]:
     timestamps = np.asarray([last[col, row] for col, row in cells], dtype=float)
     unseen = ~np.isfinite(timestamps)
     due = unseen | (timestamps <= now - primary_window_min)
@@ -405,7 +442,15 @@ def _rank_key(
             raise ValueError(f"estimated_minutes[{task_id!r}] must be finite and positive")
 
     density = due_count / max(estimate_value, 1e-6)
-    return (0 if unseen_count else 1, oldest_due, -density, bbox)
+    fragment = int(task_id.startswith("fragment:"))
+    return (
+        0 if unseen_count else 1,
+        oldest_due,
+        fragment,
+        -density,
+        len(cells),
+        bbox,
+    )
 
 
 def _boxes_overlap(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> bool:

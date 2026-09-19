@@ -235,3 +235,18 @@ def test_catalog_regular_search_id_is_stable_when_extractor_order_changes(state)
         "search:9:4:13:9",
     }
     assert {task.task_id for task in second} == {task.task_id for task in first}
+
+
+def test_catalog_scales_search_duration_with_sar_workload(state):
+    candidates = [
+        _search_candidate((5, 1, 9, 6)),
+        _search_candidate((11, 1, 17, 9)),
+    ]
+
+    tasks = TaskCatalog(candidate_extractor=CandidateSource(candidates)).build(
+        state, (), (), now_min=10.0,
+    )
+
+    assert tasks[0].estimated_duration_min == pytest.approx(20 / 1.5)
+    assert tasks[1].estimated_duration_min == pytest.approx(48 / 1.5)
+    assert tasks[0].estimated_duration_min < tasks[1].estimated_duration_min

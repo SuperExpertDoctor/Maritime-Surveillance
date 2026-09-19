@@ -207,9 +207,14 @@ def _selection_object(payload) -> tuple[MissionSelection | None, list[str]]:
 
 
 def _task_maps(snapshot: MissionSnapshot):
-    active = {task.task_id: task for task in snapshot.active_tasks}
-    # An approved record is the execution source of truth when a stable task
-    # ID appears in both streams.  The candidate copy must not shadow it.
+    active = {
+        task.task_id: task
+        for task in snapshot.active_tasks
+        if task.status in _ACTIVE_RECORD_STATUSES
+    }
+    # An active record is the execution source of truth when a stable task ID
+    # appears in both streams. Terminal audit records must not shadow a fresh
+    # candidate with the same stable geometry ID.
     candidates = {
         task.task_id: task
         for task in snapshot.candidates
@@ -562,13 +567,19 @@ def _validate_selection(
             set(selected_task_ids)
             & set(coverage_constraint.representative_task_ids)
         )
-        if coverage_constraint.required_new_search_count > len(selected_representatives):
+        floor_infeasible = coverage_constraint.infeasible_reason is not None
+        if (
+            not floor_infeasible
+            and coverage_constraint.required_new_search_count
+            > len(selected_representatives)
+        ):
             errors.append(
                 "coverage_floor_not_met:"
                 f"{coverage_constraint.required_new_search_count}"
             )
         if (
-            coverage_constraint.required_new_search_count > 0
+            not floor_infeasible
+            and coverage_constraint.required_new_search_count > 0
             and not set(coverage_constraint.must_service_task_ids).issubset(
                 selected_representatives
             )

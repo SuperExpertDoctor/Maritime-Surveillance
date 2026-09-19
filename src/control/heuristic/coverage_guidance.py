@@ -134,12 +134,22 @@ class CoverageRouteFollower:
 
         scan_segment_index = self._scan_segment_for_progress(self._progress)
         stable_margin = max(speed * dt_min, self._along_track_cells / 2.0)
+        at_scan_endpoint = False
+        if scan_segment_index is not None:
+            _scan_start, scan_end = self._scan_ranges[scan_segment_index]
+            at_scan_endpoint = (
+                abs(self._progress - self._cumulative[scan_end])
+                <= 1e-6
+            )
         self._scan_is_stable = (
             scan_segment_index is not None
-            and self._scan_segment_for_progress(
-                self._progress, margin=stable_margin
+            and (
+                self._scan_segment_for_progress(
+                    self._progress, margin=stable_margin
+                )
+                == scan_segment_index
+                or at_scan_endpoint
             )
-            == scan_segment_index
         )
         if scan_segment_index is not None:
             scan_start, scan_end = self._scan_ranges[scan_segment_index]
@@ -299,11 +309,13 @@ class CoverageRouteFollower:
         self, progress: float, *, margin: float = 0.0
     ) -> int | None:
         for scan_index, (start, end) in enumerate(self._scan_ranges):
-            if (
-                self._cumulative[start] + margin
-                < progress
-                < self._cumulative[end] - margin
-            ):
+            lower = self._cumulative[start] + margin
+            upper = self._cumulative[end] - margin
+            if margin <= 0.0:
+                in_range = lower < progress <= self._cumulative[end] + 1e-9
+            else:
+                in_range = lower < progress < upper
+            if in_range:
                 return scan_index
         return None
 

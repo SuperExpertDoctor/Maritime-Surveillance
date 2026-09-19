@@ -49,6 +49,9 @@ class ObstacleAvoider:
         direct = DubinsPath.compute(start, goal, R_min, self.sample_step)
         if self.is_path_safe(direct.waypoints, obstacle_mask):
             return direct.waypoints
+        local = self._plan_via_local_anchors(start, goal, obstacle_mask, R_min)
+        if local:
+            return local
 
         rng = random.Random(self.seed)
         nodes = [_Node(start, None, 0.0, [start])]
@@ -130,6 +133,54 @@ class ObstacleAvoider:
         if not self.is_path_safe(path, obstacle_mask):
             raise RuntimeError("planner generated an unsafe path")
         return path
+
+    def _plan_via_local_anchors(
+        self,
+        start: Pose,
+        goal: Pose,
+        obstacle_mask: np.ndarray,
+        R_min: float,
+    ) -> list[Pose]:
+        """Try a small deterministic set before invoking the full RRT* search."""
+        dx = goal[0] - start[0]
+        dy = goal[1] - start[1]
+        distance = math.hypot(dx, dy)
+        if distance <= 1e-9:
+            return []
+        ux, uy = dx / distance, dy / distance
+        nx, ny = -uy, ux
+        cols, rows = obstacle_mask.shape
+        offsets = (1.5, 2.0, 2.5, 3.0, 4.0)
+        fractions = (0.35, 0.5, 0.65)
+        for fraction in fractions:
+            base_x = start[0] + fraction * dx
+            base_y = start[1] + fraction * dy
+            for multiplier in offsets:
+                for sign in (-1.0, 1.0):
+                    anchor_xy = (
+                        base_x + sign * multiplier * R_min * nx,
+                        base_y + sign * multiplier * R_min * ny,
+                    )
+                    if not (
+                        0.0 <= anchor_xy[0] < cols
+                        and 0.0 <= anchor_xy[1] < rows
+                    ) or self._blocked(anchor_xy, obstacle_mask):
+                        continue
+                    heading = math.atan2(
+                        goal[1] - anchor_xy[1], goal[0] - anchor_xy[0]
+                    )
+                    anchor = (*anchor_xy, heading)
+                    first = DubinsPath.compute(
+                        start, anchor, R_min, self.sample_step
+                    ).waypoints
+                    if not self.is_path_safe(first, obstacle_mask):
+                        continue
+                    second = DubinsPath.compute(
+                        anchor, goal, R_min, self.sample_step
+                    ).waypoints
+                    if self.is_path_safe(second, obstacle_mask):
+                        return [*first, *second[1:]]
+        return []
 
     def _plan_via_free_anchor(
         self,

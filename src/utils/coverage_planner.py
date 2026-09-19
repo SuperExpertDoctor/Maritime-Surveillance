@@ -52,6 +52,7 @@ class CoveragePlanner:
         R_min: float,
         direction: str | None = None,
         along_track_cells: float | None = None,
+        bounds: tuple[int, int] | None = None,
     ) -> CoveragePath:
         box = bbox if isinstance(bbox, BBox) else BBox(*bbox)
         width = box.col_end - box.col_start
@@ -67,7 +68,15 @@ class CoveragePlanner:
         if direction not in (None, "horizontal", "vertical"):
             raise ValueError("direction must be horizontal, vertical, or None")
 
-        orientation = direction or ("horizontal" if width >= height else "vertical")
+        orientation = self._select_orientation(
+            box,
+            width,
+            height,
+            direction,
+            along_track,
+            R_min,
+            bounds,
+        )
         swaths = self._build_swaths(
             box,
             swath_width,
@@ -75,9 +84,12 @@ class CoveragePlanner:
             orientation,
             along_track,
             extend_endpoints=use_sensor_geometry,
+            bounds=bounds,
         )
-        if swaths and math.dist(tuple(start_pose[:2]), swaths[0].end) < math.dist(
-            tuple(start_pose[:2]), swaths[0].start
+        if (
+            swaths
+            and math.dist(tuple(start_pose[:2]), swaths[0].end)
+            < math.dist(tuple(start_pose[:2]), swaths[0].start)
         ):
             swaths = [
                 ScanSwath(
@@ -109,6 +121,31 @@ class CoveragePlanner:
 
         return result
 
+    def _select_orientation(
+        self,
+        box: BBox,
+        width: int,
+        height: int,
+        direction: str | None,
+        along_track_cells: float,
+        radius: float,
+        bounds: tuple[int, int] | None,
+    ) -> str:
+        if direction is not None or bounds is None:
+            return direction or ("horizontal" if width >= height else "vertical")
+        orientation = "horizontal" if width >= height else "vertical"
+        endpoint_extension = max(along_track_cells, 3.3 * radius)
+        col_clearance = min(box.col_start, bounds[0] - box.col_end)
+        row_clearance = min(box.row_start, bounds[1] - box.row_end)
+        # A vertical scan turns at the row endpoints. Keep those turns away
+        # from the world edge when the required sensor extension would reach
+        # the boundary; horizontal lanes put the turns on the column axis.
+        if row_clearance <= endpoint_extension:
+            orientation = "horizontal"
+        elif col_clearance <= endpoint_extension:
+            orientation = "vertical"
+        return orientation
+
     def _build_swaths(
         self,
         box: BBox,
@@ -117,10 +154,35 @@ class CoveragePlanner:
         orientation: str,
         along_track_cells: float = 0.8,
         extend_endpoints: bool = True,
+        bounds: tuple[int, int] | None = None,
     ) -> list[ScanSwath]:
+        if bounds is not None:
+            if len(bounds) != 2 or any(int(value) <= 0 for value in bounds):
+                raise ValueError("bounds must contain two positive dimensions")
+            col_limit = math.nextafter(float(int(bounds[0])), 0.0)
+            row_limit = math.nextafter(float(int(bounds[1])), 0.0)
+            # A route endpoint can be consumed one control tick past its
+            # nominal pose. Leave room for that settling distance plus the
+            # fixed-wing turn before the aircraft commits to the next leg.
+            boundary_guard = float(radius) + max(
+                float(along_track_cells), self.sample_step,
+            )
+            col_floor = min(boundary_guard, col_limit / 2.0)
+            row_floor = min(boundary_guard, row_limit / 2.0)
+
+            def clamp(value: float, floor: float, limit: float) -> float:
+                return min(max(value, floor), limit - floor)
+
+        else:
+            col_floor = row_floor = None
+            col_limit = row_limit = None
+
         swaths: list[ScanSwath] = []
-        # The controller needs physical settling distance after each U-turn;
-        # otherwise the first edge cells are passed before SAR is stable.
+        bounded_sensor_route = bounds is not None and extend_endpoints
+        lane_width = max(width, 2.0 * radius) if bounded_sensor_route else width
+        # Keep enough straight-line distance for the fixed-wing turn and
+        # heading-settling transient before the first edge cell and after the
+        # last one. The bounded route guard keeps this extension in-world.
         endpoint_extension = (
             max(along_track_cells, 3.3 * radius) if extend_endpoints else 0.0
         )
@@ -130,10 +192,13 @@ class CoveragePlanner:
         if orientation == "horizontal":
             low_endpoint = float(box.col_start) - endpoint_extension
             high_endpoint = float(box.col_end) + endpoint_extension
-            count = int(math.ceil((box.row_end - box.row_start) / width))
+            if bounds is not None:
+                low_endpoint = clamp(low_endpoint, col_floor, col_limit)
+                high_endpoint = clamp(high_endpoint, col_floor, col_limit)
+            count = int(math.ceil((box.row_end - box.row_start) / lane_width))
             for index in range(count):
-                band_start = box.row_start + index * width
-                band_end = min(box.row_end, band_start + width)
+                band_start = box.row_start + index * lane_width
+                band_end = min(box.row_end, band_start + lane_width)
                 # Put the first cell centre safely inside the near/far range;
                 # the far boundary is exclusive in SARSensor.
                 track = (
@@ -150,29 +215,44 @@ class CoveragePlanner:
                 if index % 2 == 0:
                     start = (low_endpoint, track)
                     end = (
-                        float(box.col_end) + terminal_extension
-                        if index == count - 1
+                        clamp(
+                            float(box.col_end) + terminal_extension,
+                            col_floor,
+                            col_limit,
+                        )
+                        if bounded_sensor_route and index == count - 1
                         else high_endpoint,
                         track,
                     )
+                    if bounds is not None and index == count - 1:
+                        end = (clamp(end[0], col_floor, col_limit), end[1])
                     heading, look = 0.0, "right"
                 else:
                     start = (high_endpoint, track)
                     end = (
-                        float(box.col_start) - terminal_extension
-                        if index == count - 1
+                        clamp(
+                            float(box.col_start) - terminal_extension,
+                            col_floor,
+                            col_limit,
+                        )
+                        if bounded_sensor_route and index == count - 1
                         else low_endpoint,
                         track,
                     )
+                    if bounds is not None and index == count - 1:
+                        end = (clamp(end[0], col_floor, col_limit), end[1])
                     heading, look = math.pi, "left"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
         else:
             low_endpoint = float(box.row_start) - endpoint_extension
             high_endpoint = float(box.row_end) + endpoint_extension
-            count = int(math.ceil((box.col_end - box.col_start) / width))
+            if bounds is not None:
+                low_endpoint = clamp(low_endpoint, row_floor, row_limit)
+                high_endpoint = clamp(high_endpoint, row_floor, row_limit)
+            count = int(math.ceil((box.col_end - box.col_start) / lane_width))
             for index in range(count):
-                band_start = box.col_start + index * width
-                band_end = min(box.col_end, band_start + width)
+                band_start = box.col_start + index * lane_width
+                band_end = min(box.col_end, band_start + lane_width)
                 # Put the first cell centre safely inside the near/far range;
                 # the far boundary is exclusive in SARSensor.
                 track = (
@@ -190,19 +270,31 @@ class CoveragePlanner:
                     start = (track, low_endpoint)
                     end = (
                         track,
-                        float(box.row_end) + terminal_extension
-                        if index == count - 1
+                        clamp(
+                            float(box.row_end) + terminal_extension,
+                            row_floor,
+                            row_limit,
+                        )
+                        if bounded_sensor_route and index == count - 1
                         else high_endpoint,
                     )
+                    if bounds is not None and index == count - 1:
+                        end = (end[0], clamp(end[1], row_floor, row_limit))
                     heading, look = math.pi / 2.0, "left"
                 else:
                     start = (track, high_endpoint)
                     end = (
                         track,
-                        float(box.row_start) - terminal_extension
-                        if index == count - 1
+                        clamp(
+                            float(box.row_start) - terminal_extension,
+                            row_floor,
+                            row_limit,
+                        )
+                        if bounded_sensor_route and index == count - 1
                         else low_endpoint,
                     )
+                    if bounds is not None and index == count - 1:
+                        end = (end[0], clamp(end[1], row_floor, row_limit))
                     heading, look = -math.pi / 2.0, "right"
                 swaths.append(ScanSwath(start, end, look, footprint, heading))
         return swaths
@@ -236,13 +328,21 @@ class CoveragePlanner:
         box = bbox if isinstance(bbox, BBox) else BBox(*bbox)
         width = box.col_end - box.col_start
         height = box.row_end - box.row_start
-        orientation = "horizontal" if width >= height else "vertical"
         use_sensor_geometry = along_track_cells is not None
         along_track = (
             1.0 if along_track_cells is None else float(along_track_cells)
         )
         if not math.isfinite(along_track) or along_track <= 0.0:
             raise ValueError("along_track_cells must be finite and positive")
+        orientation = self._select_orientation(
+            box,
+            width,
+            height,
+            None,
+            along_track,
+            R_min,
+            tuple(obstacle_mask.shape),
+        )
         swaths = self._build_swaths(
             box,
             swath_width,
@@ -250,6 +350,7 @@ class CoveragePlanner:
             orientation,
             along_track_cells=along_track,
             extend_endpoints=use_sensor_geometry,
+            bounds=tuple(obstacle_mask.shape),
         )
         previous: ScanSwath | None = None
         for swath in swaths:

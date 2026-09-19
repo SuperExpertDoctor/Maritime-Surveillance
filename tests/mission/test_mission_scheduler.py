@@ -403,6 +403,22 @@ def test_approved_active_task_can_be_selected_on_its_original_id():
     ) == (Assignment("Q1", "U1", 2, None),)
 
 
+def test_terminal_task_record_does_not_shadow_reusable_candidate():
+    blocked = TaskRecord(
+        "Q1", "search", "blocked", (10, 10, 14, 14), None, (), None,
+        "call-1", 0.0, 0.0, 1.0, "coverage_incomplete",
+    )
+    snapshot = _snapshot(
+        [_task("Q1", bbox=(10, 10, 14, 14))],
+        [_resource("U1")],
+        [_edge("Q1", "U1", 1.0)],
+        available=("U1",),
+        active_tasks=(blocked,),
+    )
+
+    assert validate_selection(_selection(snapshot, ["Q1"]), snapshot) == ()
+
+
 def test_selection_rejects_transit_that_exhausts_resource_range():
     task = _task("Q1", kind="probe", contact_id="C1")
     snapshot = _snapshot(

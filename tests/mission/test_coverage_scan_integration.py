@@ -336,3 +336,82 @@ def test_shared_coverage_scenarios_and_constraint_aware_fixture():
     assert result.success
     assert {"search-old", "search-new"} <= set(result.payload["selected_task_ids"])
     assert len(result.payload["notes"]) <= 160
+
+    constrained_snapshot = {
+        **snapshot,
+        "candidates": [snapshot["candidates"][1]],
+        "feasible_edges": [snapshot["feasible_edges"][1]],
+    }
+    result = gateway.request_json(
+        role="decision_maker",
+        snapshot_id="coverage-fixture",
+        user_payload={"snapshot": constrained_snapshot},
+        validate=validate,
+    )
+    assert result.success
+    assert result.payload["selected_task_ids"] == ["search-old"]
+
+
+def test_coverage_fixture_spreads_visible_bounded_search_work():
+    from scripts.persistent_coverage_scenarios import CoverageFixtureGateway
+
+    candidates = [
+        {
+            "task_id": f"search-{index}",
+            "kind": "search",
+            "priority": "normal",
+            "bbox": [index * 4, 0, index * 4 + 2, 2],
+        }
+        for index in range(6)
+    ]
+    ordered = CoverageFixtureGateway._spread_representatives(
+        tuple(item["task_id"] for item in candidates),
+        {item["task_id"]: item for item in candidates},
+        ("search-0",),
+        3,
+    )
+
+    assert ordered[:3] == (
+        "search-0", "search-5", "search-2",
+    )
+
+
+def test_coverage_fixture_keeps_spatial_representatives_without_floor():
+    from scripts.persistent_coverage_scenarios import CoverageFixtureGateway
+
+    candidates = [
+        {
+            "task_id": f"search-{index}",
+            "kind": "search",
+            "priority": "normal",
+            "bbox": [index * 4, 0, index * 4 + 2, 2],
+        }
+        for index in range(6)
+    ]
+    snapshot = {
+        "snapshot_id": "coverage-no-floor",
+        "information_version": 1,
+        "available_uav_ids": ["UAV-1", "UAV-2", "UAV-3"],
+        "candidates": candidates,
+        "feasible_edges": [
+            {"task_id": item["task_id"], "uav_id": f"UAV-{index % 3 + 1}"}
+            for index, item in enumerate(candidates)
+        ],
+        "coverage_constraint": {
+            "required_new_search_count": 0,
+            "representative_task_ids": [item["task_id"] for item in candidates],
+            "must_service_task_ids": [],
+        },
+    }
+
+    result = CoverageFixtureGateway().request_json(
+        role="decision_maker",
+        snapshot_id=snapshot["snapshot_id"],
+        user_payload={"snapshot": snapshot},
+        validate=lambda _payload: (),
+    )
+
+    assert result.success
+    assert result.payload["selected_task_ids"][:3] == [
+        "search-0", "search-5", "search-2",
+    ]

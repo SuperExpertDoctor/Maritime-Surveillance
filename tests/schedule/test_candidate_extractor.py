@@ -134,11 +134,13 @@ def test_candidate_bbox_within_size_range(sm):
         assert area <= sm.config.grid.search_max_cells, "Area unexpectedly large"
 
 
-def test_initial_candidates_preserve_validated_normal_sortie_size(sm):
+def test_initial_candidates_use_sortie_sized_tiles(sm):
     result = CandidateExtractor().extract(sm)
     assert result.candidate_regions
     assert all(
-        candidate["cell_count"] == sm.config.grid.search_max_cells
+        sm.config.grid.search_min_cells
+        <= candidate["cell_count"]
+        <= sm.config.grid.search_min_cells * 2
         for candidate in result.candidate_regions
     )
 

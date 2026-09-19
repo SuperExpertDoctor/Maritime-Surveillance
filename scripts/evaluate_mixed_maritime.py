@@ -323,6 +323,113 @@ class _FixtureGateway:
         self, snapshot: dict, validate
     ) -> tuple[dict, tuple[str, ...]]:
         """Build a fixture selection through the same validator as production."""
+        coverage = snapshot.get("coverage_constraint")
+        if isinstance(coverage, dict):
+            required = coverage.get("required_new_search_count", 0)
+            required = required if type(required) is int and required > 0 else 0
+            must_service = tuple(
+                item for item in coverage.get("must_service_task_ids", ())
+                if isinstance(item, str)
+            )
+            representatives = tuple(
+                item for item in coverage.get("representative_task_ids", ())
+                if isinstance(item, str)
+            )
+            if required or must_service:
+                candidates = {
+                    item.get("task_id"): item
+                    for item in snapshot.get("candidates", ())
+                    if isinstance(item, dict)
+                    and isinstance(item.get("task_id"), str)
+                }
+                feasible_ids = {
+                    edge.get("task_id")
+                    for edge in snapshot.get("feasible_edges", ())
+                    if isinstance(edge, dict)
+                    and isinstance(edge.get("task_id"), str)
+                }
+                urgent_kinds = {"investigation", "direction_search"}
+                contact_ids = [
+                    task_id
+                    for task_id, item in sorted(
+                        candidates.items(),
+                        key=lambda pair: (
+                            0 if pair[1].get("kind") == "track" else 1,
+                            0 if pair[1].get("priority") == "high" else 1,
+                            pair[0],
+                        ),
+                    )
+                    if item.get("kind") in {"probe", "track"}
+                    and task_id in feasible_ids
+                ]
+                urgent_ids = [
+                    task_id
+                    for task_id, item in sorted(
+                        candidates.items(),
+                        key=lambda pair: (
+                            0 if pair[1].get("kind") == "investigation" else 1,
+                            0 if pair[1].get("priority") == "high" else 1,
+                            pair[0],
+                        ),
+                    )
+                    if item.get("kind") in urgent_kinds
+                    and task_id in feasible_ids
+                ]
+                ordered = [
+                    *urgent_ids,
+                    *(
+                        contact_ids[:1]
+                        if self.allow_handoff_preemption else ()
+                    ),
+                ]
+                ordered.extend(
+                    task_id
+                    for task_id in (*must_service, *representatives)
+                    if task_id in candidates
+                    and task_id in feasible_ids
+                    and task_id not in ordered
+                )
+                if self.allow_handoff_preemption:
+                    ordered.extend(
+                        task_id
+                        for task_id in contact_ids
+                        if task_id not in ordered
+                    )
+                kind_rank = {"investigation": 0, "direction_search": 1, "search": 2}
+                ordered.extend(
+                    task_id
+                    for task_id, item in sorted(
+                        candidates.items(),
+                        key=lambda pair: (
+                            kind_rank.get(pair[1].get("kind"), 3),
+                            0 if pair[1].get("priority") == "high" else 1,
+                            pair[0],
+                        ),
+                    )
+                    if task_id in feasible_ids and task_id not in ordered
+                )
+                selected: list[str] = []
+                tolerated = (
+                    "underutilized_feasible_work:",
+                    "coverage_floor_not_met",
+                    "coverage_oldest_not_selected",
+                )
+                for task_id in ordered:
+                    if task_id in selected:
+                        continue
+                    proposed = [*selected, task_id]
+                    payload = self._selection_payload(snapshot, proposed)
+                    errors = tuple(validate(payload)) if validate else ()
+                    if not errors or all(
+                        error.startswith(tolerated) for error in errors
+                    ):
+                        selected.append(task_id)
+                payload = self._selection_payload(snapshot, selected)
+                errors = tuple(validate(payload)) if validate else ()
+                if errors and all(error.startswith(tolerated) for error in errors):
+                    if len(selected) >= required or coverage.get("infeasible_reason"):
+                        errors = ()
+                return payload, errors
         candidates = [
             item for item in snapshot.get("candidates", ())
             if isinstance(item, dict)
@@ -337,6 +444,7 @@ class _FixtureGateway:
             item for item in candidates if item.get("task_id") in edge_ids
         ]
         visible.sort(key=lambda item: (
+            1 if item.get("task_id", "").startswith("fragment:") else 0,
             kind_rank.get(item.get("kind"), 3),
             0 if item.get("priority") == "high" else 1,
             item.get("task_id", ""),

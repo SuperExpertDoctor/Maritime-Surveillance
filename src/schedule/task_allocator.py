@@ -123,6 +123,7 @@ class TaskAllocator:
         active_records = tuple(
             record
             for record in active_tasks
+            if record.status in {"approved", "executing"}
             if record.assigned_uav_id is None
             or self.sm.is_uav_operational(record.assigned_uav_id)
         )
@@ -144,6 +145,32 @@ class TaskAllocator:
             planning_map_version,
             active_tasks=active_records,
         )
+        prompt_task_ids = (
+            tuple(task.task_id for task in prompt_window.tasks)
+            if prompt_window is not None else ()
+        )
+        prompt_sources = (
+            prompt_window.sources if prompt_window is not None else ()
+        )
+        representative_task_ids = (
+            prompt_window.representative_task_ids
+            if prompt_window is not None else ()
+        )
+        if prompt_window is not None:
+            edge_task_ids = {edge.task_id for edge in edges}
+            prompt_task_ids = tuple(
+                task_id for task_id in prompt_task_ids
+                if task_id in edge_task_ids
+            )
+            prompt_sources = tuple(
+                (task_id, source)
+                for task_id, source in prompt_sources
+                if task_id in prompt_task_ids
+            )
+            representative_task_ids = tuple(
+                task_id for task_id in representative_task_ids
+                if task_id in prompt_task_ids
+            )
         coverage_constraint = None
         if prompt_window is not None and getattr(self.sm, "coverage_metrics", None) is not None:
             coverage_config = getattr(self.config.mission, "coverage", None)
@@ -162,7 +189,7 @@ class TaskAllocator:
                 healthy_count=healthy_count,
                 active_search_count=active_search_count,
                 available_ids=available,
-                representatives=prompt_window.representative_task_ids,
+                representatives=representative_task_ids,
                 edges=edges,
                 fraction=float(
                     getattr(coverage_config, "min_search_uav_fraction", 0.4)
@@ -192,13 +219,8 @@ class TaskAllocator:
                 if reviewer_summary is None else reviewer_summary
             ),
             _information_version=int(getattr(self.sm, "information_version", 0)),
-            prompt_task_ids=(
-                tuple(task.task_id for task in prompt_window.tasks)
-                if prompt_window is not None else ()
-            ),
-            prompt_sources=(
-                prompt_window.sources if prompt_window is not None else ()
-            ),
+            prompt_task_ids=prompt_task_ids,
+            prompt_sources=prompt_sources,
             coverage_constraint=coverage_constraint,
         )
         self._last_mission_snapshot = snapshot
@@ -215,6 +237,14 @@ class TaskAllocator:
         ordinary_reserve = int(getattr(coverage_config, "ordinary_prompt_reserve", 8))
         capacity = self.mission_scheduler.max_tasks_in_prompt
         if metrics is None or not hasattr(metrics, "fixed_mask"):
+            # Legacy callers use deterministic providers that select every
+            # visible candidate. Keep that compatibility path bounded by the
+            # available fleet; production coverage snapshots still expose the
+            # configured model window for explicit choice.
+            capacity = min(
+                capacity,
+                max(1, len(self.sm.get_available_uavs())),
+            )
             ordered = tuple(sorted(
                 candidates,
                 key=lambda task: (
@@ -235,8 +265,9 @@ class TaskAllocator:
         policy = CoveragePolicy(metrics.fixed_mask, primary_window_min=primary_window)
         search_tasks = tuple(
             task for task in candidates
-            if task.kind in _SEARCH_TASK_KINDS and task.bbox is not None
+            if task.kind == "search" and task.bbox is not None
         )
+        search_task_ids = {task.task_id for task in search_tasks}
         estimates = {
             task.task_id: max(0.1, float(task.estimated_duration_min))
             for task in search_tasks
@@ -252,7 +283,7 @@ class TaskAllocator:
             sorted(
                 (
                     task for task in candidates
-                    if task not in search_tasks
+                    if task.task_id not in search_task_ids
                 ),
                 key=lambda task: (
                     -int(task.priority == "high"),
@@ -651,6 +682,24 @@ class TaskAllocator:
                         ),
                         default=None,
                     )
+                if (
+                    return_range is not None
+                    and task.kind in _SEARCH_TASK_KINDS
+                    and not task.task_id.startswith(("search:", "fragment:"))
+                ):
+                    return_range = max(
+                        return_range,
+                        min(
+                            (
+                                math.dist(
+                                    target,
+                                    tuple(map(float, base)),
+                                )
+                                for base in bases
+                            ),
+                            default=return_range,
+                        ),
+                    )
                 if return_range is None or (
                     transit_distance + mission_distance + return_range + reserve
                     > resource.remaining_range_cells + 1e-9
@@ -764,6 +813,7 @@ class TaskAllocator:
                         ),
                         allow_revisit=False,
                         seed=17,
+                        along_track_cells=0.8,
                     )
                 )
                 path = tuple(path_plan.path)

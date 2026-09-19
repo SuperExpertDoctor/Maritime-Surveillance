@@ -144,6 +144,20 @@ def test_observation_exposes_only_target_reports_and_published_hazards(engine):
     )
 
 
+def test_observation_keeps_failed_shared_uav_inert(engine):
+    failed = engine.allocator.sm.get_uav("UAV-2")
+    engine.allocator.sm.update_uav_status(
+        failed.id,
+        "failed",
+        failed.position,
+    )
+
+    observation = build_observation(engine)
+
+    peer = next(uav for uav in observation.shared_uavs if uav.uav_id == failed.id)
+    assert peer.operation_mode is OperationMode.IDLE
+
+
 def test_observation_action_mask_respects_return_lease(engine):
     observation = build_observation(
         engine,

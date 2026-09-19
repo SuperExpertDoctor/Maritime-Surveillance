@@ -439,6 +439,18 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "transit_progress": _transit_progress(entity) if entity else None,
             "trail": trail,
             "sar_look_direction": entity.sar_look_direction if entity else None,
+            "sar_scan_heading_rad": (
+                entity.sar_scan_heading_rad if entity else None
+            ),
+            "sar_scan_origin": (
+                list(entity.sar_scan_origin) if entity and entity.sar_scan_origin else None
+            ),
+            "sar_scan_position": (
+                list(entity.float_position) if entity and entity.sar_imaging else None
+            ),
+            "sar_actual_heading_rad": (
+                float(entity.heading_rad) if entity and entity.sar_imaging else None
+            ),
             "sar_footprint": [[cell.col, cell.row] for cell in entity.sar_footprint] if entity else [],
             "sar_beam": sar_beam,
             "sar_imaging": entity.sar_imaging if entity else False,

@@ -1,6 +1,7 @@
 """Evaluation-only truth snapshots and reproducible mission outcomes."""
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 import math
 from typing import Literal, Mapping
@@ -45,6 +46,7 @@ class EvaluationTick:
     valid_eo_links: tuple[tuple[str, str, str], ...]
     intent_statuses: tuple[IntentStatus, ...]
     unique_coverage_ratio: float
+    persistent_coverage: dict | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         _nonnegative_finite(self.sim_time_min, "sim_time_min")
@@ -62,6 +64,10 @@ class EvaluationTick:
             for uav_id, contact_id, ship_id in self.valid_eo_links
         ))
         object.__setattr__(self, "intent_statuses", tuple(self.intent_statuses))
+        if self.persistent_coverage is not None:
+            if not isinstance(self.persistent_coverage, dict):
+                raise TypeError("persistent_coverage must be a mapping or None")
+            object.__setattr__(self, "persistent_coverage", deepcopy(self.persistent_coverage))
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,7 @@ class EpisodeOutcome:
     decision_latency_seconds: dict = field(default_factory=dict)
     metric_denominators: dict = field(default_factory=dict)
     operational_failures: int = 0
+    persistent_coverage: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.episode_id, str) or not self.episode_id:
@@ -120,6 +127,9 @@ class EpisodeOutcome:
             raise ValueError("task_switch_count must be nonnegative")
         if isinstance(self.operational_failures, bool) or self.operational_failures < 0:
             raise ValueError("operational_failures must be nonnegative")
+        if not isinstance(self.persistent_coverage, dict):
+            raise TypeError("persistent_coverage must be a mapping")
+        object.__setattr__(self, "persistent_coverage", deepcopy(self.persistent_coverage))
 
     @property
     def type_i_probe_cost(self) -> float:
@@ -163,6 +173,8 @@ class OutcomeEvaluator:
         self._active_minutes = 0.0
         self._invalid_reasons: list[str] = []
         self._ticks = 0
+        self._last_observed_time: float | None = None
+        self._persistent_coverage_samples: list[dict] = []
         self._finalized: EpisodeOutcome | None = None
         self._classification_matrix = {
             "type_i": {"type_i": 0, "type_ii": 0, "unknown": 0},
@@ -441,6 +453,86 @@ class OutcomeEvaluator:
             "handoff_ledger": tuple(dict(item) for item in self._handoff_events.values()),
         }
 
+    @staticmethod
+    def _weighted_percentile(samples: list[tuple[float, float]], fraction: float) -> float | None:
+        if not samples:
+            return None
+        ordered = sorted(samples, key=lambda item: item[1])
+        total = sum(duration for _, duration in ordered)
+        if total <= 0:
+            return None
+        target = total * fraction
+        accumulated = 0.0
+        for value, duration in ordered:
+            accumulated += duration
+            if accumulated >= target:
+                return value
+        return ordered[-1][0]
+
+    def _persistent_coverage_summary(self) -> dict:
+        if not self._persistent_coverage_samples:
+            return {
+                "availability": False,
+                "measurement_mode": "native",
+                "sample_count": 0,
+                "windows": {},
+            }
+        samples = sorted(self._persistent_coverage_samples, key=lambda item: item["sim_time_min"])
+        schema_versions = {
+            item["metrics"].get("schema_version")
+            for item in samples
+            if isinstance(item.get("metrics"), dict)
+        }
+        windows: dict[str, dict] = {}
+        for window_min in (30, 60, 120):
+            values: list[float] = []
+            intervals: list[tuple[float, float, float]] = []
+            for index, sample in enumerate(samples):
+                metrics = sample["metrics"]
+                window = next(
+                    (
+                        item for item in metrics.get("windows", ())
+                        if isinstance(item, dict) and item.get("minutes") == window_min
+                    ),
+                    None,
+                )
+                value = window.get("coverage_pct") if window else None
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
+                    continue
+                value = float(value)
+                if window.get("window_complete", False):
+                    values.append(value)
+                if index + 1 < len(samples):
+                    end = float(samples[index + 1]["sim_time_min"])
+                    start = float(sample["sim_time_min"])
+                    if end > start:
+                        intervals.append((value, start, end))
+            durations = [(value, end - start) for value, start, end in intervals]
+            total_duration = sum(duration for _, duration in durations)
+            windows[str(window_min)] = {
+                "sample_count": len(values),
+                "sample_mean_pct": sum(values) / len(values) if values else None,
+                "time_mean_pct": (
+                    sum(value * duration for value, duration in durations) / total_duration
+                    if total_duration else None
+                ),
+                "p5_pct": self._weighted_percentile(durations, 0.05),
+                "minimum_pct": min(values) if values else None,
+                "duration_min": total_duration,
+                "longest_zero_coverage_min": max(
+                    (duration for value, duration in durations if value == 0.0),
+                    default=0.0,
+                ),
+            }
+        return {
+            "availability": True,
+            "measurement_mode": "native",
+            "schema_versions": sorted(str(value) for value in schema_versions if value is not None),
+            "sample_count": len(samples),
+            "as_of_min": samples[-1]["sim_time_min"],
+            "windows": windows,
+        }
+
     def summary(self) -> dict:
         """Return the explicit acceptance metrics without finalizing the episode."""
         return self._metric_summary()
@@ -455,11 +547,25 @@ class OutcomeEvaluator:
             raise RuntimeError("outcome has already been finalized")
         if not isinstance(tick, EvaluationTick):
             raise TypeError("tick must be an EvaluationTick")
-        self._ticks += 1
-        dt = float(tick.dt_min)
-        self._coverage = max(self._coverage, float(tick.unique_coverage_ratio))
-        start = max(0.0, float(tick.sim_time_min) - dt)
         end = float(tick.sim_time_min)
+        if self._last_observed_time is not None:
+            if end < self._last_observed_time:
+                self.invalidate("out_of_order_evaluation_tick")
+                return
+            if end == self._last_observed_time:
+                return
+            dt = end - self._last_observed_time
+        else:
+            dt = min(float(tick.dt_min), end)
+        self._last_observed_time = end
+        self._ticks += 1
+        self._coverage = max(self._coverage, float(tick.unique_coverage_ratio))
+        start = max(0.0, end - dt)
+        if tick.persistent_coverage is not None:
+            self._persistent_coverage_samples.append({
+                "sim_time_min": end,
+                "metrics": deepcopy(tick.persistent_coverage),
+            })
 
         truth_by_id = {vessel.ship_id: vessel for vessel in tick.vessels}
         for vessel in tick.vessels:
@@ -638,6 +744,7 @@ class OutcomeEvaluator:
                 "continuous_observation_min": metrics["continuous_observation_denominator_min"],
             },
             operational_failures=metrics["operational_failures"],
+            persistent_coverage=self._persistent_coverage_summary(),
         )
 
     def _record_terminal_label(self, physical_ship_id: str, identity: str, time: float) -> None:

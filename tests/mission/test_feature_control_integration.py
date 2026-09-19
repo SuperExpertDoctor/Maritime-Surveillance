@@ -198,7 +198,7 @@ def test_base_recovery_uses_controlled_return_refuel_reset_and_redispatch():
     assert result["trigger_type"] in {"heavy", "light"}
 
 
-def test_full_recovery_base_reports_failure_without_instant_refuel():
+def test_full_recovery_base_routes_second_uav_to_holding_without_refuel():
     engine = _recovery_engine()
     first, second = engine.uavs
 
@@ -217,24 +217,48 @@ def test_full_recovery_base_reports_failure_without_instant_refuel():
 
     assert engine._maybe_revoke_for_range(first, 0.0, force=True)
     assert engine._return_base_by_uav[first.id] is engine.base
+    assert engine.base.land_uav(first.id)
 
     engine.allocator.sm.current_time = 1.0
     engine._step_controlled_uav(second, 1.0)
 
-    assert engine._emergency_failures[second.id] == "no_safe_recovery_path"
-    assert second.status == "idle"
-    assert second.fuel_remaining_pct == pytest.approx(0.8)
-    assert second.id not in engine._return_base_by_uav
-    assert any(
-        event["type"] == "no_safe_recovery_path"
-        and event["data"]["uav_id"] == second.id
-        for event in engine.allocator.sm.get_recent_events(0.0)
+    assert second.status == "returning"
+    assert 0.79 < second.fuel_remaining_pct < 0.8
+    assert second.id not in engine._emergency_failures
+    assert engine._return_base_by_uav[second.id] is engine.base
+
+    for current_time in range(2, 160):
+        engine.allocator.sm.current_time = float(current_time)
+        engine._step_controlled_uav(second, float(current_time))
+        if second.status == "holding":
+            break
+
+    assert second.status == "holding"
+    assert engine._holding_base_by_uav[second.id] is engine.base
+    assert engine.base.occupancy == engine.base.capacity
+
+
+def test_transiently_unplannable_heading_does_not_fail_high_fuel_uav(monkeypatch):
+    engine = _recovery_engine()
+    uav = engine.uavs[0]
+    task = ControlTask(
+        "coverage:t12-transient-recovery",
+        OperationMode.COVERAGE,
+        region_bbox=BBox(15, 15, 19, 19),
     )
-    assert not any(
-        event["type"] == "return_reserved"
-        and event["data"]["uav_id"] == second.id
-        for event in engine.allocator.sm.get_recent_events(0.0)
+    engine.control_coordinator.start_work(
+        uav.id, sortie_number=1, current_time=0.0, dt_min=1.0, task=task,
     )
+
+    class NoCandidatePlanner:
+        def evaluate(self, *args, **kwargs):
+            del args, kwargs
+            return ()
+
+    monkeypatch.setattr("src.env.simulation.RecoveryPlanner", NoCandidatePlanner)
+
+    assert engine._maybe_revoke_for_range(uav, 0.0) is False
+    assert uav.id not in engine._emergency_failures
 
 
 def test_low_fuel_warning_is_emitted_before_controlled_return():

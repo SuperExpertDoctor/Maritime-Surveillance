@@ -37,6 +37,9 @@ _OPERATION_BY_STATUS = {
     "returning": OperationMode.RETURN,
     "holding": OperationMode.HOLDING,
     "refueling": OperationMode.IDLE,
+    # Failed airframes remain visible to active controllers as inert peers;
+    # quarantine keeps them out of scheduling and command execution.
+    "failed": OperationMode.IDLE,
 }
 
 

@@ -30,7 +30,9 @@ from src.control.heuristic.base import (
 )
 from src.control.heuristic.coverage_guidance import CoverageGuidance, CoverageRouteFollower
 from src.control.heuristic.navigation import AStarNavigator
+from src.env.dubins import DubinsPath
 from src.utils.coverage_planner import CoveragePath, CoveragePlanner, ScanSwath
+from src.utils.obstacle_avoider import ObstacleAvoider
 
 
 class CoveragePhase(str, Enum):
@@ -433,12 +435,36 @@ class CoverageController(HeuristicControllerBase):
             self.r_min,
             direction,
             along_track_cells=self.sar_along_track_cells,
+            bounds=tuple(observation.planning_obstacle_mask.shape),
         )
         endpoints = scan_endpoint_poses(initial_coverage)
         if not endpoints:
             raise ValueError("coverage planner produced no scan endpoints")
-        entry = endpoints[0]
-        transit = self._plan_transit_to_pose(start_pose, entry, observation)
+        entry: tuple[float, float, float] | None = None
+        transit: list[tuple[float, float, float]] | None = None
+        fallback: tuple[tuple[float, float, float], list[tuple[float, float, float]]] | None = None
+        last_error: Exception | None = None
+        bounds = tuple(observation.planning_obstacle_mask.shape)
+        for candidate in endpoints:
+            try:
+                candidate_transit = self._plan_transit_to_pose(
+                    start_pose, candidate, observation
+                )
+            except (ValueError, RuntimeError) as exc:
+                last_error = exc
+                continue
+            if fallback is None:
+                fallback = (candidate, candidate_transit)
+            if self._route_has_world_clearance(candidate_transit, bounds):
+                entry = candidate
+                transit = candidate_transit
+                break
+        if transit is None or entry is None:
+            if fallback is None:
+                if last_error is not None:
+                    raise last_error
+                raise ValueError("coverage planner produced no transit route")
+            entry, transit = fallback
         coverage = self.planner.plan(
             self.task.region_bbox,
             entry,
@@ -446,15 +472,21 @@ class CoverageController(HeuristicControllerBase):
             self.r_min,
             direction,
             along_track_cells=self.sar_along_track_cells,
+            bounds=bounds,
         )
         # The navigator reaches the scan entry position, but its final heading
         # is only a transit tangent.  Let the first scan segment carry the
         # physical heading transition while the SAR gate remains closed.
         transit[-1] = coverage.waypoints[0]
-        route = tuple(transit) + tuple(coverage.waypoints[1:])
+        coverage_route, coverage_scan_ranges = self._assemble_coverage_route(
+            coverage,
+            observation.planning_obstacle_mask,
+        )
+        route = tuple(transit) + coverage_route[1:]
         offset = len(transit) - 1
         scan_ranges = tuple(
-            (offset + start, offset + end) for start, end in coverage.scan_ranges
+            (offset + start, offset + end)
+            for start, end in coverage_scan_ranges
         )
         self._set_route(
             route,
@@ -465,6 +497,57 @@ class CoverageController(HeuristicControllerBase):
             progress_offset_cells=progress_offset_cells,
         )
         self.phase = CoveragePhase.TRANSIT_ASTAR
+
+    @staticmethod
+    def _route_has_world_clearance(
+        route: Sequence[tuple[float, float, float]],
+        bounds: tuple[int, int],
+    ) -> bool:
+        cols, rows = bounds
+        return all(
+            1.0 <= pose[0] < cols - 1.0
+            and 1.0 <= pose[1] < rows - 1.0
+            for pose in route
+        )
+
+    def _assemble_coverage_route(
+        self,
+        coverage: CoveragePath,
+        obstacle_mask: object,
+    ) -> tuple[tuple[tuple[float, float, float], ...], tuple[tuple[int, int], ...]]:
+        """Keep scan lines fixed while making Dubins connectors world-safe."""
+        if not coverage.swaths or not coverage.waypoints:
+            raise ValueError("coverage planner produced no route")
+        avoider = ObstacleAvoider(max_iterations=1000, seed=17)
+        route: list[tuple[float, float, float]] = [coverage.waypoints[0]]
+        scan_ranges: list[tuple[int, int]] = []
+        for index, swath in enumerate(coverage.swaths):
+            if index:
+                entry = (swath.start[0], swath.start[1], swath.heading)
+                direct = DubinsPath.compute(
+                    route[-1], entry, self.r_min, self.planner.sample_step
+                ).waypoints
+                if avoider.is_path_safe(direct, obstacle_mask):
+                    connector = direct
+                else:
+                    try:
+                        connector = avoider.plan_path(
+                            route[-1], entry, obstacle_mask, self.r_min
+                        )
+                    except RuntimeError:
+                        connector = ObstacleAvoider(
+                            max_iterations=2400,
+                            seed=17 + index * 101,
+                        ).plan_path(
+                            route[-1], entry, obstacle_mask, self.r_min
+                        )
+                route.extend(tuple(pose) for pose in connector[1:])
+
+            scan_line = self.planner.sample_scan_line(swath)
+            scan_start = len(route) - 1
+            route.extend(tuple(pose) for pose in scan_line[1:])
+            scan_ranges.append((scan_start, len(route) - 1))
+        return tuple(route), tuple(scan_ranges)
 
     def _plan_transit_to_pose(
         self,
@@ -492,31 +575,20 @@ class CoverageController(HeuristicControllerBase):
         )
 
     def _refresh_conflict_route(self, observation: ControlObservation) -> None:
-        """Give a controlled coverage task a new scan orientation after a conflict."""
+        """Rebuild only the unconsumed suffix after a route conflict."""
         if not any(
             event.event_type == "route_blocked"
             and event.payload.get("reason") == "path_conflict"
             for event in observation.events
         ):
             return
-        assert self.task is not None
-        if self.task.region_bbox is None:
-            return
-        progress_offset_cells = self.follower.progress_cells
-        width = self.task.region_bbox.col_end - self.task.region_bbox.col_start
-        height = self.task.region_bbox.row_end - self.task.region_bbox.row_start
-        current = self._direction or ("horizontal" if width >= height else "vertical")
-        direction = "vertical" if current == "horizontal" else "horizontal"
         try:
-            self._plan_route(
-                observation,
-                direction=direction,
-                progress_offset_cells=progress_offset_cells,
-            )
+            self._replan_unflown_suffix(observation)
         except (CoverageRouteBlockedError, ValueError, RuntimeError):
-            self._route_status = "unavailable"
-            raise
-        self._direction = direction
+            # A path-conflict notification is advisory: keep the already
+            # validated route executable when a transient detour has no
+            # solution at the current fixed-wing pose.
+            self._route_status = "ready" if self.route and not self._stopped else "unavailable"
 
     def _refresh_invalidated_route(self, observation: ControlObservation) -> None:
         if observation.planning_map_version == self.planning_map_version:
@@ -532,9 +604,19 @@ class CoverageController(HeuristicControllerBase):
         ) is not None:
             try:
                 self._replan_unflown_suffix(observation)
-            except (CoverageRouteBlockedError, ValueError, RuntimeError):
-                self._route_status = "unavailable"
-                raise
+            except (CoverageRouteBlockedError, ValueError, RuntimeError) as suffix_error:
+                try:
+                    self._detour_invalidated_suffix(observation)
+                except (CoverageRouteBlockedError, ValueError, RuntimeError):
+                    # A new weather cell can cut through a scan line itself,
+                    # not only its connector. Rebuild the remaining sortie
+                    # with the alternate lane orientation before surfacing a
+                    # control fault.
+                    try:
+                        self._replan_with_direction(observation)
+                    except (CoverageRouteBlockedError, ValueError, RuntimeError):
+                        self._route_status = "unavailable"
+                        raise suffix_error
         else:
             self.planning_map_version = observation.planning_map_version
             self._route_status = (
@@ -596,6 +678,115 @@ class CoverageController(HeuristicControllerBase):
             progress_offset_cells=progress_offset_cells,
         )
         self.phase = CoveragePhase.TRANSIT_ASTAR
+
+    def _detour_invalidated_suffix(self, observation: ControlObservation) -> None:
+        """Patch one blocked raster segment while keeping the scan contract."""
+        assert self.follower is not None
+        base_index = self.follower.index + 1
+        current_pose = (
+            *observation.self_state.position,
+            observation.self_state.heading_rad,
+        )
+        sequence = (current_pose, *self.route[base_index:])
+        blocked = self._route_blocked(
+            sequence, observation.planning_obstacle_mask,
+        )
+        if blocked is None:
+            self.planning_map_version = observation.planning_map_version
+            self._route_status = "ready"
+            return
+        blocked_segment, blocked_cell = blocked
+        if blocked_segment <= 0:
+            raise CoverageRouteBlockedError(
+                blocked_segment,
+                blocked_cell,
+                observation.planning_map_version,
+            )
+
+        def pose_is_free(pose: tuple[float, float, float]) -> bool:
+            col = math.floor(pose[0])
+            row = math.floor(pose[1])
+            mask = observation.planning_obstacle_mask
+            return (
+                0 <= col < mask.shape[0]
+                and 0 <= row < mask.shape[1]
+                and not bool(mask[col, row])
+            )
+
+        start_index = blocked_segment
+        if not pose_is_free(sequence[start_index]):
+            raise CoverageRouteBlockedError(
+                blocked_segment,
+                blocked_cell,
+                observation.planning_map_version,
+            )
+        candidates = range(
+            blocked_segment + 2,
+            min(len(sequence), blocked_segment + 48),
+        )
+        for goal_index in candidates:
+            goal = sequence[goal_index]
+            if not pose_is_free(goal):
+                continue
+            if math.dist(sequence[start_index][:2], goal[:2]) < 1.0:
+                continue
+            try:
+                detour = ObstacleAvoider(
+                    max_iterations=2400,
+                    seed=17 + goal_index,
+                ).plan_path(
+                    sequence[start_index],
+                    goal,
+                    observation.planning_obstacle_mask,
+                    self.r_min,
+                )
+            except (RuntimeError, ValueError):
+                continue
+            new_sequence = (
+                sequence[: start_index + 1]
+                + tuple(detour[1:])
+                + sequence[goal_index + 1 :]
+            )
+            route_offset = base_index - 1
+            relative_ranges = []
+            relative_swaths = []
+            for scan_range, swath in zip(self.scan_ranges, self.scan_swaths):
+                start, end = scan_range
+                relative_start = max(0, start - route_offset)
+                relative_end = end - route_offset
+                if relative_end <= relative_start or relative_end >= len(sequence):
+                    continue
+                relative_ranges.append((relative_start, relative_end))
+                relative_swaths.append(swath)
+            delta = len(detour) - 1 - (goal_index - start_index)
+            adjusted_ranges = []
+            for start, end in relative_ranges:
+                if end <= start_index:
+                    adjusted = (start, end)
+                elif start >= goal_index:
+                    adjusted = (start + delta, end + delta)
+                else:
+                    adjusted = (start, end + delta)
+                if adjusted[0] < adjusted[1] < len(new_sequence):
+                    adjusted_ranges.append(adjusted)
+            try:
+                self._set_route(
+                    new_sequence,
+                    tuple(adjusted_ranges),
+                    tuple(relative_swaths[: len(adjusted_ranges)]),
+                    observation.planning_obstacle_mask,
+                    observation.planning_map_version,
+                    progress_offset_cells=self.follower.progress_cells,
+                )
+            except (CoverageRouteBlockedError, ValueError):
+                continue
+            self.phase = CoveragePhase.TRANSIT_ASTAR
+            return
+        raise CoverageRouteBlockedError(
+            blocked_segment,
+            blocked_cell,
+            observation.planning_map_version,
+        )
 
     def _next_unconsumed_scan_start(self) -> int:
         assert self.follower is not None

@@ -7,6 +7,7 @@ which makes it safe to execute in a ``ProcessPoolExecutor``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
 
@@ -28,6 +29,7 @@ class SearchRouteRequest:
     allow_revisit: bool
     direction: str | None = None
     seed: int = 17
+    along_track_cells: float | None = None
 
 
 @dataclass(frozen=True)
@@ -39,9 +41,18 @@ class SearchRoutePlan:
     scanned_swath_count: int
 
 
+def _path_in_bounds(path: tuple[Pose, ...] | list[Pose], shape: tuple[int, int]) -> bool:
+    cols, rows = shape
+    return all(
+        0 <= math.floor(pose[0]) < cols and 0 <= math.floor(pose[1]) < rows
+        for pose in path
+    )
+
+
 def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
     """Build a complete obstacle-safe Dubins/SAR route from a state snapshot."""
     bbox = BBox(*request.bbox)
+    mask = np.asarray(request.obstacle_mask, dtype=bool)
     planner = CoveragePlanner(sample_step=0.2)
     coverage = planner.plan(
         bbox,
@@ -49,6 +60,8 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
         request.swath_width,
         request.r_min,
         direction=request.direction,
+        along_track_cells=request.along_track_cells,
+        bounds=tuple(mask.shape),
     )
     fresh_mask = np.asarray(request.unscanned_mask, dtype=bool)
     swaths = [
@@ -59,7 +72,6 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
     if not swaths:
         return SearchRoutePlan(request.uav_id, (), 0, (), 0)
 
-    mask = np.asarray(request.obstacle_mask, dtype=bool)
     avoider = ObstacleAvoider(max_iterations=1000, seed=request.seed)
     path: list[Pose] = [tuple(map(float, request.start_pose))]
     scan_ranges: list[tuple[int, int, str]] = []
@@ -82,6 +94,8 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
         if index == 0:
             transit_end_index = len(path) - 1
         scan_line = planner.sample_scan_line(swath)
+        if not _path_in_bounds(scan_line, mask.shape):
+            raise RuntimeError("SAR scan line exits planning bounds")
         if not avoider.is_path_safe(scan_line, mask):
             raise RuntimeError("SAR scan line intersects a no-fly obstacle")
         scan_start = len(path) - 1

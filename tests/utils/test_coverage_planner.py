@@ -69,3 +69,62 @@ def test_region_feasibility_checks_extended_sensor_scan_geometry():
     assert not planner.is_region_feasible(
         bbox, 1.5, 1.0, mask, along_track_cells=0.8
     )
+
+
+def test_sensor_geometry_clamps_endpoint_extension_to_world_bounds():
+    planner = CoveragePlanner(sample_step=0.2, near_range=0.25)
+    path = planner.plan(
+        BBox(5, 1, 11, 9),
+        (1.0, 1.0, 0.0),
+        swath_width=1.5,
+        R_min=1.0,
+        along_track_cells=0.8,
+        bounds=(30, 30),
+    )
+
+    assert all(
+        0.0 <= coordinate < 30.0
+        for swath in path.swaths
+        for pose in (swath.start, swath.end)
+        for coordinate in pose
+    )
+
+
+def test_sensor_geometry_leaves_turn_guard_at_world_boundary():
+    path = CoveragePlanner().plan(
+        BBox(5, 1, 11, 9),
+        (2.0, 10.0, 0.0),
+        swath_width=1.5,
+        R_min=1.0,
+        along_track_cells=0.8,
+        bounds=(30, 30),
+    )
+
+    assert min(
+        pose[0]
+        for swath in path.swaths
+        for pose in (swath.start, swath.end)
+    ) >= 1.8 - 1e-9
+
+
+def test_bounded_sensor_routes_alternate_direction_within_safe_bounds():
+    path = CoveragePlanner().plan(
+        BBox(11, 1, 17, 9),
+        (2.0, 10.0, 0.0),
+        swath_width=1.5,
+        R_min=1.0,
+        along_track_cells=0.8,
+        bounds=(30, 30),
+    )
+
+    assert {swath.heading for swath in path.swaths} == {
+        0.0,
+        math.pi,
+    }
+    assert {swath.look_direction for swath in path.swaths} == {"left", "right"}
+    assert all(
+        0.0 <= coordinate < 30.0
+        for swath in path.swaths
+        for pose in (swath.start, swath.end)
+        for coordinate in pose[:2]
+    )

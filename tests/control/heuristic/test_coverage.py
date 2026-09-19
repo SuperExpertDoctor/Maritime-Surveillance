@@ -9,6 +9,7 @@ from src.control.common.contracts import (
     ActionSpec,
     ControlMode,
     ControlObservation,
+    ControlEvent,
     ControlOwner,
     ControlTask,
     ObservationSpec,
@@ -152,11 +153,25 @@ def _with_pose(observation, pose, *, planning_map_version=None, obstacle_mask=No
 def _advance_to(controller, observation, target_index):
     """Advance through route samples so tests exercise physical progress."""
     decision = None
-    stepped_observation = replace(observation, dt_min=max(observation.dt_min, 2.0))
-    for index in range(controller.follower.index + 1, target_index + 1):
+    current_position = observation.self_state.position
+    speed = min(
+        max(
+            float(observation.self_state.speed_cells_min),
+            controller.action_spec.min_speed_cells_min,
+        ),
+        controller.action_spec.max_speed_cells_min,
+    )
+    while controller.follower.index < target_index:
+        index = min(controller.follower.index + 1, target_index)
+        distance = math.dist(current_position, controller.route[index][:2])
+        stepped_observation = replace(
+            observation,
+            dt_min=max(observation.dt_min, distance / max(speed, 1e-9)),
+        )
         decision = controller.act(
             _with_pose(stepped_observation, controller.route[index])
         )
+        current_position = controller.route[index][:2]
     return decision
 
 
@@ -230,16 +245,31 @@ def test_coverage_emits_search_complete_once_after_final_scan_pose(
 ):
     decisions = []
     target_index = len(started_controller.route) - 1
+    current_position = observation.self_state.position
+    speed = min(
+        max(
+            float(observation.self_state.speed_cells_min),
+            started_controller.action_spec.min_speed_cells_min,
+        ),
+        started_controller.action_spec.max_speed_cells_min,
+    )
     while started_controller.follower.index < target_index:
         next_index = min(started_controller.follower.index + 1, target_index)
+        distance = math.dist(current_position, started_controller.route[next_index][:2])
         decisions.append(
             started_controller.act(
                 _with_pose(
-                    replace(observation, dt_min=2.0),
+                    replace(
+                        observation,
+                        dt_min=max(
+                            observation.dt_min, distance / max(speed, 1e-9)
+                        ),
+                    ),
                     started_controller.route[next_index],
                 )
             )
         )
+        current_position = started_controller.route[next_index][:2]
     final_observation = _with_pose(observation, started_controller.route[-1])
 
     decision = started_controller.act(final_observation)
@@ -272,6 +302,64 @@ def test_coverage_updates_the_map_version_when_unflown_route_is_still_safe(
 
     assert started_controller.navigator.plan_calls == 1
     assert started_controller.planning_map_version == 2
+    assert started_controller.route_snapshot().status == "ready"
+
+
+def test_coverage_conflict_replan_keeps_unconsumed_scan_suffix(
+    started_controller, observation
+):
+    scan_start, _ = started_controller.scan_ranges[0]
+    _advance_to(started_controller, observation, scan_start + 1)
+    before_revision = started_controller.route_snapshot().route_revision
+    before_heading = started_controller.scan_swaths[0].heading
+    before_progress = started_controller.follower.progress_cells
+    conflict = ControlEvent(
+        sequence=1,
+        timestamp_min=observation.timestamp_min,
+        event_type="route_blocked",
+        source="simulation",
+        uav_id=observation.self_state.uav_id,
+        payload={"reason": "path_conflict"},
+    )
+
+    started_controller.act(
+        replace(
+            _with_pose(observation, started_controller.route[scan_start + 1]),
+            events=(conflict,),
+        )
+    )
+
+    assert started_controller.route_snapshot().route_revision > before_revision
+    assert started_controller.scan_swaths[0].heading == pytest.approx(before_heading)
+    assert started_controller.follower.progress_cells >= before_progress
+
+
+def test_coverage_conflict_replan_keeps_current_route_when_suffix_is_unavailable(
+    started_controller, observation, monkeypatch
+):
+    scan_start, _ = started_controller.scan_ranges[0]
+    _advance_to(started_controller, observation, scan_start + 1)
+    conflict = ControlEvent(
+        sequence=1,
+        timestamp_min=observation.timestamp_min,
+        event_type="route_blocked",
+        source="simulation",
+        uav_id=observation.self_state.uav_id,
+        payload={"reason": "path_conflict"},
+    )
+
+    def unavailable(_observation):
+        raise RuntimeError("temporary conflict detour unavailable")
+
+    monkeypatch.setattr(started_controller, "_replan_unflown_suffix", unavailable)
+    decision = started_controller.act(
+        replace(
+            _with_pose(observation, started_controller.route[scan_start + 1]),
+            events=(conflict,),
+        )
+    )
+
+    assert decision.command.operation_mode is OperationMode.COVERAGE
     assert started_controller.route_snapshot().status == "ready"
 
 
@@ -339,7 +427,7 @@ def test_coverage_replan_starts_at_next_unconsumed_scan_band(
     blocked_mask = np.array(observation.planning_obstacle_mask, copy=True)
     # The prior connector swings through this cell, while the detour to the
     # second band remains free.  It must not restart at the first scan entry.
-    blocked_pose = controller.route[first_scan_end + 1]
+    blocked_pose = controller.route[first_scan_end + 5]
     blocked_mask[math.floor(blocked_pose[0]), math.floor(blocked_pose[1])] = True
     replan_observation = _with_pose(
         observation,

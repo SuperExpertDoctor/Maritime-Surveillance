@@ -769,6 +769,24 @@ def test_recovery_planner_skips_a_base_when_hybrid_astar_has_no_safe_path():
     assert len(navigator.plan_arguments) == 1
 
 
+def test_recovery_planner_can_plan_to_full_base_for_holding_fallback():
+    start = (1.0, 1.0, 0.0)
+    navigator = RecoveryNavigatorSpy({(8.0, 1.0): [start, (8.0, 1.0, 0.0)]})
+
+    candidates = RecoveryPlanner(navigator=navigator).evaluate(
+        start,
+        100.0,
+        (BaseObservation("base-A", (8.0, 1.0), 1, 1),),
+        np.zeros((12, 12), dtype=bool),
+        3,
+        1.0,
+        2.0,
+        allow_reserved_bases=True,
+    )
+
+    assert [candidate.base.base_id for candidate in candidates] == ["base-A"]
+
+
 def test_recovery_planner_rejects_a_path_to_a_different_base():
     start = (1.0, 1.0, 0.0)
     navigator = RecoveryNavigatorSpy(

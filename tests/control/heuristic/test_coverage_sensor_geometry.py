@@ -118,6 +118,38 @@ def test_controller_emits_scan_direction_heading_and_origin_for_each_swath():
     assert command.sar_scan_origin == swath.start
 
 
+def test_controller_rebuilds_boundary_connectors_inside_world_bounds():
+    controller = CoverageController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=ActionSpec(-2.0, 2.0, .5, 1.0),
+        swath_width=1.5,
+        r_min=1.0,
+        sar_along_track_cells=.8,
+    )
+    observation = _observation(position=(2.0, 10.0))
+
+    controller.start_task(
+        ControlTask("edge", OperationMode.COVERAGE, region_bbox=BBox(5, 1, 11, 9)),
+        observation,
+    )
+
+    assert len(controller.scan_ranges) >= 2
+    transit_end = controller.scan_ranges[0][0]
+    assert all(
+        1.0 <= pose[0] < observation.planning_obstacle_mask.shape[0] - 1.0
+        and 1.0 <= pose[1] < observation.planning_obstacle_mask.shape[1] - 1.0
+        for pose in controller.route[: transit_end + 1]
+    )
+    assert all(
+        0.0 <= pose[0] < observation.planning_obstacle_mask.shape[0]
+        and 0.0 <= pose[1] < observation.planning_obstacle_mask.shape[1]
+        for pose in controller.route
+    )
+    assert controller._route_blocked(
+        controller.route, observation.planning_obstacle_mask
+    ) is None
+
+
 def test_controller_rejects_planner_with_inconsistent_near_range():
     execution = CoverageExecutionConfig(
         swath_width_cells=1.5,

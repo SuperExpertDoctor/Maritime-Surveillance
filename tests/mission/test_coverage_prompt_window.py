@@ -59,6 +59,26 @@ def test_window_reserves_ordinary_candidates_and_non_overlapping_representatives
     assert dict(window.sources)
 
 
+def test_window_fills_remaining_capacity_with_non_overlapping_successors():
+    tasks = [
+        _task(f"S{index}", bbox=(index * 2, 0, index * 2 + 1, 1))
+        for index in range(8)
+    ] + [
+        _task("overlap", bbox=(0, 0, 1, 1)),
+        _task("successor", bbox=(20, 0, 21, 1)),
+    ]
+
+    window = CoveragePolicy(np.ones((30, 2), dtype=bool)).select_window(
+        tasks,
+        ordinary_reserve=8,
+        capacity=9,
+        now_min=0.0,
+    )
+
+    assert "successor" in {task.task_id for task in window.tasks}
+    assert "overlap" not in {task.task_id for task in window.tasks}
+
+
 def test_constraint_uses_maximum_matching_not_minimum_of_counts():
     constraint = build_coverage_constraint(
         healthy_count=5,
@@ -133,3 +153,49 @@ def test_validator_requires_oldest_representative_and_floor():
 
     assert "coverage_floor_not_met:2" in errors
     assert "coverage_oldest_not_selected" in errors
+
+
+def test_validator_allows_partial_floor_when_snapshot_reports_infeasible_resources():
+    tasks = (_task("S1", bbox=(1, 1, 2, 2)), _task("S2", bbox=(3, 1, 4, 2)))
+    resources = (_resource("U1"),)
+    edges = (_edge("S1", "U1"),)
+    snapshot = MissionSnapshot(
+        snapshot_id="snapshot-infeasible-coverage",
+        sim_time_min=10.0,
+        candidates=tasks,
+        available_uav_ids=("U1",),
+        preemptible_uav_ids=(),
+        uav_generations=(("U1", 0),),
+        resources=resources,
+        feasible_edges=edges,
+        active_tasks=(),
+        contacts=(),
+        intents=(),
+        intent_statuses=(),
+        memory_version="baseline",
+        planning_map_version=0,
+        reviewer_summary="",
+        prompt_task_ids=("S1", "S2"),
+        prompt_sources=(("S1", "ordinary"), ("S2", "ordinary")),
+        coverage_constraint=CoverageConstraint(
+            desired_search_count=2,
+            active_search_count=0,
+            required_new_search_count=2,
+            representative_task_ids=("S1", "S2"),
+            must_service_task_ids=("S1",),
+            infeasible_reason="insufficient_available_resources",
+        ),
+    )
+    scheduler = MissionScheduler(selection_provider=lambda _snapshot, _payload: {})
+    payload = {
+        "schema_version": SELECTION_SCHEMA,
+        "snapshot_id": snapshot.snapshot_id,
+        "selected_task_ids": ["S1"],
+        "preempt_uav_ids": [],
+        "defer_reason": None,
+        "notes": "",
+    }
+
+    errors = scheduler.validate_selection(payload, snapshot)
+
+    assert errors == ()

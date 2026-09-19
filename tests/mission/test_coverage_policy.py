@@ -195,6 +195,43 @@ def test_rank_search_candidates_uses_stable_bbox_order_and_conservative_fallback
     assert ranked is not candidates
 
 
+def test_rank_search_candidates_prefers_shorter_task_when_coverage_priority_ties():
+    candidates = (
+        Candidate("large", (0, 0, 4, 2)),
+        Candidate("small", (4, 0, 5, 2)),
+    )
+    last_sar = np.full((5, 2), -np.inf, dtype=float)
+
+    ranked = CoveragePolicy.rank_search_candidates(
+        candidates,
+        now_min=120.0,
+        last_sar=last_sar,
+        estimated_minutes={"large": 8.0, "small": 2.0},
+    )
+
+    assert tuple(candidate.task_id for candidate in ranked) == ("small", "large")
+
+
+def test_rank_search_candidates_defers_residual_fragments_to_regular_work():
+    candidates = (
+        Candidate("fragment:edge", (0, 0, 1, 1)),
+        Candidate("search:regular", (1, 0, 5, 2)),
+    )
+    last_sar = np.full((5, 2), -np.inf, dtype=float)
+
+    ranked = CoveragePolicy.rank_search_candidates(
+        candidates,
+        now_min=120.0,
+        last_sar=last_sar,
+        estimated_minutes={"fragment:edge": 1.0, "search:regular": 8.0},
+    )
+
+    assert tuple(candidate.task_id for candidate in ranked) == (
+        "search:regular",
+        "fragment:edge",
+    )
+
+
 def test_rank_search_candidates_validates_inputs():
     policy = CoveragePolicy(np.ones((1, 1), dtype=bool))
     with pytest.raises(ValueError, match="estimated_minutes"):

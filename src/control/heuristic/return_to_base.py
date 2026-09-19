@@ -95,6 +95,8 @@ class RecoveryPlanner:
         planning_map_version: int,
         r_min: float,
         reserve_cells: float,
+        *,
+        allow_reserved_bases: bool = False,
     ) -> tuple[RecoveryCandidate, ...]:
         if not math.isfinite(remaining_range_cells) or remaining_range_cells < 0.0:
             raise ValueError("remaining_range_cells must be finite and non-negative")
@@ -102,9 +104,11 @@ class RecoveryPlanner:
             raise ValueError("r_min must be finite and positive")
         if not math.isfinite(reserve_cells) or reserve_cells < 0.0:
             raise ValueError("reserve_cells must be finite and non-negative")
+        if not isinstance(allow_reserved_bases, bool):
+            raise ValueError("allow_reserved_bases must be boolean")
         candidates = []
         for base in bases:
-            if base.reserved_load >= base.capacity:
+            if not allow_reserved_bases and base.reserved_load >= base.capacity:
                 continue
             try:
                 planned = self.navigator.plan_grid(

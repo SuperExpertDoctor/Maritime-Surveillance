@@ -456,7 +456,10 @@ class UAVEntity:
                 heading_error = abs(_wrap_pi(self.heading_rad - desired_heading))
                 self.sar_scan_heading_rad = desired_heading
                 self.sar_heading_error_deg = math.degrees(heading_error)
-                stable_leg = start < route_index < end
+                # The final waypoint is a valid SAR aperture sample.  The
+                # route follower keeps the aperture stable there before the
+                # next connector or task-completion event is consumed.
+                stable_leg = start < route_index <= end
                 self.sar_imaging = (
                     stable_leg
                     and heading_error <= self.sar_heading_tolerance_rad

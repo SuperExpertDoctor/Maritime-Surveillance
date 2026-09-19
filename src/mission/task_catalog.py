@@ -184,7 +184,12 @@ class TaskCatalog:
         if not isinstance(cell_count, int) or isinstance(cell_count, bool) or cell_count <= 0:
             cell_count = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
         utility = total_value / cell_count
-        duration = self._finite(candidate.get("estimated_duration_min", 5.0), 5.0)
+        supplied_duration = candidate.get("estimated_duration_min")
+        if supplied_duration is None:
+            swath_width = self._sar_swath_width(state)
+            duration = max(5.0, cell_count / swath_width)
+        else:
+            duration = self._finite(supplied_duration, 5.0)
         duration = max(0.1, duration)
         target = self._bbox_center(bbox)
         feasible = tuple(
@@ -410,6 +415,19 @@ class TaskCatalog:
         speed = getattr(uav_config, "cruise_speed_kmh", 1.0)
         cell_size = getattr(grid, "cell_size_km", 1.0)
         return max(1e-6, float(speed) / 60.0 / float(cell_size))
+
+    @staticmethod
+    def _sar_swath_width(state) -> float:
+        config = getattr(state, "config", None)
+        sensor = getattr(config, "sensor", None)
+        sar = getattr(sensor, "sar", None)
+        grid = getattr(config, "grid", None)
+        swath_km = getattr(sar, "swath_km", 1.0)
+        cell_size_km = getattr(grid, "cell_size_km", 1.0)
+        try:
+            return max(1.0, float(swath_km) / float(cell_size_km))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 1.0
 
     @classmethod
     def _uav_remaining_range(cls, state, uav) -> float:

@@ -14,7 +14,9 @@ from tests.mission.coverage_helpers import make_coverage_rig
 @pytest.mark.parametrize("dt_min", [1.0, 0.25])
 def test_real_motion_scans_every_required_cell(bbox, dt_min):
     rig = make_coverage_rig(bbox=bbox, start_pose=(6.0, 12.0, 0.0), dt_min=dt_min)
-    records = rig.run(max_minutes=240)
+    # Bounded world-safe turn guards add a short final connector on edge
+    # regions; allow that physical distance in the completion horizon.
+    records = rig.run(max_minutes=260)
 
     actual = {tuple(cell) for record in records for cell in record["footprint"]}
     required = {

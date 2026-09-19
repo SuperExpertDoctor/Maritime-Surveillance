@@ -1962,20 +1962,24 @@ class SimulationEngine:
                     **dict(event.payload),
                 })
 
-        if (
-            command.operation_mode is OperationMode.RETURN
-            and uav.id in self._return_base_by_uav
-            and math.dist(
+        if command.operation_mode is OperationMode.RETURN and uav.id in self._return_base_by_uav:
+            base = self._return_base_by_uav[uav.id]
+            # A fixed-wing return controller may still be turning when it
+            # crosses the exact base coordinate. Capture the final approach
+            # before the next safety tick can carry it beyond the map edge.
+            capture_radius = max(
+                0.05,
+                uav.R_min
+                + self._control_action_spec().max_speed_cells_min * self.clock.dt_min,
+            )
+            if math.dist(
                 uav.float_position,
-                (
-                    self._return_base_by_uav[uav.id].position.col,
-                    self._return_base_by_uav[uav.id].position.row,
-                ),
-            ) <= 0.05
-        ):
-            uav.status = "refueling"
-            uav.sensor_mode = "off"
-            self._land_for_refuelling(uav)
+                (base.position.col, base.position.row),
+            ) <= capture_radius:
+                uav.position = base.position
+                uav.status = "refueling"
+                uav.sensor_mode = "off"
+                self._land_for_refuelling(uav)
 
     def _queue_pending_coverage_completion(
         self,
@@ -2444,12 +2448,43 @@ class SimulationEngine:
             return False
         previous_task = self.control_coordinator.active_task(uav.id)
         reserve_cells = self.config.control.safety.reserve_range_cells
+        max_speed = self._control_action_spec().max_speed_cells_min
+        base_capacity_available = any(
+            self._base_maintenance_load(base) < base.capacity
+            for base in self.bases
+        )
+        if not force and base_capacity_available:
+            # Recovery planning can be temporarily impossible while a
+            # fixed-wing controller is completing an edge turn.  Do not turn
+            # that transient heading into a failure while the airframe still
+            # has a conservative direct-to-base fuel margin.
+            available_bases = [
+                base for base in self.bases
+                if self._base_maintenance_load(base) < base.capacity
+            ]
+            nearest_base_distance = min(
+                math.dist(
+                    uav.float_position,
+                    (base.position.col, base.position.row),
+                )
+                for base in available_bases
+            )
+            conservative_margin = (
+                nearest_base_distance
+                + 2.0 * math.pi * uav.R_min
+                + reserve_cells
+                + max_speed * self.clock.dt_min
+            )
+            if uav.remaining_range_cells > conservative_margin:
+                return False
         planner = RecoveryPlanner()
+        base_observations = self._control_base_observations()
+        allow_reserved_bases = False
         try:
             candidates = planner.evaluate(
                 uav.pose,
                 uav.remaining_range_cells,
-                self._control_base_observations(),
+                base_observations,
                 self.allocator.sm.obstacle_mask,
                 self.allocator.sm.obstacle_version,
                 uav.R_min,
@@ -2461,6 +2496,25 @@ class SimulationEngine:
         else:
             planning_error = "no candidate satisfies the range and safety contract"
         if not candidates:
+            # A full base rejects a new refuelling slot, not a safe inbound
+            # flight. Let the airframe reserve the route and enter holding
+            # on arrival when every open slot is infeasible.
+            allow_reserved_bases = True
+            try:
+                candidates = planner.evaluate(
+                    uav.pose,
+                    uav.remaining_range_cells,
+                    base_observations,
+                    self.allocator.sm.obstacle_mask,
+                    self.allocator.sm.obstacle_version,
+                    uav.R_min,
+                    reserve_cells,
+                    allow_reserved_bases=True,
+                )
+            except (RuntimeError, ValueError) as exc:
+                candidates = ()
+                planning_error = str(exc)
+        if not candidates:
             error = NoSafeRecoveryPath(
                 "none",
                 self.allocator.sm.obstacle_version,
@@ -2470,20 +2524,26 @@ class SimulationEngine:
             raise error
 
         candidate = candidates[0]
-        max_speed = self._control_action_spec().max_speed_cells_min
         threshold = (
             candidate.path_length_cells
             + candidate.reserve_cells
             + max_speed * self.clock.dt_min
         )
-        if not force and uav.remaining_range_cells > threshold:
+        if (
+            not force
+            and not allow_reserved_bases
+            and uav.remaining_range_cells > threshold
+        ):
             return False
 
         base = next(
             (item for item in self.bases if item.id == candidate.base.base_id),
             None,
         )
-        if base is None or self._base_maintenance_load(base) >= base.capacity:
+        if base is None or (
+            not allow_reserved_bases
+            and self._base_maintenance_load(base) >= base.capacity
+        ):
             self._emit_no_safe_recovery_path(
                 uav,
                 current_time,
@@ -3632,12 +3692,35 @@ class SimulationEngine:
                             current_time,
                             uav_id=uav.id,
                         )
+                    execution = self.dynamics_executor.coverage_execution
                     sm.add_event("sar_scan", {
                         "episode_id": self.episode_id,
                         "uav_id": uav.id,
                         "task_id": task.task_id if task is not None else None,
                         "generation": lease.generation,
                         "cells": [list(cell) for cell in cells],
+                        "position": [float(uav.float_position[0]), float(uav.float_position[1])],
+                        "heading_rad": float(uav.heading_rad),
+                        "look_direction": uav.sar_look_direction,
+                        "sar_scan_heading_rad": (
+                            float(uav.sar_scan_heading_rad)
+                            if uav.sar_scan_heading_rad is not None else None
+                        ),
+                        "sar_scan_origin": (
+                            list(uav.sar_scan_origin)
+                            if uav.sar_scan_origin is not None else None
+                        ),
+                        "swath_width_cells": float(getattr(
+                            uav.sar_sensor,
+                            "swath_width_cells",
+                            execution.swath_width_cells,
+                        )),
+                        "near_range_cells": float(getattr(
+                            uav.sar_sensor,
+                            "near_range_cells",
+                            execution.near_range_cells,
+                        )),
+                        "along_track_cells": float(uav.sar_along_track_cells),
                     })
                 footprint_set = set(footprint)
                 for ship in self.ships:
@@ -4093,6 +4176,7 @@ class SimulationEngine:
             valid_eo_links=tuple(links),
             intent_statuses=tuple(status_samples),
             unique_coverage_ratio=float(coverage),
+            persistent_coverage=sm.get_persistent_coverage_stats(),
         ))
 
     def _resume_search(self, uav: UAVEntity) -> bool:

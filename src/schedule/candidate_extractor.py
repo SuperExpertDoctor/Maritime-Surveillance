@@ -133,7 +133,7 @@ class CandidateExtractor:
         uavs = sm.get_all_uavs()
         reference = uavs[0] if uavs else None
         r_min = float(getattr(reference, "R_min", 1.0))
-        along_track = getattr(reference, "sar_along_track_cells", None)
+        along_track = getattr(reference, "sar_along_track_cells", None) or 0.8
         fragments: list[dict] = []
         accepted_boxes: set[tuple[int, int, int, int]] = set()
         served = np.zeros_like(due, dtype=bool)
@@ -638,8 +638,8 @@ class CandidateExtractor:
                 # close to a coastal launch point in that tie so the first
                 # sortie spends its limited early window on SAR imaging
                 # rather than a long deadhead transit across the map.
-                return (-unseen_density, -unseen_count, distance,
-                        abs(area - gc.search_max_cells), -item["total_value"])
+                return (-unseen_density, abs(area - gc.search_min_cells),
+                        -unseen_count, distance, -item["total_value"])
             return (-item["total_value"], distance)
 
         candidates.sort(key=candidate_key)
@@ -958,7 +958,7 @@ class CandidateExtractor:
             raw.sort(key=lambda item: (
                 -(item["unseen_count"] / item["cell_count"]),
                 -item["unseen_count"],
-                abs(item["cell_count"] - gc.search_max_cells),
+                abs(item["cell_count"] - gc.search_min_cells),
                 -item["total_value"],
                 item["distance"],
             ))
@@ -1145,7 +1145,7 @@ class CandidateExtractor:
 
     @staticmethod
     def _partition_counts(width: int, height: int, gc) -> tuple[int, int]:
-        """Choose the densest grid whose every tile satisfies region limits."""
+        """Choose sortie-sized tiles whose every piece satisfies region limits."""
         choices: list[tuple[float, int, int, int]] = []
         for n_cols in range(1, width + 1):
             widths = (width // n_cols, math.ceil(width / n_cols))
@@ -1164,11 +1164,12 @@ class CandidateExtractor:
                 ):
                     continue
                 mean_area = width * height / (n_cols * n_rows)
-                # Around 24 cells typically needs two scan lines with the
-                # configured two-cell SAR swath, preserving the validated
-                # coverage throughput of the normal exploration phase.
+                # Small tiles let a fixed-wing sortie finish a complete SAR
+                # responsibility before its range reserve triggers return.
+                # Prefer the lower legal area bound; max-sized rectangles
+                # strand unfinished tasks after the transit and scan turns.
                 choices.append((
-                    -abs(mean_area - gc.search_max_cells),
+                    -abs(mean_area - gc.search_min_cells),
                     n_cols * n_rows,
                     n_cols,
                     n_rows,

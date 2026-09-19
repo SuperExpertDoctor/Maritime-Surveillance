@@ -116,6 +116,37 @@ def test_refuelling_promotes_finished_work_lease_before_reset():
     assert not engine.control_coordinator.has_controller(uav.id)
 
 
+def test_return_capture_snaps_final_approach_before_boundary_fault():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    uav = engine.uavs[0]
+    base = engine.base
+    uav._col = float(base.position.col) + 0.12
+    uav._row = float(base.position.row)
+    uav.heading_rad = math.pi
+    uav.fuel_remaining_pct = 0.8
+    engine.allocator.sm.update_uav_status(uav.id, "idle", uav.position)
+    task = ControlTask(
+        "capture-final-approach",
+        OperationMode.COVERAGE,
+        region_bbox=BBox(5, 5, 9, 9),
+    )
+    engine.control_coordinator.start_work(
+        uav.id, sortie_number=1, current_time=0.0, dt_min=1.0, task=task,
+    )
+
+    assert engine._maybe_revoke_for_range(uav, 0.0, force=True)
+    uav._col = float(base.position.col) + 0.12
+    uav._row = float(base.position.row)
+    uav.heading_rad = math.pi
+
+    engine._step_controlled_uav(uav, 1.0)
+
+    assert uav.status == "refueling"
+    assert uav.position == base.position
+    assert base.is_refueling(uav.id)
+    assert uav.id not in engine._emergency_failures
+
+
 def test_dynamic_obstacle_replans_remaining_return_route():
     engine = SimulationEngine(ConfigLoader.load())
     uav = engine.uavs[0]
@@ -391,6 +422,33 @@ def test_return_route_skips_base_with_full_reserved_maintenance_capacity():
     engine._set_return_route(uav, 10.0)
 
     assert engine._return_base_by_uav[uav.id] is not busiest
+
+
+def test_range_reserve_uses_available_base_when_nearest_base_is_full():
+    config = ConfigLoader.load()
+    engine = SimulationEngine(config, seed=42)
+    uav = engine.uavs[0]
+    uav.position = GridCoord(5, 3)
+    uav.heading_rad = math.radians(75.0)
+    uav.fuel_remaining_pct = 0.216
+    nearest = engine.bases[0]
+    for assigned in engine.uavs[1:4]:
+        engine._return_base_by_uav[assigned.id] = nearest
+    engine.control_coordinator.start_work(
+        uav.id,
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=engine.clock.dt_min,
+        task=ControlTask(
+            "reserve-test",
+            OperationMode.COVERAGE,
+            region_bbox=BBox(5, 1, 11, 9),
+        ),
+    )
+
+    engine._maybe_revoke_for_range(uav, 1.0)
+
+    assert engine._return_base_by_uav[uav.id] is engine.bases[1]
 
 
 def test_return_route_uses_high_budget_fallback_after_transient_rrt_failures(monkeypatch):
