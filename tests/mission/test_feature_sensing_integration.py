@@ -153,6 +153,25 @@ def test_ais_toggle_connects_command_boundary_contact_evidence_and_revision():
     )
 
 
+def test_deleted_vessel_removes_ais_history_key():
+    engine = build_scenario("ais-toggle", seed=42, transport="fixture")
+    ship = next(
+        item for item in engine.ships
+        if item.vessel_class == "type_ii" and item.ais_enabled
+    )
+    engine._refresh_ais_signals(1.0)
+    signal = ship.ais_signal
+    assert signal is not None
+    revision = engine._vessel_revisions[ship.id]
+
+    engine.vessel_commands.enqueue(VesselCommand(
+        "ais-history-delete", engine.episode_id, "delete", ship.id,
+        revision, None, None, None,
+    ))
+    assert engine.apply_pending_vessel_commands()[0].status == "applied"
+    assert signal.mmsi not in engine._ais_history
+
+
 def test_passive_gates_publish_bearing_or_position_then_investigation_task():
     one_observer = _passive_engine(((3.0, 5.0), (20.0, 20.0)))
     one_observer.allocator.sm.current_time = 1.0

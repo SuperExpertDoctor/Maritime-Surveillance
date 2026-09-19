@@ -18,28 +18,27 @@ class TriggerManager:
     def __init__(self, sm: StateManager):
         self._sm = sm
         self._pending_events: list[dict] = []
+        self._event_dedup_expires: dict[tuple[str, str], float] = {}
         self._last_heavy_time: float = 0.0
-        self._last_light_time: float = 0.0
+        self._last_light_time: float | None = None
         self._heavy_retry_at: float | None = None
         self._heavy_retry_reason: str = "decision_failed"
         self._last_checked_events: tuple[dict, ...] = ()
 
     def notify_event(self, event_type: str, time: float, **kwargs) -> None:
-        # Dedup: skip duplicate (event_type, uav_id) within a 5-min window
-        # to prevent a single UAV from flooding the event queue with the
-        # same event type (e.g. repeated storm_avoidance or fuel warnings).
-        uav_id = kwargs.get("uav_id", "")
-        if uav_id:
-            for existing in self._pending_events:
-                if (
-                    existing["type"] == event_type
-                    and existing.get("uav_id") == uav_id
-                    and time - existing["time"] <= 5.0
-                ):
-                    return  # duplicate suppressed
+        # Keep deduplication independent from the pending queue.  check()
+        # consumes pending events, but a repeated edge remains suppressed
+        # until its explicit expiry time.
+        event_time = float(time)
+        self._prune_event_dedup(event_time)
+        uav_id = str(kwargs.get("uav_id", ""))
+        key = (str(event_type), uav_id)
+        if event_time < self._event_dedup_expires.get(key, -math.inf):
+            return
+        self._event_dedup_expires[key] = event_time + 5.0
         self._pending_events.append({
             "type": event_type,
-            "time": time,
+            "time": event_time,
             **kwargs,
         })
 
@@ -73,6 +72,7 @@ class TriggerManager:
 
     def check(self, current_time: float) -> TriggerDecision:
         """检查是否需要触发，返回决策。"""
+        self._prune_event_dedup(float(current_time))
         decision = self._check_events(current_time)
         if decision.trigger_type != "none":
             return decision
@@ -191,7 +191,10 @@ class TriggerManager:
             )
 
         # 轻量触发
-        if light_count > 0:
+        if light_count > 0 and (
+            self._last_light_time is None
+            or current_time - self._last_light_time >= 5.0
+        ):
             affected = [e.get("uav_id", "") for e in recent
                        if e.get("uav_id", "") and e["type"] in light_types]
             return TriggerDecision(
@@ -208,7 +211,7 @@ class TriggerManager:
             if self._heavy_retry_at is not None and time >= self._heavy_retry_at:
                 self._heavy_retry_at = None
         elif trigger_type == "light":
-            self._last_light_time = time
+            self._last_light_time = float(time)
 
     def schedule_heavy_retry(self, current_time: float, *, reason: str) -> None:
         """Schedule a failed model decision for one simulation minute later."""
@@ -229,3 +232,8 @@ class TriggerManager:
     def clear_heavy_retry(self) -> None:
         """Discard an automatic retry once an operator decision succeeds."""
         self._heavy_retry_at = None
+
+    def _prune_event_dedup(self, current_time: float) -> None:
+        for key, expires_at in tuple(self._event_dedup_expires.items()):
+            if current_time >= expires_at:
+                del self._event_dedup_expires[key]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 import math
 
 from src.control.common.contracts import (
@@ -17,12 +18,26 @@ from src.control.common.contracts import (
 SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN = math.radians(2.0)
 
 
+class ControlOutcome(str, Enum):
+    """Classification for a control tick or rejected control attempt."""
+
+    CLEAN = "clean"
+    CLIPPED = "clipped"
+    MASKED = "masked"
+    INVALID = "invalid"
+    UNSAFE = "unsafe"
+
+
 class InvalidControlCommand(ValueError):
     """Raised when a controller command cannot be applied safely."""
+
+    outcome = ControlOutcome.INVALID
 
 
 class UnsafeControlState(RuntimeError):
     """Raised when no legal motion can avoid the published safety mask."""
+
+    outcome = ControlOutcome.UNSAFE
 
 
 @dataclass(frozen=True)
@@ -245,6 +260,7 @@ class SafetyEnvelope:
 
 
 __all__ = [
+    "ControlOutcome",
     "InvalidControlCommand",
     "SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN",
     "SafetyEnvelope",

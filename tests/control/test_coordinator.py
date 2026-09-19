@@ -36,7 +36,11 @@ from src.control.common.factory import ControlFactory
 from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
 from src.control.common.ownership import ControlOwnership
-from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
+from src.control.common.safety import (
+    InvalidControlCommand,
+    SafetyEnvelope,
+    UnsafeControlState,
+)
 from src.control.heuristic.base import HeuristicControllerBase
 from src.control.heuristic.return_to_base import ReturnToBaseController
 from src.env.uav_entity import UAVEntity
@@ -513,7 +517,46 @@ def test_safety_result_execution_audit_and_previous_intervention_state_are_recor
     assert coordinator._invalid_streaks["UAV-1"] == 0
 
 
-def test_third_consecutive_intervention_raises_before_world_or_registry_mutation():
+def test_clipping_does_not_increment_invalid_command_counter():
+    controller = DeterministicController(
+        ControlMode.BC,
+        commands=(command(speed=2.0),) * 3,
+    )
+    coordinator, *_ = make_runtime(
+        {"UAV-1": ControlMode.BC}, {"UAV-1": controller}
+    )
+    uav = make_uav("UAV-1")
+    start_learning(coordinator)
+
+    results = [
+        coordinator.step_uav(uav, current_time=float(tick))
+        for tick in range(1, 4)
+    ]
+
+    assert all(result.safety.interventions for result in results)
+    assert coordinator._invalid_streaks["UAV-1"] == 0
+    assert uav.last_applied_command is results[-1].safety.applied_command
+
+
+def test_unsafe_control_state_is_classified_and_recovered_separately():
+    controller = DeterministicController(ControlMode.BC)
+    coordinator, _, state_manager, *_ = make_runtime(
+        {"UAV-1": ControlMode.BC}, {"UAV-1": controller}
+    )
+    uav = make_uav("UAV-1")
+    start_learning(coordinator)
+    blocked = np.ones(state_manager.config.grid.resolution, dtype=bool)
+    state_manager.set_environment_obstacles([], blocked)
+
+    with pytest.raises(UnsafeControlState) as captured:
+        coordinator.step_uav(uav, current_time=1.0)
+
+    assert getattr(captured.value, "outcome", None) == "unsafe"
+    assert coordinator._invalid_streaks["UAV-1"] == 0
+    assert uav.last_applied_command is None
+
+
+def test_consecutive_safety_adjustments_execute_without_invalid_revoke():
     controller = DeterministicController(
         ControlMode.BC,
         commands=(command(speed=2.0),) * 3,
@@ -537,18 +580,13 @@ def test_third_consecutive_intervention_raises_before_world_or_registry_mutation
         "operation": coordinator._operation_modes["UAV-1"],
     }
 
-    with pytest.raises(EmergencyRevokeRequired) as captured:
-        coordinator.step_uav(uav, current_time=3.0)
+    result = coordinator.step_uav(uav, current_time=3.0)
 
-    assert captured.value.uav_id == "UAV-1"
-    assert captured.value.invalid_streak == 3
-    assert uav.pose == before["pose"]
-    assert uav.remaining_range_cells == before["range"]
-    assert uav.sensor_mode == before["sensor"]
-    assert uav.last_applied_command is before["last_applied"]
-    assert state_uav.sensor_mode == before["state_sensor"]
-    assert registry._track_bindings == before["bindings"]
-    assert coordinator._operation_modes["UAV-1"] is before["operation"]
+    assert result.outcome.value == "clipped"
+    assert uav.pose != before["pose"]
+    assert uav.remaining_range_cells < before["range"]
+    assert uav.last_applied_command is not before["last_applied"]
+    assert coordinator._invalid_streaks["UAV-1"] == 0
 
 
 def test_one_clean_command_resets_the_consecutive_invalid_streak():
@@ -574,7 +612,7 @@ def test_one_clean_command_resets_the_consecutive_invalid_streak():
     ]
 
     assert len(results) == 5
-    assert coordinator._invalid_streaks["UAV-1"] == 2
+    assert coordinator._invalid_streaks["UAV-1"] == 0
 
 
 def test_schema_mask_and_nonfinite_rejections_share_the_invalid_threshold():
@@ -872,7 +910,7 @@ def test_new_sortie_clears_saved_coverage_before_work_begins():
     assert coordinator._pending_tasks == {}
 
 
-def test_external_return_revocation_clears_saved_coverage_without_consuming_lifecycle_event():
+def test_external_return_revocation_saves_coverage_without_consuming_lifecycle_event():
     config = ConfigLoader.load()
     factory = DeterministicFactory(config.control)
     coordinator, _, state_manager, *_ = make_runtime(
@@ -898,7 +936,7 @@ def test_external_return_revocation_clears_saved_coverage_without_consuming_life
     )
     result = coordinator.step_uav(uav, current_time=3.0)
 
-    assert "UAV-1" not in coordinator._task_flow._saved_coverage_tasks
+    assert "UAV-1" in coordinator._task_flow._saved_coverage_tasks
     assert [event.event_type for event in result.observation.events] == [
         "work_range_exhausted"
     ]

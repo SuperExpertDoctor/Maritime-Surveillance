@@ -151,7 +151,7 @@ def test_watchdog_replans_twice_then_emits_one_terminal_failure(
         for event in result.events
     ] == [1, 2, 3]
     assert controller.route_snapshot().status == "unavailable"
-    assert controller.route_snapshot().route
+    assert controller.route_snapshot().route == ()
     assert controller.route_snapshot().coverage_progress["stall_replans"] == 2
 
 

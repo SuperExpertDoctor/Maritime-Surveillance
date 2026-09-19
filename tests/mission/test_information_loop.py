@@ -109,6 +109,22 @@ def test_expired_evidence_is_a_heavy_information_event():
     assert engine.allocator.trigger_manager.check(1.0).trigger_type == "heavy"
 
 
+def test_light_trigger_respects_five_minute_dedup_window():
+    engine = _engine()
+    engine.allocator.sm.cycle = 1
+    manager = engine.allocator.trigger_manager
+
+    manager.notify_event("search_complete", 1.0, uav_id="UAV-1")
+    first = manager.check(1.0)
+    manager.mark_triggered(first.trigger_type, 1.0)
+
+    manager.notify_event("search_complete", 2.0, uav_id="UAV-1")
+    assert manager.check(2.0).trigger_type == "none"
+
+    manager.notify_event("search_complete", 6.1, uav_id="UAV-1")
+    assert manager.check(6.1).trigger_type == "light"
+
+
 def test_ais_off_does_not_append_evidence_and_forced_enable_refreshes_once():
     engine = _engine()
     ship = next(ship for ship in engine.ships if ship.vessel_class == "type_ii")

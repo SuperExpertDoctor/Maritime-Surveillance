@@ -184,6 +184,43 @@ def test_tracking_exit_without_saved_coverage_requests_assignment_and_holds(fact
     assert transition.request_assignment
 
 
+def test_tracking_exit_restores_saved_coverage_without_new_assignment(factory, coverage_task):
+    ownership = ControlOwnership(["UAV-1"])
+    lease = ownership.acquire(
+        "UAV-1", ControlOwner.HEURISTIC, "tracking:C1", 0.0
+    )
+    task = ControlTask("track:C1", OperationMode.TRACK, target_contact_id="C1")
+    controller = factory.create_heuristic("UAV-1", task)
+    controllers = {"UAV-1": controller}
+    pending_tasks = {"UAV-1": task}
+    flow = HeuristicTaskFlow(ownership, factory, controllers, pending_tasks)
+    flow.save_coverage_task("UAV-1", coverage_task, generation=1)
+
+    transition = flow.handle(_event("target_lost"), lease)
+
+    assert transition.consumed
+    assert transition.current_lease.owner is ControlOwner.HEURISTIC
+    assert transition.task == coverage_task
+    assert not transition.request_assignment
+    assert "UAV-1" not in flow._saved_coverage_tasks
+
+
+def test_saved_coverage_round_trip_restores_generation_and_route(factory, coverage_task):
+    flow, *_ = _heuristic_flow(factory, coverage_task)
+    route = ((5.0, 5.0, 0.0), (9.0, 5.0, 0.0))
+
+    flow.save_coverage_task(
+        "UAV-1", coverage_task, generation=7, route=route,
+    )
+    restored = flow.restore_coverage_task("UAV-1", generation=7)
+
+    assert restored is not None
+    assert restored.task == coverage_task
+    assert restored.generation == 7
+    assert restored.route == route
+    assert "UAV-1" not in flow._saved_coverage_tasks
+
+
 def test_type_i_release_replaces_active_tracking_with_holding(factory):
     ownership = ControlOwnership(["UAV-1"])
     lease = ownership.acquire(

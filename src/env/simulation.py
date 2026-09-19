@@ -52,7 +52,7 @@ from src.control.common.factory import ControlFactory, ControlProvider
 from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
 from src.control.common.ownership import ControlOwnership
-from src.control.common.safety import SafetyEnvelope
+from src.control.common.safety import SafetyEnvelope, UnsafeControlState
 from src.control.heuristic.navigation import AStarNavigator
 from src.control.heuristic.return_to_base import (
     NoSafeRecoveryPath,
@@ -628,6 +628,16 @@ class SimulationEngine:
         now = float(self.clock.time)
         sm = self.allocator.sm
         contact_ids = set(plan.contact_ids)
+        removed_mmsis = {
+            contact.ais_mmsi
+            for contact in sm.contacts.list_snapshots()
+            if contact.contact_id in contact_ids and contact.ais_mmsi
+        }
+        removed_ship = next(
+            (ship for ship in self.ships if ship.id == plan.vessel_id), None
+        )
+        if removed_ship is not None and removed_ship.ais_signal is not None:
+            removed_mmsis.add(removed_ship.ais_signal.mmsi)
         probe_ids = {
             probe.probe_id
             for probe in sm.get_probe_sessions()
@@ -726,6 +736,13 @@ class SimulationEngine:
             "revision": plan.revision + 1,
             "contact_ids": list(plan.contact_ids),
         })
+        remaining_mmsis = {
+            ship.ais_signal.mmsi
+            for ship in self.ships
+            if ship.ais_signal is not None
+        }
+        for mmsi in removed_mmsis - remaining_mmsis:
+            self._ais_history.pop(mmsi, None)
 
     def _create_scenario_vessel(self, command: VesselCommand) -> Ship:
         x, y = map(float, command.position_cells)
@@ -1902,11 +1919,17 @@ class SimulationEngine:
                     started_at_min=tick.observation.timestamp_min,
                 )
         command = tick.execution.applied_command
+        previous_target = uav.target_group_id
         if command.operation_mode is OperationMode.TRACK:
             uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
                 command.target_contact_id, command.target_contact_id)
             if command.target_contact_id:
                 uav._mission_kind = "track_entry"
+                if (
+                    previous_target != uav.target_group_id
+                    or uav.id not in self._tracking_started_at
+                ):
+                    self._tracking_started_at[uav.id] = tick.observation.timestamp_min
         elif command.operation_mode is OperationMode.PROBE:
             uav.target_group_id = self.allocator.sm.merged_contact_aliases.get(
                 command.target_contact_id, command.target_contact_id)
@@ -2640,6 +2663,8 @@ class SimulationEngine:
         reason = (
             "invalid_command_limit"
             if isinstance(error, EmergencyRevokeRequired)
+            else "unsafe_control_state"
+            if isinstance(error, UnsafeControlState)
             else "controller_fault"
         )
         self.allocator.trigger_manager.notify_event(
