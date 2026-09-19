@@ -6,6 +6,20 @@ GridCoord = namedtuple("GridCoord", ["col", "row"])
 BBox = namedtuple("BBox", ["col_start", "row_start", "col_end", "row_end"])
 
 
+def grid_bbox_from_center(
+    center: GridCoord, radius: int, resolution: tuple[int, int]
+) -> BBox:
+    """Return the bounded half-open bbox around a grid coordinate."""
+    col, row = center
+    cols, rows = resolution
+    return BBox(
+        max(0, col - radius),
+        max(0, row - radius),
+        min(cols, col + radius),
+        min(rows, row + radius),
+    )
+
+
 @dataclass
 class Region:
     id: str
