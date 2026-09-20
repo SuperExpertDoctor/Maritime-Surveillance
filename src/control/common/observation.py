@@ -177,6 +177,26 @@ class ObservationProvider:
                 age_min=max(0.0, float(current_time) - report.observed_at),
                 confidence=1.0,
             ))
+        # Released multi-observer passive fixes have no AIS/visual samples,
+        # hence no legacy TargetReport. They are still measured contacts that
+        # the assigned probe must be able to approach (never visual evidence).
+        published = {state_manager.resolve_contact_id(c.contact_id) for c in contacts}
+        for contact in state_manager.contacts.list_snapshots():
+            if contact.contact_id in published or contact.samples:
+                continue
+            position = state_manager.contact_position(contact.contact_id, current_time)
+            if position is None:
+                continue
+            contacts.append(ContactObservation(
+                contact_id=contact.contact_id,
+                group_id=contact.contact_id,
+                estimated_position=position,
+                estimated_velocity=contact.estimated_velocity_cells_min or (0.0, 0.0),
+                source="passive",
+                observed_at_min=float(contact.last_seen_min),
+                age_min=max(0.0, float(current_time) - contact.last_seen_min),
+                confidence=1.0,
+            ))
         # Retained commands may still reference an alias. Publish the same
         # measured estimate under that ID, with canonical registry ownership.
         canonical = {contact.contact_id: contact for contact in contacts}

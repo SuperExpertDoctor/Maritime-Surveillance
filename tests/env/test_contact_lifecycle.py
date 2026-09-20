@@ -80,6 +80,7 @@ def start_tracking(engine, uav, cid, *, execute=True, reserve=True, current_time
         tick = engine.control_coordinator.step_uav(uav, current_time=current_time, dt_min=.1)
         engine._record_control_tick(uav, tick)
         assert tick.execution.applied_command.operation_mode is OperationMode.TRACK
+        assert engine._tracking_started_at[uav.id] == pytest.approx(current_time)
     return task
 
 

@@ -1101,10 +1101,14 @@ class MissionScheduler:
                 snapshot_id=snapshot.snapshot_id,
                 system_prompt=self.system_prompt,
                 user_payload=payload,
-                # The gateway may correct only the response schema.  Snapshot
-                # semantics and assignment feasibility are post-selection
-                # checks and must not trigger an unbounded model correction.
-                validate=self._selection_schema_errors,
+                # Correct infeasible selections within the gateway's existing
+                # retry limit and shared planning deadline; never relax rules.
+                validate=lambda candidate: (
+                    self._selection_schema_errors(candidate)
+                    or self.validate_selection(
+                        candidate, snapshot, visible_task_ids=visible_task_ids,
+                    )
+                ),
                 post_validate=lambda candidate: self.validate_selection(
                     candidate,
                     snapshot,
@@ -1313,8 +1317,31 @@ class MissionScheduler:
 
     def _prompt_payload(self, snapshot: MissionSnapshot) -> dict:
         prompt_limit = min(self.max_tasks_in_prompt, 40)
-        all_candidates = tuple(snapshot.candidates)
-        candidate_count = len(all_candidates)
+        # Route feasibility alone does not authorize taking a busy aircraft.
+        # Apply the same resource and preemption rules as the final matcher.
+        candidates, active = _task_maps(snapshot)
+        resources = _resource_maps(snapshot)
+        legal_edges = []
+        for edge in snapshot.feasible_edges:
+            selection = MissionSelection(
+                SELECTION_SCHEMA, snapshot.snapshot_id, (edge.task_id,),
+                (edge.uav_id,) if edge.uav_id in snapshot.preemptible_uav_ids else (),
+                None, "",
+            )
+            if _edge_usable(
+                edge, edge.task_id, candidates, active, resources, snapshot,
+                selection, self.reassignment_cooldown_min,
+                allow_probe_preempt_search=self.allow_probe_preempt_search,
+                allow_intent_preempt_search=self.allow_intent_preempt_search,
+            ):
+                legal_edges.append(edge)
+        legal_uavs = {}
+        for edge in legal_edges:
+            legal_uavs.setdefault(edge.task_id, set()).add(edge.uav_id)
+        all_candidates = tuple(
+            task for task in snapshot.candidates if task.task_id in legal_uavs
+        )
+        candidate_count = len(snapshot.candidates)
         explicit_window = bool(snapshot.prompt_task_ids)
         prompt_sources: dict[str, str] = {}
         prompt_skip_cycles: dict[str, int] = {}
@@ -1369,6 +1396,8 @@ class MissionScheduler:
         prompt_candidate_payloads = [
             _candidate_payload(task) for task in ordered_tasks
         ]
+        for candidate in prompt_candidate_payloads:
+            candidate["feasible_uav_ids"] = sorted(legal_uavs[candidate["task_id"]])
         prompt_task_ids = {
             candidate["task_id"]
             for candidate in prompt_candidate_payloads
@@ -1386,7 +1415,7 @@ class MissionScheduler:
         }
         prompt_edges = [
             _jsonable(edge)
-            for edge in snapshot.feasible_edges
+            for edge in legal_edges
             if edge.task_id in prompt_task_ids
         ]
         full = {

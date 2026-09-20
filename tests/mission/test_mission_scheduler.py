@@ -883,3 +883,52 @@ def test_task_allocator_search_edge_uses_complete_route_and_final_endpoint(monke
     assert edges[0].transit_time_min == pytest.approx(2.0)
     assert edges[0].mission_range_cells == pytest.approx(2.0)
     assert captured["target"] == (10.0, 14.0)
+
+
+def test_live_scheduler_corrects_infeasible_simultaneous_selection():
+    snapshot = _snapshot(
+        [_task('S1'), _task('S2')], [_resource('U1')],
+        [_edge('S1', 'U1', 1.0), _edge('S2', 'U1', 2.0)],
+    )
+    transport = ScriptedTransport({'decision_maker': [
+        json.dumps(_selection(snapshot, ['S1', 'S2'])),
+        json.dumps(_selection(snapshot, ['S1'])),
+    ]})
+    scheduler = MissionScheduler(gateway=LLMGateway(transport=transport))
+    batch = scheduler.decide(snapshot)
+    assert batch is not None
+    assert [a.task_id for a in batch.assignments] == ['S1']
+    assert len(transport.calls) == 2
+    correction = json.loads(transport.calls[1]['messages'][-1]['content'])
+    assert 'infeasible_assignment' in correction['errors']
+
+
+@pytest.mark.parametrize("explicit_window", [False, True])
+def test_prompt_removes_illegal_search_preemption_edges(explicit_window):
+    snapshot = _snapshot(
+        [_task('Q1', kind='probe', contact_id='C1'),
+         _task('S2'), _task('I1', kind='investigation', bbox=(15, 15, 19, 20))],
+        [_resource('U1', operation='transit', current_task_id='old')],
+        [_edge(t, 'U1', 1.0) for t in ('Q1', 'S2', 'I1')],
+        available=(), preemptible=('U1',),
+        active_tasks=(TaskRecord('old', 'search', 'executing', (1, 1, 5, 6),
+                                None, (), 'U1', None, 0.0, 1.0, None, None),),
+    )
+    if explicit_window:
+        snapshot = replace(snapshot, prompt_task_ids=('Q1', 'S2', 'I1'))
+    payload = MissionScheduler()._prompt_payload(snapshot)['snapshot']
+    assert [t['task_id'] for t in payload['candidates']] == ['Q1']
+    assert payload['candidates'][0]['feasible_uav_ids'] == ['U1']
+
+
+def test_infeasible_live_selection_remains_rejected_after_bounded_corrections():
+    snapshot = _snapshot(
+        [_task('S1'), _task('S2')], [_resource('U1')],
+        [_edge('S1', 'U1', 1.0), _edge('S2', 'U1', 2.0)],
+    )
+    invalid = json.dumps(_selection(snapshot, ['S1', 'S2']))
+    transport = ScriptedTransport({'decision_maker': [invalid] * 3})
+    scheduler = MissionScheduler(gateway=LLMGateway(transport=transport))
+    assert scheduler.decide(snapshot) is None
+    assert 1 <= len(transport.calls) <= 3
+    assert scheduler.last_selection_success is False

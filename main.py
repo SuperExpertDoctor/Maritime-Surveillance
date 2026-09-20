@@ -213,11 +213,14 @@ def main(
     frame_publisher.close()
     output_path = app.state.frame_logger.path if app is not None else logger.path
     summary["jsonl_path"] = output_path
-    print("仿真结束。")
+    if engine.runtime_status == "paused_model":
+        print(f"仿真提前暂停：完成 {summary['steps']}/{steps} 步，模型决策失败；详见 JSONL 日志。")
+    else:
+        print(f"仿真运行结束：完成 {summary['steps']}/{steps} 步。")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"JSONL 日志: {output_path}")
     if hold_server and app is not None:
-        print(f"服务将持续运行，按 Ctrl+C 停止: http://localhost:{port}")
+        print(f"网页服务保持运行（不代表仿真继续推进），按 Ctrl+C 停止: http://localhost:{port}")
         try:
             while True:
                 time.sleep(1)

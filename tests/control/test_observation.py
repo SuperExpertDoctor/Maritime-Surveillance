@@ -247,3 +247,23 @@ def test_merged_alias_command_stays_valid_and_binds_the_canonical_contact(engine
     assert len(sm.get_track_regions()) == 1
     assert sm.get_track_regions()[0].target_group_id == aid
     assert sm.get_uav(engine.uavs[0].id).target_group_id == aid
+
+
+def test_released_passive_position_reaches_probe_controller_without_visual_samples(engine):
+    from src.mission.contracts import PassivePosition
+    sm = engine.allocator.sm
+    cid = sm.contacts.ingest_passive_position(PassivePosition(
+        'position-1', 'emitter-1', 'burst-1', 'sample-1', 0.0,
+        (20.0, 21.0), ('bearing-u1', 'bearing-u2'),
+    ))
+    assert sm.contacts.snapshot(cid).samples == ()
+    observation = build_observation(engine)
+    contact = next((c for c in observation.contacts if c.contact_id == cid), None)
+    assert contact is not None
+    assert contact.estimated_position == (20.0, 21.0)
+    assert contact.source == 'passive'
+    assert sm.contacts.snapshot(cid).samples == ()
+    stale = build_observation(
+        engine, current_time=engine.config.mission.contact.stale_after_min + 1,
+    )
+    assert not any(c.contact_id == cid for c in stale.contacts)
