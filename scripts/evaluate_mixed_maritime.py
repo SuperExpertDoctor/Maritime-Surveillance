@@ -408,27 +408,41 @@ class _FixtureGateway:
                     )
                     if task_id in feasible_ids and task_id not in ordered
                 )
+                # Keep mandatory coverage first, then honor urgent priorities
+                # within the non-search share, then fill ordinary representatives.
+                ordered = list(dict.fromkeys((*must_service, *ordered)))
                 selected: list[str] = []
                 tolerated = (
                     "underutilized_feasible_work:",
                     "coverage_floor_not_met",
                     "coverage_oldest_not_selected",
+                    "zone_quota_not_met:",
+                    "zone_must_service_not_selected:",
                 )
                 for task_id in ordered:
                     if task_id in selected:
+                        continue
+                    if task_id not in candidates:
+                        continue
+                    if (not coverage.get("infeasible_reason")
+                            and candidates[task_id].get("kind") != "search"
+                            and sum(candidates[s].get("kind") != "search" for s in selected)
+                            >= max(0, len(snapshot.get("available_uav_ids", ())) - required)):
+                        continue
+                    if (not coverage.get("infeasible_reason")
+                            and candidates[task_id].get("kind") == "search"
+                            and sum(candidates[s].get("kind") == "search" for s in selected) >= required):
                         continue
                     proposed = [*selected, task_id]
                     payload = self._selection_payload(snapshot, proposed)
                     errors = tuple(validate(payload)) if validate else ()
                     if not errors or all(
-                        error.startswith(tolerated) for error in errors
+                        error.startswith(tolerated) or error.startswith("search_count_not_exact:")
+                        for error in errors
                     ):
                         selected.append(task_id)
                 payload = self._selection_payload(snapshot, selected)
                 errors = tuple(validate(payload)) if validate else ()
-                if errors and all(error.startswith(tolerated) for error in errors):
-                    if len(selected) >= required or coverage.get("infeasible_reason"):
-                        errors = ()
                 return payload, errors
         candidates = [
             item for item in snapshot.get("candidates", ())

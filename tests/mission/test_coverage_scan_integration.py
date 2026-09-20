@@ -304,7 +304,7 @@ def test_shared_coverage_scenarios_and_constraint_aware_fixture():
         "candidates": [
             {"task_id": "probe-1", "kind": "probe", "priority": "high"},
             {"task_id": "search-old", "kind": "search", "priority": "normal"},
-            {"task_id": "search-new", "kind": "direction_search", "priority": "normal"},
+            {"task_id": "search-new", "kind": "search", "priority": "normal"},
         ],
         "feasible_edges": [
             {"task_id": "probe-1", "uav_id": "UAV-1"},
@@ -348,7 +348,8 @@ def test_shared_coverage_scenarios_and_constraint_aware_fixture():
         user_payload={"snapshot": constrained_snapshot},
         validate=validate,
     )
-    assert result.success
+    assert not result.success
+    assert "coverage_floor_not_met:2" in result.errors
     assert result.payload["selected_task_ids"] == ["search-old"]
 
 
@@ -376,7 +377,7 @@ def test_coverage_fixture_spreads_visible_bounded_search_work():
     )
 
 
-def test_coverage_fixture_keeps_spatial_representatives_without_floor():
+def test_coverage_fixture_respects_zero_exact_search_budget():
     from scripts.persistent_coverage_scenarios import CoverageFixtureGateway
 
     candidates = [
@@ -412,6 +413,4 @@ def test_coverage_fixture_keeps_spatial_representatives_without_floor():
     )
 
     assert result.success
-    assert result.payload["selected_task_ids"][:3] == [
-        "search-0", "search-5", "search-2",
-    ]
+    assert result.payload["selected_task_ids"] == []

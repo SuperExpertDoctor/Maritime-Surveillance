@@ -140,6 +140,19 @@ def build_scenario(name: str, *, seed: int, transport: str):
         llm_gateway=gateway,
         episode_id=f"replay-{name.lower()}-{int(seed)}",
     )
+    if name == "V07" and transport == "fixture":
+        # This scripted scenario verifies probe/track/handoff, not first-pass
+        # coverage. Start with explicit synthetic fresh coverage so the exact
+        # search budget leaves resources for its contact workflow.
+        metrics = engine.allocator.sm.coverage_metrics
+        fixed = metrics.fixed_mask
+        cells = tuple((c, r) for c in range(fixed.shape[0])
+                      for r in range(fixed.shape[1]) if fixed[c, r])
+        metrics.record_sar(cells, at_min=0.0)
+        engine.allocator.sm.add_event("validation_fixture_prepared", {
+            "scenario": "V07", "reason": "synthetic_initial_sar_for_contact_workflow",
+            "cells": len(cells), "at_min": 0.0,
+        })
     if name in {"information-loop", "intent-lifecycle"}:
         _scenario_intents(engine, "intent-overlap")
     return engine

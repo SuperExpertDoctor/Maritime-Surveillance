@@ -472,7 +472,7 @@ def test_pairing_failure_rewrites_selection_success_false():
     assert interaction["errors"]
 
 
-def test_pairing_exception_is_logged_with_exception_type_and_context(capsys, monkeypatch):
+def test_pairing_exception_is_logged_with_exception_type_and_context(caplog, monkeypatch):
     snapshot = _snapshot(
         [_task("Q1")],
         [_resource("U1")],
@@ -485,7 +485,7 @@ def test_pairing_exception_is_logged_with_exception_type_and_context(capsys, mon
 
     monkeypatch.setattr(mission_scheduler_module, "_minimum_cost_matching", explode)
     result = pair_selected_tasks(_selection(snapshot, ["Q1"]), snapshot)
-    log_output = capsys.readouterr().err
+    log_output = caplog.text
 
     assert result.is_valid is False
     assert result.errors

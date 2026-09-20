@@ -1,4 +1,5 @@
 from dataclasses import replace
+import numpy as np
 
 from scripts.evaluate_mixed_maritime import _FixtureGateway
 from scripts.replay_restoration_scenarios import build_scenario
@@ -210,6 +211,11 @@ def test_passive_gates_publish_bearing_or_position_then_investigation_task():
 def test_information_version_flows_from_evidence_to_selection_and_commit():
     engine = build_scenario("information-loop", seed=42, transport="fixture")
     sm = engine.allocator.sm
+    # Test investigation dispatch after coverage has freed part of the fleet;
+    # the separate first-round acceptance requires all ten UAVs to search.
+    sm.coverage_metrics.record_sar(
+        tuple(map(tuple, np.argwhere(sm.coverage_metrics.fixed_mask).tolist())), at_min=0.0,
+    )
     sm.current_time = 1.0
     position = PassivePosition(
         position_id="POS-INTEGRATION-1",

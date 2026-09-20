@@ -86,7 +86,7 @@ def test_constraint_uses_maximum_matching_not_minimum_of_counts():
         available_ids=("U1", "U2"),
         representatives=("S1", "S2", "S3"),
         edges=(_edge("S1", "U1"), _edge("S2", "U1"), _edge("S3", "U2")),
-        fraction=0.4,
+        fraction=1.0,
     )
 
     assert constraint.desired_search_count == 2
@@ -99,13 +99,13 @@ def test_constraint_reports_infeasible_floor_without_fabricating_a_slot():
     constraint = build_coverage_constraint(
         healthy_count=10,
         active_search_count=0,
-        available_ids=("U1",),
+        available_ids=("U1", "U2", "U3", "U4"),
         representatives=("S1", "S2"),
         edges=(_edge("S1", "U1"),),
         fraction=0.4,
     )
 
-    assert constraint.required_new_search_count == 4
+    assert constraint.required_new_search_count == 1
     assert constraint.infeasible_reason == "insufficient_available_resources"
 
 
@@ -151,7 +151,7 @@ def test_validator_requires_oldest_representative_and_floor():
 
     errors = scheduler.validate_selection(payload, snapshot)
 
-    assert "coverage_floor_not_met:2" in errors
+    assert "search_count_not_exact:2:1" in errors
     assert "coverage_oldest_not_selected" in errors
 
 

@@ -147,8 +147,15 @@ class CoverageFixtureGateway(_FixtureGateway):
             "underutilized_feasible_work:",
             "coverage_floor_not_met",
             "coverage_oldest_not_selected",
+            "search_count_not_exact:",
+            "zone_quota_not_met:",
+            "zone_must_service_not_selected:",
         )
         for task_id in ordered:
+            if (not snapshot.get("coverage_constraint", {}).get("infeasible_reason")
+                    and candidates[task_id].get("kind") == "search"
+                    and sum(candidates[s].get("kind") == "search" for s in selected) >= required):
+                continue
             proposed = [*selected, task_id]
             payload = self._selection_payload(snapshot, proposed)
             errors = tuple(validate(payload)) if validate else ()
@@ -157,10 +164,6 @@ class CoverageFixtureGateway(_FixtureGateway):
 
         payload = self._selection_payload(snapshot, selected)
         errors = tuple(validate(payload)) if validate else ()
-        if errors and all(error.startswith(tolerated) for error in errors):
-            # The fixture cannot create a second legal resource when the real
-            # snapshot reports an insufficient-resource coverage floor.
-            errors = ()
         return payload, errors
 
 
