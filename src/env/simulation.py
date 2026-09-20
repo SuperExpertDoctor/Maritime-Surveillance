@@ -2304,6 +2304,13 @@ class SimulationEngine:
             return
         self._mission_task_records[task.task_id] = desired
         sm.current_time = max(float(sm.current_time), float(current_time))
+        # Publishing the audit event alone does not reach TriggerManager.
+        # Reuse its existing heavy event so one completed search (not only
+        # three batched light events) refreshes rolling coverage decisions.
+        self.allocator.trigger_manager.notify_event(
+            "mission_task_released", time=current_time, uav_id=uav_id,
+            task_id=task.task_id,
+        )
         sm.add_event("mission_task_released", {
             "task_id": task.task_id,
             "uav_id": uav_id,

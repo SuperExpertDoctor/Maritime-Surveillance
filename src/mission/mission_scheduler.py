@@ -609,14 +609,19 @@ def _validate_selection(
             & set(coverage_constraint.representative_task_ids)
         )
         floor_infeasible = coverage_constraint.infeasible_reason is not None
+        ordinary_count = sum(
+            task.kind == "search" and task.bbox is not None
+            and task.task_id in candidates and task.task_id not in active
+            for task in selected_tasks
+        )
         if (
             not floor_infeasible
             and coverage_constraint.required_new_search_count
-            > len(selected_representatives)
+            != ordinary_count
         ):
             errors.append(
-                "coverage_floor_not_met:"
-                f"{coverage_constraint.required_new_search_count}"
+                "search_count_not_exact:"
+                f"{coverage_constraint.required_new_search_count}:{ordinary_count}"
             )
         if (
             not floor_infeasible
@@ -626,6 +631,14 @@ def _validate_selection(
             )
         ):
             errors.append("coverage_oldest_not_selected")
+        for zone in coverage_constraint.zone_requirements:
+            if zone.infeasible_reason is not None:
+                continue
+            selected = set(selected_task_ids) & set(zone.representative_task_ids)
+            if len(selected) < zone.required_search_count:
+                errors.append(f"zone_quota_not_met:{zone.zone_id}")
+            if not set(zone.must_service_task_ids) <= selected:
+                errors.append(f"zone_must_service_not_selected:{zone.zone_id}")
     selected_contacts = [task.contact_id for task in selected_tasks if task.contact_id]
     if len(set(selected_contacts)) != len(selected_contacts):
         errors.append("duplicate_contact")
@@ -1452,6 +1465,11 @@ class MissionScheduler:
         }
         if snapshot.coverage_constraint is not None:
             full["coverage_constraint"] = _jsonable(snapshot.coverage_constraint)
+            for key in ("zone_requirements", "zone_infeasible"):
+                if not full["coverage_constraint"][key]:
+                    full["coverage_constraint"].pop(key)
+        if snapshot.coverage_summary is not None:
+            full["coverage_summary"] = _jsonable(snapshot.coverage_summary)
         strategy_context = _strategy_context(snapshot)
         memories = ()
         if self.strategy_memory_store is not None:

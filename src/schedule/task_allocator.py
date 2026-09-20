@@ -33,7 +33,11 @@ from src.mission.contracts import (
 from src.mission.coverage_policy import (
     CoverageCandidateWindow,
     CoveragePolicy,
+    adaptive_search_fraction,
     build_coverage_constraint,
+)
+from src.mission.coverage_zones import (
+    ZonePartition, build_zone_coverage_summary, build_zone_quota_inputs,
 )
 from src.mission.mission_scheduler import MissionScheduler
 from src.mission.task_catalog import TaskCatalog
@@ -195,11 +199,26 @@ class TaskAllocator:
                 if task_id in prompt_task_ids
             )
         coverage_constraint = None
+        coverage_summary = None
         if prompt_window is not None and getattr(self.sm, "coverage_metrics", None) is not None:
             coverage_config = getattr(self.config.mission, "coverage", None)
-            healthy_count = sum(
-                self.sm.is_uav_operational(uav.id)
-                for uav in self.sm.get_all_uavs()
+            metrics = self.sm.coverage_metrics
+            zones = ZonePartition(metrics.fixed_mask, coverage_config.zone_cols, coverage_config.zone_rows)
+            coverage_summary = build_zone_coverage_summary(
+                zones, now_min=now, last_sar=metrics.last_scan_matrix(),
+                feasible_mask=self.sm.get_searchable_mask(),
+                primary_window_min=coverage_config.primary_window_min,
+                in_flight_tasks=active_records,
+            )
+            fraction = adaptive_search_fraction(
+                coverage_summary["gap_pct"], coverage_config.min_search_uav_fraction,
+                coverage_config.search_uav_fraction_max,
+            )
+            quota_inputs = build_zone_quota_inputs(
+                zones, coverage_summary,
+                (task for task in prompt_window.tasks if task.task_id in prompt_task_ids),
+                threshold=coverage_config.zone_quota_gap_threshold,
+                max_slots=math.ceil(len(available) * fraction),
             )
             active_search_count = sum(
                 record.status in {"approved", "executing"}
@@ -209,14 +228,12 @@ class TaskAllocator:
                 for record in active_records
             )
             coverage_constraint = build_coverage_constraint(
-                healthy_count=healthy_count,
                 active_search_count=active_search_count,
                 available_ids=available,
                 representatives=representative_task_ids,
                 edges=edges,
-                fraction=float(
-                    getattr(coverage_config, "min_search_uav_fraction", 0.4)
-                ),
+                fraction=fraction,
+                zone_requirements_input=quota_inputs,
             )
         self._mission_snapshot_counter += 1
         snapshot_id = f"mission:{now:g}:{self._mission_snapshot_counter}"
@@ -245,6 +262,7 @@ class TaskAllocator:
             prompt_task_ids=prompt_task_ids,
             prompt_sources=prompt_sources,
             coverage_constraint=coverage_constraint,
+            coverage_summary=coverage_summary,
         )
         self._last_mission_snapshot = snapshot
         return snapshot
@@ -317,11 +335,13 @@ class TaskAllocator:
             )
         )
         ranked = (*urgent, *ranked_search)
+        zones = ZonePartition(metrics.fixed_mask, coverage_config.zone_cols, coverage_config.zone_rows)
         return policy.select_window(
             ranked,
-            ordinary_reserve=min(ordinary_reserve, capacity),
+            ordinary_reserve=min(max(ordinary_reserve, len(self.sm.get_available_uavs())), capacity),
             capacity=capacity,
             now_min=now_min,
+            zones=zones,
         )
 
     def set_strategy_memory_version(self, version: str) -> None:

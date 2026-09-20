@@ -47,6 +47,10 @@ coverage:
   windows_min: [30, 60, 120]
   primary_window_min: 60
   min_search_uav_fraction: 0.4
+  search_uav_fraction_max: 1.0
+  zone_cols: 3
+  zone_rows: 3
+  zone_quota_gap_threshold: 0.5
   ordinary_prompt_reserve: 8
   geometry_candidate_budget: 120
   no_progress_timeout_min: 10.0
