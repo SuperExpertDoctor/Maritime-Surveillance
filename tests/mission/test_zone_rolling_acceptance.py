@@ -551,3 +551,24 @@ def test_real_engine_first_step_applies_ten_parallel_searches():
     assert len(assigned) == 10
     assert len({r.assigned_uav_id for r in assigned}) == 10
     assert all(r.kind == "search" for r in assigned)
+
+
+def test_real_weather_blockage_reports_infeasible_without_inventing_work():
+    from scripts.persistent_coverage_scenarios import build_coverage_scenario
+
+    engine = build_coverage_scenario(
+        "coverage-open-water", seed=42, transport="fixture"
+    )
+    sm = engine.allocator.sm
+    sm.set_environment_obstacles([], np.ones(sm.obstacle_mask.shape, dtype=bool))
+    snapshot = engine.allocator.build_mission_snapshot()
+    assert snapshot.coverage_summary["gap_pct"] == 100
+    assert all(
+        zone["searchable_cells"] == 0 for zone in snapshot.coverage_summary["zones"]
+    )
+    constraint = snapshot.coverage_constraint
+    assert constraint.desired_search_count == 10
+    assert constraint.required_new_search_count == 0
+    assert constraint.infeasible_reason == "insufficient_available_resources"
+    assert constraint.zone_requirements == ()
+    assert len(constraint.zone_infeasible) == 9
