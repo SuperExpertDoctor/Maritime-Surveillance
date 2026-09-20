@@ -173,7 +173,7 @@ def test_budget_endpoints_and_available_anchor():
             edges=(_edge("S1"), _edge("S2", "U2")),
             fraction=1,
         ).required_new_search_count
-        == 2
+        == 0
     )
 
 

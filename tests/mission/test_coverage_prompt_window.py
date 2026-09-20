@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from src.mission.contracts import (
     FeasibleEdge,
@@ -107,6 +108,57 @@ def test_constraint_reports_infeasible_floor_without_fabricating_a_slot():
 
     assert constraint.required_new_search_count == 1
     assert constraint.infeasible_reason == "insufficient_available_resources"
+
+
+@pytest.mark.parametrize(
+    ("available_count", "active", "reserved", "pending", "edge_count", "expected"),
+    [
+        (10, 0, 10, 10, 10, 0),
+        (10, 4, 7, 3, 10, 3),
+        (4, 4, 6, 2, 4, 0),
+        (4, 1, 1, 0, 2, 2),
+    ],
+)
+def test_residual_new_search_budget_accounts_for_pending_capacity(
+    available_count, active, reserved, pending, edge_count, expected,
+):
+    uavs = tuple(f"U{index}" for index in range(available_count))
+    task_ids = tuple(f"S{index}" for index in range(edge_count))
+    edges = tuple(
+        _edge(task_id, uavs[index % len(uavs)])
+        for index, task_id in enumerate(task_ids)
+    )
+
+    constraint = build_coverage_constraint(
+        active_search_count=active,
+        reserved_search_count=reserved,
+        matchable_pending_count=pending,
+        available_ids=uavs,
+        representatives=task_ids,
+        edges=edges,
+        fraction=1.0,
+    )
+
+    assert constraint.desired_search_count == available_count
+    assert constraint.required_new_search_count == expected
+    assert constraint.reserved_search_count == reserved
+    assert constraint.matchable_pending_count == pending
+
+
+def test_unmatchable_pending_geometry_is_reserved_but_does_not_satisfy_capacity():
+    constraint = build_coverage_constraint(
+        active_search_count=1,
+        reserved_search_count=2,
+        matchable_pending_count=0,
+        available_ids=("U1", "U2"),
+        representatives=("S-new",),
+        edges=(_edge("S-new", "U1"),),
+        fraction=1.0,
+    )
+
+    assert constraint.required_new_search_count == 1
+    assert constraint.reserved_search_count == 2
+    assert constraint.matchable_pending_count == 0
 
 
 def test_validator_requires_oldest_representative_and_floor():

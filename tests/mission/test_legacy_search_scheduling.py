@@ -136,6 +136,21 @@ def test_pending_geometry_cannot_be_required_and_rejected_in_same_snapshot():
     )
 
 
+def test_pending_search_is_a_reserved_audit_region_not_a_new_llm_candidate():
+    engine, task_id, _uav_id, _bbox = pending_search_fixture()
+    snapshot = engine.allocator.build_mission_snapshot(
+        active_tasks=tuple(engine._mission_task_records.values()),
+    )
+
+    assert snapshot.pending_search_task_ids == (task_id,)
+    assert task_id in {record.task_id for record in snapshot.active_tasks}
+    assert task_id not in {candidate.task_id for candidate in snapshot.candidates}
+    assert snapshot.coverage_constraint is not None
+    assert snapshot.coverage_constraint.reserved_search_count >= 1
+    assert snapshot.coverage_constraint.matchable_pending_count == 1
+    assert task_id not in snapshot.coverage_constraint.must_service_task_ids
+
+
 def _two_pending_searches():
     engine = _engine()
     snapshot = engine.allocator.build_mission_snapshot(0.0)

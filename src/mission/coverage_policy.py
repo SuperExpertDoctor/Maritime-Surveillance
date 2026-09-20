@@ -300,6 +300,8 @@ def adaptive_search_fraction(gap_pct: float, minimum: float = 0.4, maximum: floa
 def build_coverage_constraint(
     *,
     active_search_count: int,
+    reserved_search_count: int | None = None,
+    matchable_pending_count: int = 0,
     available_ids: Iterable[str],
     representatives: Iterable[Any],
     edges: Iterable[Any],
@@ -318,9 +320,31 @@ def build_coverage_constraint(
 
     if any(
         isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0
-        for value in ((active_search_count,) if healthy_count is None else (healthy_count, active_search_count))
+        for value in (
+            (active_search_count, matchable_pending_count)
+            if healthy_count is None
+            else (healthy_count, active_search_count, matchable_pending_count)
+        )
     ):
-        raise ValueError("healthy_count and active_search_count must be non-negative integers")
+        raise ValueError(
+            "healthy_count, active_search_count, and matchable_pending_count "
+            "must be non-negative integers"
+        )
+    if reserved_search_count is None:
+        reserved_search_count = int(active_search_count) + int(matchable_pending_count)
+    if (
+        isinstance(reserved_search_count, bool)
+        or not isinstance(reserved_search_count, Integral)
+        or int(reserved_search_count) < 0
+    ):
+        raise ValueError("reserved_search_count must be a non-negative integer")
+    reserved_search_count = int(reserved_search_count)
+    if int(active_search_count) > reserved_search_count:
+        raise ValueError("active_search_count exceeds reserved_search_count")
+    if int(active_search_count) + int(matchable_pending_count) > reserved_search_count:
+        raise ValueError(
+            "matchable_pending_count exceeds reserved pending capacity"
+        )
     if isinstance(fraction, bool) or not isinstance(fraction, Real):
         raise ValueError("fraction must be finite and in (0, 1]")
     fraction = float(fraction)
@@ -336,7 +360,11 @@ def build_coverage_constraint(
         raise ValueError("representatives must contain task IDs or task objects")
     representative_ids = tuple(dict.fromkeys(representative_ids))
     desired = int(math.ceil(len(available) * fraction))
-    quota_inputs = tuple(zone_requirements_input)[:desired]
+    residual_target = max(
+        0,
+        desired - int(active_search_count) - int(matchable_pending_count),
+    )
+    quota_inputs = tuple(zone_requirements_input)[:residual_target]
     if len({item.zone_id for item in quota_inputs}) != len(quota_inputs):
         raise ValueError("duplicate quota zone")
     representative_ids = tuple(dict.fromkeys((*representative_ids,
@@ -382,8 +410,13 @@ def build_coverage_constraint(
         if task_id not in matched_tasks and visit(task_id, set()):
             matched_tasks.add(task_id)
     feasible_slots = len(matched_uav)
-    required = min(desired, feasible_slots)
-    infeasible_reason = None if feasible_slots >= desired else "insufficient_available_resources"
+    required = min(residual_target, feasible_slots)
+    infeasible_reason = (
+        None
+        if int(active_search_count) + int(matchable_pending_count) + feasible_slots
+        >= desired
+        else "insufficient_available_resources"
+    )
     # Quota witnesses already consume budget; never add an incompatible extra
     # oldest obligation when every budget slot belongs to a different zone.
     must_service = tuple(task for zone in zone_matched for task in zone.must_service_task_ids)
@@ -398,6 +431,8 @@ def build_coverage_constraint(
         infeasible_reason=infeasible_reason,
         zone_requirements=tuple(zone_matched),
         zone_infeasible=tuple(zone_infeasible),
+        reserved_search_count=reserved_search_count,
+        matchable_pending_count=int(matchable_pending_count),
     )
 
 

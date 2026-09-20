@@ -657,16 +657,31 @@ class CoverageConstraint:
     infeasible_reason: str | None = None
     zone_requirements: tuple[ZoneCoverageRequirement, ...] = ()
     zone_infeasible: tuple[tuple[str, str], ...] = ()
+    reserved_search_count: int = 0
+    matchable_pending_count: int = 0
 
     def __post_init__(self) -> None:
         for name in (
             "desired_search_count",
             "active_search_count",
             "required_new_search_count",
+            "reserved_search_count",
+            "matchable_pending_count",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        reserved = self.reserved_search_count
+        if reserved == 0 and self.active_search_count:
+            # Older positional callers did not publish the reserved total.
+            reserved = self.active_search_count
+            object.__setattr__(self, "reserved_search_count", reserved)
+        if self.active_search_count > reserved:
+            raise ValueError("active_search_count exceeds reserved_search_count")
+        if self.active_search_count + self.matchable_pending_count > reserved:
+            raise ValueError(
+                "matchable_pending_count exceeds reserved pending capacity"
+            )
         if self.required_new_search_count > self.desired_search_count:
             raise ValueError("required_new_search_count exceeds desired_search_count")
         representatives = tuple(self.representative_task_ids)

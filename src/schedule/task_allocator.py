@@ -50,6 +50,15 @@ _LOGGER = logging.getLogger(__name__)
 _CACHE_MISS = object()
 
 
+def _bbox_overlaps(left, right) -> bool:
+    return not (
+        left[2] <= right[0]
+        or right[2] <= left[0]
+        or left[3] <= right[1]
+        or right[3] <= left[1]
+    )
+
+
 class TaskAllocator:
     """Main orchestrator connecting all scheduling components."""
 
@@ -145,6 +154,20 @@ class TaskAllocator:
         candidates = self.task_catalog.build(
             self.sm, published_contacts, published_intents, now,
         )
+        unfinished_regions = self.sm.get_unfinished_search_regions()
+        if unfinished_regions:
+            candidates = tuple(
+                candidate
+                for candidate in candidates
+                if not (
+                    candidate.kind == "search"
+                    and candidate.bbox is not None
+                    and any(
+                        _bbox_overlaps(candidate.bbox, region.bbox)
+                        for region in unfinished_regions
+                    )
+                )
+            )
         prompt_window = self._coverage_prompt_window(candidates, now)
         resources = self._mission_resources()
         available = tuple(sorted(uav.id for uav in self.sm.get_available_uavs()))
@@ -156,6 +179,16 @@ class TaskAllocator:
             or self.sm.is_uav_operational(record.assigned_uav_id)
         )
         active_by_id = {record.task_id: record for record in active_records}
+        pending_search_task_ids = tuple(
+            region.id
+            for region in self.sm.get_pending_search_regions()
+            if (
+                (record := active_by_id.get(region.id)) is not None
+                and record.kind == "search"
+                and record.status == "approved"
+                and record.assigned_uav_id is None
+            )
+        )
         preemptible = tuple(sorted(
             resource.uav_id
             for resource in resources
@@ -172,6 +205,12 @@ class TaskAllocator:
             published_contacts,
             planning_map_version,
             active_tasks=active_records,
+        )
+        pending_matching = self._match_pending_search_edges(
+            pending_search_task_ids,
+            resources,
+            available,
+            edges,
         )
         prompt_task_ids = (
             tuple(task.task_id for task in prompt_window.tasks)
@@ -215,21 +254,36 @@ class TaskAllocator:
                 coverage_summary["gap_pct"], coverage_config.min_search_uav_fraction,
                 coverage_config.search_uav_fraction_max,
             )
+            assigned_search_ids = {
+                region.id for region in self.sm.get_assigned_search_regions()
+            }
+            active_search_count = sum(
+                record.task_id in assigned_search_ids
+                and record.status in {"approved", "executing"}
+                and record.assigned_uav_id is not None
+                and record.kind == "search"
+                and self.sm.is_uav_operational(record.assigned_uav_id)
+                for record in active_records
+            )
+            reserved_search_count = len(unfinished_regions)
+            matchable_pending_count = len(pending_matching)
+            desired_search_count = math.ceil(len(available) * fraction)
+            residual_new_slots = max(
+                0,
+                desired_search_count
+                - active_search_count
+                - matchable_pending_count,
+            )
             quota_inputs = build_zone_quota_inputs(
                 zones, coverage_summary,
                 (task for task in prompt_window.tasks if task.task_id in prompt_task_ids),
                 threshold=coverage_config.zone_quota_gap_threshold,
-                max_slots=math.ceil(len(available) * fraction),
-            )
-            active_search_count = sum(
-                record.status in {"approved", "executing"}
-                and record.assigned_uav_id is not None
-                and record.kind in _SEARCH_TASK_KINDS
-                and self.sm.is_uav_operational(record.assigned_uav_id)
-                for record in active_records
+                max_slots=residual_new_slots,
             )
             coverage_constraint = build_coverage_constraint(
                 active_search_count=active_search_count,
+                reserved_search_count=reserved_search_count,
+                matchable_pending_count=matchable_pending_count,
                 available_ids=available,
                 representatives=representative_task_ids,
                 edges=edges,
@@ -262,53 +316,74 @@ class TaskAllocator:
             _information_version=int(getattr(self.sm, "information_version", 0)),
             prompt_task_ids=prompt_task_ids,
             prompt_sources=prompt_sources,
+            pending_search_task_ids=pending_search_task_ids,
             coverage_constraint=coverage_constraint,
             coverage_summary=coverage_summary,
         )
         self._last_mission_snapshot = snapshot
         return snapshot
 
-    def _pending_search_matching(
+    def _pending_search_ids(
         self,
-        snapshot: MissionSnapshot,
-    ) -> dict[str, FeasibleEdge]:
-        """Return a read-only maximum-cardinality pending-region matching."""
+        active_tasks: tuple[TaskRecord, ...],
+    ) -> tuple[str, ...]:
         records = {
             record.task_id: record
-            for record in snapshot.active_tasks
+            for record in active_tasks
             if (
                 record.kind == "search"
                 and record.status == "approved"
                 and record.assigned_uav_id is None
             )
         }
-        pending_ids = tuple(
+        return tuple(
             region.id
             for region in self.sm.get_pending_search_regions()
             if region.id in records
         )
+
+    @staticmethod
+    def _match_pending_search_edges(
+        pending_ids: tuple[str, ...],
+        resources: tuple[UavResource, ...],
+        available_ids: tuple[str, ...],
+        edges: tuple[FeasibleEdge, ...],
+    ) -> dict[str, FeasibleEdge]:
+        """Match pending IDs only against currently idle, operational edges."""
         if not pending_ids:
             return {}
-        available_ids = set(snapshot.available_uav_ids)
-        resources = {
+        available = set(available_ids)
+        resource_map = {
             resource.uav_id: resource
-            for resource in snapshot.resources
-            if resource.uav_id in available_ids
+            for resource in resources
+            if resource.uav_id in available
         }
         options = {
             task_id: tuple(
                 edge
-                for edge in snapshot.feasible_edges
-                if edge.task_id == task_id and edge.uav_id in available_ids
+                for edge in edges
+                if edge.task_id == task_id and edge.uav_id in available
             )
             for task_id in pending_ids
         }
         return match_task_ids(
             pending_ids,
             options,
-            resources,
+            resource_map,
             require_all=False,
         ) or {}
+
+    def _pending_search_matching(
+        self,
+        snapshot: MissionSnapshot,
+    ) -> dict[str, FeasibleEdge]:
+        """Return a read-only maximum-cardinality pending-region matching."""
+        return self._match_pending_search_edges(
+            self._pending_search_ids(snapshot.active_tasks),
+            snapshot.resources,
+            snapshot.available_uav_ids,
+            snapshot.feasible_edges,
+        )
 
     def build_pending_search_batch(
         self,
