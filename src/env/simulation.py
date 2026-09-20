@@ -433,6 +433,7 @@ class SimulationEngine:
         self._runtime_status = "running"
         self._blocked_role: str | None = None
         self._decision_failure_streak = 0
+        self._mission_invariant_failure_signatures: set[tuple[str, ...]] = set()
         self._retired_command_results: dict[str, CommandResult] = {}
         self._publish_runtime_state()
 
@@ -870,6 +871,7 @@ class SimulationEngine:
 
     def _publish_runtime_state(self) -> None:
         """Copy lifecycle metadata into the immutable frame source."""
+        self._validate_mission_state_invariants()
         self.allocator.sm.runtime_status = self._runtime_status
         self.allocator.sm.blocked_role = self._blocked_role
         self.allocator.sm.vessel_mutation_allowed = self.vessel_mutation_allowed
@@ -887,6 +889,194 @@ class SimulationEngine:
                 self.allocator.memory_version,
                 float(self.clock.time),
             )
+
+    def _set_search_task_projection(
+        self,
+        task_id: str,
+        *,
+        state: str,
+        uav_id: str | None,
+        current_time: float,
+        reason: str | None,
+    ) -> None:
+        """Apply one ordinary-search state to both authoritative projections."""
+        valid_states = {"pending", "executing", "completed", "stale"}
+        if state not in valid_states:
+            raise ValueError(f"unknown search projection state: {state}")
+        if state == "executing" and not isinstance(uav_id, str):
+            raise ValueError("executing search must have a UAV")
+        if state != "executing" and uav_id is not None:
+            raise ValueError(f"{state} search must be unassigned")
+        if uav_id is not None and not self.allocator.sm.is_uav_operational(uav_id):
+            raise ValueError("executing search must use an operational UAV")
+
+        regions = [
+            region
+            for region in self.allocator.sm.get_search_regions()
+            if region.id == task_id and region.type == "search"
+        ]
+        if len(regions) > 1:
+            raise ValueError(f"duplicate search region: {task_id}")
+        record = self._mission_task_records.get(task_id)
+        if record is not None and record.kind not in _SEARCH_TASK_KINDS:
+            raise ValueError(f"non-search task has search region: {task_id}")
+        if not regions and record is None:
+            return
+        if not regions:
+            raise ValueError(f"search region missing: {task_id}")
+
+        region = regions[0]
+        if state in {"pending", "executing"}:
+            region.status = "active"
+        elif state == "completed":
+            region.status = "completed"
+        else:
+            region.status = "stale"
+        region.assigned_uav_id = uav_id
+
+        if record is None:
+            return
+        if state == "pending":
+            desired = replace(
+                record,
+                status="approved",
+                assigned_uav_id=None,
+                finished_at_min=None,
+                release_reason=reason,
+            )
+        elif state == "executing":
+            desired = replace(
+                record,
+                status="executing",
+                assigned_uav_id=uav_id,
+                started_at_min=(
+                    record.started_at_min
+                    if record.started_at_min is not None
+                    else current_time
+                ),
+                finished_at_min=None,
+                release_reason=None,
+            )
+        elif state == "completed":
+            desired = replace(
+                record,
+                status="completed",
+                assigned_uav_id=None,
+                finished_at_min=current_time,
+                release_reason=reason,
+            )
+        else:
+            desired = replace(
+                record,
+                status=(
+                    record.status
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else "blocked"
+                ),
+                assigned_uav_id=None,
+                finished_at_min=(
+                    record.finished_at_min
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else current_time
+                ),
+                release_reason=(
+                    record.release_reason
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else reason
+                ),
+            )
+        self._mission_task_records[task_id] = desired
+
+    def _mission_state_invariant_errors(self) -> tuple[str, ...]:
+        """Return deterministic ordinary-search projection violations."""
+        sm = self.allocator.sm
+        regions = [
+            region for region in sm.get_search_regions()
+            if region.type == "search"
+        ]
+        region_by_id: dict[str, Region] = {}
+        errors: list[str] = []
+        for region in regions:
+            if region.id in region_by_id:
+                errors.append(f"duplicate_search_region:{region.id}")
+            else:
+                region_by_id[region.id] = region
+
+        records = {
+            record.task_id: record
+            for record in self._mission_task_records.values()
+            if record.kind == "search"
+        }
+        assigned_records: dict[str, list[str]] = defaultdict(list)
+        for record in records.values():
+            if record.assigned_uav_id is not None:
+                assigned_records[record.assigned_uav_id].append(record.task_id)
+            region = region_by_id.get(record.task_id)
+            if record.status == "executing":
+                if record.assigned_uav_id is None:
+                    errors.append(f"executing_search_without_uav:{record.task_id}")
+                else:
+                    if not sm.is_uav_operational(record.assigned_uav_id):
+                        errors.append(
+                            f"executing_search_nonoperational_uav:{record.task_id}"
+                        )
+                    if region is None or region.assigned_uav_id != record.assigned_uav_id:
+                        errors.append(
+                            f"region_record_assignee_mismatch:{record.task_id}"
+                        )
+            elif record.status == "approved" and record.assigned_uav_id is None:
+                if region is None or region.status != "active" or region.assigned_uav_id is not None:
+                    errors.append(f"pending_search_projection_mismatch:{record.task_id}")
+            elif record.status in {"completed", "cancelled", "blocked"} and record.assigned_uav_id is not None:
+                errors.append(f"terminal_search_has_uav:{record.task_id}")
+
+        if not self.allocator.uses_legacy_scheduler():
+            for region in regions:
+                if region.status not in {"active"} or region.assigned_uav_id is None:
+                    continue
+                record = records.get(region.id)
+                if record is None or record.assigned_uav_id != region.assigned_uav_id:
+                    errors.append(f"region_record_assignee_mismatch:{region.id}")
+
+        for uav_id, task_ids in sorted(assigned_records.items()):
+            if len(task_ids) > 1:
+                errors.append(f"uav_bound_to_multiple_searches:{uav_id}")
+
+        unfinished = [
+            region for region in regions
+            if region.status == "active"
+        ]
+        for index, left in enumerate(unfinished):
+            for right in unfinished[index + 1:]:
+                if not (
+                    left.bbox.col_end <= right.bbox.col_start
+                    or right.bbox.col_end <= left.bbox.col_start
+                    or left.bbox.row_end <= right.bbox.row_start
+                    or right.bbox.row_end <= left.bbox.row_start
+                ):
+                    errors.append(
+                        f"overlapping_unfinished_search_regions:{left.id}/{right.id}"
+                    )
+        return tuple(dict.fromkeys(errors))
+
+    def _validate_mission_state_invariants(
+        self, *, strict: bool = False,
+    ) -> tuple[str, ...]:
+        """Validate projections; production pauses once per violation signature."""
+        errors = self._mission_state_invariant_errors()
+        if not errors:
+            return ()
+        if strict:
+            raise ValueError("; ".join(errors))
+        signature = tuple(errors)
+        if signature not in self._mission_invariant_failure_signatures:
+            self._mission_invariant_failure_signatures.add(signature)
+            self.allocator.sm.add_event("mission_state_invariant_failed", {
+                "violations": list(errors),
+            })
+        self._runtime_status = "paused_safety"
+        self._blocked_role = "mission_state_invariant"
+        return errors
 
     def _publish_control_routes(self) -> None:
         """Publish immutable controller route envelopes for frame readers."""
@@ -1811,6 +2001,14 @@ class SimulationEngine:
                 finished_at_min=None,
                 release_reason=None,
             )
+            if candidate.kind == "search":
+                self._set_search_task_projection(
+                    task.task_id,
+                    state="executing",
+                    uav_id=uav.id,
+                    current_time=self.clock.time,
+                    reason=None,
+                )
             self.allocator.sm.update_uav_control(
                 uav.id,
                 self.control_coordinator.configured_mode(uav.id).value,
@@ -2074,6 +2272,7 @@ class SimulationEngine:
                         status="blocked",
                         reason=str(event.payload.get("reason", "task_failed")),
                         current_time=event.timestamp_min,
+                        preserve_search=failed_task.task_type is OperationMode.COVERAGE,
                     )
                 self.allocator.sm.add_event("task_failed", {
                     "uav_id": uav.id,
@@ -2226,6 +2425,7 @@ class SimulationEngine:
                 status="blocked",
                 reason="coverage_incomplete",
                 current_time=current_time,
+                preserve_search=True,
                 coverage_generation=generation,
             )
             region = next(
@@ -2284,6 +2484,7 @@ class SimulationEngine:
             and sm.resolve_contact_id(active.target_contact_id)
             == sm.resolve_contact_id(task.target_contact_id)
         )
+        record_before = self._mission_task_records.get(task.task_id)
 
         if task.task_type is OperationMode.COVERAGE:
             service = sm.coverage_service
@@ -2298,21 +2499,20 @@ class SimulationEngine:
                     reason,
                     uav_id=uav_id,
                 )
-            region = next(
-                (
-                    item for item in sm.get_search_regions()
-                    if item.id == task.task_id
-                ),
-                None,
+            projection_state = (
+                "pending"
+                if preserve_search
+                else "completed"
+                if status == "completed"
+                else "stale"
             )
-            if region is not None:
-                region.assigned_uav_id = None
-                if preserve_search:
-                    region.status = "active"
-                elif status == "completed":
-                    region.status = "completed"
-                else:
-                    region.status = "stale"
+            self._set_search_task_projection(
+                task.task_id,
+                state=projection_state,
+                uav_id=None,
+                current_time=current_time,
+                reason=reason,
+            )
 
         if task.target_contact_id is not None:
             try:
@@ -2360,7 +2560,11 @@ class SimulationEngine:
         record = self._mission_task_records.get(task.task_id)
         if record is None:
             return
-        if preserve_search:
+        if task.task_type is OperationMode.COVERAGE:
+            desired = record
+            if record_before == desired:
+                return
+        elif preserve_search:
             desired = replace(
                 record,
                 status="approved",
@@ -2475,6 +2679,7 @@ class SimulationEngine:
                 status="blocked",
                 reason="holding",
                 current_time=current_time,
+                preserve_search=previous_task.task_type is OperationMode.COVERAGE,
             )
         task = ControlTask(
             f"holding:{uav.id}:{current_time}", OperationMode.HOLDING,
@@ -2524,14 +2729,19 @@ class SimulationEngine:
             None,
         )
         if region is not None:
-            region.status = "completed"
+            self._set_search_task_projection(
+                region.id,
+                state="completed",
+                uav_id=None,
+                current_time=event.timestamp_min,
+                reason="search_complete",
+            )
             region.completion_pct = (
                 completion.completion_pct if completion is not None else 100.0
             )
             region.completion_basis = (
                 "task_sar" if completion is not None else "legacy_observation"
             )
-            region.assigned_uav_id = None
         uav.completed_searches_since_refuel += 1
         self._sortie_searched[uav.id] = True
         self.allocator.sm.clear_uav_assignment(uav.id)
@@ -2732,6 +2942,7 @@ class SimulationEngine:
                 status="blocked",
                 reason="fuel_return" if force else "range_reserve",
                 current_time=current_time,
+                preserve_search=previous_task.task_type is OperationMode.COVERAGE,
             )
         uav.plan_return(plan.path)
         self._prepare_return_state(uav, current_time)
@@ -2921,7 +3132,17 @@ class SimulationEngine:
         uav.target_group_id = None
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
-                region.assigned_uav_id = None
+                record = self._mission_task_records.get(region.id)
+                if record is None or record.kind == "search":
+                    self._set_search_task_projection(
+                        region.id,
+                        state="pending",
+                        uav_id=None,
+                        current_time=current_time,
+                        reason="uav_return",
+                    )
+                else:
+                    region.assigned_uav_id = None
         sm.clear_uav_assignment(uav.id)
         uav.status = "returning"
         uav.sensor_mode = "off"
@@ -2956,6 +3177,7 @@ class SimulationEngine:
                     if active_task.task_type is OperationMode.COVERAGE
                     else None
                 ),
+                preserve_search=active_task.task_type is OperationMode.COVERAGE,
             )
 
         # A stale coordinator mirror or an already detached task record must
@@ -2965,21 +3187,38 @@ class SimulationEngine:
                 continue
             if record.status in {"completed", "cancelled", "blocked"}:
                 continue
-            self._mission_task_records[task_id] = replace(
-                record,
-                status="blocked",
-                assigned_uav_id=None,
-                finished_at_min=current_time,
-                release_reason=reason,
-            )
+            if record.kind == "search":
+                self._set_search_task_projection(
+                    task_id,
+                    state="pending",
+                    uav_id=None,
+                    current_time=current_time,
+                    reason=reason,
+                )
+            else:
+                self._mission_task_records[task_id] = replace(
+                    record,
+                    status="blocked",
+                    assigned_uav_id=None,
+                    finished_at_min=current_time,
+                    release_reason=reason,
+                )
 
         # Keep the failed area's responsibility visible and reusable by a
-        # healthy UAV. The old task record remains blocked for audit purposes.
+        # healthy UAV while preserving the failure reason in the audit record.
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
-                region.assigned_uav_id = None
-                if region.status == "stale":
-                    region.status = "active"
+                record = self._mission_task_records.get(region.id)
+                if record is None or record.kind == "search":
+                    self._set_search_task_projection(
+                        region.id,
+                        state="pending",
+                        uav_id=None,
+                        current_time=current_time,
+                        reason=reason,
+                    )
+                else:
+                    region.assigned_uav_id = None
         sm.clear_uav_assignment(uav.id)
 
         contact_ids = {
@@ -3704,8 +3943,13 @@ class SimulationEngine:
                 try:
                     self._assign_search_route(uav, region)
                 except (RuntimeError, ValueError) as exc:
-                    region.status = "stale"
-                    region.assigned_uav_id = None
+                    self._set_search_task_projection(
+                        region.id,
+                        state="stale",
+                        uav_id=None,
+                        current_time=sm.current_time,
+                        reason="route_blocked",
+                    )
                     sm.clear_uav_assignment(uav.id)
                     sm.add_event("route_plan_failed", {
                         "uav_id": uav.id,
@@ -4417,7 +4661,17 @@ class SimulationEngine:
                 sm.release_contact_reservation(uav.target_group_id, uav.id, current_time, "uav_return")
         for region in sm.get_search_regions():
             if region.assigned_uav_id == uav.id:
-                region.assigned_uav_id = None
+                record = self._mission_task_records.get(region.id)
+                if record is None or record.kind == "search":
+                    self._set_search_task_projection(
+                        region.id,
+                        state="pending",
+                        uav_id=None,
+                        current_time=current_time,
+                        reason="uav_return",
+                    )
+                else:
+                    region.assigned_uav_id = None
 
         self._set_return_route(uav, current_time)
         sm.clear_uav_assignment(uav.id)
@@ -4590,9 +4844,14 @@ class SimulationEngine:
                     break
 
             if assigned_region is not None:
-                assigned_region.status = "completed"
+                self._set_search_task_projection(
+                    assigned_region.id,
+                    state="completed",
+                    uav_id=None,
+                    current_time=current_time,
+                    reason="search_complete",
+                )
                 assigned_region.completion_pct = 100.0
-                assigned_region.assigned_uav_id = None
             self.allocator.trigger_manager.notify_event(
                 "search_complete", time=current_time, uav_id=uav.id, region_id=region_id,
             )
@@ -4643,8 +4902,13 @@ class SimulationEngine:
         sm = self.allocator.sm
         sm.lifecycle_mode = True
         for region in sm.get_search_regions():
-            region.status = "stale"
-            region.assigned_uav_id = None
+            self._set_search_task_projection(
+                region.id,
+                state="stale",
+                uav_id=None,
+                current_time=current_time,
+                reason="lifecycle_rotation",
+            )
         sm.set_search_regions([])
         sm.add_event("lifecycle_rotation_started", {
             "coverage_pct": coverage,
@@ -4899,8 +5163,13 @@ class SimulationEngine:
                             entity, task, sm.current_time,
                         )
             except Exception as exc:
-                region.status = "stale"
-                region.assigned_uav_id = None
+                self._set_search_task_projection(
+                    region.id,
+                    state="stale",
+                    uav_id=None,
+                    current_time=sm.current_time,
+                    reason="route_plan_failed",
+                )
                 sm.clear_uav_assignment(entity.id)
                 entity.status = "idle"
                 sm.add_event("route_plan_failed", {
@@ -4995,9 +5264,14 @@ class SimulationEngine:
         plan: SearchRoutePlan,
     ) -> None:
         if not plan.scanned_swath_count:
-            region.status = "completed"
+            self._set_search_task_projection(
+                region.id,
+                state="completed",
+                uav_id=None,
+                current_time=self.allocator.sm.current_time,
+                reason="empty_search_route",
+            )
             region.completion_pct = 100.0
-            region.assigned_uav_id = None
             self.allocator.sm.clear_uav_assignment(uav.id)
             uav.status = "idle"
             return

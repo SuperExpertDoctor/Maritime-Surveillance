@@ -2,6 +2,7 @@ import json
 
 from src.env.simulation import SimulationEngine
 from src.schedule.config_loader import ConfigLoader
+from src.schedule.datatypes import BBox, Region
 from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_builder import build_frame
 
@@ -96,3 +97,31 @@ def test_state_manager_vessel_inventory_is_a_deep_copied_operator_read_model():
     inventory[0]["position"][0] = 88
 
     assert state.get_vessel_inventory()[0]["position"] == [4.0, 5.0]
+
+
+def test_frame_keeps_the_same_pending_region_through_reassignment():
+    engine = SimulationEngine(ConfigLoader.load(), seed=41, llm_gateway=None)
+    region = Region("search:pending-frame", BBox(2, 2, 4, 4), "search")
+    engine.allocator.sm.set_search_regions([region])
+
+    pending = _frame(engine)
+    pending_region = next(
+        item for item in pending["search_regions"] if item["id"] == region.id
+    )
+    assert pending_region["status"] == "active"
+    assert pending_region["assigned_uav_id"] is None
+
+    engine._set_search_task_projection(
+        region.id,
+        state="executing",
+        uav_id="UAV-1",
+        current_time=1.0,
+        reason="test-reassignment",
+    )
+    reassigned = _frame(engine)
+    reassigned_region = next(
+        item for item in reassigned["search_regions"] if item["id"] == region.id
+    )
+    assert reassigned_region["id"] == pending_region["id"]
+    assert reassigned_region["bbox"] == pending_region["bbox"]
+    assert reassigned_region["assigned_uav_id"] == "UAV-1"

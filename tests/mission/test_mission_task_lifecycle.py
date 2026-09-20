@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.control.common.contracts import ControlEvent, ControlTask, OperationMode
 from src.env.simulation import SimulationEngine
 from src.mission.contracts import Assignment, AssignmentBatch, TaskRecord
@@ -185,7 +187,7 @@ def test_task_sar_completion_uses_the_final_footprint_and_enters_holding_next_ti
     assert engine.control_coordinator.active_task(uav.id).task_type is OperationMode.HOLDING
 
 
-def test_incomplete_route_is_blocked_with_missing_cells_and_never_counted_complete():
+def test_incomplete_route_remains_pending_with_missing_cells_and_never_counted_complete():
     engine, uav, task = _coverage_task_fixture()
     generation = engine.control_coordinator.current_lease(uav.id).generation
     progress = engine.allocator.sm.coverage_service.progress(task.task_id, generation)
@@ -200,11 +202,14 @@ def test_incomplete_route_is_blocked_with_missing_cells_and_never_counted_comple
     _finish_route(engine, uav, task, generation)
 
     record = engine._mission_task_records[task.task_id]
-    assert record.status == "blocked"
+    assert record.status == "approved"
+    assert record.assigned_uav_id is None
+    assert record.finished_at_min is None
     assert record.release_reason == "coverage_incomplete"
     assert uav.completed_searches_since_refuel == 0
     region = engine.allocator.sm.get_search_regions()[0]
-    assert region.status == "stale"
+    assert region.status == "active"
+    assert region.assigned_uav_id is None
     assert region.completion_basis == "task_sar"
     assert region.completion_pct < 100.0
     incomplete = next(
@@ -212,6 +217,46 @@ def test_incomplete_route_is_blocked_with_missing_cells_and_never_counted_comple
         if event["type"] == "coverage_incomplete"
     )
     assert incomplete["data"]["missing_cells"]
+
+
+def test_search_projection_rejects_illegal_pending_assignee():
+    engine, uav, task = _coverage_task_fixture()
+
+    with pytest.raises(ValueError, match="pending search must be unassigned"):
+        engine._set_search_task_projection(
+            task.task_id,
+            state="pending",
+            uav_id=uav.id,
+            current_time=1.0,
+            reason="test",
+        )
+
+
+def test_search_state_invariant_detects_region_record_mismatch():
+    engine, uav, task = _coverage_task_fixture()
+    region = engine.allocator.sm.get_search_regions()[0]
+    region.assigned_uav_id = "UAV-2"
+
+    with pytest.raises(ValueError, match="region_record_assignee_mismatch"):
+        engine._validate_mission_state_invariants(strict=True)
+
+
+def test_production_invariant_failure_pauses_once_and_emits_structured_event():
+    engine, _uav, _task = _coverage_task_fixture()
+    engine.allocator.sm.get_search_regions()[0].assigned_uav_id = "UAV-2"
+
+    first = engine._validate_mission_state_invariants()
+    second = engine._validate_mission_state_invariants()
+
+    assert first == second
+    assert engine.runtime_status == "paused_safety"
+    assert engine.blocked_role == "mission_state_invariant"
+    failures = [
+        event for event in engine.allocator.sm.get_recent_events(0.0)
+        if event["type"] == "mission_state_invariant_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["data"]["violations"]
 
 
 def test_completion_without_generation_cannot_complete_current_task():
