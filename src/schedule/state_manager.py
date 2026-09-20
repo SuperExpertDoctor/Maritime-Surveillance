@@ -361,6 +361,45 @@ class StateManager:
     def get_active_search_regions(self) -> list[Region]:
         return [region for region in self._search_regions if region.status == "active"]
 
+    @staticmethod
+    def _is_unfinished_ordinary_search(region: Region) -> bool:
+        return region.type == "search" and region.status == "active"
+
+    def get_pending_search_regions(self) -> tuple[Region, ...]:
+        """Return active ordinary search regions without a current assignee."""
+        return tuple(sorted(
+            (
+                region
+                for region in self._search_regions
+                if self._is_unfinished_ordinary_search(region)
+                and region.assigned_uav_id is None
+            ),
+            key=lambda region: region.id,
+        ))
+
+    def get_assigned_search_regions(self) -> tuple[Region, ...]:
+        """Return active ordinary search regions with a current assignee."""
+        return tuple(sorted(
+            (
+                region
+                for region in self._search_regions
+                if self._is_unfinished_ordinary_search(region)
+                and region.assigned_uav_id is not None
+            ),
+            key=lambda region: region.id,
+        ))
+
+    def get_unfinished_search_regions(self) -> tuple[Region, ...]:
+        """Return all active ordinary search geometry in stable ID order."""
+        return tuple(sorted(
+            (
+                region
+                for region in self._search_regions
+                if self._is_unfinished_ordinary_search(region)
+            ),
+            key=lambda region: region.id,
+        ))
+
     def get_previous_search_regions(self) -> list[Region]:
         return self._previous_search_regions
 

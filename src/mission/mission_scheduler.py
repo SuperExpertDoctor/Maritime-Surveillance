@@ -1462,6 +1462,7 @@ class MissionScheduler:
             "prompt_skip_cycles": prompt_skip_cycles,
             "prompt_fairness_bound_cycles": fairness_bound_cycles,
             "prompt_geometry_filtered": geometry_filtered,
+            "pending_search_task_ids": list(snapshot.pending_search_task_ids),
         }
         if snapshot.coverage_constraint is not None:
             full["coverage_constraint"] = _jsonable(snapshot.coverage_constraint)

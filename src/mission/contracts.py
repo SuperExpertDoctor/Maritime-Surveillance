@@ -712,6 +712,7 @@ class MissionSnapshot:
     _information_version: int = field(default=0, repr=False, kw_only=True)
     prompt_task_ids: tuple[str, ...] = field(default=(), kw_only=True)
     prompt_sources: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
+    pending_search_task_ids: tuple[str, ...] = field(default=(), kw_only=True)
     coverage_constraint: CoverageConstraint | None = field(default=None, kw_only=True)
     coverage_summary: dict | None = field(default=None, kw_only=True)
 
@@ -736,6 +737,12 @@ class MissionSnapshot:
             "prompt_sources",
             tuple(tuple(item) for item in self.prompt_sources),
         )
+        pending_ids = tuple(self.pending_search_task_ids)
+        if any(not isinstance(item, str) or not item for item in pending_ids):
+            raise ValueError(
+                "pending_search_task_ids must contain non-empty strings"
+            )
+        object.__setattr__(self, "pending_search_task_ids", tuple(sorted(set(pending_ids))))
         if self.coverage_constraint is not None and not isinstance(
             self.coverage_constraint, CoverageConstraint
         ):
