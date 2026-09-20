@@ -504,6 +504,90 @@ def _minimum_cost_matching(
     return {task_id: edge for task_id, edge in result[1]}
 
 
+def _minimum_cost_maximum_matching(
+    task_ids: tuple[str, ...],
+    options: dict[str, tuple[FeasibleEdge, ...]],
+    resources: dict[str, UavResource],
+) -> dict[str, FeasibleEdge]:
+    """Find a deterministic minimum-cost matching of maximum cardinality."""
+    if not task_ids or not resources:
+        return {}
+    order = tuple(sorted(
+        task_ids,
+        key=lambda task_id: (len(options.get(task_id, ())), task_id),
+    ))
+    resource_ids = tuple(sorted(resources))
+    resource_bits = {uav_id: 1 << index for index, uav_id in enumerate(resource_ids)}
+
+    @lru_cache(maxsize=None)
+    def solve(index: int, used_mask: int):
+        if index == len(order):
+            return 0, 0.0, ()
+        task_id = order[index]
+        best = solve(index + 1, used_mask)
+        for edge in options.get(task_id, ()):
+            bit = resource_bits.get(edge.uav_id)
+            if bit is None or used_mask & bit:
+                continue
+            remainder = solve(index + 1, used_mask | bit)
+            candidate = (
+                remainder[0] + 1,
+                edge.transit_time_min + remainder[1],
+                ((task_id, edge.uav_id, edge),) + remainder[2],
+            )
+            if (
+                candidate[0] > best[0]
+                or (
+                    candidate[0] == best[0]
+                    and (
+                        candidate[1] < best[1] - 1e-12
+                        or (
+                            abs(candidate[1] - best[1]) <= 1e-12
+                            and tuple((item[0], item[1]) for item in candidate[2])
+                            < tuple((item[0], item[1]) for item in best[2])
+                        )
+                    )
+                )
+            ):
+                best = candidate
+        return best
+
+    result = solve(0, 0)
+    return {task_id: edge for task_id, _uav_id, edge in result[2]}
+
+
+def match_task_ids(
+    task_ids: tuple[str, ...] | list[str],
+    options: dict[str, tuple[FeasibleEdge, ...]],
+    resources: dict[str, UavResource],
+    *,
+    required_preempt_uav_ids: frozenset[str] = frozenset(),
+    require_all: bool = True,
+) -> dict[str, FeasibleEdge] | None:
+    """Share deterministic task/resource matching across validation paths."""
+    normalized_ids = tuple(task_ids)
+    normalized_options = {
+        task_id: tuple(sorted(
+            options.get(task_id, ()),
+            key=lambda edge: (edge.transit_time_min, edge.uav_id),
+        ))
+        for task_id in normalized_ids
+    }
+    if not require_all:
+        return _minimum_cost_maximum_matching(
+            normalized_ids, normalized_options, resources,
+        )
+    maximum = _maximum_matching(normalized_ids, normalized_options)
+    if len(maximum) < len(normalized_ids):
+        return None
+    return _minimum_cost_matching(
+        normalized_ids,
+        normalized_options,
+        resources,
+        required_preempt_uav_ids,
+    )
+
+
 def _actual_preempted(
     matching: dict[str, FeasibleEdge],
     selection: MissionSelection,
@@ -695,20 +779,16 @@ def _validate_selection(
         errors.append("preempt_requires_selected_task")
     matching = None
     if selected_task_ids:
-        maximum = _maximum_matching(selected_task_ids, options)
-        if len(maximum) < len(selected_task_ids):
-            errors.append("infeasible_assignment")
-        else:
-            matching = _minimum_cost_matching(
+            matching = match_task_ids(
                 selected_task_ids,
                 options,
                 resources,
-                frozenset(preempt_uav_ids),
+                required_preempt_uav_ids=frozenset(preempt_uav_ids),
             )
             if matching is None:
                 # Keep a local exact matching only to report unused declared
                 # preemptions when the unconstrained assignment is legal.
-                matching = _minimum_cost_matching(
+                matching = match_task_ids(
                     selected_task_ids, options, resources,
                 )
                 if matching is None:
@@ -835,11 +915,11 @@ def _pair_selected_tasks(
             allow_probe_preempt_search=allow_probe_preempt_search,
             allow_intent_preempt_search=allow_intent_preempt_search,
         )
-        matching = _minimum_cost_matching(
+        matching = match_task_ids(
             parsed.selected_task_ids,
             options,
             _resource_maps(snapshot),
-            frozenset(parsed.preempt_uav_ids),
+            required_preempt_uav_ids=frozenset(parsed.preempt_uav_ids),
         )
         if matching is None:
             return PairingResult((), ("infeasible_assignment",), False)
@@ -1553,6 +1633,7 @@ __all__ = [
     "PairingResult",
     "TaskRecord",
     "UavResource",
+    "match_task_ids",
     "pair_selected_tasks",
     "validate_selection",
     ]

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from src.mission.contracts import Assignment, AssignmentBatch
+from src.mission.contracts import Assignment, AssignmentBatch, TaskRecord
 from src.mission.mission_scheduler import MissionScheduler
+from src.schedule.datatypes import BBox, Region
 from tests.mission.test_mission_task_lifecycle import _engine
 
 
@@ -117,4 +118,159 @@ def test_pending_geometry_cannot_be_required_and_rejected_in_same_snapshot():
         task_id in required
         and any("overlapping_active_search" in error for error in errors)
         for task_id, errors in errors_by_candidate.items()
+    )
+
+
+def _two_pending_searches():
+    engine = _engine()
+    snapshot = engine.allocator.build_mission_snapshot(0.0)
+    selected = []
+    used_tasks = set()
+    used_uavs = set()
+    candidates = {candidate.task_id: candidate for candidate in snapshot.candidates}
+    for edge in snapshot.feasible_edges:
+        candidate = candidates[edge.task_id]
+        if (
+            candidate.kind == "search"
+            and edge.uav_id in snapshot.available_uav_ids
+            and edge.task_id not in used_tasks
+            and edge.uav_id not in used_uavs
+        ):
+            selected.append((candidate, edge))
+            used_tasks.add(edge.task_id)
+            used_uavs.add(edge.uav_id)
+        if len(selected) == 2:
+            break
+    assert len(selected) == 2
+    assignments = tuple(
+        Assignment(
+            candidate.task_id,
+            edge.uav_id,
+            dict(snapshot.uav_generations)[edge.uav_id],
+            None,
+        )
+        for candidate, edge in selected
+    )
+    assert engine.apply_assignment_batch(
+        AssignmentBatch(snapshot.snapshot_id, assignments, "fixture-two-searches")
+    )
+    for assignment in assignments:
+        task = engine.control_coordinator.active_task(assignment.uav_id)
+        assert task is not None
+        engine._close_mission_task(
+            assignment.uav_id,
+            task,
+            status="approved",
+            reason="preempted",
+            current_time=1.0,
+            preserve_search=True,
+        )
+    return engine, tuple(sorted(used_tasks))
+
+
+def test_pending_matching_is_max_cardinality_then_min_cost_and_read_only():
+    engine, pending_ids = _two_pending_searches()
+    before_regions = [
+        (region.id, region.assigned_uav_id, region.completion_pct)
+        for region in engine.allocator.sm.get_search_regions()
+    ]
+    before_records = dict(engine._mission_task_records)
+    before_tasks = tuple(
+        (uav.id, uav.status, uav.assigned_region)
+        for uav in engine.uavs
+    )
+
+    first = engine.allocator.build_pending_search_batch(
+        1.0,
+        active_tasks=tuple(engine._mission_task_records.values()),
+    )
+    second = engine.allocator.build_pending_search_batch(
+        1.0,
+        active_tasks=tuple(reversed(tuple(engine._mission_task_records.values()))),
+    )
+
+    assert first is not None and second is not None
+    assert tuple(item.task_id for item in first.assignments) == pending_ids
+    assert [
+        (item.task_id, item.uav_id, item.expected_generation, item.previous_task_id)
+        for item in first.assignments
+    ] == [
+        (item.task_id, item.uav_id, item.expected_generation, item.previous_task_id)
+        for item in second.assignments
+    ]
+    assert len(first.assignments) == 2
+    assert before_regions == [
+        (region.id, region.assigned_uav_id, region.completion_pct)
+        for region in engine.allocator.sm.get_search_regions()
+    ]
+    assert before_records == engine._mission_task_records
+    assert before_tasks == tuple(
+        (uav.id, uav.status, uav.assigned_region)
+        for uav in engine.uavs
+    )
+
+
+def test_pending_matching_excludes_urgent_records_and_unavailable_uavs():
+    engine, pending_ids = _two_pending_searches()
+    urgent_id = "urgent-direction-search"
+    engine.allocator.sm.set_search_regions([
+        *engine.allocator.sm.get_search_regions(),
+        Region(urgent_id, BBox(2, 2, 4, 4), "search"),
+    ])
+    engine._mission_task_records[urgent_id] = TaskRecord(
+        urgent_id,
+        "direction_search",
+        "approved",
+        (2, 2, 4, 4),
+        None,
+        (),
+        None,
+        "fixture",
+        0.0,
+        None,
+        None,
+        None,
+    )
+    for uav_id in ("UAV-1", "UAV-2"):
+        engine.allocator.sm.update_uav_status(
+            uav_id,
+            "returning" if uav_id == "UAV-1" else "refueling",
+            engine.allocator.sm.get_uav(uav_id).position,
+        )
+
+    batch = engine.allocator.build_pending_search_batch(
+        1.0,
+        active_tasks=tuple(engine._mission_task_records.values()),
+    )
+
+    assert batch is not None
+    assert tuple(item.task_id for item in batch.assignments) == pending_ids
+    assert urgent_id not in {item.task_id for item in batch.assignments}
+    assert {item.uav_id for item in batch.assignments}.isdisjoint({"UAV-1", "UAV-2"})
+
+
+def test_unmatchable_pending_geometry_remains_pending():
+    engine, task_id, _uav_id, bbox = pending_search_fixture()
+    for uav in engine.uavs:
+        if uav.id != "UAV-10":
+            engine.allocator.sm.update_uav_status(
+                uav.id,
+                "returning",
+                uav.position,
+            )
+    batch = engine.allocator.build_pending_search_batch(
+        1.0,
+        active_tasks=tuple(engine._mission_task_records.values()),
+    )
+
+    assert batch is None
+    region = next(
+        region
+        for region in engine.allocator.sm.get_search_regions()
+        if region.id == task_id
+    )
+    assert (region.status, region.assigned_uav_id, tuple(region.bbox)) == (
+        "active",
+        None,
+        bbox,
     )

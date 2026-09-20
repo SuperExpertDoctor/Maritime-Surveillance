@@ -20,6 +20,7 @@ import time
 import logging
 
 from src.mission.contracts import (
+    Assignment,
     AssignmentBatch,
     ContactSnapshot,
     FeasibleEdge,
@@ -39,7 +40,7 @@ from src.mission.coverage_policy import (
 from src.mission.coverage_zones import (
     ZonePartition, build_zone_coverage_summary, build_zone_quota_inputs,
 )
-from src.mission.mission_scheduler import MissionScheduler
+from src.mission.mission_scheduler import MissionScheduler, match_task_ids
 from src.mission.task_catalog import TaskCatalog
 from src.mission.strategy_memory import StrategyMemoryStore
 
@@ -266,6 +267,92 @@ class TaskAllocator:
         )
         self._last_mission_snapshot = snapshot
         return snapshot
+
+    def _pending_search_matching(
+        self,
+        snapshot: MissionSnapshot,
+    ) -> dict[str, FeasibleEdge]:
+        """Return a read-only maximum-cardinality pending-region matching."""
+        records = {
+            record.task_id: record
+            for record in snapshot.active_tasks
+            if (
+                record.kind == "search"
+                and record.status == "approved"
+                and record.assigned_uav_id is None
+            )
+        }
+        pending_ids = tuple(
+            region.id
+            for region in self.sm.get_pending_search_regions()
+            if region.id in records
+        )
+        if not pending_ids:
+            return {}
+        available_ids = set(snapshot.available_uav_ids)
+        resources = {
+            resource.uav_id: resource
+            for resource in snapshot.resources
+            if resource.uav_id in available_ids
+        }
+        options = {
+            task_id: tuple(
+                edge
+                for edge in snapshot.feasible_edges
+                if edge.task_id == task_id and edge.uav_id in available_ids
+            )
+            for task_id in pending_ids
+        }
+        return match_task_ids(
+            pending_ids,
+            options,
+            resources,
+            require_all=False,
+        ) or {}
+
+    def build_pending_search_batch(
+        self,
+        now_min: float,
+        *,
+        active_tasks: tuple[TaskRecord, ...],
+    ) -> AssignmentBatch | None:
+        """Build a deterministic batch for feasible pending ordinary searches."""
+        snapshot = self.build_mission_snapshot(
+            now_min,
+            active_tasks=tuple(active_tasks),
+        )
+        matching = self._pending_search_matching(snapshot)
+        if not matching:
+            return None
+        resources = {resource.uav_id: resource for resource in snapshot.resources}
+        assignments = tuple(
+            Assignment(
+                task_id,
+                matching[task_id].uav_id,
+                resources[matching[task_id].uav_id].generation,
+                resources[matching[task_id].uav_id].current_task_id,
+            )
+            for task_id in sorted(matching)
+        )
+        return AssignmentBatch(
+            snapshot.snapshot_id,
+            assignments,
+            f"deterministic-pending:{snapshot.snapshot_id}",
+            _information_version=snapshot.information_version,
+        )
+
+    def pending_search_match_count(
+        self,
+        now_min: float,
+        *,
+        active_tasks: tuple[TaskRecord, ...],
+    ) -> int:
+        """Return pending capacity available for deterministic reassignment."""
+        snapshot = self.build_mission_snapshot(
+            now_min,
+            active_tasks=tuple(active_tasks),
+        )
+        return len(self._pending_search_matching(snapshot))
 
     def _coverage_prompt_window(
         self,
