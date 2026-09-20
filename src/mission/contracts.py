@@ -1,6 +1,7 @@
 """Immutable public contracts for the mixed maritime mission domain."""
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 import hashlib
 import math
 from typing import Literal
@@ -618,8 +619,35 @@ class TaskRecord:
 
 
 @dataclass(frozen=True)
+class ZoneCoverageRequirement:
+    zone_id: str
+    required_search_count: int
+    representative_task_ids: tuple[str, ...]
+    must_service_task_ids: tuple[str, ...]
+    infeasible_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.zone_id, str) or not self.zone_id:
+            raise ValueError("zone_id must be non-empty")
+        count = self.required_search_count
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("required_search_count must be a non-negative integer")
+        for name in ("representative_task_ids", "must_service_task_ids"):
+            ids = tuple(getattr(self, name))
+            if any(not isinstance(item, str) or not item for item in ids) or len(set(ids)) != len(ids):
+                raise ValueError(f"{name} must contain unique non-empty strings")
+            object.__setattr__(self, name, ids)
+        if not set(self.must_service_task_ids) <= set(self.representative_task_ids):
+            raise ValueError("must_service_task_ids must be representatives")
+        if self.infeasible_reason is not None and (
+            not isinstance(self.infeasible_reason, str) or not self.infeasible_reason
+        ):
+            raise ValueError("infeasible_reason must be non-empty when provided")
+
+
+@dataclass(frozen=True)
 class CoverageConstraint:
-    """Resource floor for ordinary search work in one mission snapshot."""
+    """Exact ordinary-search budget and feasible spatial obligations."""
 
     desired_search_count: int
     active_search_count: int
@@ -627,6 +655,8 @@ class CoverageConstraint:
     representative_task_ids: tuple[str, ...]
     must_service_task_ids: tuple[str, ...]
     infeasible_reason: str | None = None
+    zone_requirements: tuple[ZoneCoverageRequirement, ...] = ()
+    zone_infeasible: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -651,6 +681,15 @@ class CoverageConstraint:
             raise ValueError("infeasible_reason must be non-empty when provided")
         object.__setattr__(self, "representative_task_ids", representatives)
         object.__setattr__(self, "must_service_task_ids", must_service)
+        zones = tuple(self.zone_requirements)
+        if any(not isinstance(zone, ZoneCoverageRequirement) for zone in zones):
+            raise ValueError("zone_requirements must contain ZoneCoverageRequirement")
+        if len({zone.zone_id for zone in zones}) != len(zones):
+            raise ValueError("zone_requirements must have unique zone IDs")
+        if any(not set(zone.representative_task_ids) <= set(representatives) for zone in zones):
+            raise ValueError("zone representatives must be global representatives")
+        object.__setattr__(self, "zone_requirements", zones)
+        object.__setattr__(self, "zone_infeasible", tuple(tuple(item) for item in self.zone_infeasible))
 
 
 @dataclass(frozen=True)
@@ -674,8 +713,13 @@ class MissionSnapshot:
     prompt_task_ids: tuple[str, ...] = field(default=(), kw_only=True)
     prompt_sources: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
     coverage_constraint: CoverageConstraint | None = field(default=None, kw_only=True)
+    coverage_summary: dict | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
+        if self.coverage_summary is not None:
+            if not isinstance(self.coverage_summary, dict):
+                raise ValueError("coverage_summary must be a dict or None")
+            object.__setattr__(self, "coverage_summary", deepcopy(self.coverage_summary))
         object.__setattr__(self, "candidates", tuple(self.candidates))
         object.__setattr__(self, "available_uav_ids", tuple(self.available_uav_ids))
         object.__setattr__(self, "preemptible_uav_ids", tuple(self.preemptible_uav_ids))
@@ -814,6 +858,7 @@ __all__ = [
     "CommandResult",
     "CovarianceKernel",
     "CoverageConstraint",
+    "ZoneCoverageRequirement",
     "EvasiveManeuverFact",
     "EvidenceKind",
     "EvidenceRecord",

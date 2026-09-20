@@ -283,6 +283,10 @@ class CoverageConfig:
     windows_min: tuple[int, ...] = (30, 60, 120)
     primary_window_min: int = 60
     min_search_uav_fraction: float = 0.4
+    search_uav_fraction_max: float = 1.0
+    zone_cols: int = 3
+    zone_rows: int = 3
+    zone_quota_gap_threshold: float = 0.5
     ordinary_prompt_reserve: int = 8
     geometry_candidate_budget: int = 120
     no_progress_timeout_min: float = 10.0
@@ -306,6 +310,12 @@ class CoverageConfig:
         )
         if not 0.0 < fraction <= 1.0:
             raise ValueError("coverage.min_search_uav_fraction must be in (0, 1]")
+        maximum = finite_number(self.search_uav_fraction_max, "coverage.search_uav_fraction_max")
+        if not fraction <= maximum <= 1.0:
+            raise ValueError("coverage.search_uav_fraction_max must be between minimum and 1")
+        _integer(self.zone_cols, "coverage.zone_cols", minimum=1)
+        _integer(self.zone_rows, "coverage.zone_rows", minimum=1)
+        _probability(self.zone_quota_gap_threshold, "coverage.zone_quota_gap_threshold")
         _integer(self.ordinary_prompt_reserve, "coverage.ordinary_prompt_reserve", minimum=1)
         _integer(self.geometry_candidate_budget, "coverage.geometry_candidate_budget", minimum=1)
         _positive(self.no_progress_timeout_min, "coverage.no_progress_timeout_min")

@@ -146,6 +146,7 @@ class CoveragePolicy:
         ordinary_reserve: int,
         capacity: int,
         now_min: float,
+        zones=None,
     ) -> CoverageCandidateWindow:
         """Reserve ordinary coverage slots before filling urgent work.
 
@@ -182,6 +183,32 @@ class CoveragePolicy:
         urgent = [task for task in normalized if task.task_id not in ordinary_ids]
         reserve_count = min(ordinary_reserve, capacity, len(ordinary))
         urgent_count = min(capacity - reserve_count, len(urgent))
+
+        if zones is not None:
+            # Scan each zone until a usable candidate is found; blocked rounds
+            # must not hide later non-overlapping work. Contained candidates
+            # precede cross-tile candidates so quotas remain representable.
+            grouped = {zone: [] for zone in zones.zone_ids}
+            for task in ordinary:
+                if task.bbox is not None:
+                    zone = zones.zone_of_bbox(task.bbox)
+                    if zone is not None:
+                        grouped[zone].append(task)
+            for zone, tasks in grouped.items():
+                tasks.sort(key=lambda task: not zones.contains_bbox(zone, task.bbox))
+            indices = dict.fromkeys(grouped, 0)
+            rotated, boxes = [], []
+            while any(indices[z] < len(grouped[z]) for z in grouped):
+                for zone, tasks in grouped.items():
+                    while indices[zone] < len(tasks):
+                        task = tasks[indices[zone]]
+                        indices[zone] += 1
+                        if any(_boxes_overlap(task.bbox, box) for box in boxes):
+                            continue
+                        rotated.append(task)
+                        boxes.append(task.bbox)
+                        break
+            ordinary = rotated
 
         representative_ordinary: list[Any] = []
         representative_boxes: list[tuple[float, float, float, float]] = []
@@ -260,25 +287,38 @@ class CoveragePolicy:
         )
 
 
+def adaptive_search_fraction(gap_pct: float, minimum: float = 0.4, maximum: float = 1.0) -> float:
+    """Interpolate the ordinary-search share from actual whole-domain SAR gap."""
+    for value in (gap_pct, minimum, maximum):
+        if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+            raise ValueError("coverage fractions require finite numbers")
+    if not 0 <= gap_pct <= 100 or not 0 < minimum <= maximum <= 1:
+        raise ValueError("invalid gap or search fraction range")
+    return float(minimum + (maximum - minimum) * gap_pct / 100)
+
+
 def build_coverage_constraint(
     *,
-    healthy_count: int,
     active_search_count: int,
     available_ids: Iterable[str],
     representatives: Iterable[Any],
     edges: Iterable[Any],
     fraction: float,
+    zone_requirements_input=(),
+    healthy_count: int | None = None,
 ):
-    """Build a feasible search-resource floor using maximum matching.
+    """Build an available-fleet budget with one quota-first maximum matching.
 
     The return type is imported lazily to keep this policy module independent
     from the broader mission contract graph.
+    ``healthy_count`` is accepted for source compatibility only; the budget
+    deliberately uses idle ``available_ids`` without subtracting busy work.
     """
-    from src.mission.contracts import CoverageConstraint
+    from src.mission.contracts import CoverageConstraint, ZoneCoverageRequirement
 
     if any(
         isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0
-        for value in (healthy_count, active_search_count)
+        for value in ((active_search_count,) if healthy_count is None else (healthy_count, active_search_count))
     ):
         raise ValueError("healthy_count and active_search_count must be non-negative integers")
     if isinstance(fraction, bool) or not isinstance(fraction, Real):
@@ -295,6 +335,12 @@ def build_coverage_constraint(
     if any(not isinstance(item, str) or not item for item in representative_ids):
         raise ValueError("representatives must contain task IDs or task objects")
     representative_ids = tuple(dict.fromkeys(representative_ids))
+    desired = int(math.ceil(len(available) * fraction))
+    quota_inputs = tuple(zone_requirements_input)[:desired]
+    if len({item.zone_id for item in quota_inputs}) != len(quota_inputs):
+        raise ValueError("duplicate quota zone")
+    representative_ids = tuple(dict.fromkeys((*representative_ids,
+        *(task_id for item in quota_inputs for task_id in item.candidate_task_ids))))
     adjacency = {task_id: [] for task_id in representative_ids}
     for edge in edges:
         if isinstance(edge, Mapping):
@@ -321,31 +367,28 @@ def build_coverage_constraint(
                 return True
         return False
 
+    zone_matched, zone_infeasible = [], []
+    matched_tasks = set()
+    for item in quota_inputs:
+        for task_id in item.candidate_task_ids:
+            if task_id not in matched_tasks and visit(task_id, set()):
+                matched_tasks.add(task_id)
+                zone_matched.append(ZoneCoverageRequirement(
+                    item.zone_id, 1, item.candidate_task_ids, (task_id,)))
+                break
+        else:
+            zone_infeasible.append((item.zone_id, "no_feasible_zone_representative"))
     for task_id in representative_ids:
-        visit(task_id, set())
+        if task_id not in matched_tasks and visit(task_id, set()):
+            matched_tasks.add(task_id)
     feasible_slots = len(matched_uav)
-    desired = int(math.ceil(int(healthy_count) * fraction))
-    outstanding = max(desired - int(active_search_count), 0)
-    if outstanding == 0:
-        required = 0
-        infeasible_reason = None
-    elif feasible_slots == 0:
-        # No legal edge means the model may defer without fabricating a slot.
-        required = 0
-        infeasible_reason = "no_feasible_search_edges"
-    else:
-        required = outstanding
-        infeasible_reason = (
-            None if feasible_slots >= outstanding
-            else "insufficient_available_resources"
-        )
-    must_service = ()
-    if required:
-        must_service = next(
-            (task_id for task_id in representative_ids if adjacency[task_id]),
-            (),
-        )
-        must_service = (must_service,) if must_service else ()
+    required = min(desired, feasible_slots)
+    infeasible_reason = None if feasible_slots >= desired else "insufficient_available_resources"
+    # Quota witnesses already consume budget; never add an incompatible extra
+    # oldest obligation when every budget slot belongs to a different zone.
+    must_service = tuple(task for zone in zone_matched for task in zone.must_service_task_ids)
+    if not must_service and required:
+        must_service = (next(task for task in representative_ids if task in matched_tasks),)
     return CoverageConstraint(
         desired_search_count=desired,
         active_search_count=int(active_search_count),
@@ -353,6 +396,8 @@ def build_coverage_constraint(
         representative_task_ids=representative_ids,
         must_service_task_ids=must_service,
         infeasible_reason=infeasible_reason,
+        zone_requirements=tuple(zone_matched),
+        zone_infeasible=tuple(zone_infeasible),
     )
 
 
@@ -640,5 +685,6 @@ __all__ = [
     "CoverageCandidateWindow",
     "CoveragePolicy",
     "build_coverage_constraint",
+    "adaptive_search_fraction",
     "rank_search_candidates",
 ]
