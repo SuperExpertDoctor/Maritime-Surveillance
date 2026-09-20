@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from threading import RLock
 from typing import TypeVar
@@ -16,26 +16,35 @@ from src.control.common.contracts import (
     ControlMode,
     ControlObservation,
     ControlOwner,
+    ControlRouteSnapshot,
     ControlTask,
     ControllerContext,
     ControllerEventRequest,
     OperationMode,
     RecoveryPlan,
     StopReason,
+    UavRouteSnapshot,
 )
 from src.control.common.executor import ExecutionResult, UAVDynamicsExecutor
 from src.control.common.factory import ControlFactory
 from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
-from src.control.common.ownership import ControlLease, ControlOwnership
+from src.control.common.ownership import (
+    ControlLease,
+    ControlOwnership,
+    ControlOwnershipError,
+)
 from src.control.common.safety import (
+    ControlOutcome,
     InvalidControlCommand,
     SafetyEnvelope,
     SafetyIntervention,
     SafetyResult,
+    UnsafeControlState,
 )
 from src.control.heuristic.base import HeuristicControllerBase
 from src.control.heuristic.return_to_base import ReturnToBaseController
+from src.control.heuristic.return_to_base import _poses_match
 from src.control.heuristic.task_flow import EVENT_TRANSITIONS, HeuristicTaskFlow
 from src.env.uav_entity import UAVEntity
 from src.schedule.config_loader import ControlConfig
@@ -50,6 +59,16 @@ class ControlTickResult:
     safety: SafetyResult
     execution: ExecutionResult
     emitted_events: tuple[ControlEvent, ...]
+
+    @property
+    def outcome(self) -> ControlOutcome:
+        """Classify a successful tick without changing the frozen fields."""
+        kinds = {item.kind for item in self.safety.interventions}
+        if "sensor_mode_masked" in kinds:
+            return ControlOutcome.MASKED
+        if kinds:
+            return ControlOutcome.CLIPPED
+        return ControlOutcome.CLEAN
 
 
 class ControlCoordinatorError(RuntimeError):
@@ -128,9 +147,13 @@ class ControlCoordinator:
         self._last_safety_intervened = {
             uav_id: False for uav_id in self._configured_modes
         }
+        self._last_control_outcomes = {
+            uav_id: ControlOutcome.CLEAN for uav_id in self._configured_modes
+        }
         self._last_tick_times: dict[str, float | None] = {
             uav_id: None for uav_id in self._configured_modes
         }
+        self._quarantined_uavs: set[str] = set()
         self._episode_ids: dict[str, str] = {}
         self._sortie_numbers: dict[str, int] = {}
         self._next_event_sequence = 1
@@ -139,6 +162,7 @@ class ControlCoordinator:
             factory,
             self._controllers,
             self._pending_tasks,
+            state_manager=state_manager,
             atomic=self._atomic,
         )
 
@@ -216,6 +240,7 @@ class ControlCoordinator:
             controller.action_spec,
             episode_id,
             task,
+            generation=current.generation + 1,
         )
         controller.reset(context)
 
@@ -237,11 +262,13 @@ class ControlCoordinator:
             else:
                 self._pending_tasks[uav_id] = task
             self._operation_modes[uav_id] = OperationMode.IDLE
+            self._quarantined_uavs.discard(uav_id)
             self._episode_ids[uav_id] = episode_id
             self._sortie_numbers[uav_id] = sortie_number
             self._invalid_streaks[uav_id] = 0
             self._last_applied_commands[uav_id] = None
             self._last_safety_intervened[uav_id] = False
+            self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
             self._last_tick_times[uav_id] = None
         if old_controller is not None and old_controller is not controller:
             self._stop_controller(old_controller, StopReason.CANCELLED)
@@ -280,12 +307,17 @@ class ControlCoordinator:
                 f"cannot assign a task while {uav_id} is returning"
             )
 
+        if task.task_type is not OperationMode.COVERAGE:
+            self._save_active_coverage(uav_id)
+
         with self._lock:
             latest = self.ownership.current(uav_id)
             if latest != current:
                 raise StaleControlCommand(
                     self._stale_message(uav_id, current, latest)
                 )
+            if task.task_type is OperationMode.COVERAGE:
+                self._task_flow.clear_saved_coverage(uav_id)
             if current.owner is ControlOwner.SYSTEM:
                 lease = self.ownership.acquire(
                     uav_id,
@@ -307,6 +339,174 @@ class ControlCoordinator:
             self._stop_controller(old_controller, StopReason.PREEMPTED)
         return lease
 
+    def assign_tasks_atomically(
+        self,
+        assignments: Sequence[tuple[str, ControlTask, int | None]],
+        *,
+        current_time: float,
+        dt_min: float = 1.0,
+    ) -> tuple[ControlLease, ...]:
+        """Prepare and commit several heuristic task assignments together."""
+        requests = tuple(assignments)
+        if not requests:
+            return ()
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        self._validate_time(dt_min, "dt_min")
+
+        prepared: list[
+            tuple[
+                str,
+                ControlTask,
+                int | None,
+                ControlLease,
+                ControllerBase,
+                str | None,
+                int | None,
+            ]
+        ] = []
+        seen_uavs: set[str] = set()
+        for request in requests:
+            if not isinstance(request, tuple) or len(request) != 3:
+                raise ControlCoordinatorError(
+                    "batch assignments must be (uav_id, task, expected_generation)"
+                )
+            uav_id, task, expected_generation = request
+            self._mode_for(uav_id)
+            if uav_id in seen_uavs:
+                raise ControlCoordinatorError(
+                    f"batch contains duplicate assignment for {uav_id}"
+                )
+            seen_uavs.add(uav_id)
+            if not isinstance(task, ControlTask):
+                raise ControlCoordinatorError("batch assignments require ControlTask values")
+            if expected_generation is not None and (
+                isinstance(expected_generation, bool)
+                or not isinstance(expected_generation, int)
+                or expected_generation < 0
+            ):
+                raise ControlCoordinatorError(
+                    "expected_generation must be a non-negative integer or None"
+                )
+            if self._configured_modes[uav_id] is not ControlMode.HEURISTIC:
+                raise ControlCoordinatorError(
+                    f"assign_tasks_atomically requires configured heuristic mode for {uav_id}"
+                )
+            current = self.ownership.current(uav_id)
+            if expected_generation is not None and (
+                current.generation != expected_generation
+            ):
+                raise StaleControlCommand(
+                    f"stale batch assignment for {uav_id}: expected generation "
+                    f"{expected_generation}, current generation {current.generation}"
+                )
+            if current.owner is ControlOwner.LEARNING:
+                raise ControlCoordinatorError(
+                    f"cannot assign a heuristic task under LEARNING owner for {uav_id}"
+                )
+            if (
+                current.owner is ControlOwner.SYSTEM
+                and self._operation_modes[uav_id] is OperationMode.RETURN
+            ):
+                raise ControlCoordinatorError(
+                    f"cannot assign a task while {uav_id} is returning"
+                )
+            controller = self.factory.create_heuristic(uav_id, task)
+            self._validate_controller(controller, ControlMode.HEURISTIC)
+            episode_id = None
+            sortie_number = None
+            if uav_id not in self._episode_ids:
+                if current.owner is not ControlOwner.SYSTEM:
+                    raise ControlCoordinatorError(
+                        f"cannot start a task under {current.owner.value} for {uav_id}"
+                    )
+                sortie_number = self._sortie_numbers.get(uav_id, 0) + 1
+                episode_id = f"{uav_id}:{sortie_number}"
+                controller.reset(
+                    ControllerContext(
+                        uav_id,
+                        dt_min,
+                        controller.observation_spec,
+                        controller.action_spec,
+                        episode_id,
+                        task,
+                        generation=current.generation + 1,
+                    )
+                )
+            prepared.append(
+                (
+                    uav_id,
+                    task,
+                    expected_generation,
+                    current,
+                    controller,
+                    episode_id,
+                    sortie_number,
+                )
+            )
+
+        with self._lock:
+            for uav_id, _, expected_generation, observed, _, _, _ in prepared:
+                latest = self.ownership.current(uav_id)
+                if latest != observed:
+                    raise StaleControlCommand(
+                        self._stale_message(uav_id, observed, latest)
+                    )
+                if (
+                    expected_generation is not None
+                    and latest.generation != expected_generation
+                ):
+                    raise StaleControlCommand(
+                        f"stale batch assignment for {uav_id}: expected generation "
+                        f"{expected_generation}, current generation {latest.generation}"
+                    )
+
+            transition_requests = tuple(
+                (
+                    observed,
+                    ControlOwner.HEURISTIC,
+                    self._task_controller_id(task),
+                    current_time,
+                )
+                for _, task, _, observed, _, _, _ in prepared
+            )
+            try:
+                leases = self.ownership.transition_batch(transition_requests)
+            except ControlOwnershipError as exc:
+                raise StaleControlCommand(str(exc)) from exc
+
+            old_controllers: list[ControllerBase] = []
+            for (
+                uav_id,
+                task,
+                _,
+                _,
+                controller,
+                episode_id,
+                sortie_number,
+            ), _ in zip(prepared, leases):
+                if task.task_type is OperationMode.COVERAGE:
+                    self._task_flow.clear_saved_coverage(uav_id)
+                else:
+                    self._save_active_coverage(uav_id)
+                old_controller = self._controllers.get(uav_id)
+                if old_controller is not None and old_controller is not controller:
+                    old_controllers.append(old_controller)
+                self._controllers[uav_id] = controller
+                self._pending_tasks[uav_id] = task
+                if episode_id is not None and sortie_number is not None:
+                    self._episode_ids[uav_id] = episode_id
+                    self._sortie_numbers[uav_id] = sortie_number
+                    self._operation_modes[uav_id] = OperationMode.IDLE
+                    self._invalid_streaks[uav_id] = 0
+                    self._last_applied_commands[uav_id] = None
+                    self._last_safety_intervened[uav_id] = False
+                    self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
+                    self._last_tick_times[uav_id] = None
+
+        for controller in old_controllers:
+            self._stop_controller(controller, StopReason.PREEMPTED)
+        return leases
+
     def revoke_for_return(
         self,
         uav_id: str,
@@ -323,6 +523,7 @@ class ControlCoordinator:
             raise ControlCoordinatorError(
                 f"return revocation requires a work owner for {uav_id}"
             )
+        self._save_active_coverage(uav_id)
         task = ControlTask(
             recovery_plan.reservation_id,
             OperationMode.RETURN,
@@ -340,7 +541,8 @@ class ControlCoordinator:
                 raise StaleControlCommand(
                     self._stale_message(uav_id, current, latest)
                 )
-            self._task_flow.clear_saved_coverage(uav_id)
+            if task.task_type is OperationMode.COVERAGE:
+                self._task_flow.clear_saved_coverage(uav_id)
             lease = self.ownership.replace(
                 current,
                 ControlOwner.SYSTEM,
@@ -382,6 +584,12 @@ class ControlCoordinator:
         with self._lock:
             return self._last_safety_intervened[uav_id]
 
+    def control_outcome(self, uav_id: str) -> ControlOutcome:
+        """Return the last explicit control outcome for a UAV."""
+        self._require_uav(uav_id)
+        with self._lock:
+            return self._last_control_outcomes[uav_id]
+
     def active_task(self, uav_id: str) -> ControlTask | None:
         """Return a task snapshot for lifecycle and compatibility bookkeeping."""
         self._require_uav(uav_id)
@@ -393,6 +601,70 @@ class ControlCoordinator:
             context = getattr(controller, "context", None)
             task = getattr(context, "task", None)
             return task if isinstance(task, ControlTask) else pending
+
+    def route_snapshot(self, uav_id: str) -> UavRouteSnapshot:
+        """Read the current controller route without planning or advancing it."""
+        self._require_uav(uav_id)
+        with self._lock:
+            lease = self.ownership.current(uav_id)
+            controller = self._controllers.get(uav_id)
+            task = self._pending_tasks.get(uav_id)
+            if task is None and controller is not None:
+                context = getattr(controller, "context", None)
+                candidate = getattr(context, "task", None)
+                if isinstance(candidate, ControlTask):
+                    task = candidate
+            operation = self._operation_modes[uav_id]
+            if controller is None:
+                route = ControlRouteSnapshot(
+                    task.task_id if task is not None else None,
+                    task.task_type.value if task is not None else operation.value,
+                    "cleared",
+                    task.target_contact_id if task is not None else None,
+                    (),
+                    0,
+                    0,
+                    None,
+                    "cleared",
+                )
+            else:
+                exported = controller.route_snapshot()
+                if exported is None:
+                    route = ControlRouteSnapshot(
+                        task.task_id if task is not None else None,
+                        task.task_type.value if task is not None else operation.value,
+                        "unavailable",
+                        task.target_contact_id if task is not None else None,
+                        (),
+                        0,
+                        0,
+                        None,
+                        "unavailable",
+                    )
+                elif isinstance(exported, ControlRouteSnapshot):
+                    route = exported
+                    if task is not None and route.task_id is None:
+                        route = replace(
+                            route,
+                            task_id=task.task_id,
+                            task_type=task.task_type.value,
+                            target_contact_id=task.target_contact_id,
+                            status=(
+                                "pending"
+                                if route.status == "unavailable"
+                                and not route.route
+                                else route.status
+                            ),
+                        )
+                else:
+                    raise ControlCoordinatorError(
+                        "controller route_snapshot must return ControlRouteSnapshot or None"
+                    )
+            return UavRouteSnapshot(
+                self.state_manager.episode_id,
+                lease.generation,
+                route,
+            )
 
     def controller(self, uav_id: str) -> ControllerBase | None:
         """Return the installed controller for integration diagnostics."""
@@ -436,6 +708,51 @@ class ControlCoordinator:
             self._stop_controller(old_controller, StopReason.PREEMPTED)
         return lease
 
+    def promote_to_system_holding(
+        self, uav_id: str, *, current_time: float, task_id: str | None = None
+    ) -> ControlLease:
+        """Transfer a finished work controller into system-owned holding."""
+        self._require_uav(uav_id)
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        self._save_active_coverage(uav_id)
+        task = ControlTask(
+            task_id or f"holding:{uav_id}:{current_time}",
+            OperationMode.HOLDING,
+        )
+        with self._lock:
+            current = self.ownership.current(uav_id)
+            if current.owner is ControlOwner.SYSTEM:
+                if self._operation_modes[uav_id] is OperationMode.HOLDING:
+                    return current
+                raise ControlCoordinatorError(
+                    f"{uav_id} is already SYSTEM-owned outside holding"
+                )
+            if current.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+                raise ControlCoordinatorError(
+                    f"{uav_id} cannot enter SYSTEM holding from {current.owner.value}"
+                )
+        controller = self.factory.create_heuristic(uav_id, task)
+        self._validate_controller(controller, ControlMode.HEURISTIC)
+        with self._lock:
+            latest = self.ownership.current(uav_id)
+            if latest != current:
+                raise StaleControlCommand(
+                    self._stale_message(uav_id, current, latest)
+                )
+            lease = self.ownership.replace(
+                current,
+                ControlOwner.SYSTEM,
+                f"holding:{task.task_id}",
+                current_time,
+            )
+            old_controller = self._controllers.get(uav_id)
+            self._controllers[uav_id] = controller
+            self._pending_tasks[uav_id] = task
+            self._operation_modes[uav_id] = OperationMode.HOLDING
+        if old_controller is not None and old_controller is not controller:
+            self._stop_controller(old_controller, StopReason.PREEMPTED)
+        return lease
+
     def reset_after_refuel(
         self, uav_id: str, *, current_time: float
     ) -> ControlLease:
@@ -459,10 +776,88 @@ class ControlCoordinator:
             self._operation_modes[uav_id] = OperationMode.IDLE
             self._last_applied_commands[uav_id] = None
             self._last_safety_intervened[uav_id] = False
+            self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
             self._last_tick_times[uav_id] = None
         if old_controller is not None:
             self._stop_controller(old_controller, StopReason.COMPLETED)
         return lease
+
+    def quarantine_uav(
+        self,
+        uav_id: str,
+        *,
+        current_time: float,
+        reason: str,
+    ) -> ControlLease:
+        """Atomically remove a failed UAV from the command path.
+
+        Quarantine deliberately leaves no SYSTEM holding controller.  A failed
+        airframe must remain physically where the failure occurred until a
+        separate recovery authority has established a safe action.
+        """
+        self._require_uav(uav_id)
+        self._validate_time(current_time, "current_time", allow_zero=True)
+        if not isinstance(reason, str) or not reason.strip():
+            raise ControlCoordinatorError("quarantine reason must be non-empty")
+
+        with self._lock:
+            current = self.ownership.current(uav_id)
+            if uav_id in self._quarantined_uavs:
+                return current
+            already_quiet = (
+                uav_id not in self._controllers
+                and uav_id not in self._pending_tasks
+                and not self._queued_events[uav_id]
+                and uav_id not in self._task_flow._saved_coverage_tasks
+                and self._operation_modes[uav_id] is OperationMode.IDLE
+                and self._last_applied_commands[uav_id] is None
+                and current.owner is ControlOwner.SYSTEM
+            )
+            if already_quiet:
+                lease = self.ownership.release_to_system(current, current_time)
+                old_controller = None
+                self._quarantined_uavs.add(uav_id)
+            else:
+                lease = self.ownership.release_to_system(current, current_time)
+                old_controller = self._controllers.pop(uav_id, None)
+                self._pending_tasks.pop(uav_id, None)
+                self._queued_events[uav_id] = []
+                self._task_flow.clear_saved_coverage(uav_id)
+                self._operation_modes[uav_id] = OperationMode.IDLE
+                self._invalid_streaks[uav_id] = 0
+                self._last_applied_commands[uav_id] = None
+                self._last_safety_intervened[uav_id] = False
+                self._last_control_outcomes[uav_id] = ControlOutcome.CLEAN
+                self._last_tick_times[uav_id] = None
+                self._quarantined_uavs.add(uav_id)
+
+        if old_controller is not None:
+            self._stop_controller(old_controller, StopReason.FAILED)
+
+        state = self.state_manager.get_uav(uav_id)
+        if state is not None:
+            self.state_manager.update_uav_control(
+                uav_id,
+                self._configured_modes[uav_id].value,
+                lease.owner.value,
+                OperationMode.IDLE.value,
+                lease.generation,
+                False,
+            )
+        return lease
+
+    def _save_active_coverage(self, uav_id: str) -> None:
+        """Save only active coverage before a temporary lifecycle interruption."""
+        task = self.active_task(uav_id)
+        if task is None or task.task_type is not OperationMode.COVERAGE:
+            return
+        snapshot = self.route_snapshot(uav_id)
+        self._task_flow.save_coverage_task(
+            uav_id,
+            task,
+            generation=self.current_lease(uav_id).generation,
+            route=snapshot.route.route,
+        )
 
     def step_uav(
         self,
@@ -498,6 +893,8 @@ class ControlCoordinator:
                 raise ControlCoordinatorError(
                     f"work has not started for {uav_id}"
                 ) from exc
+            pending_task = self._pending_tasks.get(uav_id)
+            active_task = pending_task or self.active_task(uav_id)
             observation = self.observations.build(
                 uav,
                 self.state_manager,
@@ -509,6 +906,7 @@ class ControlCoordinator:
                 safety_intervened=self._last_safety_intervened[uav_id],
                 current_time=current_time,
                 dt_min=dt_min,
+                task=active_task,
             )
             pending_task = self._pending_tasks.pop(uav_id, None)
             if pending_task is not None:
@@ -544,9 +942,13 @@ class ControlCoordinator:
                 safety = self.safety.apply(decision.command, observation, dt_min)
             except InvalidControlCommand as exc:
                 self._raise_rejected_command(uav_id, exc)
-            invalid_streak = self._update_invalid_streak(
-                uav_id, safety.interventions
+            except UnsafeControlState:
+                self._last_control_outcomes[uav_id] = ControlOutcome.UNSAFE
+                raise
+            self._last_control_outcomes[uav_id] = self._safety_outcome(
+                safety.interventions
             )
+            invalid_streak = self._update_invalid_streak(uav_id)
             if invalid_streak >= self.config.safety.max_invalid_commands:
                 raise EmergencyRevokeRequired(uav_id, invalid_streak)
             execution = self.executor.execute(uav, safety, dt_min)
@@ -593,6 +995,14 @@ class ControlCoordinator:
         remaining = []
         for event in events:
             lease = self.ownership.current(uav_id)
+            if event.event_type == "duplicate_task_cancelled":
+                task = self.active_task(uav_id)
+                # A queued merge cancellation belongs to one controller
+                # generation, even when a replacement reuses the task ID.
+                if (task is None or event.payload.get("task_id") != task.task_id
+                        or event.payload.get("lease_generation") != lease.generation
+                        or event.payload.get("controller_id") != lease.controller_id):
+                    continue
             if (
                 lease.owner is not ControlOwner.HEURISTIC
                 or event.event_type not in EVENT_TRANSITIONS
@@ -631,17 +1041,15 @@ class ControlCoordinator:
             controller.action_spec,
             episode_id,
             task,
+            generation=self.ownership.current(uav_id).generation,
         )
 
     def _update_invalid_streak(
         self,
         uav_id: str,
-        interventions: Sequence[SafetyIntervention],
     ) -> int:
-        if interventions:
-            self._invalid_streaks[uav_id] += 1
-        else:
-            self._invalid_streaks[uav_id] = 0
+        # A command that safety can legally adjust is not an invalid command.
+        self._invalid_streaks[uav_id] = 0
         return self._invalid_streaks[uav_id]
 
     def _raise_rejected_command(
@@ -649,10 +1057,19 @@ class ControlCoordinator:
     ) -> None:
         with self._lock:
             self._invalid_streaks[uav_id] += 1
+            self._last_control_outcomes[uav_id] = ControlOutcome.INVALID
             invalid_streak = self._invalid_streaks[uav_id]
         if invalid_streak >= self.config.safety.max_invalid_commands:
             raise EmergencyRevokeRequired(uav_id, invalid_streak) from error
         raise error
+
+    @staticmethod
+    def _safety_outcome(
+        interventions: Sequence[SafetyIntervention],
+    ) -> ControlOutcome:
+        if any(item.kind == "sensor_mode_masked" for item in interventions):
+            return ControlOutcome.MASKED
+        return ControlOutcome.CLIPPED if interventions else ControlOutcome.CLEAN
 
     def _queue_decision_events(
         self,
@@ -776,10 +1193,7 @@ class ControlCoordinator:
             raise ControlCoordinatorError(
                 "RecoveryPlan path_length_cells does not match path"
             )
-        if not all(
-            math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9)
-            for actual, expected in zip(plan.path[-1][:2], plan.base_position)
-        ):
+        if not _poses_match(plan.path[-1], plan.base_position):
             raise ControlCoordinatorError(
                 "RecoveryPlan path must end at base_position"
             )
@@ -804,7 +1218,7 @@ class ControlCoordinator:
     def _validate_time(
         value: float, name: str, *, allow_zero: bool = False
     ) -> None:
-        lower_bound = 0.0 if allow_zero else 0.0
+        lower_bound = 0.0
         if (
             isinstance(value, bool)
             or not isinstance(value, int | float)
@@ -852,6 +1266,7 @@ class ControlCoordinator:
 __all__ = [
     "ControlCoordinator",
     "ControlCoordinatorError",
+    "ControlOutcome",
     "ControlTickResult",
     "EmergencyRevokeRequired",
     "StaleControlCommand",

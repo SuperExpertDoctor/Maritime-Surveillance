@@ -1,5 +1,7 @@
 import { coordToPixel } from "./geometry";
 import { markerColor, UAV_STATUS_COLORS } from "./colors";
+import { uavDisplayState } from "./displayState";
+import { layoutLabels } from "./labelLayout";
 
 const FONT = '"Fira Code", "Microsoft YaHei", monospace';
 const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
@@ -289,7 +291,35 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
   }
 }
 
-export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
+export function drawIntents(ctx, intents, statuses, cellSize, ox, oy) {
+  const statusById = new Map((statuses || []).map((status) => [status.intent_id, status]));
+  for (const intent of intents || []) {
+    if (!Array.isArray(intent.bbox) || intent.bbox.length !== 4) continue;
+    const [c0, r0, c1, r1] = intent.bbox;
+    if (!(c1 > c0 && r1 > r0)) continue;
+    const status = statusById.get(intent.intent_id);
+    const lifecycle = intent.lifecycle || "active";
+    const color = lifecycle === "expired"
+      ? "#64748B"
+      : lifecycle === "cancelled" ? "#94A3B8" : "#7C3AED";
+    const point = coordToPixel(c0, r0, cellSize, ox, oy);
+    const width = (c1 - c0) * cellSize;
+    const height = (r1 - r0) * cellSize;
+    ctx.save();
+    ctx.fillStyle = lifecycle === "active" ? "rgba(124, 58, 237, .10)" : "rgba(100, 116, 139, .07)";
+    ctx.fillRect(point.x, point.y, width, height);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lifecycle === "active" ? 1.8 : 1;
+    ctx.setLineDash(lifecycle === "active" ? [5, 3] : [2, 4]);
+    ctx.strokeRect(point.x + 1, point.y + 1, Math.max(0, width - 2), Math.max(0, height - 2));
+    ctx.restore();
+    const coverage = status ? Math.round((status.coverage_ratio || 0) * 100) : null;
+    const label = `${intent.intent_id}${coverage == null ? "" : ` ${coverage}%`}`;
+    text(ctx, label, point.x + 4, point.y + Math.max(11, cellSize * 0.48), color, Math.max(7, cellSize * 0.27), 700);
+  }
+}
+
+export function drawTrackRegions(ctx, regions, contacts, cellSize, ox, oy) {
   for (const region of regions || []) {
     const [c0, r0, c1, r1] = region.bbox;
     const { x, y } = coordToPixel(c0, r0, cellSize, ox, oy);
@@ -300,10 +330,13 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
     ctx.setLineDash([5, 4]);
     ctx.strokeRect(x, y, (c1 - c0) * cellSize, (r1 - r0) * cellSize);
     ctx.setLineDash([]);
-    const group = (ships || []).filter((ship) => ship.group_id === region.target_group_id && !ship.departed);
+    const group = (contacts || []).filter((contact) => {
+      const id = contact.contact_id || contact.group_id;
+      return id === region.target_group_id && contact.state !== "departed";
+    });
     if (group.length) {
-      const centerCol = group.reduce((sum, ship) => sum + ship.position[0], 0) / group.length;
-      const centerRow = group.reduce((sum, ship) => sum + ship.position[1], 0) / group.length;
+      const centerCol = group.reduce((sum, contact) => sum + (contact.estimated_position || contact.position)[0], 0) / group.length;
+      const centerRow = group.reduce((sum, contact) => sum + (contact.estimated_position || contact.position)[1], 0) / group.length;
       const center = gridCenter(centerCol, centerRow, cellSize, ox, oy);
       ctx.strokeStyle = "rgba(190, 18, 60, .72)";
       ctx.setLineDash([3, 4]);
@@ -312,6 +345,180 @@ export function drawTrackRegions(ctx, regions, ships, cellSize, ox, oy) {
       ctx.stroke();
       ctx.setLineDash([]);
     }
+  }
+}
+
+function contactColor(contact) {
+  if (contact?.state === "lost" || contact?.state === "departed") return "#64748B";
+  if (contact?.vessel_class === "type_ii") return "#BE123C";
+  if (contact?.vessel_class === "type_i") return "#0F766E";
+  return "#B45309";
+}
+
+function drawContactVessel(ctx, center, size, color, heading, selected) {
+  ctx.save();
+  ctx.translate(center.x, center.y);
+  if (heading != null) ctx.rotate(heading);
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#FFFFFF";
+  ctx.lineWidth = selected ? 1.2 : 0.8;
+  ctx.beginPath();
+  if (heading == null) {
+    ctx.moveTo(0, -size * 1.08);
+    ctx.lineTo(size * 0.72, 0);
+    ctx.lineTo(0, size * 1.08);
+    ctx.lineTo(-size * 0.72, 0);
+  } else {
+    ctx.moveTo(size * 1.25, 0);
+    ctx.lineTo(-size * 0.62, -size * 0.72);
+    ctx.lineTo(-size * 0.36, 0);
+    ctx.lineTo(-size * 0.62, size * 0.72);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+export function drawContacts(ctx, contacts, cellSize, ox, oy, selectedId, phase = 0) {
+  for (const contact of contacts || []) {
+    const position = contact.estimated_position;
+    if (!Array.isArray(position) || position.length < 2) continue;
+    const color = contactColor(contact);
+    const center = gridCenter(Number(position[0]), Number(position[1]), cellSize, ox, oy);
+    const radius = Math.max(4, cellSize * (contact.contact_id === selectedId ? 0.34 : 0.25));
+    const samples = (contact.samples || []).filter((sample) => Array.isArray(sample.position));
+    if (samples.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = `${color}66`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      samples.forEach((sample, index) => {
+        const point = gridCenter(sample.position[0], sample.position[1], cellSize, ox, oy);
+        if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+    const aisSample = [...samples].reverse().find((sample) => sample.source === "ais");
+    if (aisSample && contact.state !== "departed") {
+      const aisPoint = gridCenter(aisSample.position[0], aisSample.position[1], cellSize, ox, oy);
+      ctx.save();
+      ctx.strokeStyle = "rgba(100, 116, 139, .62)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(center.x, center.y);
+      ctx.lineTo(aisPoint.x, aisPoint.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.save();
+    ctx.globalAlpha = contact.state === "lost" ? 0.5 : 1;
+    ctx.fillStyle = `${color}22`;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = contact.contact_id === selectedId ? 2 : 1.2;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius + 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (contact.contact_id === selectedId) {
+      ctx.globalAlpha = 0.78;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, radius + 7 + Math.sin(phase / 10) * 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.fillStyle = color;
+    const velocity = contact.estimated_velocity;
+    const speed = Array.isArray(velocity) && velocity.length >= 2
+      ? Math.hypot(Number(velocity[0]), Number(velocity[1]))
+      : 0;
+    const heading = speed > 1e-3
+      ? Math.atan2(Number(velocity[1]), Number(velocity[0]))
+      : null;
+    drawContactVessel(
+      ctx,
+      center,
+      radius,
+      color,
+      Number.isFinite(heading) ? heading : null,
+      contact.contact_id === selectedId,
+    );
+    ctx.restore();
+  }
+}
+
+export function drawPassiveEvidence(ctx, evidence, cellSize, ox, oy, phase = 0) {
+  for (const item of evidence || []) {
+    if (item.kind === "passive_bearing") {
+      const origin = item.observer_position || item.origin;
+      if (!Array.isArray(origin) || origin.length < 2) continue;
+      const center = gridCenter(Number(origin[0]), Number(origin[1]), cellSize, ox, oy);
+      // The public evidence contract is bearing-only. Use the configured
+      // receiver envelope as a rendering bound instead of a measured range.
+      const radius = Math.max(cellSize * 1.5, 10 * cellSize);
+      const bearing = Number(item.bearing_deg || 0) * Math.PI / 180;
+      const spread = Math.max(0.04, Number(item.bearing_std_deg || 3) * 2 * Math.PI / 180);
+      ctx.save();
+      ctx.fillStyle = "rgba(14, 116, 144, .09)";
+      ctx.strokeStyle = "rgba(14, 116, 144, .64)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(center.x, center.y);
+      ctx.arc(center.x, center.y, radius, bearing - spread, bearing + spread);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#0E7490";
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, Math.max(2, cellSize * 0.1), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    } else if (item.kind === "passive_position") {
+      const position = item.position;
+      if (!Array.isArray(position) || position.length < 2) continue;
+      const center = gridCenter(Number(position[0]), Number(position[1]), cellSize, ox, oy);
+      const size = Math.max(4, cellSize * 0.25);
+      const pulse = 1 + 0.12 * Math.sin(phase / 8);
+      ctx.save();
+      ctx.translate(center.x, center.y);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = "rgba(5, 150, 105, .18)";
+      ctx.strokeStyle = "#047857";
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(-size * pulse, -size * pulse, size * 2 * pulse, size * 2 * pulse);
+      ctx.strokeRect(-size * pulse, -size * pulse, size * 2 * pulse, size * 2 * pulse);
+      ctx.restore();
+    }
+  }
+}
+
+export function drawScenarioVessels(ctx, vessels, cellSize, ox, oy, selectedId) {
+  for (const vessel of vessels || []) {
+    if (!Array.isArray(vessel.position) || vessel.position.length < 2) continue;
+    const center = gridCenter(Number(vessel.position[0]), Number(vessel.position[1]), cellSize, ox, oy);
+    const selected = vessel.scenario_entity_id === selectedId;
+    const color = vessel.vessel_class === "type_ii" ? "#B45309" : "#0369A1";
+    const radius = Math.max(4, cellSize * (selected ? 0.34 : 0.27));
+    ctx.save();
+    ctx.fillStyle = `${color}20`;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = selected ? 2 : 1.2;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius + (selected ? 5 : 3), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(center.x, center.y - radius);
+    ctx.lineTo(center.x + radius, center.y + radius);
+    ctx.lineTo(center.x - radius, center.y + radius);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 }
 
@@ -871,11 +1078,11 @@ function cellSizeForShip(size, carrier) {
   return size * (carrier ? 4.6 : 4.15);
 }
 
-function drawClassificationSymbol(ctx, ship, center, size, military) {
+function drawClassificationSymbol(ctx, ship, center, size, classification) {
   if (ship.departed) return;
   ctx.save();
   ctx.lineWidth = 1;
-  if (military) {
+  if (classification === "type_ii") {
     const x = center.x + size + 5;
     const y = center.y - size - 1;
     ctx.strokeStyle = "#F87171";
@@ -889,7 +1096,7 @@ function drawClassificationSymbol(ctx, ship, center, size, military) {
     ctx.quadraticCurveTo(x - 2, y + 6, x, y + 6);
     ctx.quadraticCurveTo(x + 2, y + 6, x + 4, y + 2);
     ctx.stroke();
-  } else if (ship.is_military === false) {
+  } else if (classification === "type_i") {
     ctx.fillStyle = "#0369A1";
     ctx.beginPath();
     ctx.moveTo(center.x + size + 2, center.y - 2);
@@ -903,7 +1110,7 @@ function drawClassificationSymbol(ctx, ship, center, size, military) {
 
 function drawShipRadar(ctx, ship, center, cellSize) {
   if (ship.departed) return;
-  const radius = Math.max(cellSize * 1.6, Number(ship.radar_range_cells || 3) * cellSize);
+  const radius = cellSize * 3;
   const heading = (Number(ship.heading_deg) || 0) * Math.PI / 180;
   ctx.save();
   ctx.fillStyle = "rgba(6, 182, 212, .035)";
@@ -928,8 +1135,10 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
   const observedShips = (ships || []).filter((ship) => ship?.is_detected);
   drawGroupRings(ctx, observedShips, cellSize, ox, oy);
   for (const ship of observedShips) {
-    const military = ship.is_military === true || ship.discrimination === "military";
-    const color = military ? "#E11D48" : ship.is_military === false ? "#0369A1" : ship.is_detected ? "#CA8A04" : "#475569";
+    const classification = ship.vessel_class || ship.assessment?.vessel_class || "unknown";
+    const color = classification === "type_ii"
+      ? "#E11D48"
+      : classification === "type_i" ? "#0369A1" : "#CA8A04";
     const size = Math.max(4, cellSize * (ship.ship_type === "carrier" ? 0.38 : 0.28));
     if (ship.trail?.length > 1) {
       ctx.save();
@@ -961,11 +1170,12 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
       ctx.stroke();
     }
     ctx.restore();
-    drawClassificationSymbol(ctx, ship, center, size, military);
+    drawClassificationSymbol(ctx, ship, center, size, classification);
     if (ship.ais?.reported_position && !ship.departed) {
       const report = gridCenter(ship.ais.reported_position[0], ship.ais.reported_position[1], cellSize, ox, oy);
       ctx.save();
-      ctx.strokeStyle = military ? "rgba(251, 113, 133, .72)" : "rgba(148, 163, 184, .52)";
+      ctx.strokeStyle = classification === "type_ii"
+        ? "rgba(251, 113, 133, .72)" : "rgba(148, 163, 184, .52)";
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 3]);
       ctx.beginPath();
@@ -974,13 +1184,6 @@ export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
       ctx.stroke();
       ctx.restore();
     }
-    const state = ship.departed
-      ? "DEPARTED"
-      : ship.is_evasive
-        ? "EVADE"
-        : ship.ship_type === "carrier" ? "CV" : "DDG";
-    const stateColor = ship.departed ? "#64748B" : ship.is_evasive ? "#BE123C" : military ? "#BE123C" : "#334155";
-    text(ctx, state, center.x + size + 3, center.y + 3, stateColor, Math.max(7, cellSize * 0.26), 700);
   }
 }
 
@@ -1018,12 +1221,6 @@ export function drawBases(ctx, bases, baseCenters, cellSize, phase) {
     ctx.lineWidth = 1.3;
     ctx.stroke();
     ctx.restore();
-    const baseLabel = `B${base.number || index + 1}`;
-    const labelX = center.x + outerRadius + 4;
-    const labelY = center.y + 2;
-    const fontSize = Math.max(7, cellSize * 0.25);
-    text(ctx, baseLabel, labelX, labelY, color, fontSize, 700);
-    text(ctx, `${base.occupancy || 0}/${base.capacity || 3}`, labelX, labelY + fontSize + 3, "#7F1D1D", Math.max(6, cellSize * 0.21), 600);
   }
 }
 
@@ -1075,13 +1272,181 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCe
       ctx.arc(center.x, center.y, size + 3, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
       ctx.stroke();
     }
-    text(ctx, uav.id.replace("UAV-", "U"), center.x + size + 3, center.y - size - 1, "#0F172A", 9, 700);
     if (uav.avoidance_level > 0) {
       const level = Number(uav.avoidance_level);
       const levelColor = level >= 3 ? "#F87171" : level === 2 ? "#FBBF24" : "#67E8F9";
       text(ctx, `L${level}`, center.x + size + 3, center.y + size + 8, levelColor, Math.max(7, cellSize * 0.25), 700);
     }
   }
+}
+
+function contactLabel(contact) {
+  if (contact.state === "lost") return `${contact.contact_id} 暂时丢失`;
+  if (contact.state === "departed") return `${contact.contact_id} 已离场`;
+  if (contact.vessel_class === "type_ii") return `${contact.contact_id} II 类`;
+  if (contact.vessel_class === "type_i") return `${contact.contact_id} I 类`;
+  return `${contact.contact_id} 待核查`;
+}
+
+function legacyShipLabel(ship) {
+  const label = ship.ship_type === "carrier" ? "航母" : "水面目标";
+  return `${ship.id} ${label}`;
+}
+
+function addLabel(ctx, labels, styles, id, anchor, value, priority, color, selected) {
+  const fontSize = 9;
+  ctx.font = `600 ${fontSize}px ${FONT}`;
+  labels.push({
+    id,
+    anchor,
+    text: value,
+    width: ctx.measureText(value).width + 10,
+    height: 17,
+    priority,
+  });
+  styles.set(id, { color, selected, fontSize });
+}
+
+function drawLabelLeader(ctx, anchor, label) {
+  const endX = clamp(anchor.x, label.x, label.x + label.width);
+  const endY = clamp(anchor.y, label.y, label.y + label.height);
+  ctx.beginPath();
+  ctx.moveTo(anchor.x, anchor.y);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+}
+
+/** Draw all object text after symbols have been placed in screen space. */
+export function drawLabels(
+  ctx,
+  frame,
+  cellSize,
+  ox,
+  oy,
+  bounds,
+  selectedUavId,
+  selectedContactId,
+  selectedScenarioVesselId,
+  baseCenters,
+  showScenario = false,
+) {
+  const labels = [];
+  const styles = new Map();
+  const uavs = frame?.uavs || [];
+  const contacts = Array.isArray(frame?.contacts) && frame.contacts.length
+    ? frame.contacts
+    : [];
+  const legacyShips = contacts.length ? [] : (frame?.ships || []).filter((ship) => ship?.is_detected);
+
+  for (const uav of uavs) {
+    const center = resolveUavDisplayCenter(uav, cellSize, ox, oy, baseCenters);
+    const display = uavDisplayState(uav);
+    const selected = uav.id === selectedUavId;
+    addLabel(
+      ctx,
+      labels,
+      styles,
+      `uav:${uav.id}`,
+      center,
+      `${uav.id.replace("UAV-", "U")} · ${display.label}`,
+      selected ? "selected" : "uav",
+      UAV_STATUS_COLORS[uav.status] || "#334155",
+      selected,
+    );
+  }
+
+  for (const contact of contacts) {
+    const position = contact.estimated_position;
+    if (!Array.isArray(position) || position.length < 2) continue;
+    const center = gridCenter(Number(position[0]), Number(position[1]), cellSize, ox, oy);
+    const classified = contact.vessel_class === "type_i" || contact.vessel_class === "type_ii";
+    const selected = contact.contact_id === selectedContactId;
+    addLabel(
+      ctx,
+      labels,
+      styles,
+      `contact:${contact.contact_id}`,
+      center,
+      contactLabel(contact),
+      selected ? "selected" : classified ? "classified" : "contact",
+      contactColor(contact),
+      selected,
+    );
+  }
+
+  for (const ship of legacyShips) {
+    const position = ship.position || ship.estimated_position;
+    if (!Array.isArray(position) || position.length < 2) continue;
+    addLabel(
+      ctx,
+      labels,
+      styles,
+      `ship:${ship.id}`,
+      gridCenter(Number(position[0]), Number(position[1]), cellSize, ox, oy),
+      legacyShipLabel(ship),
+      "contact",
+      "#334155",
+      false,
+    );
+  }
+
+  if (showScenario) {
+    for (const vessel of frame?.scenario_vessels || []) {
+      const position = vessel.position;
+      if (!Array.isArray(position) || position.length < 2) continue;
+      const selected = vessel.scenario_entity_id === selectedScenarioVesselId;
+      addLabel(
+        ctx,
+        labels,
+        styles,
+        `scenario:${vessel.scenario_entity_id}`,
+        gridCenter(Number(position[0]), Number(position[1]), cellSize, ox, oy),
+        `场景 · ${vessel.scenario_entity_id}`,
+        selected ? "selected" : "scenario",
+        vessel.vessel_class === "type_ii" ? "#B45309" : "#0369A1",
+        selected,
+      );
+    }
+  }
+
+  for (const [index, base] of (frame?.bases || []).entries()) {
+    const center = baseCenters?.[index];
+    if (!center) continue;
+    addLabel(
+      ctx,
+      labels,
+      styles,
+      `base:${base.id || index}`,
+      center,
+      `B${base.number || index + 1} ${base.occupancy || 0}/${base.capacity || 3}`,
+      "uav",
+      "#991B1B",
+      false,
+    );
+  }
+
+  const placed = layoutLabels(labels, bounds);
+  for (const label of placed) {
+    if (label.hidden) continue;
+    const source = labels.find((item) => item.id === label.id);
+    const style = styles.get(label.id);
+    if (!source || !style) continue;
+    ctx.save();
+    if (style.selected) {
+      ctx.strokeStyle = `${style.color}B8`;
+      ctx.lineWidth = 1;
+      drawLabelLeader(ctx, label.anchor, label);
+      ctx.stroke();
+    }
+    ctx.fillStyle = style.selected ? "rgba(255, 255, 255, .98)" : "rgba(255, 255, 255, .88)";
+    ctx.strokeStyle = style.selected ? style.color : "rgba(100, 116, 139, .44)";
+    ctx.lineWidth = style.selected ? 1.2 : 0.7;
+    ctx.fillRect(label.x, label.y, label.width, label.height);
+    ctx.strokeRect(label.x, label.y, label.width, label.height);
+    text(ctx, source.text, label.x + 5, label.y + 12, style.color, style.fontSize, style.selected ? 700 : 600);
+    ctx.restore();
+  }
+  return placed;
 }
 
 export function drawTransparencyLegend(ctx, bounds) {
@@ -1174,6 +1539,9 @@ export function renderFrame(ctx, frame, options = {}) {
     mapBounds,
     legendBounds,
     trailMode = "tail",
+    selectedContactId,
+    showScenario = false,
+    selectedScenarioVesselId,
   } = options;
   const width = ctx.canvas.clientWidth || ctx.canvas.width;
   const height = ctx.canvas.clientHeight || ctx.canvas.height;
@@ -1193,15 +1561,39 @@ export function renderFrame(ctx, frame, options = {}) {
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
+    drawIntents(ctx, frame.intents, frame.intent_statuses, cellSize, offsetX, offsetY);
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
-    drawTrackRegions(ctx, frame.track_regions, frame.ships, cellSize, offsetX, offsetY);
+    const contacts = Array.isArray(frame.contacts) && frame.contacts.length
+      ? frame.contacts : frame.ships;
+    drawTrackRegions(ctx, frame.track_regions, contacts, cellSize, offsetX, offsetY);
+    drawPassiveEvidence(ctx, frame.evidence, cellSize, offsetX, offsetY, frameCount);
     drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, baseCenters);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY, frameCount);
     drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
-    drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
+    if (Array.isArray(frame.contacts) && frame.contacts.length) {
+      drawContacts(ctx, frame.contacts, cellSize, offsetX, offsetY, selectedContactId, frameCount);
+    } else {
+      drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
+    }
+    if (showScenario) {
+      drawScenarioVessels(ctx, frame.scenario_vessels, cellSize, offsetX, offsetY, selectedScenarioVesselId);
+    }
     drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets, baseCenters);
     drawBases(ctx, bases, baseCenters, cellSize, frameCount);
+    drawLabels(
+      ctx,
+      frame,
+      cellSize,
+      offsetX,
+      offsetY,
+      resolvedMapBounds,
+      selectedUavId,
+      selectedContactId,
+      selectedScenarioVesselId,
+      baseCenters,
+      showScenario,
+    );
     drawTransparencyLegend(ctx, legendBounds);
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);

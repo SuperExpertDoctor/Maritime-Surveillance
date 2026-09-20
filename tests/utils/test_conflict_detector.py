@@ -19,7 +19,42 @@ def test_conflict_detector_ignores_current_pose_overlap():
         {"id": "UAV-2", "status": "transit", "planned_path": [(1.0, 1.0, 0.0)]},
     ])
 
-    assert conflicts == []
+    assert len(conflicts) == 1
+    assert conflicts[0].step_offset_a == 0
+
+
+def test_conflict_detector_uses_longest_path_horizon():
+    conflicts = detect_conflicts([
+        {
+            "id": "UAV-1",
+            "status": "transit",
+            "planned_path": [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)],
+        },
+        {
+            "id": "UAV-2",
+            "status": "transit",
+            "planned_path": [
+                (5.0, 0.0, 0.0), (4.0, 0.0, 0.0), (2.0, 0.0, 0.0),
+            ],
+        },
+    ])
+
+    assert len(conflicts) == 1
+    assert conflicts[0].step_offset_a == 2
+
+
+def test_common_prefix_mode_checks_the_first_divergent_step():
+    conflicts = detect_conflicts([
+        {"id": "UAV-1", "status": "transit", "planned_path": [
+            (0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+        ]},
+        {"id": "UAV-2", "status": "transit", "planned_path": [
+            (0.0, 0.0, 0.0), (1.1, 0.0, 0.0),
+        ]},
+    ], min_separation_cells=0.5, ignore_common_prefix=True)
+
+    assert len(conflicts) == 1
+    assert conflicts[0].step_offset_a == 1
 
 
 def test_conflict_detector_catches_a_mid_step_crossing():

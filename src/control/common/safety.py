@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 import math
 
 from src.control.common.contracts import (
@@ -17,12 +18,45 @@ from src.control.common.contracts import (
 SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN = math.radians(2.0)
 
 
-class InvalidControlCommand(ValueError):
+class ControlOutcome(str, Enum):
+    """Classification for a control tick or rejected control attempt."""
+
+    CLEAN = "clean"
+    CLIPPED = "clipped"
+    MASKED = "masked"
+    INVALID = "invalid"
+    UNSAFE = "unsafe"
+
+
+class ControlError(Exception):
+    """Base for errors that require a control-layer recovery policy."""
+
+    code = "control_error"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        self.code = code or type(self).code
+        super().__init__(message)
+
+
+class InvalidControlCommand(ControlError, ValueError):
     """Raised when a controller command cannot be applied safely."""
 
+    outcome = ControlOutcome.INVALID
+    code = "invalid_control_command"
 
-class UnsafeControlState(RuntimeError):
+
+class ProbeValidationError(ControlError, ValueError):
+    """Raised when frozen probe evidence cannot satisfy its control contract."""
+
+    outcome = ControlOutcome.UNSAFE
+    code = "probe_validation"
+
+
+class UnsafeControlState(ControlError, RuntimeError):
     """Raised when no legal motion can avoid the published safety mask."""
+
+    outcome = ControlOutcome.UNSAFE
+    code = "unsafe_control_state"
 
 
 @dataclass(frozen=True)
@@ -79,10 +113,23 @@ class SafetyEnvelope:
                 > SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN
             )
         ):
-            applied = replace(applied, sensor_mode=SensorMode.OFF)
+            applied = replace(
+                applied,
+                sensor_mode=SensorMode.OFF,
+                sar_look_direction=None,
+                sar_scan_heading_rad=None,
+                sar_scan_origin=None,
+            )
             interventions.append(SafetyIntervention("sensor_mode_masked"))
         elif applied.sensor_mode not in observation.action_mask.allowed_sensor_modes:
             raise InvalidControlCommand("sensor mode is absent from action mask")
+        elif applied.sensor_mode is not SensorMode.SAR:
+            applied = replace(
+                applied,
+                sar_look_direction=None,
+                sar_scan_heading_rad=None,
+                sar_scan_origin=None,
+            )
 
         return SafetyResult(command, applied, tuple(interventions))
 
@@ -105,6 +152,22 @@ class SafetyEnvelope:
             and command.target_contact_id not in observation.action_mask.target_contact_ids
         ):
             raise InvalidControlCommand("target contact is absent from action mask")
+        if command.sensor_mode is SensorMode.SAR:
+            if command.sar_look_direction not in ("left", "right"):
+                raise InvalidControlCommand("SAR geometry requires a valid look direction")
+            if command.sar_scan_heading_rad is None or not math.isfinite(
+                command.sar_scan_heading_rad
+            ):
+                raise InvalidControlCommand("SAR geometry requires a finite scan heading")
+            origin = command.sar_scan_origin
+            valid_origin = isinstance(origin, (tuple, list)) and len(origin) == 2
+            if valid_origin:
+                try:
+                    valid_origin = all(math.isfinite(float(value)) for value in origin)
+                except (TypeError, ValueError):
+                    valid_origin = False
+            if not valid_origin:
+                raise InvalidControlCommand("SAR geometry requires a finite scan origin")
 
     def _safe_candidate(
         self,
@@ -216,7 +279,10 @@ class SafetyEnvelope:
 
 
 __all__ = [
+    "ControlError",
+    "ControlOutcome",
     "InvalidControlCommand",
+    "ProbeValidationError",
     "SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN",
     "SafetyEnvelope",
     "SafetyIntervention",

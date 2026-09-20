@@ -1,8 +1,9 @@
 """传感器模型：SAR、EO/IR、雷帧 —— 探测概率 + 距离限制 + 传感器融合。"""
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from src.schedule.datatypes import GridCoord
+from src.mission.config import PassiveConfig, EmitterConfig
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,8 @@ class SensorConfig:
     eoir: EoIrConfig
     radar: RadarConfig
     general: GeneralSensorConfig
+    passive: PassiveConfig = field(default_factory=PassiveConfig)
+    emitter: EmitterConfig = field(default_factory=EmitterConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -70,11 +73,13 @@ class SensorBase:
     """
 
     def __init__(self, name: str, detection_range_km: float,
-                 detection_probability: float, false_alarm_rate: float):
+                 detection_probability: float, false_alarm_rate: float,
+                 rng: random.Random | None = None):
         self.name = name
         self.detection_range_km = detection_range_km
         self.detection_probability = detection_probability
         self.false_alarm_rate = false_alarm_rate
+        self._rng = rng if rng is not None else random.Random()
 
     def get_effective_range_cells(self, cell_size_km: float) -> float:
         """返回有效探测距离（网格单位）。"""
@@ -106,7 +111,7 @@ class SensorBase:
             return False
 
         # 概率判定
-        return random.random() < self.detection_probability
+        return self._rng.random() < self.detection_probability
 
 
 class SarSensor(SensorBase):
@@ -115,12 +120,13 @@ class SarSensor(SensorBase):
     特点：大范围条带扫描，分辨率适中，不受光照影响。
     """
 
-    def __init__(self, config: SarConfig):
+    def __init__(self, config: SarConfig, rng: random.Random | None = None):
         super().__init__(
             name="SAR",
             detection_range_km=config.detection_range_km,
             detection_probability=config.detection_probability,
             false_alarm_rate=config.false_alarm_rate,
+            rng=rng,
         )
         self.swath_km = config.swath_km
         self.resolution_m = config.resolution_m
@@ -137,12 +143,13 @@ class EoIrSensor(SensorBase):
     特点：高分辨率，短距离，受天气和光照影响。
     """
 
-    def __init__(self, config: EoIrConfig):
+    def __init__(self, config: EoIrConfig, rng: random.Random | None = None):
         super().__init__(
             name="EO/IR",
             detection_range_km=config.detection_range_km,
             detection_probability=config.detection_probability,
             false_alarm_rate=config.false_alarm_rate,
+            rng=rng,
         )
         self.fov_deg = config.fov_deg
         self.resolution_m = config.resolution_m
@@ -154,12 +161,13 @@ class RadarSensor(SensorBase):
     特点：最远探测距离，360° 方位覆盖，高检测概率。
     """
 
-    def __init__(self, config: RadarConfig):
+    def __init__(self, config: RadarConfig, rng: random.Random | None = None):
         super().__init__(
             name="Radar/ESM",
             detection_range_km=config.detection_range_km,
             detection_probability=config.detection_probability,
             false_alarm_rate=config.false_alarm_rate,
+            rng=rng,
         )
         self.azimuth_coverage_deg = config.azimuth_coverage_deg
         self.update_rate_hz = config.update_rate_hz
@@ -179,15 +187,18 @@ class SensorSuite:
         self.sar = sar
         self.eoir = eoir
         self.radar = radar
-        self._sensors = [sar, eoir, radar]
+        # Radar remains available as a configured legacy component, but it is
+        # not a passive discovery source in the aligned mission contract.
+        self._sensors = [sar, eoir]
 
     @classmethod
-    def from_config(cls, config: SensorConfig) -> "SensorSuite":
+    def from_config(cls, config: SensorConfig,
+                    rng: random.Random | None = None) -> "SensorSuite":
         """从 SensorConfig 创建传感器套件。"""
         return cls(
-            sar=SarSensor(config.sar),
-            eoir=EoIrSensor(config.eoir),
-            radar=RadarSensor(config.radar),
+            sar=SarSensor(config.sar, rng=rng),
+            eoir=EoIrSensor(config.eoir, rng=rng),
+            radar=RadarSensor(config.radar, rng=rng),
         )
 
     def detect(self, uav_pos: GridCoord,

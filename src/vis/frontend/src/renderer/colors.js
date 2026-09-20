@@ -12,6 +12,7 @@ export const UAV_STATUS_COLORS = {
   holding: "#A16207",
   idle: "#475569",
   transit: "#1D4ED8",
+  failed: "#7F1D1D",
 };
 
 export function markerColor(ageMinutes) {

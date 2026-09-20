@@ -13,6 +13,7 @@ from src.control.common.contracts import (
     ControlDecision,
     ControlObservation,
     ControlOwner,
+    ControlRouteSnapshot,
     ControlTask,
     ObservationSpec,
     OperationMode,
@@ -22,7 +23,11 @@ from src.control.common.contracts import (
     StopReason,
 )
 from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
-from src.control.heuristic.base import HeuristicControllerBase, RouteFollower
+from src.control.heuristic.base import (
+    HeuristicControllerBase,
+    RouteFollower,
+    next_route_index,
+)
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
 from src.utils.track_orbit import LGVFTracker
 
@@ -90,6 +95,8 @@ class RecoveryPlanner:
         planning_map_version: int,
         r_min: float,
         reserve_cells: float,
+        *,
+        allow_reserved_bases: bool = False,
     ) -> tuple[RecoveryCandidate, ...]:
         if not math.isfinite(remaining_range_cells) or remaining_range_cells < 0.0:
             raise ValueError("remaining_range_cells must be finite and non-negative")
@@ -97,9 +104,11 @@ class RecoveryPlanner:
             raise ValueError("r_min must be finite and positive")
         if not math.isfinite(reserve_cells) or reserve_cells < 0.0:
             raise ValueError("reserve_cells must be finite and non-negative")
+        if not isinstance(allow_reserved_bases, bool):
+            raise ValueError("allow_reserved_bases must be boolean")
         candidates = []
         for base in bases:
-            if base.reserved_load >= base.capacity:
+            if not allow_reserved_bases and base.reserved_load >= base.capacity:
                 continue
             try:
                 planned = self.navigator.plan_grid(
@@ -117,7 +126,7 @@ class RecoveryPlanner:
                 continue
             if not _poses_match(path[0], start_pose):
                 continue
-            if path[-1][:2] != tuple(map(float, base.position)):
+            if not _poses_match(path[-1], base.position):
                 continue
             if _route_blocked(path, planning_obstacle_mask):
                 continue
@@ -177,6 +186,9 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.follower: RouteFollower | None = None
         self.planning_map_version: int | None = None
         self.reservation_id: str | None = None
+        self._route_revision = 0
+        self._route_status = "pending"
+        self._stopped = False
         self._arrived = False
         self._reservation_released = False
         self._failure: NoSafeRecoveryPath | None = None
@@ -212,7 +224,7 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise ValueError(
                 "RecoveryPlan path must start at the current observation pose"
             )
-        if route[-1][:2] != tuple(map(float, plan.base_position)):
+        if not _poses_match(route[-1], plan.base_position):
             raise ValueError("RecoveryPlan path must end at base_position")
         if not all(
             math.isfinite(value) and value >= 0.0
@@ -239,6 +251,9 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.follower = RouteFollower(route)
         self.planning_map_version = plan.planning_map_version
         self.reservation_id = plan.reservation_id
+        self._route_revision = 1
+        self._route_status = "ready"
+        self._stopped = False
         self._arrived = False
         self._reservation_released = False
         self._failure = None
@@ -272,6 +287,8 @@ class ReturnToBaseController(HeuristicControllerBase):
 
     def stop_task(self, reason: StopReason) -> None:
         del reason
+        self._stopped = True
+        self._route_status = "cleared"
         if (
             self.reservation_id is not None
             and not self._arrived
@@ -311,7 +328,7 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise self._fail_recovery(
                 observation, "replanned route does not start at current observation pose"
             )
-        if route[-1][:2] != tuple(map(float, self.recovery_plan.base_position)):
+        if not _poses_match(route[-1], self.recovery_plan.base_position):
             raise self._fail_recovery(
                 observation, "replanned route does not end at the reserved base"
             )
@@ -330,6 +347,8 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.route = route
         self.follower = RouteFollower(route)
         self.planning_map_version = observation.planning_map_version
+        self._route_revision += 1
+        self._route_status = "ready"
 
     def _fail_recovery(
         self, observation: ControlObservation, reason: str
@@ -343,6 +362,7 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.route = ()
         self.follower = None
         self._failure = failure
+        self._route_status = "unavailable"
         return failure
 
     @staticmethod
@@ -353,6 +373,33 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise InvalidControlCommand("operation mode is absent from action mask")
         if command.sensor_mode not in observation.action_mask.allowed_sensor_modes:
             raise InvalidControlCommand("sensor mode is absent from action mask")
+
+    def route_snapshot(self) -> ControlRouteSnapshot:
+        task = self.task
+        route = (
+            self.route
+            if self._route_status == "ready" and not self._stopped
+            else ()
+        )
+        follower = self.follower if route else None
+        status = self._route_status
+        if task is None:
+            status = "unavailable"
+        elif self._stopped:
+            status = "cleared"
+        elif not route and status == "ready":
+            status = "pending"
+        return ControlRouteSnapshot(
+            task.task_id if task is not None else None,
+            OperationMode.RETURN.value,
+            OperationMode.RETURN.value,
+            None,
+            route,
+            next_route_index(follower),
+            self._route_revision,
+            self.planning_map_version if route else None,
+            status,
+        )
 
 
 class SystemHoldingController(HeuristicControllerBase):
@@ -390,6 +437,7 @@ class SystemHoldingController(HeuristicControllerBase):
         )
         self.task: ControlTask | None = None
         self.orbit_center: tuple[float, float] | None = None
+        self._stopped = False
         self._safety = SafetyEnvelope(action_spec)
 
     @property
@@ -422,6 +470,7 @@ class SystemHoldingController(HeuristicControllerBase):
             float(position[1]) + self.orbit_radius_cells * math.cos(heading),
         )
         self.task = task
+        self._stopped = False
 
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.task is None or self.orbit_center is None:
@@ -447,6 +496,27 @@ class SystemHoldingController(HeuristicControllerBase):
 
     def stop_task(self, reason: StopReason) -> None:
         del reason
+        self._stopped = True
+
+    def route_snapshot(self) -> ControlRouteSnapshot:
+        task = self.task
+        if task is None:
+            status = "unavailable"
+        elif self._stopped:
+            status = "cleared"
+        else:
+            status = "guidance_only"
+        return ControlRouteSnapshot(
+            task.task_id if task is not None else None,
+            OperationMode.HOLDING.value,
+            OperationMode.HOLDING.value,
+            None,
+            (),
+            0,
+            0,
+            None,
+            status,
+        )
 
 
 def _current_pose(observation: ControlObservation) -> Pose:
@@ -467,12 +537,14 @@ def _normalise_route(path: Sequence[Sequence[float]]) -> tuple[Pose, ...]:
 
 def _poses_match(actual: Sequence[float], expected: Sequence[float]) -> bool:
     """Match route origins within 1e-6 cells and wrapped radians."""
-    if len(actual) != 3 or len(expected) != 3:
+    if len(actual) < 2 or len(expected) < 2:
         return False
     position_matches = (
         math.dist(actual[:2], expected[:2])
         <= ROUTE_ORIGIN_POSITION_TOLERANCE_CELLS
     )
+    if len(actual) < 3 or len(expected) < 3:
+        return position_matches
     heading_delta = (actual[2] - expected[2] + math.pi) % (2.0 * math.pi) - math.pi
     return (
         position_matches
@@ -498,6 +570,7 @@ __all__ = [
     "RecoveryCandidate",
     "RecoveryPlanner",
     "ReturnToBaseController",
+    "_poses_match",
     "SystemHoldingController",
     "legacy_return_endpoints",
     "path_length_cells",

@@ -1,0 +1,35 @@
+{
+  "git_commit": "bc8d76f4003ba9abdc5f8d6d637fc2ecbadf60de",
+  "files": [
+    {
+      "path": "outputs/simulation_20260812_200432.jsonl",
+      "sha256": "8759a25cd8e14f17a63b26df74d0359b0a1ca90de62f0efc015c73453abc32aa",
+      "frames": 471,
+      "last_sim_time_min": 471.0,
+      "last_coverage_pct": 56.35528330781011
+    },
+    {
+      "path": "outputs/simulation_20260916_204010.jsonl",
+      "sha256": "ff07850296485e2a2596a26639b936eff0f8bfae93743aa4908809c50367957e",
+      "frames": 20,
+      "last_sim_time_min": 20.0,
+      "last_coverage_pct": 0.0
+    },
+    {
+      "path": "outputs/simulation_20260916_210604.jsonl",
+      "sha256": "6a9800c21139039d9c0907e795e55da692cec90f21c432cfbc4465b6849b8ebe",
+      "frames": 20,
+      "last_sim_time_min": 20.0,
+      "last_coverage_pct": 0.0
+    }
+  ],
+  "screenshots": {
+    "viewport": [
+      1440,
+      1000
+    ],
+    "time_min": 20,
+    "renderer": "current frontend, same renderer for both logs",
+    "replay_transport": "Playwright intercepted replay API serving original log frames; server replay normalization not exercised"
+  }
+}

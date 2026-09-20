@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { collectReplayMarkers } from "../renderer/replayEvents";
 
 const CHUNK_SIZE = 120;
+
+function hasFrame(frames, index) {
+  return index >= 0 && index < frames.length && frames[index] !== null && frames[index] !== undefined;
+}
 
 export default function useReplay(enabled) {
   const [files, setFiles] = useState([]);
@@ -11,10 +16,14 @@ export default function useReplay(enabled) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [targetLoadingIndex, setTargetLoadingIndex] = useState(null);
   const [error, setError] = useState("");
   const framesRef = useRef([]);
   const totalRef = useRef(0);
   const loadedOffsetsRef = useRef(new Set());
+  const loadGenerationRef = useRef(0);
+  const selectedFileRef = useRef("");
+  const pendingChunksRef = useRef(new Map());
 
   useEffect(() => {
     if (!enabled) return;
@@ -29,41 +38,69 @@ export default function useReplay(enabled) {
   }, [enabled]);
 
   /** Fetch one chunk [offset, offset+CHUNK_SIZE) and merge into framesRef. */
-  const fetchChunk = useCallback(async (filename, offset) => {
+  const fetchChunk = useCallback(async (filename, offset, generation = loadGenerationRef.current) => {
     const key = `${filename}|${offset}`;
-    if (loadedOffsetsRef.current.has(key)) return;
-    loadedOffsetsRef.current.add(key);
-    const url = `/api/replay?file=${encodeURIComponent(filename)}&offset=${offset}&limit=${CHUNK_SIZE}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    if (data.error) throw new Error(data.error);
+    if (generation !== loadGenerationRef.current || filename !== selectedFileRef.current) {
+      return false;
+    }
+    if (loadedOffsetsRef.current.has(key)) return true;
+    const requestKey = `${generation}|${key}`;
+    const pending = pendingChunksRef.current.get(requestKey);
+    if (pending) return pending;
 
-    // Merge chunk into the contiguous frames array
-    const current = [...framesRef.current];
-    for (let i = 0; i < data.frames.length; i += 1) {
-      const dest = offset + i;
-      if (dest < current.length) {
-        current[dest] = data.frames[i];
-      } else {
-        // Extend with sparse holes (filled by subsequent chunks)
-        while (current.length < dest) current.push(null);
-        current.push(data.frames[i]);
+    const request = (async () => {
+      const url = `/api/replay?file=${encodeURIComponent(filename)}&offset=${offset}&limit=${CHUNK_SIZE}`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      if (generation !== loadGenerationRef.current || filename !== selectedFileRef.current) {
+        return false;
+      }
+      if (!Array.isArray(data.frames)) throw new Error("Replay frames are invalid");
+      const total = Number(data.total);
+      if (!Number.isFinite(total) || total < 0) throw new Error("Replay total is invalid");
+      // Merge chunks into a sparse array. Missing target slots remain null.
+      const current = [...framesRef.current];
+      for (let i = 0; i < data.frames.length; i += 1) {
+        const dest = offset + i;
+        if (dest < current.length) {
+          current[dest] = data.frames[i];
+        } else {
+          while (current.length < dest) current.push(null);
+          current.push(data.frames[i]);
+        }
+      }
+      framesRef.current = current;
+      totalRef.current = total;
+      loadedOffsetsRef.current.add(key);
+      setFrames([...current]);
+      setTotal(total);
+      setError("");
+      return true;
+    })();
+    pendingChunksRef.current.set(requestKey, request);
+    try {
+      return await request;
+    } finally {
+      if (pendingChunksRef.current.get(requestKey) === request) {
+        pendingChunksRef.current.delete(requestKey);
       }
     }
-    framesRef.current = current;
-    totalRef.current = data.total;
-    setFrames([...current]);       // trigger React re-render
-    setTotal(data.total);
   }, []);
 
   const load = useCallback(async (filename) => {
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    selectedFileRef.current = filename;
     setSelectedFile(filename);
     setIsPlaying(false);
     setError("");
+    setTargetLoadingIndex(null);
     if (!filename) {
       framesRef.current = [];
       loadedOffsetsRef.current.clear();
+      setLoading(false);
       setFrames([]);
       setTotal(0);
       setIndex(0);
@@ -71,19 +108,21 @@ export default function useReplay(enabled) {
     }
     setLoading(true);
     loadedOffsetsRef.current.clear();
+    pendingChunksRef.current.clear();
     framesRef.current = [];
     totalRef.current = 0;
     setFrames([]);
     setTotal(0);
     setIndex(0);
     try {
-      await fetchChunk(filename, 0);
+      await fetchChunk(filename, 0, generation);
     } catch {
+      if (generation !== loadGenerationRef.current) return;
       framesRef.current = [];
       setFrames([]);
       setError("回放加载失败");
     } finally {
-      setLoading(false);
+      if (generation === loadGenerationRef.current) setLoading(false);
     }
   }, [fetchChunk]);
 
@@ -91,15 +130,28 @@ export default function useReplay(enabled) {
   const ensureLoaded = useCallback(async (targetIndex) => {
     const safe = Math.max(0, Math.min(targetIndex, Math.max(0, totalRef.current - 1)));
     // If the slot is already filled, we are done.
-    if (safe < framesRef.current.length && framesRef.current[safe] !== null && framesRef.current[safe] !== undefined) {
-      return;
+    if (hasFrame(framesRef.current, safe)) {
+      setTargetLoadingIndex((current) => current === safe ? null : current);
+      return true;
     }
     // Otherwise load the chunk that contains this index.
     const chunkOffset = Math.floor(safe / CHUNK_SIZE) * CHUNK_SIZE;
+    const generation = loadGenerationRef.current;
+    const filename = selectedFileRef.current || selectedFile;
+    if (!filename) return false;
+    setTargetLoadingIndex(safe);
     try {
-      await fetchChunk(selectedFile, chunkOffset);
+      const loaded = await fetchChunk(filename, chunkOffset, generation);
+      if (loaded && generation === loadGenerationRef.current && hasFrame(framesRef.current, safe)) {
+        setTargetLoadingIndex((current) => current === safe ? null : current);
+      }
+      return loaded;
     } catch {
-      // Silently ignore — the error state is set in `load`.
+      if (generation === loadGenerationRef.current && filename === selectedFileRef.current) {
+        setError("回放加载失败");
+        setTargetLoadingIndex((current) => current === safe ? null : current);
+      }
+      return false;
     }
   }, [fetchChunk, selectedFile]);
 
@@ -107,14 +159,22 @@ export default function useReplay(enabled) {
     const upper = Math.max(0, totalRef.current - 1);
     const clamped = Math.max(0, Math.min(upper, Number(nextIndex) || 0));
     setIndex(clamped);
-    ensureLoaded(clamped);
+    if (hasFrame(framesRef.current, clamped)) {
+      setTargetLoadingIndex(null);
+    } else {
+      setTargetLoadingIndex(clamped);
+      void ensureLoaded(clamped);
+    }
   }, [ensureLoaded]);
 
   const loadAll = useCallback(async (onProgress) => {
-    if (!selectedFile || totalRef.current <= 0) return [];
+    const filename = selectedFileRef.current || selectedFile;
+    const generation = loadGenerationRef.current;
+    if (!filename || totalRef.current <= 0) return [];
     const totalChunks = Math.ceil(totalRef.current / CHUNK_SIZE);
     for (let chunk = 0; chunk < totalChunks; chunk += 1) {
-      await fetchChunk(selectedFile, chunk * CHUNK_SIZE);
+      const current = await fetchChunk(filename, chunk * CHUNK_SIZE, generation);
+      if (!current) throw new Error("Replay selection changed");
       onProgress?.((chunk + 1) / totalChunks);
     }
     const complete = framesRef.current.slice(0, totalRef.current);
@@ -160,34 +220,9 @@ export default function useReplay(enabled) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [enabled, index, seek]);
 
-  const markers = useMemo(() => {
-    const unique = new Map();
-    frames.forEach((frame, frameIndex) => {
-      if (!frame) return;
-      (frame.events || [])
-        .filter((event) => ["target_found", "llm_decision", "uav_returned"].includes(event.type))
-        .forEach((event) => {
-          const key = `${event.time}|${event.type}|${JSON.stringify(event.data)}`;
-          if (!unique.has(key)) unique.set(key, { frameIndex, type: event.type });
-        });
-    });
-    return [...unique.values()];
-  }, [frames]);
-
-  const currentFrame = (() => {
-    if (index < frames.length) {
-      const f = frames[index];
-      if (f !== null && f !== undefined) return f;
-    }
-    // Fallback: find the nearest non-null frame
-    for (let offset = 0; offset < Math.max(frames.length, 10); offset += 1) {
-      const before = frames[index - offset];
-      if (before !== null && before !== undefined) return before;
-      const after = frames[index + offset];
-      if (after !== null && after !== undefined) return after;
-    }
-    return null;
-  })();
+  const markers = useMemo(() => collectReplayMarkers(frames), [frames]);
+  const currentFrame = hasFrame(frames, index) ? frames[index] : null;
+  const loadedFrameCount = frames.reduce((count, frame) => count + (frame ? 1 : 0), 0);
 
   return {
     files,
@@ -203,6 +238,8 @@ export default function useReplay(enabled) {
     speed,
     setSpeed,
     loading,
+    targetLoadingIndex,
+    loadedFrameCount,
     error,
     markers,
     loadAll,

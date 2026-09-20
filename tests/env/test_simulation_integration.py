@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 
+from src.control.common.contracts import ControlOwner, ControlTask, OperationMode
 from src.env.simulation import SimulationEngine
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox, GridCoord
@@ -88,6 +89,64 @@ def test_sar_is_off_during_dubins_turns():
     assert uav.sensor_mode == "sar"
 
 
+def test_refuelling_promotes_finished_work_lease_before_reset():
+    engine = SimulationEngine(ConfigLoader.load(), seed=11, llm_gateway=object())
+    uav = engine.uavs[0]
+    task = ControlTask(
+        "coverage:refuel-regression",
+        OperationMode.COVERAGE,
+        region_bbox=BBox(4, 4, 8, 8),
+    )
+    engine.control_coordinator.start_work(
+        uav.id,
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=1.0,
+        task=task,
+    )
+    uav.position = engine.base.position
+    uav.status = "refueling"
+    engine._return_base_by_uav[uav.id] = engine.base
+
+    for current_time in range(int(engine.base.refuel_time_min) + 1):
+        engine._process_refuelling(float(current_time))
+
+    assert uav.status == "idle"
+    assert engine.control_coordinator.current_lease(uav.id).owner is ControlOwner.SYSTEM
+    assert not engine.control_coordinator.has_controller(uav.id)
+
+
+def test_return_capture_snaps_final_approach_before_boundary_fault():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    uav = engine.uavs[0]
+    base = engine.base
+    uav._col = float(base.position.col) + 0.12
+    uav._row = float(base.position.row)
+    uav.heading_rad = math.pi
+    uav.fuel_remaining_pct = 0.8
+    engine.allocator.sm.update_uav_status(uav.id, "idle", uav.position)
+    task = ControlTask(
+        "capture-final-approach",
+        OperationMode.COVERAGE,
+        region_bbox=BBox(5, 5, 9, 9),
+    )
+    engine.control_coordinator.start_work(
+        uav.id, sortie_number=1, current_time=0.0, dt_min=1.0, task=task,
+    )
+
+    assert engine._maybe_revoke_for_range(uav, 0.0, force=True)
+    uav._col = float(base.position.col) + 0.12
+    uav._row = float(base.position.row)
+    uav.heading_rad = math.pi
+
+    engine._step_controlled_uav(uav, 1.0)
+
+    assert uav.status == "refueling"
+    assert uav.position == base.position
+    assert base.is_refueling(uav.id)
+    assert uav.id not in engine._emergency_failures
+
+
 def test_dynamic_obstacle_replans_remaining_return_route():
     engine = SimulationEngine(ConfigLoader.load())
     uav = engine.uavs[0]
@@ -117,6 +176,31 @@ def test_dynamic_obstacle_replans_remaining_return_route():
     )
     events = engine.allocator.sm.get_recent_events(0)
     assert any(event["type"] == "route_replanned" for event in events)
+
+
+def test_deferred_light_pairing_is_not_recorded_as_operational_failure(monkeypatch):
+    engine = SimulationEngine(ConfigLoader.load(), seed=42)
+
+    def defer_light_pairing(*_args, **_kwargs):
+        engine.allocator.last_decision_timing = {
+            "snapshot_frozen_wall": 1.0,
+            "decision_finished_wall": 1.1,
+            "llm_seconds": 0.0,
+            "validation_seconds": 0.1,
+            "matching_seconds": 0.1,
+        }
+        return {
+            "trigger_type": "light",
+            "action": "approved_tasks_deferred",
+        }, None
+
+    monkeypatch.setattr(engine.allocator, "mission_step", defer_light_pairing)
+
+    engine.step()
+
+    outcome = engine.summary()["episode_outcome"]
+    assert outcome["decision_latency_seconds"]["failures"] == 0
+    assert outcome["operational_failures"] == 0
 
 
 def test_every_initial_candidate_has_a_safe_executable_route():
@@ -191,22 +275,23 @@ def test_sar_requires_stable_straight_heading_before_writing_information():
     assert not uav.sar_imaging
     assert uav.sensor_mode == "off"
     engine._update_sensors_and_detections(engine.clock.time)
-    assert not np.isfinite(engine.allocator.sm.info_field.last_scan_time).any()
+    assert not np.isfinite(engine.allocator.sm.get_last_scan_matrix()).any()
 
     uav.heading_rad = uav.waypoints[start + 2][2]
     uav._update_scan_direction()
     assert uav.sar_imaging
     engine._update_sensors_and_detections(engine.clock.time)
-    assert np.isfinite(engine.allocator.sm.info_field.last_scan_time).any()
+    assert np.isfinite(engine.allocator.sm.get_last_scan_matrix()).any()
 
 
 def test_simulation_applies_phase_speed_control_to_shared_trackers():
     engine = SimulationEngine(ConfigLoader.load())
-    center = engine._group_center("G1")
+    contact_id = engine.allocator.sm.contacts.list_snapshots()[0].contact_id
+    center = engine._contact_center(contact_id)
     first, second = engine.uavs[:2]
     for uav in (first, second):
         uav.status = "tracking"
-        uav.target_group_id = "G1"
+        uav.target_group_id = contact_id
     first._col, first._row = center[0] + 1.8, center[1]
     second._col = center[0] + 1.8 * math.cos(0.2)
     second._row = center[1] + 1.8 * math.sin(0.2)
@@ -240,7 +325,7 @@ def test_completed_search_starts_a_real_return_during_lifecycle_rotation():
     assert uav.mission_kind == "return"
 
 
-def test_tracking_dwell_starts_return_without_waiting_for_low_fuel():
+def test_tracking_dwell_starts_return_without_waiting_for_low_fuel(monkeypatch):
     engine = SimulationEngine(ConfigLoader.load())
     engine._lifecycle_mode = True
     engine.allocator.sm.lifecycle_mode = True
@@ -249,6 +334,8 @@ def test_tracking_dwell_starts_return_without_waiting_for_low_fuel():
     uav.target_group_id = "G1"
     engine._sortie_searched[uav.id] = True
     engine._tracking_started_at[uav.id] = -engine.config.uav.lifecycle_search_dwell_min
+    from src.schedule.trigger_manager import TriggerDecision
+    monkeypatch.setattr(engine.allocator.trigger_manager, "check", lambda _t: TriggerDecision("none"))
 
     engine.step()
 
@@ -335,6 +422,33 @@ def test_return_route_skips_base_with_full_reserved_maintenance_capacity():
     engine._set_return_route(uav, 10.0)
 
     assert engine._return_base_by_uav[uav.id] is not busiest
+
+
+def test_range_reserve_uses_available_base_when_nearest_base_is_full():
+    config = ConfigLoader.load()
+    engine = SimulationEngine(config, seed=42)
+    uav = engine.uavs[0]
+    uav.position = GridCoord(5, 3)
+    uav.heading_rad = math.radians(75.0)
+    uav.fuel_remaining_pct = 0.216
+    nearest = engine.bases[0]
+    for assigned in engine.uavs[1:4]:
+        engine._return_base_by_uav[assigned.id] = nearest
+    engine.control_coordinator.start_work(
+        uav.id,
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=engine.clock.dt_min,
+        task=ControlTask(
+            "reserve-test",
+            OperationMode.COVERAGE,
+            region_bbox=BBox(5, 1, 11, 9),
+        ),
+    )
+
+    engine._maybe_revoke_for_range(uav, 1.0)
+
+    assert engine._return_base_by_uav[uav.id] is engine.bases[1]
 
 
 def test_return_route_uses_high_budget_fallback_after_transient_rrt_failures(monkeypatch):
@@ -483,8 +597,8 @@ def test_post_coverage_search_assignment_keeps_stale_revisit_swaths():
     ).candidate_regions[0]
     region = Region(id="S-revisit", bbox=candidate["bbox"], type="search")
     searchable = engine.allocator.sm.get_searchable_mask()
-    scan_times = engine.allocator.sm.info_field.last_scan_time
-    scan_times[searchable] = 1.0
+    cols, rows = engine.config.grid.resolution
+    engine.allocator.sm.scan_bbox(BBox(0, 0, cols, rows), 1.0)
     uav = engine.uavs[0]
 
     engine._assign_search_route(uav, region)
@@ -500,9 +614,7 @@ def test_freshness_patrol_assignment_revisits_before_global_coverage_target():
         engine.allocator.sm
     ).candidate_regions[0]
     region = Region(id="S-early-patrol", bbox=candidate["bbox"], type="search")
-    scan_times = engine.allocator.sm.info_field.last_scan_time
-    scan_times[region.bbox.col_start:region.bbox.col_end,
-               region.bbox.row_start:region.bbox.row_end] = 1.0
+    engine.allocator.sm.scan_bbox(region.bbox, 1.0)
     uav = engine.uavs[0]
 
     engine._assign_search_route(uav, region, allow_revisit=True)
@@ -528,7 +640,7 @@ def test_search_route_uses_short_dubins_connectors_when_clear(monkeypatch):
     assert uav._scan_ranges
 
 
-def test_post_coverage_completion_restarts_local_revisit_without_idling():
+def test_post_coverage_completion_waits_for_scheduler_before_revisit():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     candidate = engine.allocator.extractor.extract(
         engine.allocator.sm
@@ -543,7 +655,8 @@ def test_post_coverage_completion_restarts_local_revisit_without_idling():
     state = engine.allocator.sm.get_uav(engine.uavs[0].id)
     state.assigned_region_id = region.id
     searchable = engine.allocator.sm.get_searchable_mask()
-    engine.allocator.sm.info_field.last_scan_time[searchable] = 1.0
+    cols, rows = engine.config.grid.resolution
+    engine.allocator.sm.scan_bbox(BBox(0, 0, cols, rows), 1.0)
     uav = engine.uavs[0]
     uav.status = "idle"
     uav.search_complete_pending = True
@@ -552,17 +665,22 @@ def test_post_coverage_completion_restarts_local_revisit_without_idling():
         engine.config.uav.freshness_patrol_start_min,
     )
 
-    assert uav.status == "transit"
+    assert uav.status == "idle"
     assert not uav.search_complete_pending
-    assert region.status == "active"
-    assert region.assigned_uav_id == uav.id
+    assert region.status == "completed"
+    assert region.assigned_uav_id is None
+    assert any(
+        event["type"] == "search_complete"
+        for event in engine.allocator.sm.get_recent_events(0)
+    )
 
 
 def test_freshness_patrol_caps_local_revisit_fleet_size():
     engine = SimulationEngine(ConfigLoader.load(), seed=23)
     start = engine.config.uav.freshness_patrol_start_min
     searchable = engine.allocator.sm.get_searchable_mask()
-    engine.allocator.sm.info_field.last_scan_time[searchable] = 1.0
+    cols, rows = engine.config.grid.resolution
+    engine.allocator.sm.scan_bbox(BBox(0, 0, cols, rows), 1.0)
     selected = [
         engine._should_continue_freshness_patrol(uav, start)
         for uav in engine.uavs

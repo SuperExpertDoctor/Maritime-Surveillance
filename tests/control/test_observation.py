@@ -18,8 +18,19 @@ from src.schedule.datatypes import GridCoord
 
 
 @pytest.fixture
-def engine():
-    return SimulationEngine(ConfigLoader.load(), seed=17)
+def engine(monkeypatch):
+    monkeypatch.setenv("LONGCAT_API_KEY", "t06-offline-fixture")
+    config = ConfigLoader.load()
+    # Keep the original no-broadcast fixture; global AIS is tested separately.
+    from dataclasses import replace
+    config.ship = replace(
+        config.ship,
+        population=replace(
+            config.ship.population, type_i_ratio=0.0, type_ii_ratio=1.0,
+        ),
+        type_ii_ais_on_probability=0.0,
+    )
+    return SimulationEngine(config, seed=17)
 
 
 def make_provider(engine):
@@ -57,13 +68,13 @@ def test_observation_excludes_undetected_ship_truth(engine):
     hidden = engine.ships[0]
     hidden._col = 27.12345
     hidden._row = 26.54321
-    hidden.actual_military = True
+    hidden.environment_vessel_class = "type_ii"
 
     observation = build_observation(engine)
 
     assert observation.contacts == ()
     assert "27.12345" not in repr(observation)
-    assert "actual_military" not in repr(observation)
+    assert "environment_vessel_class" not in repr(observation)
     assert "ships" not in inspect.signature(ObservationProvider).parameters
     assert "ships" not in inspect.signature(ObservationProvider.build).parameters
 
@@ -104,12 +115,12 @@ def test_observation_exposes_only_target_reports_and_published_hazards(engine):
     observation = build_observation(
         engine,
         control_owner=ControlOwner.HEURISTIC,
-        current_time=10.0,
+        current_time=5.0,
     )
 
     assert [contact.contact_id for contact in observation.contacts] == ["contact-a", "contact-b"]
     assert observation.contacts[0].estimated_position == (6.0, 8.0)
-    assert observation.contacts[0].age_min == 6.0
+    assert observation.contacts[0].age_min == 1.0
     assert [hazard.hazard_id for hazard in observation.hazards] == sorted(
         hazard.hazard_id for hazard in observation.hazards
     )
@@ -128,8 +139,23 @@ def test_observation_exposes_only_target_reports_and_published_hazards(engine):
     assert observation.action_mask.allowed_operation_modes == (
         OperationMode.TRANSIT,
         OperationMode.COVERAGE,
+        OperationMode.PROBE,
         OperationMode.TRACK,
     )
+
+
+def test_observation_keeps_failed_shared_uav_inert(engine):
+    failed = engine.allocator.sm.get_uav("UAV-2")
+    engine.allocator.sm.update_uav_status(
+        failed.id,
+        "failed",
+        failed.position,
+    )
+
+    observation = build_observation(engine)
+
+    peer = next(uav for uav in observation.shared_uavs if uav.uav_id == failed.id)
+    assert peer.operation_mode is OperationMode.IDLE
 
 
 def test_observation_action_mask_respects_return_lease(engine):
@@ -176,3 +202,68 @@ def test_state_manager_versions_only_changed_obstacle_masks(engine):
     observation = build_observation(engine)
     assert observation.planning_map_version == sm.obstacle_version
     assert np.array_equal(observation.planning_obstacle_mask, changed_mask)
+
+
+def test_observed_contact_can_be_applied_by_existing_control_registry(engine):
+    from src.control.common.contracts import ControlCommand
+    from src.control.common.operation_registry import OperationRegistry
+    from src.env.ais_signal import AISSignal
+
+    sm = engine.allocator.sm
+    cid = sm.contacts.ingest_ais(AISSignal("123456789", (10., 10.), 0., 0., "MV", "Cargo", 0.), 0.)
+    observation = build_observation(engine, control_owner=ControlOwner.HEURISTIC)
+    registry = OperationRegistry(sm)
+    registry.reconcile(engine.uavs[0].id, None,
+                       ControlCommand(0., .2, SensorMode.EO, OperationMode.TRACK, cid),
+                       observation)
+    assert sm.get_track_regions()[0].target_group_id == cid
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_merged_alias_command_stays_valid_and_binds_the_canonical_contact(engine, legacy):
+    from src.control.common.contracts import ControlCommand
+    from src.control.common.operation_registry import OperationRegistry
+    from tests.mission.test_contact_store import ais, visual
+
+    sm = engine.allocator.sm
+    if legacy:
+        sm.record_target_observation("legacy-visual", GridCoord(10, 10), "UAV-1", 0)
+        alias = "legacy-visual"
+    else:
+        alias = sm.contacts.ingest_visual(visual())
+    aid = sm.contacts.ingest_ais(ais(), 0)
+    registry = OperationRegistry(sm)
+    command = ControlCommand(0., .2, SensorMode.EO, OperationMode.TRACK, alias)
+    before = build_observation(engine, control_owner=ControlOwner.HEURISTIC)
+    registry.reconcile(engine.uavs[0].id, None, command, before)
+    sm.contacts.ingest_ais(ais(1), 1)
+    sm.publish_contact_events()
+    observation = build_observation(engine, control_owner=ControlOwner.HEURISTIC, current_time=1)
+
+    assert {alias, aid} <= set(observation.action_mask.target_contact_ids)
+    alias_observation = next(c for c in observation.contacts if c.contact_id == alias)
+    assert alias_observation.group_id == aid
+    registry.reconcile(engine.uavs[0].id, command, command, observation)
+    assert len(sm.get_track_regions()) == 1
+    assert sm.get_track_regions()[0].target_group_id == aid
+    assert sm.get_uav(engine.uavs[0].id).target_group_id == aid
+
+
+def test_released_passive_position_reaches_probe_controller_without_visual_samples(engine):
+    from src.mission.contracts import PassivePosition
+    sm = engine.allocator.sm
+    cid = sm.contacts.ingest_passive_position(PassivePosition(
+        'position-1', 'emitter-1', 'burst-1', 'sample-1', 0.0,
+        (20.0, 21.0), ('bearing-u1', 'bearing-u2'),
+    ))
+    assert sm.contacts.snapshot(cid).samples == ()
+    observation = build_observation(engine)
+    contact = next((c for c in observation.contacts if c.contact_id == cid), None)
+    assert contact is not None
+    assert contact.estimated_position == (20.0, 21.0)
+    assert contact.source == 'passive'
+    assert sm.contacts.snapshot(cid).samples == ()
+    stale = build_observation(
+        engine, current_time=engine.config.mission.contact.stale_after_min + 1,
+    )
+    assert not any(c.contact_id == cid for c in stale.contacts)

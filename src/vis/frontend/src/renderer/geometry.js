@@ -50,9 +50,28 @@ export function coordToPixel(col, row, cellSize, offsetX, offsetY) {
   };
 }
 
-export function pixelToCoord(px, py, cellSize, offsetX, offsetY) {
+export function pixelToCoord(px, py, cellSize, offsetX, offsetY, cols = GRID_CELLS, rows = GRID_CELLS) {
   const col = Math.floor((px - offsetX) / cellSize);
   const row = Math.floor((py - offsetY) / cellSize);
-  if (col < 0 || col >= 30 || row < 0 || row >= 30) return null;
+  if (col < 0 || col >= cols || row < 0 || row >= rows) return null;
   return { col, row };
+}
+
+/** Convert a CSS-pixel drag into a half-open, clamped grid rectangle. */
+export function dragToBBox(start, end, layout, cols = GRID_CELLS, rows = GRID_CELLS) {
+  if (!start || !end || !layout || Math.abs(start.x - end.x) < 3 || Math.abs(start.y - end.y) < 3) {
+    return null;
+  }
+  const clamp = (value, maximum) => Math.max(0, Math.min(maximum, value));
+  const x0 = (Math.min(start.x, end.x) - layout.offsetX) / layout.cellSize;
+  const y0 = (Math.min(start.y, end.y) - layout.offsetY) / layout.cellSize;
+  const x1 = (Math.max(start.x, end.x) - layout.offsetX) / layout.cellSize;
+  const y1 = (Math.max(start.y, end.y) - layout.offsetY) / layout.cellSize;
+  const bbox = [
+    clamp(Math.floor(x0), cols),
+    clamp(Math.floor(y0), rows),
+    clamp(Math.ceil(x1), cols),
+    clamp(Math.ceil(y1), rows),
+  ];
+  return bbox[0] < bbox[2] && bbox[1] < bbox[3] ? bbox : null;
 }

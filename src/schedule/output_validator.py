@@ -146,7 +146,7 @@ def _bboxes_overlap(a: BBox, b: BBox) -> bool:
     return True
 
 
-def _compute_iou(a: BBox, b: BBox) -> float:
+def compute_iou(a: BBox, b: BBox) -> float:
     if not _bboxes_overlap(a, b):
         return 0.0
     inter_w = min(a.col_end, b.col_end) - max(a.col_start, b.col_start)
@@ -156,3 +156,7 @@ def _compute_iou(a: BBox, b: BBox) -> float:
     area_b = (b.col_end - b.col_start) * (b.row_end - b.row_start)
     union_area = area_a + area_b - inter_area
     return inter_area / union_area if union_area > 0 else 0.0
+
+
+# Kept for import compatibility; all production callers use compute_iou.
+_compute_iou = compute_iou

@@ -1,9 +1,10 @@
 import math
 
+import pytest
+
 from src.env.base_station import BaseStation
 from src.env.obstacle import Island, Thunderstorm, obstacle_intersects_mask
 from src.env.simulation import SimulationEngine
-from src.env.ship import ShipType
 from src.env.uav_entity import MAX_VISUAL_TRAIL_POINTS, UAVEntity
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox, GridCoord, Region
@@ -122,9 +123,11 @@ def test_reset_generates_a_fresh_two_base_coastal_scenario():
     assert any(event["type"] == "environment_reset" for event in engine.allocator.sm.get_recent_events(0))
 
 
-def test_explicit_reset_seed_rebuilds_the_same_clean_scenario():
+def test_explicit_reset_seed_rebuilds_the_same_clean_scenario(monkeypatch):
     config = ConfigLoader.load()
     engine = SimulationEngine(config, seed=5)
+    from src.schedule.trigger_manager import TriggerDecision
+    monkeypatch.setattr(engine.allocator.trigger_manager, "check", lambda _t: TriggerDecision("none"))
     engine.step()
     engine.reset(seed=31)
     fresh = SimulationEngine(config, seed=31)
@@ -181,9 +184,10 @@ def test_unobserved_ships_are_not_exported_to_the_visualization_or_llm_state():
         bases=engine.bases,
     )
     assert initial_frame["ships"] == []
-    assert engine.allocator.sm.get_target_reports() == []
+    assert len(engine.allocator.sm.get_target_reports()) == sum(
+        ship.ais_signal is not None for ship in engine.ships)
 
-    engine._handle_detection(engine.uavs[0], contact, 1.0)
+    contact_id = engine._handle_detection(engine.uavs[0], contact, 1.0)
     discovered_frame = build_frame(
         engine.allocator.sm,
         cycle=0,
@@ -195,12 +199,12 @@ def test_unobserved_ships_are_not_exported_to_the_visualization_or_llm_state():
     )
 
     assert [ship["id"] for ship in discovered_frame["ships"]] == [contact.id]
-    report = engine.allocator.sm.get_target_report(contact.group_id)
+    report = engine.allocator.sm.get_target_report(contact_id)
     assert report is not None
     assert report.position == contact.position
 
 
-def test_target_detection_retires_overlapping_search_and_redirects_uav(monkeypatch):
+def test_target_detection_preserves_search_until_a_scheduling_decision(monkeypatch):
     engine = SimulationEngine(ConfigLoader.load(), seed=41)
     contact = engine.ships[0]
     observer, searcher = engine.uavs[:2]
@@ -232,13 +236,13 @@ def test_target_detection_retires_overlapping_search_and_redirects_uav(monkeypat
         lambda entity, current_time: redirected.append((entity.id, current_time)),
     )
 
-    engine._handle_detection(observer, contact, 1.0)
+    contact_id = engine._handle_detection(observer, contact, 1.0)
 
-    track = engine.allocator.sm.get_track_region_for_group(contact.group_id)
-    assert track is not None
-    assert engine.allocator.sm.get_search_regions() == []
-    assert engine.allocator.sm.get_uav(searcher.id).assigned_region_id is None
-    assert redirected == [(searcher.id, 1.0)]
+    assert engine.allocator.sm.get_target_report(contact_id) is not None
+    assert engine.allocator.sm.get_track_regions() == []
+    assert engine.allocator.sm.get_search_regions() == [conflict]
+    assert engine.allocator.sm.get_uav(searcher.id).assigned_region_id == conflict.id
+    assert redirected == []
 
 
 def test_moving_track_region_retires_newly_overlapping_search(monkeypatch):
@@ -278,17 +282,23 @@ def test_moving_track_region_retires_newly_overlapping_search(monkeypatch):
 def test_tracker_return_keeps_only_last_observed_contact_for_handoff():
     engine = SimulationEngine(ConfigLoader.load(), seed=41)
     contact = engine.ships[0]
+    contact.position = GridCoord(7, 4)
     uav = engine.uavs[0]
-    engine._handle_detection(uav, contact, 1.0)
+    contact_id = engine._handle_detection(uav, contact, 1.0)
+    # T06: install an explicit test assignment; detection no longer creates one.
+    track = engine.allocator.sm.create_track_region(contact_id, contact.position)
+    track.assigned_uav_id = uav.id
+    uav.target_group_id = contact_id
 
+    engine.allocator.sm.current_time = 2.0
     engine._begin_return(uav, 2.0)
 
     assert uav.status == "returning"
-    assert engine.allocator.sm.get_track_region_for_group(contact.group_id) is None
-    report = engine.allocator.sm.get_target_report(contact.group_id)
+    assert engine.allocator.sm.get_track_region_for_group(contact_id) is None
+    report = engine.allocator.sm.get_target_report(contact_id)
     assert report is not None
     candidates = engine.allocator.extractor.extract(engine.allocator.sm).candidate_regions
-    handoffs = [item for item in candidates if item.get("target_group_id") == contact.group_id]
+    handoffs = [item for item in candidates if item.get("target_group_id") == contact_id]
     assert handoffs
 
 
@@ -407,42 +417,31 @@ def test_base_station_rejects_over_capacity_directly():
     assert base.can_accept()
 
 
-def test_carrier_formation_always_has_two_destroyer_escorts():
+def test_ships_are_independent_contacts_with_generic_public_types():
     engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    carriers = [ship for ship in engine.ships if ship.ship_type is ShipType.AIRCRAFT_CARRIER]
 
-    assert len(carriers) <= engine.config.ship.carrier_max
-    if carriers:
-        carrier = carriers[0]
-        escorts = [
-            ship for ship in engine.ships
-            if ship.group_id == carrier.group_id and ship.ship_type is ShipType.DESTROYER
-        ]
-        assert len(escorts) >= 2
-        assert all(ship.base_heading == carrier.base_heading for ship in escorts)
+    assert len(engine.ships) == engine.config.ship.population.total_count
+    assert len({ship.group_id for ship in engine.ships}) == len(engine.ships)
+    assert all(ship.group_id == ship.id for ship in engine.ships)
+    assert {ship.ship_type.value for ship in engine.ships} == {"cargo"}
+    assert len({ship.normal_route for ship in engine.ships}) == len(engine.ships)
 
 
-def test_target_ship_changes_course_and_starts_zigzagging_when_tracked():
-    engine = SimulationEngine(ConfigLoader.load(), seed=42)
-    ship = engine.ships[0]
-    ship._phase = 0.0
-    original_heading = ship.base_heading
+@pytest.mark.parametrize("vessel_class", ("type_i", "type_ii"))
+def test_normal_motion_does_not_read_tracking_state(vessel_class):
+    untracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    tracked_engine = SimulationEngine(ConfigLoader.load(), seed=42)
+    untracked = next(ship for ship in untracked_engine.ships if ship.vessel_class == vessel_class)
+    tracked = next(ship for ship in tracked_engine.ships if ship.id == untracked.id)
 
-    ship.set_tracked(True)
-
-    assert ship.is_evading
-    assert ship.base_heading == original_heading
-    assert ship.heading_rad == original_heading
-
-    headings = []
+    tracked.set_tracked(True)
     for _ in range(18):
-        previous = ship.heading_rad
-        ship.step(1.0)
-        headings.append(ship.heading_rad)
-        delta = abs((ship.heading_rad - previous + math.pi) % (2 * math.pi) - math.pi)
-        assert math.degrees(delta) <= engine.config.ship.max_turn_rate_deg_min + 1e-6
+        untracked.step(1.0)
+        tracked.step(1.0)
 
-    assert any(abs((heading - original_heading + math.pi) % (2 * math.pi) - math.pi) > math.radians(1) for heading in headings)
+    assert tracked.float_position == untracked.float_position
+    assert tracked.heading_rad == untracked.heading_rad
+    assert not tracked.is_evading
 
 
 def test_target_ship_nomoto_response_has_bounded_yaw_and_turn_speed_loss():

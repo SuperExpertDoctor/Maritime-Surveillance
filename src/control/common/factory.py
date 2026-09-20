@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from inspect import signature
-from math import pi
+from math import pi, radians
 
 from src.control.common.base import ControllerBase
 from src.control.common.contracts import (
     ActionSpec,
     ControlMode,
     ControlTask,
+    CoverageExecutionConfig,
     ObservationSpec,
     OperationMode,
 )
@@ -20,6 +21,8 @@ from src.control.heuristic.return_to_base import (
     SystemHoldingController,
 )
 from src.control.heuristic.tracking import TrackingController
+from src.control.heuristic.probe import ProbeController
+from src.mission.config import ContactConfig, CoverageConfig
 from src.schedule.config_loader import ControlConfig
 
 
@@ -37,6 +40,9 @@ class ControlFactory:
         *,
         observation_spec: ObservationSpec | None = None,
         action_spec: ActionSpec | None = None,
+        contact_config: ContactConfig | None = None,
+        coverage_execution: CoverageExecutionConfig | None = None,
+        coverage_config: CoverageConfig | None = None,
     ) -> None:
         self._config = config
         self._observation_spec = observation_spec or ObservationSpec(
@@ -44,6 +50,16 @@ class ControlFactory:
             config.observation.local_window_cells,
         )
         self._action_spec = action_spec or ActionSpec(-pi, pi, 0.1, 1.0)
+        self._contact_config = contact_config
+        self._coverage_config = coverage_config or CoverageConfig()
+        self._coverage_execution = coverage_execution or CoverageExecutionConfig(
+            swath_width_cells=2.0,
+            near_range_cells=0.25,
+            min_turn_radius_cells=1.0,
+            along_track_cells=0.8,
+            heading_tolerance_rad=radians(2.0),
+            cross_track_tolerance_cells=0.2,
+        )
         self._providers: dict[ControlMode, ControlProvider] = {
             ControlMode.HEURISTIC: self._create_builtin_heuristic,
         }
@@ -129,9 +145,19 @@ class ControlFactory:
             "action_spec": self._action_spec,
         }
         if task.task_type is OperationMode.COVERAGE:
-            return CoverageController(**kwargs)
+            return CoverageController(
+                coverage_execution=self._coverage_execution,
+                progress_timeout_min=self._coverage_config.no_progress_timeout_min,
+                align_timeout_min=self._coverage_config.align_timeout_min,
+                max_stall_replans=self._coverage_config.max_stall_replans,
+                **kwargs,
+            )
         if task.task_type is OperationMode.TRACK:
             return TrackingController(**kwargs)
+        if task.task_type is OperationMode.PROBE:
+            if self._contact_config is None:
+                raise ControlFactoryError("probe controller requires explicit ContactConfig")
+            return ProbeController(contact_config=self._contact_config, **kwargs)
         if task.task_type is OperationMode.RETURN:
             return ReturnToBaseController(**kwargs)
         if task.task_type is OperationMode.HOLDING:
@@ -146,10 +172,15 @@ class ControlFactory:
             raise ControlFactoryError("coverage task requires region_bbox")
         if task.task_type is OperationMode.TRACK and not task.target_contact_id:
             raise ControlFactoryError("track task requires target_contact_id")
+        if task.task_type is OperationMode.PROBE and (
+            not task.target_contact_id or not task.probe_id
+        ):
+            raise ControlFactoryError("probe task requires target_contact_id and probe_id")
         if task.task_type is OperationMode.RETURN and task.recovery_plan is None:
             raise ControlFactoryError("return task requires recovery_plan")
         if task.task_type not in {
             OperationMode.COVERAGE,
+            OperationMode.PROBE,
             OperationMode.TRACK,
             OperationMode.RETURN,
             OperationMode.HOLDING,

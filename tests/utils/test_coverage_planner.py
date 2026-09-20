@@ -1,7 +1,6 @@
 import math
 
 import numpy as np
-import pytest
 
 from src.schedule.datatypes import BBox, GridCoord
 from src.utils.coverage_planner import CoveragePlanner
@@ -15,6 +14,23 @@ def test_square_bbox_has_three_gapless_swaths():
     expected = {GridCoord(c, r) for c in range(6) for r in range(6)}
     assert path.covered_cells == expected
     assert [swath.look_direction for swath in path.swaths] == ["right", "left", "right"]
+
+
+def test_fractional_swath_exports_real_footprints_and_required_cells():
+    path = CoveragePlanner(sample_step=0.2, near_range=0.25).plan(
+        BBox(10, 10, 16, 14), (6, 12, 0), swath_width=1.5, R_min=1.0,
+        along_track_cells=0.8, bounds=(30, 30),
+    )
+
+    required = {
+        GridCoord(col, row)
+        for col in range(10, 16)
+        for row in range(10, 14)
+    }
+    assert path.required_cells == frozenset(required)
+    assert path.scan_footprints
+    assert path.covered_cells <= path.required_cells
+    assert path.covered_cells == set().union(*path.scan_footprints)
 
 
 def test_long_bbox_scans_along_long_axis():
@@ -59,3 +75,87 @@ def test_region_feasibility_checks_dubins_turns_outside_bbox():
     mask = np.zeros((30, 30), dtype=bool)
     mask[4, 7] = True
     assert not planner.is_region_feasible(bbox, 2, 1, mask)
+
+
+def test_region_feasibility_checks_extended_sensor_scan_geometry():
+    planner = CoveragePlanner(sample_step=0.2, near_range=0.25)
+    bbox = BBox(10, 10, 16, 14)
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[6, 10] = True
+
+    assert not planner.is_region_feasible(
+        bbox, 1.5, 1.0, mask, along_track_cells=0.8
+    )
+
+
+def test_region_feasibility_honors_explicit_direction():
+    planner = CoveragePlanner(sample_step=0.2)
+    bbox = BBox(5, 5, 11, 15)
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[4, 5] = True
+
+    assert not planner.is_region_feasible(
+        bbox, 2.0, 1.0, mask, direction="vertical"
+    )
+    assert planner.is_region_feasible(
+        bbox, 2.0, 1.0, mask, direction="horizontal"
+    )
+
+
+def test_sensor_geometry_clamps_endpoint_extension_to_world_bounds():
+    planner = CoveragePlanner(sample_step=0.2, near_range=0.25)
+    path = planner.plan(
+        BBox(5, 1, 11, 9),
+        (1.0, 1.0, 0.0),
+        swath_width=1.5,
+        R_min=1.0,
+        along_track_cells=0.8,
+        bounds=(30, 30),
+    )
+
+    assert all(
+        0.0 <= coordinate < 30.0
+        for swath in path.swaths
+        for pose in (swath.start, swath.end)
+        for coordinate in pose
+    )
+
+
+def test_sensor_geometry_leaves_turn_guard_at_world_boundary():
+    path = CoveragePlanner().plan(
+        BBox(5, 1, 11, 9),
+        (2.0, 10.0, 0.0),
+        swath_width=1.5,
+        R_min=1.0,
+        along_track_cells=0.8,
+        bounds=(30, 30),
+    )
+
+    assert min(
+        pose[0]
+        for swath in path.swaths
+        for pose in (swath.start, swath.end)
+    ) >= 1.8 - 1e-9
+
+
+def test_bounded_sensor_routes_alternate_direction_within_safe_bounds():
+    path = CoveragePlanner().plan(
+        BBox(11, 1, 17, 9),
+        (2.0, 10.0, 0.0),
+        swath_width=1.5,
+        R_min=1.0,
+        along_track_cells=0.8,
+        bounds=(30, 30),
+    )
+
+    assert {swath.heading for swath in path.swaths} == {
+        0.0,
+        math.pi,
+    }
+    assert {swath.look_direction for swath in path.swaths} == {"left", "right"}
+    assert all(
+        0.0 <= coordinate < 30.0
+        for swath in path.swaths
+        for pose in (swath.start, swath.end)
+        for coordinate in pose[:2]
+    )

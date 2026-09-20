@@ -15,6 +15,7 @@ import time
 import uvicorn
 
 from src.env.simulation import SimulationEngine
+from src.mission.strategy_memory import StrategyMemoryStore
 from src.schedule.config_loader import ConfigLoader
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend.frame_publisher import FramePublisher
@@ -115,6 +116,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-delay", type=float, default=0.05)
     parser.add_argument("--skip-llm-probe", action="store_true")
     parser.add_argument("--llm-probe-timeout", type=float, default=20.0)
+    parser.add_argument("--memory-version", default="baseline")
+    parser.add_argument("--memory-root", default="outputs/strategy_memory")
     return parser
 
 
@@ -127,12 +130,26 @@ def main(
     hold_server: bool = False,
     probe_llm: bool = True,
     llm_probe_timeout: float = 20.0,
+    memory_version: str = "baseline",
+    memory_root: str | os.PathLike[str] = "outputs/strategy_memory",
 ) -> dict:
     config = ConfigLoader.load(config_path)
+    memory_store = StrategyMemoryStore(memory_root)
     if config.common.clear_outputs_before_run:
+        output_path = Path("outputs").resolve()
+        memory_path = Path(memory_root).resolve()
+        if memory_path == output_path or output_path in memory_path.parents:
+            raise ValueError(
+                "memory-root must be outside outputs when clear_outputs_before_run is enabled"
+            )
         removed = clear_output_cache()
         print(f"Cleared {removed} cached output item(s)")
-    engine = SimulationEngine(config)
+    resolved_memory_version = memory_store.resolve_version(memory_version)
+    engine = SimulationEngine(
+        config,
+        strategy_memory_store=memory_store,
+        strategy_memory_version=resolved_memory_version,
+    )
     if probe_llm:
         engine.allocator.llm_client.probe(llm_probe_timeout)
         print("LongCat-2.0 connectivity probe passed")
@@ -141,7 +158,7 @@ def main(
 
     if start_server:
         _free_port(port)
-        app = create_app(config, engine.allocator.sm)
+        app = create_app(config, engine.allocator.sm, engine=engine)
         app.state.total_steps = steps
         def run_server():
             uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
@@ -196,11 +213,14 @@ def main(
     frame_publisher.close()
     output_path = app.state.frame_logger.path if app is not None else logger.path
     summary["jsonl_path"] = output_path
-    print("仿真结束。")
+    if engine.runtime_status == "paused_model":
+        print(f"仿真提前暂停：完成 {summary['steps']}/{steps} 步，模型决策失败；详见 JSONL 日志。")
+    else:
+        print(f"仿真运行结束：完成 {summary['steps']}/{steps} 步。")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"JSONL 日志: {output_path}")
     if hold_server and app is not None:
-        print(f"服务将持续运行，按 Ctrl+C 停止: http://localhost:{port}")
+        print(f"网页服务保持运行（不代表仿真继续推进），按 Ctrl+C 停止: http://localhost:{port}")
         try:
             while True:
                 time.sleep(1)
@@ -220,4 +240,6 @@ if __name__ == "__main__":
         hold_server=args.hold_server,
         probe_llm=not args.skip_llm_probe,
         llm_probe_timeout=args.llm_probe_timeout,
+        memory_version=args.memory_version,
+        memory_root=args.memory_root,
     )

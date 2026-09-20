@@ -1,0 +1,99 @@
+contact:
+  history_window_min: 120.0
+  history_max_samples: 600
+  stale_after_min: 5.0
+  association_gate_cells: 0.5
+  association_margin_cells: 0.2
+  assessment_interval_min: 3.0
+  min_valid_samples_per_phase: 4
+  max_sample_gap_min: 2.0
+  baseline_duration_min: 4.0
+  near_duration_min: 5.0
+  baseline_standoff_cells: 1.8
+  near_standoff_cells: 1.2
+  probe_timeout_min: 20.0
+  approach_timeout_min: 120.0
+  probe_retry_cooldown_min: 10.0
+  assessment_confidence_min: 0.8
+  type_i_recheck_cooldown_min: 60.0
+  prompt_contact_limit: 20
+  prompt_keypoints_per_contact: 12
+intent:
+  max_active_intents: 20
+  default_valid_duration_min: 120.0
+  default_revisit_interval_min: 20.0
+  default_weight: 0.5
+  candidate_limit: 20
+  general_candidate_reserve: 2
+  freshness_threshold: 0.7
+  mutation_queue_limit: 100
+scheduling:
+  allow_probe_preempt_search: true
+  allow_intent_preempt_search: false
+  reassignment_cooldown_min: 5.0
+  max_tasks_in_prompt: 40
+evolution:
+  enabled: true
+  max_active_memories: 5
+  max_memory_chars: 400
+  min_support_episodes: 3
+  candidate_generation_interval_episodes: 5
+  validation_seeds: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
+  holdout_seeds: [201, 202, 203, 204, 205]
+  repeats_per_seed: 3
+  minimum_score_gain: 0.02
+  maximum_component_regression: 0.02
+coverage:
+  windows_min: [30, 60, 120]
+  primary_window_min: 60
+  min_search_uav_fraction: 0.4
+  ordinary_prompt_reserve: 8
+  geometry_candidate_budget: 120
+  no_progress_timeout_min: 10.0
+  align_timeout_min: 8.0
+  max_stall_replans: 2
+  max_consecutive_decision_failures: 3
+activity:
+  regulated_bboxes: [[8, 8, 22, 22]]
+  schedule_start_min: [30.0, 120.0]
+  schedule_duration_min: [60.0, 120.0]
+  survey_command_speed_kn: 10.0
+  survey_track_spacing_cells: 1.0
+  trajectory_window_min: 20.0
+  min_observed_duration_min: 12.0
+  observed_speed_max_kn: 12.0
+  reversal_angle_min_deg: 120.0
+  min_reversal_count: 2
+  radiation_window_min: 10.0
+  min_distinct_bursts: 2
+  type_ii_equipment_pd: 0.90
+  type_ii_equipment_pfa: 0.05
+  deployed_equipment_pd: 0.85
+  deployed_equipment_pfa: 0.05
+evasion:
+  observer_range_cells: 6.0
+  history_window_min: 6.0
+  response_window_min: 3.0
+  minimum_samples_per_window: 3
+  minimum_window_span_min: 1.5
+  minimum_course_change_deg: 45.0
+  minimum_speed_increase_kn: 3.0
+  minimum_outward_speed_kn: 3.0
+  minimum_range_increase_cells: 0.05
+  confirmation_samples: 2
+  forced_maneuver_exclusion_cells: 2.0
+  rearm_clear_min: 5.0
+  evidence_ttl_min: 20.0
+  evidence_tau_min: 8.0
+  enabled: true
+information_update:
+  value_alpha: 0.45
+  value_beta: 0.35
+  value_gamma: 0.20
+  material_delta_threshold: 0.05
+  normal_heavy_cooldown_min: 1.0
+  kernel_epsilon: 0.01
+  # The configured LongCat live route currently returns validated decisions
+  # in roughly 6-20 seconds; keep a reserve for validation and matching.
+  planning_deadline_seconds: 30.0
+  postprocess_reserve_seconds: 0.5

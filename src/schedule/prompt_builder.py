@@ -1,10 +1,52 @@
 ﻿import os
+import json
 from src.schedule.state_manager import StateManager
 from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateResult
 
 
 class PromptBuilder:
+    @staticmethod
+    def contact_payload(sm: StateManager) -> list[dict]:
+        """Explicit blue field allowlist, accepting only published contact state."""
+        payload = []
+        cfg = sm.config.mission.contact
+        for c in sm.contacts.list_snapshots()[:cfg.prompt_contact_limit]:
+            assessment = c.last_assessment
+            payload.append({
+                "contact_id": c.contact_id, "revision": c.revision,
+                "state": c.state, "vessel_class": c.vessel_class, "ais_mmsi": c.ais_mmsi,
+                "first_seen_min": c.first_seen_min, "last_seen_min": c.last_seen_min,
+                "estimated_position_cells": c.estimated_position_cells,
+                "estimated_velocity_cells_min": c.estimated_velocity_cells_min,
+                "uncertainty_cells": c.uncertainty_cells,
+                "assigned_uav_id": c.assigned_uav_id, "active_probe_id": c.active_probe_id,
+                "cleared_at_min": c.cleared_at_min,
+                "next_probe_not_before_min": c.next_probe_not_before_min,
+                "last_assessment": None if assessment is None else {
+                    "assessment_id": assessment.assessment_id,
+                    "contact_id": assessment.contact_id, "probe_id": assessment.probe_id,
+                    "history_revision": assessment.history_revision,
+                    "assessed_at_min": assessment.assessed_at_min,
+                    "vessel_class": assessment.vessel_class, "confidence": assessment.confidence,
+                    "evidence_sample_ids": assessment.evidence_sample_ids,
+                    "reasons": assessment.reasons,
+                    "alternative_explanations": assessment.alternative_explanations,
+                    "model_call_id": assessment.model_call_id,
+                },
+                "samples": [{
+                    "sample_id": s.sample_id, "contact_id": s.contact_id,
+                    "observed_at_min": s.observed_at_min, "source": s.source,
+                    "source_id": s.source_id, "position_cells": s.position_cells,
+                    "velocity_cells_min": s.velocity_cells_min,
+                    "position_uncertainty_cells": s.position_uncertainty_cells,
+                    "observer_position_cells": s.observer_position_cells,
+                    "measured_range_cells": s.measured_range_cells,
+                    "navigation_context": s.navigation_context,
+                } for s in c.samples[-cfg.prompt_keypoints_per_contact:]],
+            })
+        return payload
+
     def __init__(self, system_prompt_path: str = None):
         if system_prompt_path is None:
             system_prompt_path = os.path.join(
@@ -16,16 +58,24 @@ class PromptBuilder:
     def build(self, sm: StateManager, ivt: InfoValueTable,
               candidate_result: CandidateResult,
               reviewer_memory: str = "",
-              required_search_regions: int = 0) -> tuple[str, str]:
+              required_search_regions: int = 0,
+              *,
+              available_uav_ids: tuple[str, ...] | None = None,
+              uav_count: int | None = None) -> tuple[str, str]:
         """返回 (system_prompt, user_prompt)"""
         user = self._build_user_prompt(
             sm, ivt, candidate_result, reviewer_memory, required_search_regions,
+            available_uav_ids=available_uav_ids,
+            uav_count=uav_count,
         )
         return self.system_prompt, user
 
     def _build_user_prompt(self, sm: StateManager, ivt: InfoValueTable,
                            candidate_result: CandidateResult, reviewer_memory: str,
-                           required_search_regions: int) -> str:
+                           required_search_regions: int,
+                           *,
+                           available_uav_ids: tuple[str, ...] | None = None,
+                           uav_count: int | None = None) -> str:
         parts = []
 
         grid = sm.config.grid
@@ -84,10 +134,11 @@ class PromptBuilder:
             for report in reports:
                 velocity = report.velocity_cells_per_min
                 parts.append(
-                    f"- {report.group_id}: 最后观测=({report.position.col},{report.position.row}) "
+                    f"- {report.contact_id}: 最后观测=({report.position.col},{report.position.row}) "
                     f"时刻={report.observed_at:.1f}min 来源={report.source_uav_id} "
                     f"观测速度=({velocity[0]:.3f},{velocity[1]:.3f})格/min"
                 )
+            parts.append(json.dumps(self.contact_payload(sm), ensure_ascii=False, allow_nan=False))
 
         # 上一轮搜索区状态
         ivt.update_all()
@@ -129,21 +180,26 @@ class PromptBuilder:
         # UAV 可用状态
         parts.append("\n【UAV 可用状态】")
         all_uavs = sm.get_all_uavs()
-        available = [u for u in all_uavs if u.status == "idle"]
-        in_use = [u for u in all_uavs if u.status != "idle"]
+        available_ids = tuple(
+            u.id for u in sm.get_available_uavs()
+        ) if available_uav_ids is None else tuple(available_uav_ids)
+        available_id_set = set(available_ids)
+        available = [u for u in all_uavs if u.id in available_id_set]
+        in_use = [u for u in all_uavs if u.id not in available_id_set]
         retained = sm.get_active_search_regions()
         pending = sum(region.assigned_uav_id is None for region in retained)
-        if sm.lifecycle_mode:
-            new_capacity = max(
-                0,
-                10 - len(sm.get_track_regions()) - len(retained),
-            )
-        else:
-            new_capacity = max(0, len(available) - pending)
+        configured_count = sm.config.uav.count if uav_count is None else int(uav_count)
+        occupied_slots = len(sm.get_track_regions()) + len(retained)
+        new_capacity = max(
+            0,
+            min(configured_count, len(available) if not sm.lifecycle_mode else configured_count)
+            - (occupied_slots if sm.lifecycle_mode else pending),
+        )
         parts.append(
             f"现役搜索区将原样保留{len(retained)}个，其中待续派{pending}个；"
             f"本轮只输出新增区域，新增上限{new_capacity}个。"
         )
+        parts.append(f"配置UAV总数上限: {configured_count}架")
         parts.append(f"现可用UAV: {len(available)}架")
         for u in in_use:
             parts.append(f"  {u.id}: {u.status}, 油量{u.fuel_remaining_pct:.0%}, "

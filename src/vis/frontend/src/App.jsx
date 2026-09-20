@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
+import { Eye, EyeOff, Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
 
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
@@ -16,7 +16,14 @@ export default function App() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
+  const [showScenario, setShowScenario] = useState(false);
   const [trailMode, setTrailMode] = useState("tail");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedBBox, setSelectedBBox] = useState(null);
+  const [selectedContactId, setSelectedContactId] = useState(null);
+  const [vesselPlacement, setVesselPlacement] = useState(null);
+  const [selectedScenarioVesselId, setSelectedScenarioVesselId] = useState(null);
+  const [vesselCommandStatus, setVesselCommandStatus] = useState(null);
   const [liveEvents, setLiveEvents] = useState([]);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
   const mapExporterRef = useRef(null);
@@ -24,6 +31,25 @@ export default function App() {
   const replay = useReplay(mode === "replay");
   const mp4Export = useMp4Export(replay, mapExporterRef);
   const frame = mode === "live" ? live.frame : replay.frame;
+  const readOnly = mode === "replay";
+  const editingAllowed = mode === "live" && Boolean(frame?.vessel_mutation_allowed);
+  const vesselCommandBusy = vesselCommandStatus?.status === "queued";
+
+  useEffect(() => {
+    setSelectionMode(false);
+    setSelectedBBox(null);
+    setSelectedContactId(null);
+    setVesselPlacement(null);
+    setSelectedScenarioVesselId(null);
+    setVesselCommandStatus(null);
+  }, [mode]);
+
+  useEffect(() => {
+    if (!editingAllowed) {
+      setVesselPlacement(null);
+      setSelectedScenarioVesselId(null);
+    }
+  }, [editingAllowed]);
 
   useEffect(() => {
     if (mode !== "live" || !live.frame) return;
@@ -42,30 +68,120 @@ export default function App() {
 
   const replayEvents = useMemo(() => {
     if (mode !== "replay") return [];
-    const unique = new Map();
-    replay.frames.slice(0, replay.index + 1).forEach((item) => {
-      (item.events || []).forEach((event) => {
-        const key = `${event.time}|${event.type}|${JSON.stringify(event.data)}`;
-        unique.set(key, event);
-      });
-    });
-    return [...unique.values()];
-  }, [mode, replay.frames, replay.index]);
+    return replay.markers.map((marker) => marker.event);
+  }, [mode, replay.markers]);
 
   const replayLlmCycle = useMemo(() => {
     if (mode !== "replay") return null;
-    for (let index = replay.index; index >= 0; index -= 1) {
-      if (replay.frames[index]?.llm_cycle) return replay.frames[index].llm_cycle;
-    }
-    return null;
-  }, [mode, replay.frames, replay.index]);
+    return replay.frame?.llm_cycle || null;
+  }, [mode, replay.frame]);
   const displayedLlmCycle = mode === "replay" ? replayLlmCycle : lastLlmCycle;
+
+  const replayConnectionStatus = replay.targetLoadingIndex != null || replay.loading
+    ? "connecting"
+    : replay.error ? "error" : "connected";
+  const replayConnectionLabel = replay.targetLoadingIndex != null
+    ? "载入目标帧"
+    : replay.error || (replay.loading ? "载入中" : `${replay.frames.length} 帧`);
 
   useEffect(() => {
     if (selectedUavId && frame && !(frame.uavs || []).some((uav) => uav.id === selectedUavId)) {
       setSelectedUavId(null);
     }
-  }, [frame, selectedUavId]);
+    if (selectedContactId && frame && !(frame.contacts || []).some((contact) => contact.contact_id === selectedContactId)) {
+      setSelectedContactId(null);
+    }
+  }, [frame, selectedContactId, selectedUavId]);
+
+  const commandId = () => globalThis.crypto?.randomUUID?.()
+    || `vessel-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const pollVesselCommand = async (id) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, attempt ? 150 : 0));
+      const response = await fetch(`/api/vessel-commands/${encodeURIComponent(id)}`);
+      if (!response.ok) throw new Error(`command_${response.status}`);
+      const result = await response.json();
+      if (result.status !== "queued") return result;
+    }
+    throw new Error("command_timeout");
+  };
+
+  const submitVesselCommand = async ({ url, method, body }, successMessage, onApplied) => {
+    const id = body.command_id;
+    setVesselCommandStatus({ status: "queued", message: "船舶命令排队中", commandId: id });
+    try {
+      const response = await fetch(url, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error_code || "vessel_create_failed");
+      const applied = await pollVesselCommand(result.command_id || id);
+      setVesselCommandStatus({
+        status: applied.status,
+        message: applied.status === "applied" ? successMessage : "船舶命令被拒绝",
+        commandId: applied.command_id || id,
+        errorCode: applied.error_code,
+      });
+      if (applied.status === "applied") onApplied?.(applied);
+    } catch (error) {
+      setVesselCommandStatus({ status: "rejected", message: "船舶命令失败", errorCode: error.message });
+    }
+  };
+
+  const handlePlaceVessel = async (position, selectedType = vesselPlacement) => {
+    if (!editingAllowed || vesselCommandBusy || !selectedType || !frame?.episode_id) return;
+    const id = commandId();
+    await submitVesselCommand({
+      url: "/api/vessels",
+      method: "POST",
+      body: {
+        episode_id: frame.episode_id,
+        command_id: id,
+        vessel_class: selectedType,
+        position_cells: position,
+      },
+    }, "船舶已加入场景", () => setVesselPlacement(null));
+  };
+
+  const handleDeleteVessel = async () => {
+    if (!editingAllowed || vesselCommandBusy || !selectedScenarioVesselId || !frame?.episode_id) return;
+    const vessel = (frame.scenario_vessels || []).find(
+      (item) => item.scenario_entity_id === selectedScenarioVesselId,
+    );
+    if (!vessel) return;
+    const id = commandId();
+    await submitVesselCommand({
+      url: `/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}`,
+      method: "DELETE",
+      body: {
+        episode_id: frame.episode_id,
+        command_id: id,
+        expected_revision: vessel.revision,
+      },
+    }, "船舶已删除", () => setSelectedScenarioVesselId(null));
+  };
+
+  const handleSetVesselAis = async (enabled) => {
+    if (!editingAllowed || vesselCommandBusy || !selectedScenarioVesselId || !frame?.episode_id) return;
+    const vessel = (frame.scenario_vessels || []).find(
+      (item) => item.scenario_entity_id === selectedScenarioVesselId,
+    );
+    if (!vessel?.ais_controllable || vessel.ais_enabled === enabled) return;
+    const id = commandId();
+    await submitVesselCommand({
+      url: `/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}/ais`,
+      method: "PATCH",
+      body: {
+        episode_id: frame.episode_id,
+        command_id: id,
+        expected_revision: vessel.revision,
+        ais_enabled: enabled,
+      },
+    }, enabled ? "AIS 已开启" : "AIS 已关闭");
+  };
 
   const connectionLabel = {
     idle: "待机",
@@ -101,9 +217,9 @@ export default function App() {
             {replay.files.map((file) => <option key={file} value={file}>{file}</option>)}
           </select>
         )}
-        <span className={`connection-state ${mode === "live" ? live.status : replay.loading ? "connecting" : "connected"}`}>
+        <span className={`connection-state ${mode === "live" ? live.status : replayConnectionStatus}`}>
           <span className="connection-dot" />
-          {mode === "live" ? connectionLabel : replay.error || (replay.loading ? "载入中" : `${replay.frames.length} 帧`)}
+          {mode === "live" ? connectionLabel : replayConnectionLabel}
         </span>
         <div className="top-actions">
           <div className="trail-mode-switch" role="group" aria-label="UAV轨迹显示模式">
@@ -150,8 +266,27 @@ export default function App() {
           <button className={showGrid ? "icon-btn active" : "icon-btn"} onClick={() => setShowGrid((value) => !value)} title="网格" aria-label="切换网格">
             <Grid3X3 size={17} />
           </button>
+          <button
+            className={showScenario ? "icon-btn active" : "icon-btn"}
+            onClick={() => setShowScenario((value) => !value)}
+            title={showScenario ? "隐藏场景真值" : "显示场景真值"}
+            aria-label="切换场景真值图层"
+            aria-pressed={showScenario}
+          >
+            {showScenario ? <Eye size={17} /> : <EyeOff size={17} />}
+          </button>
           <button className={drawerVisible ? "icon-btn active" : "icon-btn"} onClick={() => setDrawerVisible((value) => !value)} title="任务详情" aria-label="切换任务详情面板" aria-pressed={drawerVisible}>
             <PanelBottom size={17} />
+          </button>
+          <button
+            className={selectionMode ? "icon-btn active" : "icon-btn"}
+            onClick={() => setSelectionMode((value) => !value)}
+            title={readOnly ? "回放只读" : "框选重点区"}
+            aria-label="框选重点区"
+            aria-pressed={selectionMode}
+            disabled={readOnly}
+          >
+            <Focus size={17} />
           </button>
           <button className="icon-btn mobile-only" onClick={() => setSidebarOpen((value) => !value)} title="编队状态" aria-label="切换编队状态面板">
             <PanelRight size={17} />
@@ -165,7 +300,22 @@ export default function App() {
         selectedUavId={selectedUavId}
         onSelectUav={setSelectedUavId}
         showGrid={showGrid}
+        showScenario={showScenario || Boolean(vesselPlacement)}
         trailMode={trailMode}
+        selectionMode={selectionMode}
+        onSelectionCommit={(bbox) => { setSelectedBBox(bbox); setSidebarOpen(true); }}
+        onSelectContact={setSelectedContactId}
+        selectedContactId={selectedContactId}
+        placementMode={Boolean(vesselPlacement && editingAllowed && !vesselCommandBusy)}
+        onPlaceVessel={handlePlaceVessel}
+        onDropVessel={(vesselClass, position) => {
+          if (editingAllowed && !vesselCommandBusy) {
+            setVesselPlacement(vesselClass);
+            handlePlaceVessel(position, vesselClass);
+          }
+        }}
+        selectedScenarioVesselId={selectedScenarioVesselId}
+        onSelectScenarioVessel={setSelectedScenarioVesselId}
       />
       <RightSidebar
         frame={frame}
@@ -174,6 +324,21 @@ export default function App() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         lastLlmCycle={displayedLlmCycle}
+        readOnly={readOnly}
+        connectionStatus={mode === "live" ? live.status : replayConnectionStatus}
+        selection={selectedBBox}
+        onClearSelection={() => setSelectedBBox(null)}
+        selectedContactId={selectedContactId}
+        onSelectContact={setSelectedContactId}
+        editingAllowed={editingAllowed}
+        vesselPlacement={vesselPlacement}
+        onSelectVesselType={setVesselPlacement}
+        onCancelVesselPlacement={() => setVesselPlacement(null)}
+        selectedScenarioVesselId={selectedScenarioVesselId}
+        onSelectScenarioVessel={setSelectedScenarioVesselId}
+        onDeleteVessel={handleDeleteVessel}
+        onSetVesselAis={handleSetVesselAis}
+        vesselCommandStatus={vesselCommandStatus}
       />
       <BottomDrawer
         frame={frame}
@@ -193,6 +358,8 @@ export default function App() {
         onSpeedChange={replay.setSpeed}
         frame={frame}
         markers={replay.markers}
+        loadedFrames={replay.loadedFrameCount}
+        targetLoadingIndex={replay.targetLoadingIndex}
         onExportMp4={mp4Export.exportMp4}
         exportAvailable={mp4Export.available}
         exporting={mp4Export.exporting}

@@ -1,10 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
 import shutil
 
 import pytest
 import yaml
 
 from main import clear_output_cache
+from src.mission.config import load_strict_yaml
 from src.schedule.config_loader import ConfigLoader
 
 
@@ -18,6 +20,43 @@ def test_config_loader_reads_merged_environment_and_llm_parameters():
     # Retaining prior runs is required for replay after a new live run starts.
     assert config.common.clear_outputs_before_run is False
     assert config.environment.base_position == (2, 14)
+    assert config.ship.population.total_count == 8
+    assert config.ship.population.type_ii_ratio == pytest.approx(0.375)
+    assert config.mission.contact.near_standoff_cells == 1.2
+    assert config.mission.scheduling.allow_probe_preempt_search is True
+    assert config.mission.information_update.planning_deadline_seconds == pytest.approx(30.0)
+    assert config.mission.information_update.postprocess_reserve_seconds == pytest.approx(0.5)
+
+
+def test_llm_configuration_declares_all_isolated_roles():
+    llm_data = load_strict_yaml("configs/llm_params.yaml")
+
+    assert llm_data["bindings"] == {
+        "decision_maker": {
+            "model": "LongCat-2.0",
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "thinking": "disabled",
+        },
+        "contact_assessor": {
+            "model": "LongCat-2.0",
+            "temperature": 0.3,
+            "max_tokens": 2048,
+            "thinking": "disabled",
+        },
+        "red_commander": {
+            "model": "LongCat-2.0",
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "thinking": "disabled",
+        },
+        "reviewer": {
+            "model": "LongCat-2.0",
+            "temperature": 0.3,
+            "max_tokens": 2048,
+            "thinking": "disabled",
+        },
+    }
 
 
 def test_control_configuration_defaults_to_heuristic():
@@ -25,7 +64,7 @@ def test_control_configuration_defaults_to_heuristic():
 
     assert config.control.default_mode == "heuristic"
     assert config.control.per_uav == {}
-    assert config.control.observation.schema_version == "control-observation/v1"
+    assert config.control.observation.schema_version == "control-observation/v2"
     assert config.control.observation.local_window_cells == 11
     assert config.control.safety.reserve_range_cells == 4.0
     assert config.control.safety.max_invalid_commands == 3
@@ -47,6 +86,7 @@ def test_control_configuration_rejects_non_integer_local_window_cells(
         "control.yaml",
         "environment.yaml",
         "llm_params.yaml",
+        "mission.yaml",
         "sensor.yaml",
         "ship.yaml",
         "uav.yaml",
@@ -77,3 +117,29 @@ def test_clear_output_cache_removes_only_output_directory_contents(tmp_path: Pat
 
     with pytest.raises(ValueError, match="outputs directory"):
         clear_output_cache(str(tmp_path / "not-outputs"))
+
+
+def test_main_rejects_memory_root_inside_cleanup_target_before_deleting(monkeypatch, tmp_path):
+    import main as main_module
+
+    monkeypatch.setattr(
+        main_module.ConfigLoader,
+        "load",
+        lambda _path: SimpleNamespace(
+            common=SimpleNamespace(clear_outputs_before_run=True),
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "clear_output_cache",
+        lambda *_args, **_kwargs: pytest.fail("cleanup ran before memory-root validation"),
+    )
+
+    with pytest.raises(ValueError, match="memory-root"):
+        main_module.main(
+            config_path="configs",
+            steps=1,
+            start_server=False,
+            probe_llm=False,
+            memory_root=Path.cwd() / "outputs" / "strategy_memory",
+        )

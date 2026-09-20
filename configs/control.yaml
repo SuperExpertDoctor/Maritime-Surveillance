@@ -2,7 +2,7 @@ default_mode: heuristic
 per_uav: {}
 
 observation:
-  schema_version: control-observation/v1
+  schema_version: control-observation/v2
   local_window_cells: 11
 
 safety:

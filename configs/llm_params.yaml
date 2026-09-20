@@ -17,18 +17,23 @@ bindings:
   decision_maker:
     model: LongCat-2.0
     temperature: 0.3
+    max_tokens: 4096
+    thinking: disabled
+  contact_assessor:
+    model: LongCat-2.0
+    temperature: 0.3
     max_tokens: 2048
+    thinking: disabled
+  red_commander:
+    model: LongCat-2.0
+    temperature: 0.3
+    max_tokens: 4096
     thinking: disabled
   reviewer:
     model: LongCat-2.0
     temperature: 0.3
-    max_tokens: 512
+    max_tokens: 2048
     thinking: disabled
-
-cycles:
-  heavy_cycle_min: 30
-  reviewer_cycle_min: 15
-  max_retries: 2
 
 cycles:
   heavy_cycle_min: 30

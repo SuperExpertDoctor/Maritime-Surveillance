@@ -140,6 +140,9 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".connection-state")).toHaveClass(/connected/);
   await expect(page.locator("canvas")).toBeVisible();
+  await expect(page.getByRole("button", { name: "I 类船舶", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeEnabled();
+  await expect(page.locator(".vessel-editor .section-heading small")).toHaveText(/^\d+\/\d+$/);
   const config = await page.evaluate(() => fetch("/api/config").then((response) => response.json()));
   expect(config.environment.base_count).toBe(2);
   expect(config.environment.base_land_margin).toBe(0);
@@ -240,6 +243,7 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   expect(replayFile).toMatch(/^simulation_.*\.jsonl$/);
   await fileSelect.selectOption(replayFile);
   await expect(page.locator(".playback-readout").first()).toContainText("480");
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeDisabled();
 
   const readout = page.locator(".playback-readout").first();
   await page.locator(".transport-btn.primary").click();
@@ -264,16 +268,17 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await expect(page.locator(".transport-btn.primary")).toHaveAttribute("title", "暂停");
   await page.keyboard.press("Space");
 
-  await page.locator(".top-actions .icon-btn").nth(1).click();
+  await page.locator('.top-actions .icon-btn[aria-label="切换任务详情面板"]').click();
   await expect(page.locator(".bottom-drawer")).toBeVisible();
   await page.locator(".drawer-tabs > button").nth(1).click();
   await expect(page.locator(".region-table")).toBeVisible();
   await page.locator(".drawer-tabs > button").nth(2).click();
   await expect(page.locator(".llm-log")).toBeVisible();
+  await expect(page.locator(".llm-log")).toContainText("Fixture mission snapshot.");
   await page.locator(".drawer-tabs > button").nth(3).click();
-  await expect(page.locator(".ais-table")).toBeVisible();
-  await page.locator(".drawer-tabs > button").nth(4).click();
   await expect(page.locator(".params-grid")).toBeVisible();
+  await page.locator(".drawer-tabs > button").nth(4).click();
+  await expect(page.locator(".ais-table")).toBeVisible();
   await page.locator(".drawer-close").click();
   await expect(page.locator(".bottom-drawer")).toHaveCount(0);
 

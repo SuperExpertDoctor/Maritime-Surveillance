@@ -36,7 +36,11 @@ from src.control.common.factory import ControlFactory
 from src.control.common.observation import ObservationProvider
 from src.control.common.operation_registry import OperationRegistry
 from src.control.common.ownership import ControlOwnership
-from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
+from src.control.common.safety import (
+    InvalidControlCommand,
+    SafetyEnvelope,
+    UnsafeControlState,
+)
 from src.control.heuristic.base import HeuristicControllerBase
 from src.control.heuristic.return_to_base import ReturnToBaseController
 from src.env.uav_entity import UAVEntity
@@ -45,7 +49,7 @@ from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.state_manager import StateManager
 
 
-OBSERVATION_SPEC = ObservationSpec("control-observation/v1", 11)
+OBSERVATION_SPEC = ObservationSpec("control-observation/v2", 11)
 ACTION_SPEC = ActionSpec(-0.5, 0.5, 0.1, 1.0)
 
 
@@ -357,7 +361,7 @@ def test_queued_events_are_ordered_visible_once_and_delayed_one_tick():
     assert third.observation.events == ()
 
 
-def test_heuristic_transition_replaces_before_act_and_suppresses_consumed_event():
+def test_target_found_is_delivered_without_replacing_a_heuristic_task():
     config = ConfigLoader.load()
     factory = DeterministicFactory(config.control)
     coordinator, _, state_manager, _, resolved_factory = make_runtime(
@@ -382,20 +386,16 @@ def test_heuristic_transition_replaces_before_act_and_suppresses_consumed_event(
     )
 
     second = coordinator.step_uav(uav, current_time=2.0)
-    new_controller = resolved_factory.heuristic_creations[1][2]
 
-    assert len(old_controller.observations) == 1
+    assert len(old_controller.observations) == 2
     assert first.observation.self_state.operation_mode is OperationMode.IDLE
     assert second.observation.self_state.operation_mode is OperationMode.COVERAGE
-    assert old_controller.stop_reasons == [StopReason.PREEMPTED]
-    assert new_controller.calls == ["reset", "start", "act"]
-    assert new_controller.start_observation is second.observation
-    assert new_controller.observations == [second.observation]
-    assert second.observation.events == ()
+    assert old_controller.stop_reasons == []
+    assert [event.event_type for event in second.observation.events] == ["target_found"]
     assert second.lease.owner is ControlOwner.HEURISTIC
-    assert second.lease.generation == first.lease.generation + 1
-    assert second.lease.controller_id.startswith("tracking:")
-    assert coordinator._operation_modes["UAV-1"] is OperationMode.TRACK
+    assert second.lease.generation == first.lease.generation
+    assert second.lease.controller_id.startswith("coverage:")
+    assert coordinator._operation_modes["UAV-1"] is OperationMode.COVERAGE
 
 
 def test_learning_task_events_are_delivered_untouched_without_replacing_lease():
@@ -517,7 +517,46 @@ def test_safety_result_execution_audit_and_previous_intervention_state_are_recor
     assert coordinator._invalid_streaks["UAV-1"] == 0
 
 
-def test_third_consecutive_intervention_raises_before_world_or_registry_mutation():
+def test_clipping_does_not_increment_invalid_command_counter():
+    controller = DeterministicController(
+        ControlMode.BC,
+        commands=(command(speed=2.0),) * 3,
+    )
+    coordinator, *_ = make_runtime(
+        {"UAV-1": ControlMode.BC}, {"UAV-1": controller}
+    )
+    uav = make_uav("UAV-1")
+    start_learning(coordinator)
+
+    results = [
+        coordinator.step_uav(uav, current_time=float(tick))
+        for tick in range(1, 4)
+    ]
+
+    assert all(result.safety.interventions for result in results)
+    assert coordinator._invalid_streaks["UAV-1"] == 0
+    assert uav.last_applied_command is results[-1].safety.applied_command
+
+
+def test_unsafe_control_state_is_classified_and_recovered_separately():
+    controller = DeterministicController(ControlMode.BC)
+    coordinator, _, state_manager, *_ = make_runtime(
+        {"UAV-1": ControlMode.BC}, {"UAV-1": controller}
+    )
+    uav = make_uav("UAV-1")
+    start_learning(coordinator)
+    blocked = np.ones(state_manager.config.grid.resolution, dtype=bool)
+    state_manager.set_environment_obstacles([], blocked)
+
+    with pytest.raises(UnsafeControlState) as captured:
+        coordinator.step_uav(uav, current_time=1.0)
+
+    assert getattr(captured.value, "outcome", None) == "unsafe"
+    assert coordinator._invalid_streaks["UAV-1"] == 0
+    assert uav.last_applied_command is None
+
+
+def test_consecutive_safety_adjustments_execute_without_invalid_revoke():
     controller = DeterministicController(
         ControlMode.BC,
         commands=(command(speed=2.0),) * 3,
@@ -541,18 +580,13 @@ def test_third_consecutive_intervention_raises_before_world_or_registry_mutation
         "operation": coordinator._operation_modes["UAV-1"],
     }
 
-    with pytest.raises(EmergencyRevokeRequired) as captured:
-        coordinator.step_uav(uav, current_time=3.0)
+    result = coordinator.step_uav(uav, current_time=3.0)
 
-    assert captured.value.uav_id == "UAV-1"
-    assert captured.value.invalid_streak == 3
-    assert uav.pose == before["pose"]
-    assert uav.remaining_range_cells == before["range"]
-    assert uav.sensor_mode == before["sensor"]
-    assert uav.last_applied_command is before["last_applied"]
-    assert state_uav.sensor_mode == before["state_sensor"]
-    assert registry._track_bindings == before["bindings"]
-    assert coordinator._operation_modes["UAV-1"] is before["operation"]
+    assert result.outcome.value == "clipped"
+    assert uav.pose != before["pose"]
+    assert uav.remaining_range_cells < before["range"]
+    assert uav.last_applied_command is not before["last_applied"]
+    assert coordinator._invalid_streaks["UAV-1"] == 0
 
 
 def test_one_clean_command_resets_the_consecutive_invalid_streak():
@@ -578,7 +612,7 @@ def test_one_clean_command_resets_the_consecutive_invalid_streak():
     ]
 
     assert len(results) == 5
-    assert coordinator._invalid_streaks["UAV-1"] == 2
+    assert coordinator._invalid_streaks["UAV-1"] == 0
 
 
 def test_schema_mask_and_nonfinite_rejections_share_the_invalid_threshold():
@@ -652,6 +686,45 @@ def test_assign_task_replaces_heuristic_source_but_starts_it_on_next_tick():
     assert new_controller.start_observation is result.observation
 
 
+def test_assign_tasks_atomically_rejects_stale_member_without_partial_install():
+    config = ConfigLoader.load()
+    factory = DeterministicFactory(config.control)
+    coordinator, *_ = make_runtime(
+        {"UAV-1": ControlMode.HEURISTIC, "UAV-2": ControlMode.HEURISTIC},
+        factory=factory,
+    )
+    coordinator.start_work(
+        "UAV-1",
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=1.0,
+        task=coverage_task("S1"),
+    )
+    coordinator.start_work(
+        "UAV-2",
+        sortie_number=1,
+        current_time=0.0,
+        dt_min=1.0,
+        task=coverage_task("S2"),
+    )
+    first_lease = coordinator.current_lease("UAV-1")
+    second_lease = coordinator.current_lease("UAV-2")
+    first_task = coordinator.active_task("UAV-1")
+    coordinator.assign_task("UAV-2", coverage_task("S2-current"), current_time=0.5)
+
+    with pytest.raises(StaleControlCommand, match="UAV-2"):
+        coordinator.assign_tasks_atomically(
+            (
+                ("UAV-1", coverage_task("S1-next"), first_lease.generation),
+                ("UAV-2", coverage_task("S2-next"), second_lease.generation),
+            ),
+            current_time=1.0,
+        )
+
+    assert coordinator.current_lease("UAV-1") == first_lease
+    assert coordinator.active_task("UAV-1") == first_task
+
+
 def valid_recovery_plan(uav: UAVEntity, reservation_id: str = "R1") -> RecoveryPlan:
     start = uav.pose
     destination = (start[0] + 1.0, start[1], start[2])
@@ -690,6 +763,69 @@ def test_reserved_validated_return_atomically_installs_system_controller_and_pre
     assert result.observation.self_state.control_mode is ControlMode.BC
     assert result.observation.self_state.control_owner is ControlOwner.SYSTEM
     assert result.observation.self_state.operation_mode is OperationMode.RETURN
+
+
+def test_work_controller_can_promote_to_system_holding_before_refuel():
+    coordinator, ownership, *_ = make_runtime(
+        {"UAV-1": ControlMode.HEURISTIC}
+    )
+    start_heuristic(coordinator)
+
+    lease = coordinator.promote_to_system_holding(
+        "UAV-1", current_time=1.0
+    )
+
+    assert lease.owner is ControlOwner.SYSTEM
+    assert coordinator.current_lease("UAV-1") is lease
+    assert coordinator.operation_mode("UAV-1") is OperationMode.HOLDING
+    assert coordinator.active_task("UAV-1").task_type is OperationMode.HOLDING
+    assert ownership.current("UAV-1") is lease
+
+
+def test_quarantine_uav_clears_control_state_without_installing_holding():
+    coordinator, ownership, state_manager, *_ = make_runtime(
+        {"UAV-1": ControlMode.HEURISTIC}
+    )
+    start_heuristic(coordinator)
+    uav = make_uav("UAV-1")
+    coordinator.step_uav(uav, current_time=1.0)
+    coordinator._task_flow._saved_coverage_tasks[uav.id] = coverage_task("S1")
+    old_lease = coordinator.current_lease(uav.id)
+
+    quarantined = coordinator.quarantine_uav(
+        uav.id, current_time=2.0, reason="no_safe_recovery_path"
+    )
+
+    assert quarantined.owner is ControlOwner.SYSTEM
+    assert quarantined.generation == old_lease.generation + 1
+    assert coordinator.controller(uav.id) is None
+    assert coordinator.active_task(uav.id) is None
+    assert coordinator.operation_mode(uav.id) is OperationMode.IDLE
+    assert coordinator._queued_events[uav.id] == []
+    assert uav.id not in coordinator._task_flow._saved_coverage_tasks
+    assert coordinator._last_applied_commands[uav.id] is None
+    assert coordinator.route_snapshot(uav.id).route.status == "cleared"
+    assert ownership.current(uav.id) is quarantined
+    assert state_manager.get_uav(uav.id).operation_mode == "idle"
+
+    assert coordinator.quarantine_uav(
+        uav.id, current_time=3.0, reason="duplicate"
+    ) is quarantined
+
+
+def test_initial_idle_quarantine_advances_generation_once():
+    coordinator, *_ = make_runtime({"UAV-1": ControlMode.HEURISTIC})
+    uav = make_uav("UAV-1")
+
+    first = coordinator.quarantine_uav(
+        uav.id, current_time=0.0, reason="initial_failure"
+    )
+    second = coordinator.quarantine_uav(
+        uav.id, current_time=1.0, reason="duplicate"
+    )
+
+    assert first.generation == 1
+    assert second is first
 
 
 @pytest.mark.parametrize(
@@ -774,7 +910,7 @@ def test_new_sortie_clears_saved_coverage_before_work_begins():
     assert coordinator._pending_tasks == {}
 
 
-def test_external_return_revocation_clears_saved_coverage_without_consuming_lifecycle_event():
+def test_external_return_revocation_saves_coverage_without_consuming_lifecycle_event():
     config = ConfigLoader.load()
     factory = DeterministicFactory(config.control)
     coordinator, _, state_manager, *_ = make_runtime(
@@ -783,21 +919,7 @@ def test_external_return_revocation_clears_saved_coverage_without_consuming_life
     uav = make_uav("UAV-1")
     start_heuristic(coordinator)
     coordinator.step_uav(uav, current_time=1.0)
-    state_manager.record_target_observation(
-        "C1", GridCoord(12, 10), "UAV-1", observed_at=1.0
-    )
-    coordinator.queue_event(
-        ControlEvent(
-            1,
-            1.0,
-            "target_found",
-            "sensor",
-            "UAV-1",
-            {"contact_id": "C1"},
-        )
-    )
-    coordinator.step_uav(uav, current_time=2.0)
-    assert "UAV-1" in coordinator._task_flow._saved_coverage_tasks
+    assert "UAV-1" not in coordinator._task_flow._saved_coverage_tasks
     coordinator.queue_event(
         ControlEvent(
             2,
@@ -814,7 +936,7 @@ def test_external_return_revocation_clears_saved_coverage_without_consuming_life
     )
     result = coordinator.step_uav(uav, current_time=3.0)
 
-    assert "UAV-1" not in coordinator._task_flow._saved_coverage_tasks
+    assert "UAV-1" in coordinator._task_flow._saved_coverage_tasks
     assert [event.event_type for event in result.observation.events] == [
         "work_range_exhausted"
     ]

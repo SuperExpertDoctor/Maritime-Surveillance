@@ -1,0 +1,26 @@
+{
+  "original_log_paths": [
+    "outputs/diagnostics/coverage_audit_20260917/legacy.jsonl",
+    "outputs/diagnostics/coverage_audit_20260917/new.jsonl"
+  ],
+  "seed": 42,
+  "common_end_min": 177,
+  "legacy_coverage_pct": {
+    "legacy": 16.7182662539,
+    "new": 3.4055727554
+  },
+  "legacy_coverage_counts": {
+    "legacy": 108,
+    "new": 22
+  },
+  "legacy_coverage_denominator": 646,
+  "sar60_counts": {
+    "legacy": 53,
+    "new": 1
+  },
+  "dynamic_denominator": 646,
+  "fixed_denominator": 671,
+  "new_frames": 500,
+  "unique_sim_times": 177,
+  "notes": "Historical audit baseline only; percentages are recorded references, not zero-tolerance assertions."
+}

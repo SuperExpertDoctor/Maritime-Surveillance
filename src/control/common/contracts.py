@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
-from types import MappingProxyType
+import math
+from typing import Literal
 
 import numpy as np
 
 from src.schedule.datatypes import BBox
+from src.mission.contracts import ContactSnapshot, ProbeSession
 
 
 class ControlMode(str, Enum):
@@ -28,6 +30,7 @@ class OperationMode(str, Enum):
     IDLE = "idle"
     TRANSIT = "transit"
     COVERAGE = "coverage"
+    PROBE = "probe"
     TRACK = "track"
     RETURN = "return"
     HOLDING = "holding"
@@ -49,16 +52,79 @@ class StopReason(str, Enum):
 Pose = tuple[float, float, float]
 
 
+class _FrozenMapping(dict):
+    """Immutable mapping for contract payloads that also has to be copyable.
+
+    ``types.MappingProxyType`` gives the immutability these snapshots need but
+    cannot itself be deep-copied, and consumers do copy them: frame publication
+    takes a ``deepcopy`` of the whole scheduler state so that historical frames
+    are not mutated by later steps.  Copying a deeply immutable mapping is the
+    identity operation, so ``__deepcopy__`` returns ``self``.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, data: Mapping) -> None:
+        dict.__init__(self, {
+            key: _immutable_snapshot(item) for key, item in data.items()
+        })
+
+    def __repr__(self) -> str:
+        return f"frozen_mapping({dict.__repr__(self)})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return dict(self) == dict(other)
+        return NotImplemented
+
+    def __deepcopy__(self, memo: dict) -> "_FrozenMapping":
+        return self
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError("frozen mapping is immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _immutable
+
+
 def _immutable_snapshot(value: object) -> object:
+    if isinstance(value, Enum):
+        return _immutable_snapshot(value.value)
+    if isinstance(value, np.ndarray):
+        return _immutable_snapshot(value.tolist())
+    if isinstance(value, np.generic):
+        return _immutable_snapshot(value.item())
     if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _immutable_snapshot(item) for key, item in value.items()}
-        )
+        return _FrozenMapping(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _FrozenMapping({
+            item.name: _immutable_snapshot(getattr(value, item.name))
+            for item in fields(value)
+        })
     if isinstance(value, list | tuple):
         return tuple(_immutable_snapshot(item) for item in value)
     if isinstance(value, set | frozenset):
-        return frozenset(_immutable_snapshot(item) for item in value)
-    return value
+        return tuple(
+            _immutable_snapshot(item)
+            for item in sorted(value, key=repr)
+        )
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("snapshot payload contains a non-finite float")
+        return value
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    attributes = {}
+    if hasattr(value, "__dict__"):
+        attributes.update(vars(value))
+    for cls in type(value).__mro__:
+        for name in getattr(cls, "__slots__", ()):
+            if isinstance(name, str) and hasattr(value, name):
+                attributes.setdefault(name, getattr(value, name))
+    if attributes:
+        return _FrozenMapping(attributes)
+    raise TypeError(
+        f"unsupported mutable snapshot payload: {type(value).__name__}"
+    )
 
 
 @dataclass(frozen=True)
@@ -74,6 +140,36 @@ class ActionSpec:
     max_turn_rate_rad_min: float
     min_speed_cells_min: float
     max_speed_cells_min: float
+
+
+@dataclass(frozen=True)
+class CoverageExecutionConfig:
+    """Physical SAR geometry shared by planning, safety, and execution."""
+
+    swath_width_cells: float
+    near_range_cells: float
+    min_turn_radius_cells: float
+    along_track_cells: float
+    heading_tolerance_rad: float
+    cross_track_tolerance_cells: float
+
+    def __post_init__(self) -> None:
+        positive = (
+            "swath_width_cells",
+            "near_range_cells",
+            "min_turn_radius_cells",
+            "along_track_cells",
+        )
+        for name in positive:
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+            object.__setattr__(self, name, value)
+        for name in ("heading_tolerance_rad", "cross_track_tolerance_cells"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True)
@@ -156,6 +252,11 @@ class ControlCommand:
     operation_mode: OperationMode
     target_contact_id: str | None = None
     schema_version: str = "control-command/v1"
+    sar_look_direction: Literal["left", "right"] | None = field(
+        default=None, kw_only=True
+    )
+    sar_scan_heading_rad: float | None = field(default=None, kw_only=True)
+    sar_scan_origin: tuple[float, float] | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -197,7 +298,100 @@ class ControlTask:
     task_type: OperationMode
     region_bbox: BBox | None = None
     target_contact_id: str | None = None
+    probe_id: str | None = None
     recovery_plan: RecoveryPlan | None = None
+
+
+_ROUTE_STATUSES = frozenset(
+    {"ready", "pending", "guidance_only", "unavailable", "cleared"}
+)
+
+
+@dataclass(frozen=True)
+class ControlRouteSnapshot:
+    task_id: str | None
+    task_type: str
+    phase: str
+    target_contact_id: str | None
+    route: tuple[Pose, ...]
+    next_index: int
+    route_revision: int
+    planning_map_version: int | None
+    status: str
+    coverage_progress: Mapping[str, object] | None = field(
+        default=None, kw_only=True
+    )
+
+    def __post_init__(self) -> None:
+        for name in ("task_type", "phase"):
+            value = getattr(self, name)
+            if isinstance(value, Enum):
+                value = value.value
+                object.__setattr__(self, name, value)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if self.task_id is not None and (
+            not isinstance(self.task_id, str) or not self.task_id
+        ):
+            raise ValueError("task_id must be a non-empty string or None")
+        if self.target_contact_id is not None and (
+            not isinstance(self.target_contact_id, str) or not self.target_contact_id
+        ):
+            raise ValueError(
+                "target_contact_id must be a non-empty string or None"
+            )
+        if self.status not in _ROUTE_STATUSES:
+            raise ValueError(f"status must be one of {sorted(_ROUTE_STATUSES)}")
+        if isinstance(self.next_index, bool) or not isinstance(self.next_index, int):
+            raise ValueError("next_index must be an integer")
+        if isinstance(self.route_revision, bool) or not isinstance(self.route_revision, int):
+            raise ValueError("route_revision must be an integer")
+        if self.route_revision < 0:
+            raise ValueError("route_revision must be non-negative")
+        if self.planning_map_version is not None and (
+            isinstance(self.planning_map_version, bool)
+            or not isinstance(self.planning_map_version, int)
+            or self.planning_map_version < 0
+        ):
+            raise ValueError(
+                "planning_map_version must be a non-negative integer or None"
+            )
+        if self.coverage_progress is not None:
+            if not isinstance(self.coverage_progress, Mapping):
+                raise ValueError("coverage_progress must be a mapping or None")
+            object.__setattr__(
+                self,
+                "coverage_progress",
+                _immutable_snapshot(self.coverage_progress),
+            )
+        normalized_route = []
+        for pose in self.route:
+            if not isinstance(pose, (tuple, list)) or len(pose) != 3:
+                raise ValueError("route poses must be finite triples")
+            normalized_pose = tuple(float(value) for value in pose)
+            if not all(math.isfinite(value) for value in normalized_pose):
+                raise ValueError("route poses must be finite triples")
+            normalized_route.append(normalized_pose)
+        if not 0 <= self.next_index <= len(normalized_route):
+            raise ValueError("next_index must be between zero and route length")
+        object.__setattr__(self, "route", tuple(normalized_route))
+
+
+@dataclass(frozen=True)
+class UavRouteSnapshot:
+    episode_id: str
+    generation: int
+    route: ControlRouteSnapshot
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.episode_id, str):
+            raise ValueError("episode_id must be a string")
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise ValueError("generation must be an integer")
+        if self.generation < 0:
+            raise ValueError("generation must be non-negative")
+        if not isinstance(self.route, ControlRouteSnapshot):
+            raise TypeError("route must be a ControlRouteSnapshot")
 
 
 @dataclass(frozen=True)
@@ -231,6 +425,8 @@ class ControlObservation:
     shared_uavs: tuple[UAVObservation, ...]
     events: tuple[ControlEvent, ...]
     action_mask: ActionMask
+    probe: ProbeSession | None = None
+    contact_histories: tuple[ContactSnapshot, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -243,7 +439,9 @@ class ControlObservation:
             array = np.array(getattr(self, field_name), copy=True)
             array.setflags(write=False)
             object.__setattr__(self, field_name, array)
-        for field_name in ("contacts", "hazards", "bases", "shared_uavs", "events"):
+        for field_name in (
+            "contacts", "hazards", "bases", "shared_uavs", "events", "contact_histories"
+        ):
             object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
 
 
@@ -255,6 +453,13 @@ class ControllerContext:
     action_spec: ActionSpec
     episode_id: str
     task: ControlTask | None = None
+    generation: int = field(default=0, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise ValueError("generation must be an integer")
+        if self.generation < 0:
+            raise ValueError("generation must be non-negative")
 
 
 @dataclass(frozen=True)

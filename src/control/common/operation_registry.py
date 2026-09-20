@@ -38,8 +38,27 @@ class OperationRegistry:
             previous_command is not None
             and previous_command.operation_mode is OperationMode.TRACK
         )
-        if previous_was_track and applied_command.operation_mode is not OperationMode.TRACK:
+        previous_was_probe = (
+            previous_command is not None
+            and previous_command.operation_mode is OperationMode.PROBE
+        )
+        if (previous_was_track or previous_was_probe) and applied_command.operation_mode not in (
+            OperationMode.TRACK, OperationMode.PROBE
+        ):
+            if previous_command.target_contact_id:
+                self._state_manager.release_contact_reservation(
+                    previous_command.target_contact_id, uav_id,
+                    observation.timestamp_min, "track_exit")
             self._release_binding(uav_id)
+
+        if applied_command.operation_mode in (OperationMode.HOLDING, OperationMode.RETURN):
+            # A failed or returning task may never have applied TRACK, or its
+            # geometry may already be gone. Reservations are owned by the store.
+            for reserved in self._state_manager.contacts.list_snapshots():
+                if reserved.assigned_uav_id == uav_id:
+                    self._state_manager.release_contact_reservation(
+                        reserved.contact_id, uav_id, observation.timestamp_min,
+                        applied_command.operation_mode.value)
 
         if contact is not None:
             self._bind_track(uav_id, contact)
@@ -47,6 +66,24 @@ class OperationRegistry:
         uav = self._state_manager.get_uav(uav_id)
         if uav is not None:
             uav.sensor_mode = applied_command.sensor_mode.value
+
+    def release_uav(
+        self,
+        uav_id: str,
+        *,
+        current_time: float,
+        reason: str,
+    ) -> None:
+        """Release every operation binding owned by one failed UAV."""
+        self._release_binding(uav_id)
+        for contact in self._state_manager.contacts.list_snapshots():
+            if contact.assigned_uav_id == uav_id:
+                self._state_manager.release_contact_reservation(
+                    contact.contact_id, uav_id, current_time, reason,
+                )
+        for probe in self._state_manager.get_probe_sessions():
+            if probe.uav_id == uav_id:
+                self._state_manager.clear_probe_session(probe.probe_id)
 
     @staticmethod
     def _resolve_track_contact(

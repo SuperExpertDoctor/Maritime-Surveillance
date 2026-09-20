@@ -25,6 +25,50 @@ def test_extract_returns_candidate_result(sm):
     assert isinstance(result, CandidateResult)
 
 
+@pytest.mark.parametrize("release_reason", ["type_i_released", "timeout"])
+def test_handoff_candidates_respect_contact_clearance_and_recheck_cooldown(sm, release_reason):
+    from src.mission.contracts import Assessment
+    from tests.mission.test_contact_store import ais, visual
+
+    cid = sm.contacts.ingest_visual(visual(t=50, position=(15, 15)))
+    sm.contacts.reserve(cid, "UAV-1", "P1")
+    if release_reason == "type_i_released":
+        sm.contacts.apply_assessment(Assessment(
+            "A1", cid, "P1", 1, 50, "type_i", .9,
+            ("EO-1",), ("validated visual evidence",), (), "call1"))
+    else:
+        sm.contacts.release(cid, 50, "timeout")
+    shape = sm.config.grid.resolution
+    args = (sm, np.zeros(shape, dtype=bool), sm.get_value_matrix(),
+            sm.get_info_matrix(), np.zeros(shape, dtype=bool))
+    assert CandidateExtractor()._handoff_candidates(*args) == []
+    # Fresh AIS must not bypass clearance/cooldown, including after aliasing.
+    sm.contacts.ingest_ais(ais(51, (15, 15)), 51)
+    sm.contacts.ingest_ais(ais(52, (15, 15)), 52)
+    sm.current_time = 52
+    assert CandidateExtractor()._handoff_candidates(*args) == []
+
+
+def test_relay_candidate_value_has_no_fake_1000_bonus(sm):
+    sm.record_target_observation("G-contact", GridCoord(20, 16), "UAV-1", 50.0)
+    shape = sm.config.grid.resolution
+    values = np.ones(shape, dtype=float)
+    info = np.zeros(shape, dtype=float)
+    occupied = np.zeros(shape, dtype=bool)
+    seen = np.zeros(shape, dtype=bool)
+    extractor = CandidateExtractor()
+    extractor._has_turning_clearance = lambda *_args: True
+
+    candidates = extractor._handoff_candidates(sm, occupied, values, info, seen)
+
+    assert candidates
+    candidate = candidates[0]
+    bbox = candidate["bbox"]
+    assert candidate["total_value"] == pytest.approx(
+        float(values[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end].sum())
+    )
+
+
 def test_black_cells_become_candidates(sm):
     """黑态势 cell 应形成候选区域。"""
     extractor = CandidateExtractor()
@@ -46,13 +90,54 @@ def test_track_regions_are_excluded(sm):
 def test_active_search_regions_are_excluded(sm):
     from src.schedule.datatypes import Region
 
-    active = Region(id="S-active", bbox=BBox(8, 8, 16, 14), type="search")
+    active = Region(
+        id="S-active",
+        bbox=BBox(8, 8, 16, 14),
+        type="search",
+        assigned_uav_id="UAV-1",
+    )
     sm.set_search_regions([active])
+    sm.update_uav_status(
+        "UAV-1", "searching", GridCoord(8, 8), assigned_region_id=active.id,
+    )
 
     result = CandidateExtractor().extract(sm)
 
     assert all(
         not _bboxes_overlap(candidate["bbox"], active.bbox)
+        for candidate in result.candidate_regions
+    )
+
+
+def test_unassigned_active_search_region_does_not_lock_candidate_pool(sm):
+    from src.schedule.datatypes import Region
+
+    active = Region(id="S-unassigned", bbox=BBox(8, 8, 16, 14), type="search")
+    sm.set_search_regions([active])
+
+    result = CandidateExtractor().extract(sm)
+
+    assert any(
+        _bboxes_overlap(candidate["bbox"], active.bbox)
+        for candidate in result.candidate_regions
+    )
+
+
+def test_active_search_region_with_unknown_uav_does_not_lock_candidate_pool(sm):
+    from src.schedule.datatypes import Region
+
+    active = Region(
+        id="S-unknown-uav",
+        bbox=BBox(8, 8, 16, 14),
+        type="search",
+        assigned_uav_id="UAV-missing",
+    )
+    sm.set_search_regions([active])
+
+    result = CandidateExtractor().extract(sm)
+
+    assert any(
+        _bboxes_overlap(candidate["bbox"], active.bbox)
         for candidate in result.candidate_regions
     )
 
@@ -69,11 +154,33 @@ def test_candidate_bbox_within_size_range(sm):
         assert area <= sm.config.grid.search_max_cells, "Area unexpectedly large"
 
 
-def test_initial_candidates_preserve_validated_normal_sortie_size(sm):
+def test_subminimum_coverage_fragment_is_alert_only(sm):
+    from src.schedule.datatypes import Region
+
+    fixed = np.zeros(sm.config.grid.resolution, dtype=bool)
+    fixed[10:18, 10:18] = True
+    sm.configure_coverage_metrics(fixed, "fragment-fixture")
+    sm._previous_search_regions = [Region("S-fragment", BBox(10, 10, 18, 18), "search")]
+    sm._track_regions = [Region("T-fragment", BBox(13, 13, 17, 17), "track")]
+    for region in sm._track_regions:
+        region.assigned_uav_id = None
+
+    pool = CandidateExtractor().extract_pool(sm)
+
+    assert all(
+        len(candidate.cells) >= sm.config.grid.search_min_cells
+        for candidate in pool.candidates
+    )
+    assert pool.fragment_alerts
+
+
+def test_initial_candidates_use_sortie_sized_tiles(sm):
     result = CandidateExtractor().extract(sm)
     assert result.candidate_regions
     assert all(
-        candidate["cell_count"] == sm.config.grid.search_max_cells
+        sm.config.grid.search_min_cells
+        <= candidate["cell_count"]
+        <= sm.config.grid.search_min_cells * 2
         for candidate in result.candidate_regions
     )
 
@@ -129,14 +236,14 @@ def test_irregular_obstacle_pocket_remains_schedulable(sm):
         obstacles,
         obstacle_grid_mask(obstacles, sm.config.grid.resolution),
     )
-    sm.info_field.last_scan_time[1:17, 1:29] = 0.0
+    sm.scan_bbox(BBox(1, 1, 17, 29), 0.0)
 
     result = CandidateExtractor().extract(sm)
 
     assert result.candidate_regions
     assert any(candidate["bbox"].col_start >= 15 for candidate in result.candidate_regions)
     assert all(
-        np.isneginf(sm.info_field.last_scan_time[
+        np.isneginf(sm.get_last_scan_matrix()[
             candidate["bbox"].col_start:candidate["bbox"].col_end,
             candidate["bbox"].row_start:candidate["bbox"].row_end,
         ]).any()
@@ -151,11 +258,11 @@ def test_sub_candidates_have_correct_local_values(sm):
     extractor = CandidateExtractor()
     result = extractor.extract(sm)
     V = sm.get_value_matrix()
-    I = sm.get_info_matrix()
+    info = sm.get_info_matrix()
     for cand in result.candidate_regions:
         bbox = cand["bbox"]
         patch_V = V[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
-        patch_I = I[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
+        patch_I = info[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end]
         expected_value = float(np.sum(patch_V))
         expected_info = float(np.mean(patch_I))
         assert abs(cand["total_value"] - expected_value) < 1e-6, (

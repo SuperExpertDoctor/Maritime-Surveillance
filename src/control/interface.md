@@ -1,5 +1,7 @@
 # UAV Control Strategy Interfaces
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 本文档说明 `src/control` 的控制策略接口、运行时契约和自定义控制器的集成方式。
 文档对应当前实现的 `control-observation/v1` 与 `control-command/v1` 契约。
 
@@ -161,14 +163,14 @@ class ControlObservation:
 | `searchable_mask` | 局部可搜索 mask，`bool` |
 | `planning_obstacle_mask` | 全局规划 mask，只含已发布的陆地和障碍物占用，`bool` |
 | `planning_map_version` | 全局规划 mask 的版本；变化后路径需要重新验证 |
-| `contacts` | 当前由传感器/状态管理器发布的目标估计，不是舰船真值 |
+| `contacts` | 当前由传感器/状态管理器发布的目标估计，不是船舶真值 |
 | `hazards` | 岛屿、雷暴等已发布危险物的几何和运动快照 |
 | `bases` | 基地位置、容量和已预留维护负载 |
 | `shared_uavs` | 其他 UAV 的公开状态，用于协同和避碰 |
 | `events` | 本 UAV 当前 tick 消费到的事件快照，事件只消费一次 |
 | `action_mask` | 当前控制权和观测资源允许的传感器、作业模式、目标 ID |
 
-`planning_obstacle_mask` 是全局规划数据，不是环境对象引用，也不包含舰船位置。
+`planning_obstacle_mask` 是全局规划数据，不是环境对象引用，也不包含船舶位置。
 `contacts` 中没有有效 contact 时，控制器不能自行猜测目标；必须使用空 contact 集合
 和 action mask 表达“当前没有可跟踪目标”。
 
@@ -182,6 +184,20 @@ class ControlObservation:
 
 ### 3.3 动作和事件
 
+覆盖控制使用一个冻结的物理几何契约。生产环境从实际 `SARSensor` 和 `UAVEntity`
+构造它，不能在 controller 中复制或放大传感器扫幅：
+
+```python
+@dataclass(frozen=True)
+class CoverageExecutionConfig:
+    swath_width_cells: float
+    near_range_cells: float
+    min_turn_radius_cells: float
+    along_track_cells: float
+    heading_tolerance_rad: float
+    cross_track_tolerance_cells: float
+```
+
 ```python
 @dataclass(frozen=True)
 class ControlCommand:
@@ -191,6 +207,9 @@ class ControlCommand:
     operation_mode: OperationMode
     target_contact_id: str | None = None
     schema_version: str = "control-command/v1"
+    sar_look_direction: Literal["left", "right"] | None = None
+    sar_scan_heading_rad: float | None = None
+    sar_scan_origin: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +220,11 @@ class ControlDecision:
 
 一个动作只描述一个仿真控制步，不是整条航路。控制器可以在内部保留路线、滤波器
 或策略状态，但每个 tick 必须返回 `ControlDecision`。
+
+三个 SAR 字段是关键字参数。`SensorMode.SAR` 的动作必须同时提供合法的视向、有限
+扫描段切线航向和当前条带起点；安全层拒绝缺失或非有限值。`OFF`/`EO` 动作可以省略
+这些字段，安全层会清除残留的 SAR acquisition 元数据。SAR 是否实际成像还要由执行
+器根据应用后的真实航向误差和条带横向误差门控。
 
 控制器事件使用 `ControllerEventRequest` 请求；协调器会分配全局 sequence、设置
 时间戳和来源，并把它们排入后续 tick。控制器不能直接修改事件队列或调用调度器。
@@ -216,6 +240,9 @@ return ControlDecision(
         speed_cells_min=speed,
         sensor_mode=SensorMode.SAR,
         operation_mode=OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(10.0, 10.0),
     ),
     events=(
         ControllerEventRequest(
@@ -668,6 +695,9 @@ class MyCoverageController(HeuristicControllerBase):
             speed_cells_min=self.action_spec.max_speed_cells_min,
             sensor_mode=SensorMode.SAR,
             operation_mode=OperationMode.COVERAGE,
+            sar_look_direction="right",
+            sar_scan_heading_rad=0.0,
+            sar_scan_origin=(0.0, 0.0),
         )
         if self.is_complete(observation):
             return ControlDecision(
@@ -909,3 +939,19 @@ assert decision.command.schema_version == "control-command/v1"
 集成测试应通过 `ControlFactory.register(ControlMode.BC/RL, provider)` 和
 `SimulationEngine(control_providers=...)` 验证实际生命周期，不应直接调用私有字段
 替代 coordinator。
+
+## 11. Mixed Maritime Boundary
+
+混合海上任务继续使用本接口的 `ControlCoordinator`、ownership generation、
+`SafetyEnvelope` 和唯一 `UAVDynamicsExecutor`。控制器只接收公开的
+`ControlObservation` 与 action mask；不能读取 `Ship`、物理身份、`StateManager`、
+红方计划或评估器真值。
+
+卫星 AIS 和 SAR/EO 测量先进入 `ContactStore`，身份只由已批准的 probe 任务产生的
+有效证据研判。`unknown` 接触不能被控制器当作 target 或 type_i；接触释放和任务
+接力必须由全局任务调度批次提交，不能在控制器回调中直接恢复旧搜索。
+
+`mission-frame/v2` 的默认渲染层只显示 UAV、公开 contact snapshot、意图和运行状态。
+物理真值、红方状态和评估结果只能写入隔离的 `evaluation` 域，不得进入 blue prompt
+或控制 observation。模型角色失败时由仿真层进入 `paused_model`/`failed`，重试不推进
+仿真时间，也不构造 heuristic 或 rule-based 的伪模型决策。

@@ -1,7 +1,7 @@
 ﻿import pytest
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.state_manager import StateManager
-from src.schedule.datatypes import BBox, GridCoord
+from src.schedule.datatypes import BBox
 from src.schedule.info_value_table import InfoValueTable
 
 

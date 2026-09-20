@@ -8,10 +8,17 @@ from datetime import datetime
 class FrameLogger:
     """追加式 JSONL 日志写入器。"""
 
-    def __init__(self, output_dir: str = "outputs"):
-        os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._path = os.path.join(output_dir, f"simulation_{timestamp}.jsonl")
+    def __init__(self, output_dir: str = "outputs", *, episode_logger=None,
+                 filename: str | None = None):
+        self._episode_logger = episode_logger
+        if episode_logger is not None:
+            self._path = str(episode_logger.path_for("frames", "frames"))
+        else:
+            os.makedirs(output_dir, exist_ok=True)
+            if filename is None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"simulation_{timestamp}.jsonl"
+            self._path = os.path.join(output_dir, filename)
         self._count: int = 0
 
     @property
@@ -24,6 +31,10 @@ class FrameLogger:
 
     def write(self, frame: dict) -> None:
         """追加一帧到 JSONL 文件。"""
+        if self._episode_logger is not None:
+            self._episode_logger.append("frames", "frames", frame)
+            self._count += 1
+            return
         payload = json.dumps(frame, ensure_ascii=False) + "\n"
         for attempt in range(20):
             try:

@@ -9,6 +9,7 @@ from src.control.common.contracts import (
     ControlDecision,
     ControlMode,
     ControlObservation,
+    ControlRouteSnapshot,
     ControllerContext,
     ObservationSpec,
     PolicySource,
@@ -40,6 +41,10 @@ class ControllerBase(ABC):
 
     def close(self) -> None:
         pass
+
+    def route_snapshot(self) -> ControlRouteSnapshot | None:
+        """Return an optional read-only route view for diagnostics and frames."""
+        return None
 
 
 class LearningControllerBase(ControllerBase):

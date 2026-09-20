@@ -1,3 +1,8 @@
+import math
+from copy import deepcopy
+from dataclasses import FrozenInstanceError, fields
+import json
+
 import numpy as np
 import pytest
 
@@ -11,14 +16,65 @@ from src.control.common.contracts import (
     ControlMode,
     ControlObservation,
     ControlOwner,
+    ControlRouteSnapshot,
     ControllerEventRequest,
+    CoverageExecutionConfig,
     HazardObservation,
     OperationMode,
     PolicySource,
     RecoveryPlan,
     SensorMode,
     UAVObservation,
+    UavRouteSnapshot,
 )
+
+
+def test_coverage_execution_config_is_frozen_and_has_six_physical_fields():
+    config = CoverageExecutionConfig(
+        swath_width_cells=1.5,
+        near_range_cells=0.25,
+        min_turn_radius_cells=1.0,
+        along_track_cells=0.8,
+        heading_tolerance_rad=math.radians(2.0),
+        cross_track_tolerance_cells=0.2,
+    )
+
+    assert tuple(item.name for item in fields(config)) == (
+        "swath_width_cells",
+        "near_range_cells",
+        "min_turn_radius_cells",
+        "along_track_cells",
+        "heading_tolerance_rad",
+        "cross_track_tolerance_cells",
+    )
+    with pytest.raises(FrozenInstanceError):
+        config.swath_width_cells = 2.0
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "swath_width_cells",
+        "near_range_cells",
+        "min_turn_radius_cells",
+        "along_track_cells",
+        "heading_tolerance_rad",
+        "cross_track_tolerance_cells",
+    ],
+)
+def test_coverage_execution_config_rejects_nonphysical_values(field_name):
+    values = {
+        "swath_width_cells": 1.5,
+        "near_range_cells": 0.25,
+        "min_turn_radius_cells": 1.0,
+        "along_track_cells": 0.8,
+        "heading_tolerance_rad": 0.03,
+        "cross_track_tolerance_cells": 0.2,
+    }
+    values[field_name] = -1.0
+
+    with pytest.raises(ValueError, match=field_name):
+        CoverageExecutionConfig(**values)
 
 
 def test_control_command_uses_physical_step_units():
@@ -27,6 +83,9 @@ def test_control_command_uses_physical_step_units():
         speed_cells_min=0.25,
         sensor_mode=SensorMode.SAR,
         operation_mode=OperationMode.COVERAGE,
+        sar_look_direction="right",
+        sar_scan_heading_rad=0.0,
+        sar_scan_origin=(0.0, 0.0),
     )
 
     assert command.turn_rate_rad_min == 0.2
@@ -98,10 +157,30 @@ def test_control_event_request_deep_freezes_nested_payload():
     assert request.payload == {
         "metadata": {"task_id": "task-1"},
         "phases": ("transit",),
-        "tags": frozenset({"priority"}),
+        "tags": ("priority",),
     }
     with pytest.raises(TypeError):
         request.payload["metadata"]["task_id"] = "task-3"
+
+
+def test_snapshot_detaches_ndarray_and_custom_mutable_payload():
+    class MutablePayload:
+        def __init__(self):
+            self.labels = ["initial"]
+
+    array = np.array([1.0, 2.0], dtype=np.float32)
+    custom = MutablePayload()
+    request = ControllerEventRequest(
+        event_type="snapshot",
+        payload={"array": array, "custom": custom},
+    )
+
+    array[0] = 99.0
+    custom.labels.append("mutated")
+
+    assert request.payload["array"] == (1.0, 2.0)
+    assert request.payload["custom"] == {"labels": ("initial",)}
+    json.dumps(request.payload, allow_nan=False)
 
 
 def test_control_event_deep_freezes_nested_payload():
@@ -124,6 +203,41 @@ def test_control_event_deep_freezes_nested_payload():
     }
     with pytest.raises(TypeError):
         event.payload["metadata"]["task_id"] = "task-3"
+
+
+def test_frozen_payloads_survive_deepcopy_because_publication_copies_them():
+    """Frame publication deep-copies scheduler state, so frozen payloads must copy.
+
+    ``MappingProxyType`` supplied the immutability but cannot be deep-copied, so
+    the first frame published while a coverage route was in flight raised
+    ``TypeError: cannot pickle 'mappingproxy' object`` and killed the process.
+    """
+    progress = {"phase": "coverage", "progress_cells": 12.0}
+
+    route = ControlRouteSnapshot(
+        task_id="task-1",
+        task_type="coverage",
+        phase="coverage",
+        target_contact_id=None,
+        route=((1.0, 2.0, 0.0),),
+        next_index=0,
+        route_revision=1,
+        planning_map_version=1,
+        status="ready",
+        coverage_progress=progress,
+    )
+    progress["phase"] = "return"
+
+    assert route.coverage_progress == {"phase": "coverage", "progress_cells": 12.0}
+    with pytest.raises(TypeError):
+        route.coverage_progress["phase"] = "return"
+
+    envelope = deepcopy(UavRouteSnapshot("episode-1", 1, route))
+
+    assert envelope.route.coverage_progress == {
+        "phase": "coverage",
+        "progress_cells": 12.0,
+    }
 
 
 def test_control_observation_owns_read_only_array_snapshots():

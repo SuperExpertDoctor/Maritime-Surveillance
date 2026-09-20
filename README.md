@@ -1,6 +1,34 @@
 # UAV Maritime Surveillance Scheduler
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 基于 LLM（LongCat）的 UAV 编队海上侦察动态任务调度系统。在 300 km × 300 km 海域中，10 架固定翼 UAV 执行区域覆盖搜索（SAR）与目标跟踪监视（EO/IR），LLM 作为全局决策器动态划分搜索区域，Hungarian 算法负责 UAV 与区域的最优配对。所有单 UAV 命令都经过统一的 `ControlCoordinator`，默认使用 heuristic 控制策略。
+
+当前对齐实现还包含混合海上目标、全局卫星 AIS、递进式 EO 核查、被动辐射探测、
+人工重点区和受验证策略记忆。当前实现和测试状态见
+[混合海上验证记录](docs/MIXED_MARITIME_VALIDATION.md)；参数口径见
+[系统参数手册](docs/SYSTEM_PARAMS.md)。本文后面的 GOAL/GOAL2 章节是历史能力说明，
+不替代当前方案的 `vessel_class/activity`、观测证据和 live 验证口径。
+
+## 2026-09-15 需求对齐
+
+- 船舶类别与活动状态分离：`unknown/type_i/type_ii` 和
+  `unknown/normal/suspected_violation/confirmed_violation`。
+- 被动接收器只向蓝方发布含噪方位；只有同一 `sample/source/burst` 中至少两架不同
+  UAV 成功探测时，环境边界才释放真实 `PassivePosition`。硬探测范围外不产生观测。
+- 中央信息策略以 `EvidenceRecord` 更新 `I/S/A/V`，每个事务只递增一个
+  `information_version`，并把 dirty bbox、原因和证据 ID 传给候选池及调度审计。
+- 调度使用完整可行候选池和公平 Prompt 窗口；LLM 选择任务 ID，确定性匹配器选择 UAV。
+- fixture 评估不会冒充真实模型达标；使用 `--transport live` 的报告才属于真实 API 验证。
+
+快速 fixture 验证：
+
+```bash
+LONGCAT_API_KEY=offline-test PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  python scripts/evaluate_mixed_maritime.py --config configs \
+  --seeds 101,102,103,104,105 --repeat 3 \
+  --output /tmp/maritime-alignment-fixture.json --transport fixture
+```
 
 ---
 
@@ -14,7 +42,7 @@
             ┌──────────────────────┼──────────────────────┐
             ▼                      ▼                      ▼
      ┌─────────────┐     ┌─────────────┐        ┌─────────────┐
-     │  障碍物更新   │     │  舰船机动     │        │ 控制运行时推进 │
+     │  障碍物更新   │     │  船舶机动     │        │ 控制运行时推进 │
      │ (雷云移动/消散)│     │ (zigzag/编队) │        │ (Coordinator) │
      └─────────────┘     └─────────────┘        └──────┬──────┘
                                                        │
@@ -376,7 +404,7 @@ $$V = \frac{(r^2 - R_d^2)^2}{2}$$
 
 | 分类 | 事件类型 | 响应方式 |
 |:----:|------|:----:|
-| **Heavy** | `target_found`, `target_lost`, `target_departed`, `civilian_released`, `target_military`, `uav_returned`, `lifecycle_completed`, `storm_spawned`, `storm_dissipated` | LLM 全管线 |
+| **Heavy** | `target_found`, `target_lost`, `target_departed`, `type_i_released`, `type_ii_confirmed`, `uav_returned`, `lifecycle_completed`, `storm_spawned`, `storm_dissipated` | LLM 全管线 |
 | **Light** | `search_complete`, `uav_refueled`, `base_capacity_full`, `uav_fuel_low_warning` | 仅 Hungarian 配对 |
 | **周期** | 每 30 min（仿真时间） | Heavy trigger |
 
@@ -431,9 +459,9 @@ TriggerManager.check():
 
 | 条件 | 判定 | 动作 |
 |------|:--:|------|
-| 无 AIS 信号 | **军舰** | 继续跟踪 |
-| $\text{dist}(\text{AIS位置}, \text{推算位置}) > 2 \text{ cells}$ | **军舰**（虚假 AIS） | 继续跟踪 |
-| $\text{dist}(\text{AIS位置}, \text{推算位置}) \leq 2 \text{ cells}$ | **民船** | 放弃跟踪，释放 UAV |
+| 无 AIS 信号 | **II 类船舶** | 继续跟踪 |
+| $\text{dist}(\text{AIS位置}, \text{推算位置}) > 2 \text{ cells}$ | **II 类船舶**（虚假 AIS） | 继续跟踪 |
+| $\text{dist}(\text{AIS位置}, \text{推算位置}) \leq 2 \text{ cells}$ | **I 类船舶** | 放弃跟踪，释放 UAV |
 
 ### 5.4 雷云规避跟踪（三级响应）
 
@@ -493,6 +521,30 @@ npm run test:acceptance
 - [docs/GOAL2.md](docs/GOAL2.md) § 十 — GOAL2 增量验证（多基地、AIS 判别、雷云规避、透明度可视化）
 - [docs/VALIDATION.md](docs/VALIDATION.md) — 最新验收记录
 
+### 回放视觉恢复验收
+
+2026-09-17 的真实引擎 fixture 长跑、专项集成测试、回放 API 和浏览器视觉验收记录在
+[回放视觉恢复验收报告](docs/validation/replay-restoration/acceptance-report.md)；25 项能力逐项状态见
+[feature integration matrix](docs/validation/replay-restoration/feature-integration-matrix.md)。运行产物放在
+`outputs/validation/replay-restoration/<run-id>/`，不得清理 `outputs/` 根目录。
+
+```bash
+# 20/120/480 分钟 V06 fixture 与实时帧审计示例
+python scripts/validate_replay_restoration.py \
+  --scenario V06 --seed 42 --steps 480 --transport fixture \
+  --output-dir outputs/validation/replay-restoration/<new-run-id>
+python scripts/validate_replay_restoration.py --check-log \
+  outputs/validation/replay-restoration/<run-id>/frames.jsonl
+
+# 专用浏览器验收使用已登记来源的输入目录
+cd src/vis/frontend
+REPLAY_ACCEPTANCE_DIR="/home/shuixia/users/houguoqiang/projects/Maritime-Surveillance/.worktrees/replay-visual-restoration/outputs/validation/replay-restoration/t14-browser-20260917" \
+REPLAY_SCREENSHOT_DIR="/home/shuixia/users/houguoqiang/projects/Maritime-Surveillance/.worktrees/replay-visual-restoration/outputs/validation/replay-restoration/t14-browser-20260917/screenshots-final" \
+  npx playwright test --config playwright.replay.config.js
+```
+
+该记录使用 fixture 验证真实引擎和渲染链路；当前环境未提供 `LONGCAT_API_KEY`，所以报告不会把 fixture 结果标记为 live 模型效果。
+
 ---
 
 ## 八、核心模块
@@ -505,10 +557,10 @@ npm run test:acceptance
 | SAR 传感器 | `sar_sensor.py` | 侧视条带成像 + SNR 检测模型 |
 | EO/IR 传感器 | `eo_sensor.py` | 光电跟踪 + FOV 锥计算 |
 | UAV 实体 | `uav_entity.py` | 连续位姿固定翼 UAV，集成 Dubins + LGVF + 传感器 |
-| 舰船模型 | `ship.py` | Zigzag 逃逸 + 编队 + ShipType（航母/驱逐舰）+ AIS |
+| 船舶模型 | `ship.py` | Zigzag 逃逸 + 编队 + ShipType（航母/驱逐舰）+ AIS |
 | 障碍物 | `obstacle.py` | 正方形岛屿 + 动态雷云 + 碰撞检测 |
 | 基地 | `base_station.py` | 多基地 + 容量约束 + 加油队列管理 |
-| 仿真引擎 | `simulation.py` | 环境 + UAV + 舰船 + 调度全集成 |
+| 仿真引擎 | `simulation.py` | 环境 + UAV + 船舶 + 调度全集成 |
 
 ### 工具库 (`src/utils/`)
 

@@ -80,9 +80,13 @@ class AStarNavigator:
         obstacle_mask: np.ndarray,
         r_min: float,
         planning_map_version: int = 0,
+        *,
+        goal_heading_rad: float | None = None,
     ) -> list[Pose]:
         start_pose = self._normalise_pose(start)
         normalised_goals = self._normalise_goals(goals)
+        if goal_heading_rad is not None and not math.isfinite(goal_heading_rad):
+            raise ValueError("goal_heading_rad must be finite")
         summary = f"grid goals={len(normalised_goals)}"
         return self._plan(
             start_pose,
@@ -91,6 +95,7 @@ class AStarNavigator:
             r_min,
             planning_map_version,
             summary,
+            goal_heading_rad=goal_heading_rad,
         )
 
     def plan_to_region(
@@ -153,6 +158,8 @@ class AStarNavigator:
         r_min: float,
         planning_map_version: int,
         goal_summary: str,
+        *,
+        goal_heading_rad: float | None = None,
     ) -> list[Pose]:
         mask = self._normalise_mask(obstacle_mask)
         if not math.isfinite(r_min) or r_min <= 0.0:
@@ -202,7 +209,11 @@ class AStarNavigator:
             pose = poses[key]
 
             if any(math.dist(pose[:2], goal) <= 1e-12 for goal in available_goals):
-                return self._reconstruct(start_key, key, came_from, start)
+                if (
+                    goal_heading_rad is None
+                    or abs(_wrap_pi(pose[2] - goal_heading_rad)) <= 1e-9
+                ):
+                    return self._reconstruct(start_key, key, came_from, start)
 
             if len(attempts) < self.candidate_limit:
                 ordered_goals = sorted(
@@ -217,7 +228,7 @@ class AStarNavigator:
                     distance = math.dist(pose[:2], goal)
                     if distance > analytic_distance + 1e-12:
                         break
-                    goal_pose = self._goal_pose(pose, goal)
+                    goal_pose = self._goal_pose(pose, goal, goal_heading_rad)
                     attempt = (key, goal_pose)
                     if attempt in attempted_pairs:
                         continue
@@ -304,13 +315,21 @@ class AStarNavigator:
         return min(math.dist(pose[:2], goal) for goal in goals)
 
     @staticmethod
-    def _goal_pose(pose: Pose, goal: tuple[float, float]) -> Pose:
+    def _goal_pose(
+        pose: Pose,
+        goal: tuple[float, float],
+        goal_heading_rad: float | None = None,
+    ) -> Pose:
         delta_col = goal[0] - pose[0]
         delta_row = goal[1] - pose[1]
         heading = (
-            math.atan2(delta_row, delta_col)
-            if abs(delta_col) > 1e-12 or abs(delta_row) > 1e-12
-            else pose[2]
+            goal_heading_rad
+            if goal_heading_rad is not None
+            else (
+                math.atan2(delta_row, delta_col)
+                if abs(delta_col) > 1e-12 or abs(delta_row) > 1e-12
+                else pose[2]
+            )
         )
         return (goal[0], goal[1], _wrap_pi(heading))
 

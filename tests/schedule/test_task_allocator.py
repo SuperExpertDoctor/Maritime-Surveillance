@@ -1,6 +1,10 @@
 ﻿import pytest
 import src.schedule.task_allocator as task_allocator_module
+from src.schedule.candidate_extractor import CandidateResult
 from src.schedule.config_loader import ConfigLoader
+from src.schedule.info_value_table import InfoValueTable
+from src.schedule.prompt_builder import PromptBuilder
+from src.schedule.state_manager import StateManager
 from src.schedule.task_allocator import TaskAllocator
 from src.schedule.datatypes import BBox, GridCoord, Region
 
@@ -21,6 +25,27 @@ def test_allocator_initializes_all_components(allocator):
     assert allocator.extractor is not None
     assert allocator.llm_client is not None
     assert allocator.trigger_manager is not None
+
+
+def test_prompt_uses_allocator_availability_and_configured_region_limit(config):
+    from dataclasses import replace
+
+    config = replace(config, uav=replace(config.uav, count_max=3))
+    state = StateManager(config)
+    available = (state.get_all_uavs()[0].id,)
+
+    _, prompt = PromptBuilder().build(
+        state,
+        InfoValueTable(state),
+        CandidateResult(),
+        required_search_regions=1,
+        available_uav_ids=available,
+        uav_count=config.uav.count,
+    )
+
+    assert "配置UAV总数上限: 3架" in prompt
+    assert "现可用UAV: 1架" in prompt
+    assert "本周期新增区域容量: 1个" in prompt
 
 
 def test_step_initial_no_trigger(allocator):

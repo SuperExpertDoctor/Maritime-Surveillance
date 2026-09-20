@@ -1,25 +1,1060 @@
 ﻿from src.schedule.config_loader import AppConfig
+from collections import OrderedDict
+from dataclasses import replace
+
 from src.schedule.state_manager import StateManager
 from src.schedule.info_value_table import InfoValueTable
 from src.schedule.candidate_extractor import CandidateExtractor, CandidateResult
 from src.schedule.llm_client import LLMClient
 from src.schedule.llm_reviewer import LLMReviewer
-from src.schedule.hungarian import hungarian_pair
-from src.schedule.trigger_manager import TriggerManager
+from src.schedule.hungarian import AssignmentBackendUnavailable, hungarian_pair
+from src.schedule.trigger_manager import TriggerDecision, TriggerManager
 from src.schedule.datatypes import Region, BBox
+from src.schedule.output_validator import compute_iou
+import math
+import numpy as np
+from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
+from src.env.dubins import DubinsPath
+from src.utils.search_route_planner import SearchRouteRequest, plan_search_route
+import time
+import logging
+
+from src.mission.contracts import (
+    AssignmentBatch,
+    ContactSnapshot,
+    FeasibleEdge,
+    Intent,
+    IntentStatus,
+    MissionSnapshot,
+    TaskCandidate,
+    TaskRecord,
+    UavResource,
+)
+from src.mission.coverage_policy import (
+    CoverageCandidateWindow,
+    CoveragePolicy,
+    build_coverage_constraint,
+)
+from src.mission.mission_scheduler import MissionScheduler
+from src.mission.task_catalog import TaskCatalog
+from src.mission.strategy_memory import StrategyMemoryStore
+
+
+_SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
+_LOGGER = logging.getLogger(__name__)
+_CACHE_MISS = object()
 
 
 class TaskAllocator:
     """Main orchestrator connecting all scheduling components."""
 
-    def __init__(self, config: AppConfig):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        llm_gateway=None,
+        strategy_memory_store: StrategyMemoryStore | None = None,
+        scheduler_mode: str = "mission",
+        route_cache_limit: int = 512,
+        metrics_cache_limit: int = 512,
+    ):
+        if scheduler_mode not in {"mission", "legacy"}:
+            raise ValueError("scheduler_mode must be mission or legacy")
+        for name, limit in (
+            ("route_cache_limit", route_cache_limit),
+            ("metrics_cache_limit", metrics_cache_limit),
+        ):
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError(f"{name} must be a positive integer")
         self.config = config
+        self.scheduler_mode = scheduler_mode
+        self._legacy_search_id_warnings: set[str] = set()
         self.sm = StateManager(config)
         self.ivt = InfoValueTable(self.sm)
         self.extractor = CandidateExtractor()
-        self.llm_client = LLMClient(config)
-        self.reviewer = LLMReviewer(config, self.llm_client)
+        self.llm_client = LLMClient(config, gateway=llm_gateway)
         self.trigger_manager = TriggerManager(self.sm)
+        self.task_catalog = TaskCatalog(candidate_extractor=self.extractor)
+        self.strategy_memory_store = strategy_memory_store or StrategyMemoryStore()
+        self.reviewer = LLMReviewer(
+            config,
+            self.llm_client,
+            strategy_memory_store=self.strategy_memory_store,
+        )
+        self.memory_version = "baseline"
+        self.mission_scheduler = MissionScheduler(
+            llm_gateway=self.llm_client.gateway,
+            reassignment_cooldown_min=config.mission.scheduling.reassignment_cooldown_min,
+            max_tasks_in_prompt=config.mission.scheduling.max_tasks_in_prompt,
+            allow_probe_preempt_search=config.mission.scheduling.allow_probe_preempt_search,
+            allow_intent_preempt_search=config.mission.scheduling.allow_intent_preempt_search,
+            planning_deadline_seconds=(
+                config.mission.information_update.planning_deadline_seconds
+            ),
+            postprocess_reserve_seconds=(
+                config.mission.information_update.postprocess_reserve_seconds
+            ),
+            strategy_memory_store=self.strategy_memory_store,
+        )
+        self._mission_snapshot_counter = 0
+        heuristic = config.control.heuristic
+        self._mission_navigator = AStarNavigator(
+            xy_resolution=heuristic.astar_xy_resolution_cells,
+            heading_bins=heuristic.astar_heading_bins,
+            candidate_limit=heuristic.astar_candidate_limit,
+            primitive_length=heuristic.astar_primitive_length_cells,
+            sample_step=heuristic.path_sample_step_cells,
+        )
+        self._mission_route_cache: OrderedDict[tuple, float | None] = OrderedDict()
+        self._mission_route_metrics_cache: OrderedDict[
+            tuple, tuple[float, float, tuple[float, float]] | None
+        ] = OrderedDict()
+        self._route_cache_limit = int(route_cache_limit)
+        self._metrics_cache_limit = int(metrics_cache_limit)
+        self._route_cache_version: int | None = None
+        self._last_mission_snapshot: MissionSnapshot | None = None
+        self.last_decision_timing: dict | None = None
+
+    def build_mission_snapshot(
+        self,
+        now_min: float | None = None,
+        *,
+        contacts: tuple[ContactSnapshot, ...] | None = None,
+        intents: tuple[Intent, ...] = (),
+        intent_statuses: tuple[IntentStatus, ...] = (),
+        active_tasks: tuple[TaskRecord, ...] = (),
+        memory_version: str | None = None,
+        reviewer_summary: str | None = None,
+    ) -> MissionSnapshot:
+        """Publish a complete scheduler snapshot without applying a decision."""
+        now = self.sm.current_time if now_min is None else float(now_min)
+        selected_memory_version = (
+            self.memory_version if memory_version is None else str(memory_version)
+        )
+        if not math.isfinite(now) or now < 0:
+            raise ValueError("now_min must be finite and non-negative")
+        published_contacts = tuple(
+            self.sm.contacts.list_snapshots() if contacts is None else contacts
+        )
+        published_intents = tuple(intents)
+        candidates = self.task_catalog.build(
+            self.sm, published_contacts, published_intents, now,
+        )
+        prompt_window = self._coverage_prompt_window(candidates, now)
+        resources = self._mission_resources()
+        available = tuple(sorted(uav.id for uav in self.sm.get_available_uavs()))
+        active_records = tuple(
+            record
+            for record in active_tasks
+            if record.status in {"approved", "executing"}
+            if record.assigned_uav_id is None
+            or self.sm.is_uav_operational(record.assigned_uav_id)
+        )
+        active_by_id = {record.task_id: record for record in active_records}
+        preemptible = tuple(sorted(
+            resource.uav_id
+            for resource in resources
+            if self.config.mission.scheduling.allow_probe_preempt_search
+            and self._ordinary_search_resource(resource, active_by_id)
+        ))
+        planning_map_version = int(self.sm.obstacle_version)
+        edge_candidates = (
+            prompt_window.tasks if prompt_window is not None else candidates
+        )
+        edges = self._mission_edges(
+            edge_candidates,
+            resources,
+            published_contacts,
+            planning_map_version,
+            active_tasks=active_records,
+        )
+        prompt_task_ids = (
+            tuple(task.task_id for task in prompt_window.tasks)
+            if prompt_window is not None else ()
+        )
+        prompt_sources = (
+            prompt_window.sources if prompt_window is not None else ()
+        )
+        representative_task_ids = (
+            prompt_window.representative_task_ids
+            if prompt_window is not None else ()
+        )
+        if prompt_window is not None:
+            edge_task_ids = {edge.task_id for edge in edges}
+            prompt_task_ids = tuple(
+                task_id for task_id in prompt_task_ids
+                if task_id in edge_task_ids
+            )
+            prompt_sources = tuple(
+                (task_id, source)
+                for task_id, source in prompt_sources
+                if task_id in prompt_task_ids
+            )
+            representative_task_ids = tuple(
+                task_id for task_id in representative_task_ids
+                if task_id in prompt_task_ids
+            )
+        coverage_constraint = None
+        if prompt_window is not None and getattr(self.sm, "coverage_metrics", None) is not None:
+            coverage_config = getattr(self.config.mission, "coverage", None)
+            healthy_count = sum(
+                self.sm.is_uav_operational(uav.id)
+                for uav in self.sm.get_all_uavs()
+            )
+            active_search_count = sum(
+                record.status in {"approved", "executing"}
+                and record.assigned_uav_id is not None
+                and record.kind in _SEARCH_TASK_KINDS
+                and self.sm.is_uav_operational(record.assigned_uav_id)
+                for record in active_records
+            )
+            coverage_constraint = build_coverage_constraint(
+                healthy_count=healthy_count,
+                active_search_count=active_search_count,
+                available_ids=available,
+                representatives=representative_task_ids,
+                edges=edges,
+                fraction=float(
+                    getattr(coverage_config, "min_search_uav_fraction", 0.4)
+                ),
+            )
+        self._mission_snapshot_counter += 1
+        snapshot_id = f"mission:{now:g}:{self._mission_snapshot_counter}"
+        snapshot = MissionSnapshot(
+            snapshot_id=snapshot_id,
+            sim_time_min=now,
+            candidates=tuple(candidates),
+            available_uav_ids=available,
+            preemptible_uav_ids=preemptible,
+            uav_generations=tuple(
+                (resource.uav_id, resource.generation) for resource in resources
+            ),
+            resources=resources,
+            feasible_edges=edges,
+            active_tasks=active_records,
+            contacts=published_contacts,
+            intents=published_intents,
+            intent_statuses=tuple(intent_statuses),
+            memory_version=selected_memory_version,
+            planning_map_version=planning_map_version,
+            reviewer_summary=(
+                self.llm_client._reviewer_memory
+                if reviewer_summary is None else reviewer_summary
+            ),
+            _information_version=int(getattr(self.sm, "information_version", 0)),
+            prompt_task_ids=prompt_task_ids,
+            prompt_sources=prompt_sources,
+            coverage_constraint=coverage_constraint,
+        )
+        self._last_mission_snapshot = snapshot
+        return snapshot
+
+    def _coverage_prompt_window(
+        self,
+        candidates: tuple[TaskCandidate, ...],
+        now_min: float,
+    ) -> CoverageCandidateWindow | None:
+        """Freeze one bounded candidate window before route-edge construction."""
+        metrics = getattr(self.sm, "coverage_metrics", None)
+        coverage_config = getattr(self.config.mission, "coverage", None)
+        ordinary_reserve = int(getattr(coverage_config, "ordinary_prompt_reserve", 8))
+        capacity = self.mission_scheduler.max_tasks_in_prompt
+        if metrics is None or not hasattr(metrics, "fixed_mask"):
+            # Legacy callers use deterministic providers that select every
+            # visible candidate. Keep that compatibility path bounded by the
+            # available fleet; production coverage snapshots still expose the
+            # configured model window for explicit choice.
+            capacity = min(
+                capacity,
+                max(1, len(self.sm.get_available_uavs())),
+            )
+            ordered = tuple(sorted(
+                candidates,
+                key=lambda task: (
+                    0 if task.kind not in _SEARCH_TASK_KINDS else 1,
+                    -int(task.priority == "high"),
+                    -float(task.utility),
+                    float(task.eligible_since_min),
+                    task.task_id,
+                ),
+            ))
+            return CoveragePolicy(np.ones((1, 1), dtype=bool)).select_window(
+                ordered,
+                ordinary_reserve=min(ordinary_reserve, capacity),
+                capacity=capacity,
+                now_min=now_min,
+            )
+        primary_window = int(getattr(coverage_config, "primary_window_min", 60))
+        policy = CoveragePolicy(metrics.fixed_mask, primary_window_min=primary_window)
+        search_tasks = tuple(
+            task for task in candidates
+            if task.kind == "search" and task.bbox is not None
+        )
+        search_task_ids = {task.task_id for task in search_tasks}
+        estimates = {
+            task.task_id: max(0.1, float(task.estimated_duration_min))
+            for task in search_tasks
+        }
+        ranked_search = policy.rank_search_candidates(
+            search_tasks,
+            now_min=now_min,
+            last_sar=metrics.last_scan_matrix(),
+            estimated_minutes=estimates,
+            primary_window_min=primary_window,
+        )
+        urgent = tuple(
+            sorted(
+                (
+                    task for task in candidates
+                    if task.task_id not in search_task_ids
+                ),
+                key=lambda task: (
+                    -int(task.priority == "high"),
+                    -float(task.utility),
+                    float(task.eligible_since_min),
+                    task.task_id,
+                ),
+            )
+        )
+        ranked = (*urgent, *ranked_search)
+        return policy.select_window(
+            ranked,
+            ordinary_reserve=min(ordinary_reserve, capacity),
+            capacity=capacity,
+            now_min=now_min,
+        )
+
+    def set_strategy_memory_version(self, version: str) -> None:
+        """Pin the memory manifest used by all snapshots in this episode."""
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError("memory version must be a non-empty string")
+        self.memory_version = version.strip()
+        self.sm.memory_version = self.memory_version
+
+    @property
+    def last_mission_snapshot(self) -> MissionSnapshot | None:
+        """Return the most recent immutable snapshot offered to the scheduler."""
+        return self._last_mission_snapshot
+
+    def uses_legacy_scheduler(self) -> bool:
+        """Return the configured path plus the narrow fixture adapter.
+
+        Production uses the explicit ``scheduler_mode`` setting. Existing
+        deterministic fixtures inject ``LLMClient.decide`` on the instance;
+        preserve that adapter without inspecting bound-method identity.
+        """
+        return (
+            self.scheduler_mode == "legacy"
+            or "decide" in vars(self.llm_client)
+        )
+
+    def decide_mission(self, now_min: float | None = None, **kwargs):
+        """Run T11 selection on a fresh snapshot; T12 owns application."""
+        snapshot = self.build_mission_snapshot(now_min, **kwargs)
+        return self.mission_scheduler.decide(snapshot)
+
+    def mission_step(
+        self,
+        current_time: float,
+        *,
+        active_tasks: tuple[TaskRecord, ...] = (),
+        intents: tuple[Intent, ...] = (),
+        intent_statuses: tuple[IntentStatus, ...] = (),
+        force_heavy: bool = False,
+    ) -> tuple[dict, object | None]:
+        """Run one unified scheduling decision without mutating mission state."""
+        if not isinstance(force_heavy, bool):
+            raise TypeError("force_heavy must be a bool")
+        self.last_decision_timing = None
+        if force_heavy:
+            # Operator retry is deliberately decision-only: no ship, sensor,
+            # UAV, fuel, information-field, or reviewer tick occurs here.
+            self.sm.current_time = float(current_time)
+            decision = TriggerDecision("heavy", "operator_retry")
+        else:
+            self.sm.step(current_time)
+            if self.sm.last_information_delta is not None:
+                self.trigger_manager.notify_information_delta(
+                    self.sm.last_information_delta,
+                    time=current_time,
+                )
+            new_memory = self.reviewer.step(current_time, self.sm)
+            if new_memory:
+                self.llm_client.set_reviewer_memory(new_memory)
+            decision = self.trigger_manager.check(current_time)
+        if decision.trigger_type == "none":
+            return {"trigger_type": "none", "action": None}, None
+        if decision.trigger_type == "light":
+            return self._handle_light_mission_trigger(
+                current_time,
+                decision,
+                active_tasks,
+                intents=intents,
+                intent_statuses=intent_statuses,
+            )
+
+        wall_started = time.perf_counter()
+        snapshot = self.build_mission_snapshot(
+            current_time,
+            active_tasks=active_tasks,
+            intents=intents,
+            intent_statuses=intent_statuses,
+        )
+        snapshot_frozen_wall = time.perf_counter()
+        decision_deadline = (
+            snapshot_frozen_wall
+            + self.config.mission.information_update.planning_deadline_seconds
+        )
+        batch = self.mission_scheduler.decide(
+            snapshot,
+            deadline_monotonic=decision_deadline,
+        )
+        decision_finished_wall = time.perf_counter()
+        failure_reason = None
+        if batch is None:
+            errors = self.mission_scheduler.last_selection_errors
+            failure_reason = errors[0] if errors else "decision_failed"
+        selection_timing = dict(self.mission_scheduler.last_selection_timing)
+        selection_timing.setdefault("prompt_seconds", 0.0)
+        selection_timing.setdefault("prompt_bytes", 0)
+        selection_timing.setdefault("llm_seconds", 0.0)
+        selection_timing.setdefault("validation_seconds", 0.0)
+        selection_timing.setdefault("matching_seconds", 0.0)
+        selection_timing.setdefault(
+            "total_seconds", decision_finished_wall - snapshot_frozen_wall,
+        )
+        self.last_decision_timing = {
+            "snapshot_frozen_wall": snapshot_frozen_wall,
+            "decision_finished_wall": decision_finished_wall,
+            "snapshot_seconds": snapshot_frozen_wall - wall_started,
+            "elapsed_before_snapshot_seconds": snapshot_frozen_wall - wall_started,
+            "prompt_seconds": selection_timing["prompt_seconds"],
+            "prompt_bytes": selection_timing["prompt_bytes"],
+            "llm_seconds": selection_timing["llm_seconds"],
+            "validation_seconds": selection_timing["validation_seconds"],
+            "matching_seconds": selection_timing["matching_seconds"],
+            "total_seconds": decision_finished_wall - wall_started,
+            "failure_reason": failure_reason,
+        }
+        interaction = self.mission_scheduler.selection_interaction()
+        prompt_payload = self.mission_scheduler.last_selection_payload or {}
+        prompt_snapshot = prompt_payload.get("snapshot") or {}
+        interaction.update({
+            "snapshot_id": snapshot.snapshot_id,
+            "information_version": snapshot.information_version,
+            "candidate_count": len(snapshot.candidates),
+            "trigger_type": decision.trigger_type,
+            "trigger_reason": decision.reason,
+            "affected_uav_ids": sorted(decision.affected_uavs),
+            "trigger_information_version": decision.information_version,
+            "reviewer_summary": snapshot.reviewer_summary,
+            "prompt_candidate_ids": [
+                candidate.get("task_id")
+                for candidate in prompt_snapshot.get("candidates", [])
+                if isinstance(candidate, dict) and candidate.get("task_id")
+            ],
+            "prompt_sources": prompt_snapshot.get("prompt_sources", {}),
+            "prompt_skip_cycles": prompt_snapshot.get("prompt_skip_cycles", {}),
+            "prompt_fairness_bound_cycles": prompt_snapshot.get(
+                "prompt_fairness_bound_cycles"
+            ),
+            "timing": {
+                "snapshot_seconds": self.last_decision_timing["snapshot_seconds"],
+                "prompt_seconds": self.last_decision_timing["prompt_seconds"],
+                "prompt_bytes": self.last_decision_timing["prompt_bytes"],
+                "elapsed_before_snapshot_seconds": self.last_decision_timing[
+                    "elapsed_before_snapshot_seconds"
+                ],
+                "llm_seconds": self.last_decision_timing["llm_seconds"],
+                "validation_seconds": self.last_decision_timing["validation_seconds"],
+                "matching_seconds": self.last_decision_timing["matching_seconds"],
+                "total_seconds": decision_finished_wall - wall_started,
+            },
+        })
+        self.trigger_manager.mark_triggered("heavy", current_time)
+        self.sm.cycle += 1
+        if batch is None:
+            self.trigger_manager.schedule_heavy_retry(
+                current_time,
+                reason=failure_reason or "decision_failed",
+            )
+            self.sm.add_event("mission_selection_failed", {
+                "snapshot_id": snapshot.snapshot_id,
+                "failure_category": (
+                    self.mission_scheduler.last_selection_failure_category
+                    or "unknown"
+                ),
+                "failure_stage": (
+                    self.mission_scheduler.last_selection_failure_stage
+                    or "unknown"
+                ),
+                "error_codes": list(self.mission_scheduler.last_selection_errors),
+                "available_count": len(snapshot.available_uav_ids),
+            })
+            self.sm.add_event("decision_failed", {
+                "cycle": self.sm.cycle,
+                "snapshot_id": snapshot.snapshot_id,
+                "information_version": snapshot.information_version,
+                "reason": failure_reason or "decision_failed",
+                "errors": list(self.mission_scheduler.last_selection_errors),
+                "call_id": self.mission_scheduler.last_selection_call_id,
+                "failure_stage": (
+                    self.mission_scheduler.last_selection_failure_stage
+                    or "unknown"
+                ),
+                "retry_at_min": current_time + 1.0,
+            })
+        self.sm.add_event("mission_decision", {
+            "cycle": self.sm.cycle,
+            "success": bool(batch is not None),
+            "assignments": len(batch.assignments) if batch is not None else 0,
+            "snapshot_id": snapshot.snapshot_id,
+        })
+        result = {
+            "trigger_type": "heavy",
+            "action": (
+                "mission_selection_approved"
+                if batch is not None
+                else "mission_selection_unavailable"
+            ),
+            "search_regions": [
+                {"id": region.id, "bbox": list(region.bbox)}
+                for region in self.sm.get_active_search_regions()
+            ],
+            "pairs": [],
+            "notes": "",
+            "llm_cycle": interaction,
+            "snapshot_id": snapshot.snapshot_id,
+        }
+        return result, batch
+
+    def _handle_light_mission_trigger(
+        self,
+        current_time: float,
+        decision,
+        active_tasks: tuple[TaskRecord, ...],
+        *,
+        intents: tuple[Intent, ...] = (),
+        intent_statuses: tuple[IntentStatus, ...] = (),
+    ) -> tuple[dict, AssignmentBatch | None]:
+        """Re-pair only approved work; light events cannot create work."""
+        del decision
+        wall_started = time.perf_counter()
+        previous = self._last_mission_snapshot
+        if previous is None:
+            snapshot = self.build_mission_snapshot(
+                current_time,
+                active_tasks=active_tasks,
+                intents=intents,
+                intent_statuses=intent_statuses,
+            )
+        else:
+            # Light events are allowed to re-pair approved work only. Reuse
+            # the last frozen candidate/edge graph instead of rebuilding all
+            # geometry and information matrices for a pairing-only tick.
+            snapshot = replace(
+                previous,
+                sim_time_min=float(current_time),
+                active_tasks=tuple(active_tasks),
+                intents=tuple(intents),
+                intent_statuses=tuple(intent_statuses),
+            )
+            self._last_mission_snapshot = snapshot
+        snapshot_frozen_wall = time.perf_counter()
+        approved_ids = tuple(
+            task.task_id
+            for task in snapshot.active_tasks
+            if task.status == "approved" and task.assigned_uav_id is None
+        )
+        assignments = self.mission_scheduler.pair_approved_tasks(
+            snapshot,
+            task_ids=approved_ids,
+        )
+        decision_finished_wall = time.perf_counter()
+        self.last_decision_timing = {
+            "snapshot_frozen_wall": snapshot_frozen_wall,
+            "decision_finished_wall": decision_finished_wall,
+            "elapsed_before_snapshot_seconds": snapshot_frozen_wall - wall_started,
+            "llm_seconds": 0.0,
+            "validation_seconds": decision_finished_wall - snapshot_frozen_wall,
+            "matching_seconds": decision_finished_wall - snapshot_frozen_wall,
+        }
+        self.trigger_manager.mark_triggered("light", current_time)
+        if not assignments:
+            return {
+                "trigger_type": "light",
+                "action": "approved_tasks_deferred",
+                "pairs": [],
+                "snapshot_id": snapshot.snapshot_id,
+            }, None
+        batch = AssignmentBatch(
+            snapshot.snapshot_id,
+            assignments,
+            "light-approved-pairing",
+            _information_version=snapshot.information_version,
+        )
+        self.sm.add_event("mission_assignment_approved", {
+            "snapshot_id": snapshot.snapshot_id,
+            "selection_call_id": batch.selection_call_id,
+            "task_ids": [assignment.task_id for assignment in assignments],
+        })
+        return {
+            "trigger_type": "light",
+            "action": "approved_task_pairing",
+            "pairs": [
+                (assignment.uav_id, assignment.task_id)
+                for assignment in assignments
+            ],
+            "snapshot_id": snapshot.snapshot_id,
+        }, batch
+
+    def _mission_resources(self) -> tuple[UavResource, ...]:
+        speed = (
+            self.config.uav.cruise_speed_kmh
+            / self.config.grid.cell_size_km
+            / 60.0
+        )
+        total_range = (
+            self.config.uav.sortie_endurance_h
+            * self.config.uav.cruise_speed_kmh
+            / self.config.grid.cell_size_km
+        )
+        resources = []
+        for uav in self.sm.get_all_uavs():
+            if not self.sm.is_uav_operational(uav.id):
+                continue
+            resources.append(UavResource(
+                uav_id=uav.id,
+                position_cells=(float(uav.position.col), float(uav.position.row)),
+                heading_rad=math.radians(float(uav.heading_deg)),
+                speed_cells_min=speed,
+                remaining_range_cells=max(
+                    0.0, total_range * float(uav.fuel_remaining_pct)
+                ),
+                operation=str(uav.operation_mode or uav.status),
+                current_task_id=uav.assigned_region_id,
+                generation=int(uav.controller_generation),
+                last_reassigned_at_min=float(
+                    getattr(uav, "last_reassigned_at_min", 0.0)
+                ),
+            ))
+        return tuple(sorted(resources, key=lambda resource: resource.uav_id))
+
+    def _ordinary_search_resource(
+        self,
+        resource: UavResource,
+        active_tasks: dict[str, TaskRecord],
+    ) -> bool:
+        if (
+            resource.current_task_id is None
+            or str(resource.operation).lower() not in {
+                "coverage", "search", "searching", "transit",
+            }
+        ):
+            return False
+        state = self.sm.get_uav(resource.uav_id)
+        if state is not None and (
+            state.control_mode != "heuristic"
+            or state.control_owner != "heuristic"
+        ):
+            return False
+        record = active_tasks.get(resource.current_task_id)
+        return record is None or (
+            record.kind in _SEARCH_TASK_KINDS
+            and record.status in {"approved", "executing"}
+            and record.assigned_uav_id == resource.uav_id
+        )
+
+    def _mission_edges(
+        self,
+        candidates: tuple[TaskCandidate, ...],
+        resources: tuple[UavResource, ...],
+        contacts: tuple[ContactSnapshot, ...],
+        planning_map_version: int,
+        *,
+        active_tasks: tuple[TaskRecord, ...] = (),
+    ) -> tuple[FeasibleEdge, ...]:
+        contact_positions = {
+            contact.contact_id: contact.estimated_position_cells
+            for contact in contacts
+        }
+        bases = self.sm.get_base_positions()
+        reserve = float(self.config.control.safety.reserve_range_cells)
+        active_candidates = {
+            record.task_id: self._active_task_candidate(record, resources)
+            for record in active_tasks
+            if record.status in {"approved", "executing"}
+            and (
+                record.assigned_uav_id is None
+                or self.sm.is_uav_operational(record.assigned_uav_id)
+            )
+        }
+        tasks_by_id = {candidate.task_id: candidate for candidate in candidates}
+        tasks_by_id.update(active_candidates)
+        edges = []
+        for task in tasks_by_id.values():
+            if task.contact_id is not None:
+                target = contact_positions.get(task.contact_id)
+            elif task.bbox is not None:
+                target = (
+                    (task.bbox[0] + task.bbox[2]) / 2.0,
+                    (task.bbox[1] + task.bbox[3]) / 2.0,
+                )
+            else:
+                target = None
+            if target is None:
+                continue
+            for resource in resources:
+                if task.feasible_uav_ids and resource.uav_id not in task.feasible_uav_ids:
+                    continue
+                route_metrics = self._mission_route_metrics(
+                    resource, task, target, planning_map_version,
+                )
+                if route_metrics is None:
+                    continue
+                transit_distance, mission_distance, endpoint = route_metrics
+                transit = transit_distance / max(resource.speed_cells_min, 1e-6)
+                if (
+                    self._legacy_search_task_id(task.task_id)
+                    or task.task_id.startswith(("investigation:", "direction:"))
+                ):
+                    return_range = min(
+                        (math.dist(endpoint, tuple(map(float, base)))
+                         for base in bases),
+                        default=None,
+                    )
+                else:
+                    return_range = min(
+                        (
+                            distance
+                            for base in bases
+                            if (distance := self._return_route_distance(
+                                endpoint,
+                                resource,
+                                tuple(map(float, base)),
+                                planning_map_version,
+                            )) is not None
+                        ),
+                        default=None,
+                    )
+                if (
+                    return_range is not None
+                    and task.kind in _SEARCH_TASK_KINDS
+                    and not task.task_id.startswith(("search:", "fragment:"))
+                ):
+                    return_range = max(
+                        return_range,
+                        min(
+                            (
+                                math.dist(
+                                    target,
+                                    tuple(map(float, base)),
+                                )
+                                for base in bases
+                            ),
+                            default=return_range,
+                        ),
+                    )
+                if return_range is None or (
+                    transit_distance + mission_distance + return_range + reserve
+                    > resource.remaining_range_cells + 1e-9
+                ):
+                    continue
+                route_cache_key = (
+                    f"{planning_map_version}:{resource.uav_id}:{resource.generation}:"
+                    f"h={resource.heading_rad:.6f}:"
+                    f"{resource.position_cells[0]:.3f},{resource.position_cells[1]:.3f}:"
+                    f"{target[0]:.3f},{target[1]:.3f}:{task.task_id}"
+                )
+                edges.append(FeasibleEdge(
+                    task_id=task.task_id,
+                    uav_id=resource.uav_id,
+                    transit_time_min=transit,
+                    mission_range_cells=mission_distance,
+                    return_range_cells=return_range,
+                    reserve_range_cells=reserve,
+                    route_cache_key=route_cache_key,
+                ))
+        return tuple(sorted(
+            edges,
+            key=lambda edge: (edge.task_id, edge.transit_time_min, edge.uav_id),
+        ))
+
+    @staticmethod
+    def _active_task_candidate(
+        record: TaskRecord,
+        resources: tuple[UavResource, ...],
+    ) -> TaskCandidate:
+        feasible = (
+            (record.assigned_uav_id,)
+            if record.assigned_uav_id is not None
+            else tuple(resource.uav_id for resource in resources)
+        )
+        return TaskCandidate(
+            task_id=record.task_id,
+            kind=record.kind,
+            bbox=record.bbox,
+            contact_id=record.contact_id,
+            intent_ids=record.intent_ids,
+            feasible_uav_ids=feasible,
+            eligible_since_min=record.created_at_min,
+            priority="high" if record.kind not in _SEARCH_TASK_KINDS else "medium",
+            estimated_duration_min=1.0,
+            utility=0.0,
+            expected_information_gain=0.0,
+        )
+
+    def _legacy_search_task_id(self, task_id: str) -> bool:
+        """Recognize old IDs once at the compatibility boundary."""
+        if not isinstance(task_id, str) or not task_id.startswith("search-"):
+            return False
+        if task_id not in self._legacy_search_id_warnings:
+            self._legacy_search_id_warnings.add(task_id)
+            _LOGGER.warning(
+                "legacy search task id accepted once: task_id=%s; "
+                "production IDs must use search:<bbox>",
+                task_id,
+            )
+        return True
+
+    def _mission_route_metrics(
+        self,
+        resource: UavResource,
+        task: TaskCandidate,
+        target: tuple[float, float],
+        planning_map_version: int,
+    ) -> tuple[float, float, tuple[float, float]] | None:
+        self._prepare_route_caches(planning_map_version)
+        scan_revision = int(getattr(
+            self.sm.information_policy,
+            "mutation_version",
+            self.sm.information_version,
+        ))
+        key = (
+            "mission-metrics",
+            planning_map_version,
+            resource.uav_id,
+            resource.generation,
+            tuple(round(value, 6) for value in resource.position_cells),
+            round(float(resource.heading_rad), 6),
+            task.kind,
+            task.task_id,
+            tuple(task.bbox)
+            if task.bbox is not None
+            else tuple(round(value, 6) for value in target),
+            scan_revision if task.kind in _SEARCH_TASK_KINDS else None,
+        )
+        cache = self._mission_route_metrics_cache
+        cached = self._cache_get(cache, key)
+        if cached is not _CACHE_MISS:
+            return cached
+
+        start = (*resource.position_cells, float(resource.heading_rad))
+        try:
+            if task.kind in _SEARCH_TASK_KINDS and (
+                self._legacy_search_task_id(task.task_id)
+                or task.task_id.startswith("investigation:")
+                or task.task_id.startswith("direction:")
+            ):
+                width = max(1.0, float(task.bbox[2] - task.bbox[0]))
+                height = max(1.0, float(task.bbox[3] - task.bbox[1]))
+                result = (
+                    math.dist(resource.position_cells, target),
+                    max(
+                        2.0 * max(width, height),
+                        max(0.0, task.estimated_duration_min)
+                        * max(resource.speed_cells_min, 0.0),
+                    ),
+                    tuple(target),
+                )
+            elif task.kind in _SEARCH_TASK_KINDS:
+                path_plan = plan_search_route(
+                    SearchRouteRequest(
+                        uav_id=resource.uav_id,
+                        start_pose=start,
+                        bbox=tuple(task.bbox),
+                        swath_width=(
+                            self.config.sensor.sar.swath_km
+                            / self.config.grid.cell_size_km
+                        ),
+                        r_min=1.0,
+                        obstacle_mask=np.asarray(
+                            self.sm.obstacle_mask, dtype=bool
+                        ).copy(),
+                        unscanned_mask=~np.isfinite(
+                            self.sm.get_last_scan_matrix()
+                        ),
+                        allow_revisit=False,
+                        seed=17,
+                        along_track_cells=0.8,
+                    )
+                )
+                path = tuple(path_plan.path)
+                if not path or not path_plan.scanned_swath_count:
+                    result = None
+                else:
+                    transit_end = min(
+                        max(0, int(path_plan.transit_end_index)),
+                        len(path) - 1,
+                    )
+                    result = (
+                        self._path_length(path[: transit_end + 1]),
+                        self._path_length(path[transit_end:]),
+                        tuple(path[-1][:2]),
+                    )
+            else:
+                radius = (
+                    self.config.mission.contact.baseline_standoff_cells
+                    if task.kind == "probe"
+                    else self.config.mission.contact.near_standoff_cells
+                )
+                path = self._quick_standoff_path(
+                    start, target, radius, self.sm.obstacle_mask,
+                )
+                if path is None:
+                    path = self._mission_navigator.plan_to_standoff(
+                        start,
+                        target,
+                        radius,
+                        self.sm.obstacle_mask,
+                        1.0,
+                        planning_map_version,
+                    )
+                if not path:
+                    result = None
+                else:
+                    result = (
+                        self._path_length(path),
+                        max(0.0, task.estimated_duration_min)
+                        * max(resource.speed_cells_min, 0.0),
+                        tuple(path[-1][:2]),
+                    )
+        except (PathNotFoundError, RuntimeError, TypeError, ValueError):
+            result = None
+        self._cache_set(cache, key, result, self._metrics_cache_limit)
+        return result
+
+    def _mission_route_distance(
+        self,
+        resource: UavResource,
+        task: TaskCandidate,
+        target: tuple[float, float],
+        planning_map_version: int,
+    ) -> float | None:
+        metrics = self._mission_route_metrics(
+            resource, task, target, planning_map_version,
+        )
+        return None if metrics is None else metrics[0]
+
+    def _return_route_distance(
+        self,
+        target: tuple[float, float],
+        resource: UavResource,
+        base: tuple[float, float],
+        planning_map_version: int,
+    ) -> float | None:
+        self._prepare_route_caches(planning_map_version)
+        key = (
+            "return", planning_map_version, resource.uav_id, resource.generation,
+            tuple(round(value, 6) for value in target),
+            tuple(round(value, 6) for value in base),
+        )
+        cached = self._cache_get(self._mission_route_cache, key)
+        if cached is not _CACHE_MISS:
+            return cached
+        heading = math.atan2(base[1] - target[1], base[0] - target[0])
+        try:
+            direct = DubinsPath.compute(
+                (*target, heading), (*base, heading), 1.0,
+                step_size=self._mission_navigator.sample_step,
+            )
+            if self._mission_navigator._path_is_safe(
+                direct.waypoints, self.sm.obstacle_mask,
+            ):
+                distance = float(direct.total_length)
+                self._cache_set(
+                    self._mission_route_cache, key, distance,
+                    self._route_cache_limit,
+                )
+                return distance
+            path = self._mission_navigator.plan_grid(
+                (*target, heading), {base}, self.sm.obstacle_mask, 1.0,
+                planning_map_version,
+            )
+        except (PathNotFoundError, TypeError, ValueError):
+            distance = None
+        except RuntimeError:
+            distance = None
+        else:
+            distance = self._path_length(path)
+        self._cache_set(
+            self._mission_route_cache, key, distance, self._route_cache_limit,
+        )
+        return distance
+
+    def _prepare_route_caches(self, planning_map_version: int) -> None:
+        version = int(planning_map_version)
+        if self._route_cache_version == version:
+            return
+        self._mission_route_cache.clear()
+        self._mission_route_metrics_cache.clear()
+        self._route_cache_version = version
+
+    @staticmethod
+    def _cache_get(cache: OrderedDict, key):
+        if key not in cache:
+            return _CACHE_MISS
+        cache.move_to_end(key)
+        return cache[key]
+
+    @staticmethod
+    def _cache_set(cache: OrderedDict, key, value, limit: int) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
+
+    def _quick_standoff_path(
+        self,
+        start: tuple[float, float, float],
+        target: tuple[float, float],
+        radius: float,
+        obstacle_mask: np.ndarray,
+    ) -> list[tuple[float, float, float]] | None:
+        """Try one certified Dubins approach before invoking Hybrid A*."""
+        distance = math.dist(start[:2], target)
+        if distance <= radius + 1e-9:
+            return [start]
+        radial = (
+            (start[0] - target[0]) / distance,
+            (start[1] - target[1]) / distance,
+        )
+        endpoint = (
+            target[0] + radius * radial[0],
+            target[1] + radius * radial[1],
+        )
+        endpoint_heading = math.atan2(
+            target[1] - endpoint[1], target[0] - endpoint[0],
+        )
+        try:
+            direct = DubinsPath.compute(
+                start, (*endpoint, endpoint_heading), 1.0,
+                step_size=self._mission_navigator.sample_step,
+            )
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        if not self._mission_navigator._path_is_safe(
+            direct.waypoints, obstacle_mask,
+        ):
+            return None
+        return list(direct.waypoints)
+
+    @staticmethod
+    def _path_length(path) -> float:
+        return sum(
+            math.dist(start[:2], end[:2])
+            for start, end in zip(path, path[1:])
+        )
 
     def retire_search_track_conflicts(
         self,
@@ -36,6 +1071,11 @@ class TaskAllocator:
     def step(self, current_time: float) -> dict:
         """Advance one frame and return a summary of actions taken."""
         self.sm.step(current_time)
+        if self.sm.last_information_delta is not None:
+            self.trigger_manager.notify_information_delta(
+                self.sm.last_information_delta,
+                time=current_time,
+            )
 
         # Reviewer update: periodically generate long-term memory
         new_memory = self.reviewer.step(current_time, self.sm)
@@ -88,10 +1128,19 @@ class TaskAllocator:
             return {"trigger_type": "light", "action": "no_eligible_regions"}
 
         # Hungarian pairing
-        pairs = hungarian_pair(
-            [{"id": u.id, "position": u.position} for u in eligible_uavs],
-            unassigned,
-        )
+        try:
+            pairs = hungarian_pair(
+                [{"id": u.id, "position": u.position} for u in eligible_uavs],
+                unassigned,
+            )
+        except AssignmentBackendUnavailable as exc:
+            self._record_assignment_backend_failure("light", current_time, exc)
+            return {
+                "trigger_type": "light",
+                "action": "assignment_backend_unavailable",
+                "pairs": [],
+                "error": str(exc),
+            }
 
         # Update UAV statuses with assignments
         for uav_id, region_id in pairs:
@@ -137,7 +1186,7 @@ class TaskAllocator:
         )
         remaining_slots = max(
             0,
-            self.config.uav.count_max
+            self.config.uav.count
             - len(self.sm.get_track_regions())
             - len(retained_regions),
         )
@@ -197,7 +1246,7 @@ class TaskAllocator:
             if matched_id not in assigned_ids:
                 for prev_id, prev_r in prev_by_id.items():
                     if prev_id not in assigned_ids:
-                        iou = self._iou(bbox, prev_r.bbox)
+                        iou = compute_iou(bbox, prev_r.bbox)
                         if iou >= self.config.grid.stability_iou_threshold:
                             matched_id = prev_id
                             break
@@ -251,10 +1300,14 @@ class TaskAllocator:
             for region in regions
             if region.assigned_uav_id is None
         ]
-        pairs = hungarian_pair(
-            [{"id": uav.id, "position": uav.position} for uav in eligible_uavs],
-            unassigned,
-        )
+        try:
+            pairs = hungarian_pair(
+                [{"id": uav.id, "position": uav.position} for uav in eligible_uavs],
+                unassigned,
+            )
+        except AssignmentBackendUnavailable as exc:
+            self._record_assignment_backend_failure("heavy", self.sm.current_time, exc)
+            return []
         by_id = {region.id: region for region in regions}
         for uav_id, region_id in pairs:
             uav = self.sm.get_uav(uav_id)
@@ -271,6 +1324,24 @@ class TaskAllocator:
             if row is not None:
                 row.assigned_uav_id = uav_id
         return pairs
+
+    def _record_assignment_backend_failure(
+        self,
+        trigger_type: str,
+        current_time: float,
+        error: AssignmentBackendUnavailable,
+    ) -> None:
+        _LOGGER.error(
+            "assignment backend unavailable: trigger_type=%s time=%s error=%s",
+            trigger_type,
+            current_time,
+            error,
+        )
+        self.sm.add_event("assignment_backend_unavailable", {
+            "trigger_type": trigger_type,
+            "time": float(current_time),
+            "error": str(error),
+        })
 
     def _finish_heavy_trigger(
         self,
@@ -303,18 +1374,3 @@ class TaskAllocator:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _iou(a: BBox, b: BBox) -> float:
-        """Intersection-over-Union of two bounding boxes."""
-        if a.col_end <= b.col_start or b.col_end <= a.col_start:
-            return 0.0
-        if a.row_end <= b.row_start or b.row_end <= a.row_start:
-            return 0.0
-        inter_w = min(a.col_end, b.col_end) - max(a.col_start, b.col_start)
-        inter_h = min(a.row_end, b.row_end) - max(a.row_start, b.row_start)
-        inter = inter_w * inter_h
-        area_a = (a.col_end - a.col_start) * (a.row_end - a.row_start)
-        area_b = (b.col_end - b.col_start) * (b.row_end - b.row_start)
-        union = area_a + area_b - inter
-        return inter / union if union > 0 else 0.0

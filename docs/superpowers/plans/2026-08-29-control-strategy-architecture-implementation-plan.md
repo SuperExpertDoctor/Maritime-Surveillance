@@ -1,5 +1,7 @@
 # UAV Control Strategy Architecture Implementation Plan
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将现有规则控制整合到 `src/control/heuristic`，建立 `bc`、`rl` 抽象基类与统一观测、动作、安全、执行和控制权运行时，并让仿真通过该运行时执行启发式覆盖/跟踪任务。
@@ -18,7 +20,7 @@
 - 启发式控制权以任务为边界，任务切换必须通过事件流和 generation 原子替换。
 - 工作里程耗尽定义为 `remaining_range <= validated_return_path + reserve + max_command_distance_next_tick`，不得用直线距离估算，也不得等待物理燃油为零。
 - 安全层可以修正非法动作，但不得选择任务、目标或操作模式。
-- 控制观测不得包含未发现舰船位置、真实军民属性或其他仿真隐藏真值。
+- 控制观测不得包含未发现船舶位置、真实军民属性或其他仿真隐藏真值。
 - 启发式任务区域转场使用曲率受限 Hybrid A*，禁止穿障和切角；Dubins 只作为经碰撞校验的目标解析入场原语。
 - 默认配置保持 `heuristic`，现有仿真无需 BC/RL 插件即可启动。
 - 显式配置 BC/RL 且未注册具体子类时必须启动失败，禁止静默降级。
@@ -534,7 +536,7 @@ def test_observation_excludes_undetected_ship_truth():
     hidden = engine.ships[0]
     hidden._col = 27.12345
     hidden._row = 26.54321
-    hidden.actual_military = True
+    hidden.vessel_class = "type_ii"
 
     observation = make_provider(engine).build(
         engine.uavs[0],
@@ -551,7 +553,7 @@ def test_observation_excludes_undetected_ship_truth():
 
     assert observation.contacts == ()
     assert "27.12345" not in repr(observation)
-    assert "actual_military" not in repr(observation)
+    assert "type_ii" not in repr(observation)
 ```
 
 Also assert:
@@ -1032,7 +1034,7 @@ Map only these events:
 EVENT_TRANSITIONS = {
     "target_found": OperationMode.TRACK,
     "target_lost": OperationMode.COVERAGE,
-    "civilian_released": OperationMode.COVERAGE,
+    "type_i_released": OperationMode.COVERAGE,
     "target_departed": OperationMode.COVERAGE,
     "search_complete": OperationMode.HOLDING,
     "task_failed": OperationMode.HOLDING,

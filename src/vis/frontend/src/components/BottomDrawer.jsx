@@ -19,6 +19,16 @@ const EVENT_NAMES = {
   route_plan_failed: "航路失败",
   route_replanned: "航路重规划",
   environment_reset: "环境重置",
+  mission_assignment_committed: "任务已提交",
+  contact_created: "创建接触",
+  probe_phase_changed: "调查阶段变化",
+  type_i_assessed: "I 类研判",
+  type_ii_assessed: "II 类研判",
+  assessment_applied: "研判完成",
+  probe_timed_out: "调查超时",
+  task_failed: "任务失败",
+  task_completed: "任务结束",
+  uav_refueled: "加油完成",
 };
 
 export default function BottomDrawer({ frame, events = [], llmCycle, visible, onToggle }) {
@@ -29,7 +39,7 @@ export default function BottomDrawer({ frame, events = [], llmCycle, visible, on
   const drag = useRef(null);
 
   useEffect(() => {
-  if (activeTab !== 4 || config || configError) return;
+  if (activeTab !== 3 || config || configError) return;
     fetch("/api/config")
       .then((response) => {
         if (!response.ok) throw new Error();
@@ -69,8 +79,8 @@ export default function BottomDrawer({ frame, events = [], llmCycle, visible, on
         {activeTab === 0 && <TimelineTab events={events} />}
         {activeTab === 1 && <RegionTab frame={frame} />}
         {activeTab === 2 && <LLMTab llm={llmCycle} />}
-        {activeTab === 3 && <AisTab frame={frame} />}
-        {activeTab === 4 && <ParamsTab config={config} error={configError} />}
+        {activeTab === 3 && <ParamsTab config={config} error={configError} />}
+        {activeTab === 4 && <AisTab frame={frame} />}
       </div>
     </section>
   );
@@ -138,27 +148,32 @@ function LLMTab({ llm }) {
 }
 
 function AisTab({ frame }) {
-  const rows = (frame?.ships || []).filter((ship) => ship.ais || ship.discrimination || ship.is_detected);
-  if (!rows.length) return <EmptyState text="No tracked AIS reports" />;
+  const rows = frame?.contacts?.length
+    ? frame.contacts.map((contact) => {
+      const ais = [...(contact.samples || [])].reverse().find((sample) => sample.source === "ais");
+      return { id: contact.contact_id, mmsi: contact.ais_mmsi, aisPosition: ais?.position, position: contact.estimated_position, state: contact.vessel_class || "unknown" };
+    })
+    : (frame?.ships || []).map((ship) => ({
+      id: ship.id,
+      mmsi: ship.ais?.mmsi,
+      aisPosition: ship.ais?.reported_position,
+      position: ship.estimated_position,
+      state: "historical",
+    }));
   return (
     <div className="table-wrap">
       <table className="region-table ais-table">
-        <thead><tr><th>Target</th><th>MMSI</th><th>AIS position</th><th>EO estimate</th><th>Error</th><th>Result</th></tr></thead>
-        <tbody>{rows.map((ship) => {
-          const discrepancy = ship.discrimination?.discrepancy_cells;
-          const military = ship.discrimination?.is_military === true || ship.is_military === true;
-          const civilian = ship.discrimination?.is_military === false || ship.is_military === false;
-          return (
-            <tr className={military ? "ais-military" : civilian ? "ais-civilian" : ""} key={ship.id}>
-              <td><b>{ship.id}</b></td>
-              <td>{ship.ais?.mmsi || "SILENT"}</td>
-              <td className="mono">{formatPosition(ship.ais?.reported_position)}</td>
-              <td className="mono">{formatPosition(ship.estimated_position)}</td>
-              <td>{Number.isFinite(discrepancy) ? discrepancy.toFixed(2) : "-"}</td>
-              <td>{military ? "MILITARY" : civilian ? "CIVILIAN" : "PENDING"}</td>
-            </tr>
-          );
-        })}</tbody>
+        <thead><tr><th>接触</th><th>MMSI</th><th>AIS 位置</th><th>估计位置</th><th>样本</th><th>状态</th></tr></thead>
+        <tbody>{rows.map((contact) => (
+          <tr key={contact.id}>
+            <td><b>{contact.id}</b></td>
+            <td>{contact.mmsi || "无"}</td>
+            <td className="mono">{formatPosition(contact.aisPosition)}</td>
+            <td className="mono">{formatPosition(contact.position)}</td>
+            <td>{frame?.contacts?.length ? (frame.contacts.find((item) => item.contact_id === contact.id)?.samples?.length || 0) : "-"}</td>
+            <td>{contact.state === "unknown" ? "待核查" : contact.state === "type_i" ? "I 类船舶" : contact.state === "type_ii" ? "II 类船舶" : "历史帧"}</td>
+          </tr>
+        ))}</tbody>
       </table>
     </div>
   );
@@ -173,9 +188,19 @@ function ParamsTab({ config, error }) {
   if (!config) return <div className="loading-state"><span />加载参数</div>;
   return <div className="params-grid">{Object.entries(config).map(([section, values]) => (
     <section key={section}><h3>{section}</h3>{Object.entries(values).map(([key, value]) => (
-      <div key={key}><span>{key}</span><b>{Array.isArray(value) ? value.join(" × ") : String(value)}</b></div>
+      <div key={key}><span>{key}</span><b>{formatParamValue(value)}</b></div>
     ))}</section>
   ))}</div>;
+}
+
+function formatParamValue(value) {
+  if (Array.isArray(value)) return value.join(" × ");
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, child]) => `${key}: ${formatParamValue(child)}`)
+      .join("; ");
+  }
+  return String(value);
 }
 
 function EmptyState({ text }) {

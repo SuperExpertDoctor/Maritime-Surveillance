@@ -1,0 +1,6 @@
+case,bbox,start_heading_rad,dt_min,first_phase,last_phase,sar_imaging_records,first_sar_heading_error_deg,first_imaging_heading_error_deg,max_imaging_heading_error_deg,actual_cells,required_cells,missing_cells,complete
+horizontal-forward,"(10, 10, 16, 14)",0.000000,1.0,transit_astar,completed,112,2.832450,0.002196,0.580156,24,24,,True
+vertical-forward,"(12, 8, 16, 14)",0.000000,0.25,transit_astar,completed,449,1.586136,0.769631,0.808986,24,24,,True
+vertical-reverse-entry,"(12, 8, 16, 14)",3.141593,0.25,transit_astar,completed,449,1.509677,0.732502,0.761236,24,24,,True
+edge-forward,"(24, 16, 28, 21)",0.000000,1.0,transit_astar,completed,99,0.685571,0.577726,0.661526,20,20,,True
+audit-forward,"(11, 21, 16, 26)",0.000000,1.0,transit_astar,completed,135,0.723742,0.640487,0.674701,25,25,,True

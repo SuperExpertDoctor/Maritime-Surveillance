@@ -6,6 +6,20 @@ GridCoord = namedtuple("GridCoord", ["col", "row"])
 BBox = namedtuple("BBox", ["col_start", "row_start", "col_end", "row_end"])
 
 
+def grid_bbox_from_center(
+    center: GridCoord, radius: int, resolution: tuple[int, int]
+) -> BBox:
+    """Return the bounded half-open bbox around a grid coordinate."""
+    col, row = center
+    cols, rows = resolution
+    return BBox(
+        max(0, col - radius),
+        max(0, row - radius),
+        min(cols, col + radius),
+        min(rows, row + radius),
+    )
+
+
 @dataclass
 class Region:
     id: str
@@ -19,6 +33,7 @@ class Region:
     completion_pct: float = 0.0
     created_cycle: int = 0
     target_group_id: Optional[str] = None
+    completion_basis: str = "legacy_observation"
 
 
 @dataclass
@@ -37,6 +52,9 @@ class UAVState:
     operation_mode: str = "idle"
     controller_generation: int = 0
     safety_intervened: bool = False
+    last_reassigned_at_min: float = 0.0
+    operational_status: str = "available"  # "available" | "failed"
+    failure_reason: Optional[str] = None
 
 
 @dataclass
@@ -47,7 +65,7 @@ class Marker:
     source_uav_id: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class TargetReport:
     """A target position that was actually observed by a UAV sensor.
 
@@ -55,7 +73,7 @@ class TargetReport:
     ground-truth ship instance.  Scheduling and LLM prompts may use only this
     report after a contact has been established.
     """
-    group_id: str
+    contact_id: str
     position: GridCoord
     observed_at: float
     source_uav_id: str

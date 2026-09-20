@@ -1,5 +1,7 @@
 # UAV 底层控制策略架构设计
 
+> 术语已按 2026-09-16 统一：分类使用 I 类船舶/II 类船舶，运行时值使用 `type_i`/`type_ii`。
+
 > 日期：2026-08-29
 > 状态：已确认，待实施计划审阅
 > 范围：`src/control` 重构及其在 `src/env`、`src/schedule`、配置、测试和可视化中的适配
@@ -39,9 +41,9 @@
 
 - 本轮不实现具体 `BCController`、`RLController`、神经网络、权重格式或训练流水线。
 - 本轮不实现 Gymnasium 环境；RL 基类只保留未来适配所需的空间和 episode 接口。
-- 本轮不改变 LLM 区域划分、Hungarian 配对、AIS 判别、舰船运动或信息场数学模型。
+- 本轮不改变 LLM 区域划分、Hungarian 配对、AIS 判别、船舶运动或信息场数学模型。
 - 本轮不把整个 `UAVEntity` 重写为新的物理引擎。
-- 本轮不允许 BC/RL 读取未被传感器发现的舰船位置、真实军民属性等仿真真值。
+- 本轮不允许 BC/RL 读取未被传感器发现的船舶位置、真实军民属性等仿真真值。
 
 ## 3. 总体决策
 
@@ -228,7 +230,7 @@ class ControlObservation:
 
 `ActionMask` 由 ObservationProvider 根据当前 owner/mode 和可观测资源生成：HEURISTIC/LEARNING 作业阶段允许 TRANSIT/COVERAGE，存在有效 contact 时才允许 EO/TRACK；SYSTEM 返航阶段只允许 RETURN/HOLDING。OFF 始终可用，`target_contact_ids` 只列出本帧 contact ID。SAR 的直线稳定性在安全层结合本步转弯率校验；mask 不替控制器决定当前任务。
 
-`planning_obstacle_mask` 是只读的全局规划快照，只包含已发布的陆地和障碍物占用，不包含舰船真值。局部窗口供策略输入，全局规划快照供 A* 使用；控制器不得绕过这两个快照访问环境对象。
+`planning_obstacle_mask` 是只读的全局规划快照，只包含已发布的陆地和障碍物占用，不包含船舶真值。局部窗口供策略输入，全局规划快照供 A* 使用；控制器不得绕过这两个快照访问环境对象。
 
 ### 5.3 动作
 
@@ -478,7 +480,7 @@ CREATED -> APPROACH_ASTAR -> ORBIT_ENTRY -> TRACKING -> COMPLETED/LOST
 - 进入阶段复用 `LGVFTracker.plan_entry()`。
 - 跟踪阶段复用 `LGVFTracker.compute_guidance()` 和现有雷云规避逻辑。
 - 所有目标更新来自 `ContactObservation`，不读取 `_group_center()` 的真值。
-- 目标丢失、民船释放、目标驶离等外部事件由 `task_flow.py` 在决策前消费；控制器内部的路径失败通过 `ControlDecision.events` 请求产生 `task_failed`。
+- 目标丢失、I 类船舶释放、目标驶离等外部事件由 `task_flow.py` 在决策前消费；控制器内部的路径失败通过 `ControlDecision.events` 请求产生 `task_failed`。
 
 ### 7.4 返航与系统等待
 
@@ -499,7 +501,7 @@ CREATED -> APPROACH_ASTAR -> ORBIT_ENTRY -> TRACKING -> COMPLETED/LOST
 `HeuristicTaskFlow` 订阅任务事件并返回 `TaskTransition`：
 
 - `target_found`：覆盖控制器停止，创建跟踪控制器。
-- `target_lost`、`civilian_released`、`target_departed`：跟踪控制器停止，优先恢复原搜索区域，否则请求调度器分配。
+- `target_lost`、`type_i_released`、`target_departed`：跟踪控制器停止，优先恢复原搜索区域，否则请求调度器分配。
 - `search_complete`：如果已有原子确定的下一任务则直接替换控制器；否则释放到 SYSTEM/HOLDING，并安装系统等待控制器，等待调度器下发下一任务。
 - `route_blocked`：覆盖/跟踪控制器内部重规划；达到重试上限后产生 `task_failed`。SYSTEM 返航由返航控制器按 7.4 节的保留 reservation 规则重规划。
 - `work_range_exhausted` 是生命周期事件，不由任务流消费；系统完成 RecoveryPlan 预验证和基地预留后，通过协调器回收控制权。
@@ -557,9 +559,9 @@ remaining_range_cells
 - 雷云和岛屿以只读 `HazardObservation` 发布；控制器不能持有可变障碍物实体。
 - 共享 UAV 状态来自 `UAVState`，不包含其他控制器内部状态。
 - 启发式任务可额外在 `ControllerContext` 中获得已分配 `ControlTask`；BC/RL 不接收强制任务分配。
-- `Ship.float_position`、`actual_military`、未发现舰船列表、未来雷云轨迹和随机数生成器均禁止进入观测。
+- `Ship.float_position`、环境侧 `vessel_class` 真值、未发现船舶列表、未来雷云轨迹和随机数生成器均禁止进入观测。
 
-测试通过构造带有明显哨兵值的隐藏舰船，递归检查观测内容，防止后续字段扩展造成真值泄漏。
+测试通过构造带有明显哨兵值的隐藏船舶，递归检查观测内容，防止后续字段扩展造成真值泄漏。
 
 ## 10. 安全与动作执行
 
@@ -592,7 +594,7 @@ remaining_range_cells
 
 ```text
 1. 时钟推进
-2. 障碍物和舰船物理更新
+2. 障碍物和船舶物理更新
 3. 对 heuristic UAV 先用任务流消费上一步转换事件并原子替换 controller/lease
 4. 重新读取当前 controller/lease，构建带 current_time 的 ControlObservation
 5. ControlCoordinator 只调用当前 controller 一次，得到 ControlDecision
