@@ -898,6 +898,7 @@ class SimulationEngine:
         uav_id: str | None,
         current_time: float,
         reason: str | None,
+        allow_missing_region: bool = False,
     ) -> None:
         """Apply one ordinary-search state to both authoritative projections."""
         valid_states = {"pending", "executing", "completed", "stale"}
@@ -923,7 +924,28 @@ class SimulationEngine:
         if not regions and record is None:
             return
         if not regions:
-            raise ValueError(f"search region missing: {task_id}")
+            if not (
+                allow_missing_region
+                and state == "completed"
+                and record is not None
+            ):
+                raise ValueError(f"search region missing: {task_id}")
+            self._mission_task_records[task_id] = replace(
+                record,
+                status="completed",
+                assigned_uav_id=None,
+                finished_at_min=(
+                    record.finished_at_min
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else current_time
+                ),
+                release_reason=(
+                    record.release_reason
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else reason
+                ),
+            )
+            return
 
         region = regions[0]
         if state in {"pending", "executing"}:
@@ -962,8 +984,16 @@ class SimulationEngine:
                 record,
                 status="completed",
                 assigned_uav_id=None,
-                finished_at_min=current_time,
-                release_reason=reason,
+                finished_at_min=(
+                    record.finished_at_min
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else current_time
+                ),
+                release_reason=(
+                    record.release_reason
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else reason
+                ),
             )
         else:
             desired = replace(
@@ -2471,6 +2501,7 @@ class SimulationEngine:
         preserve_search: bool = False,
         preserve_contact: bool = False,
         coverage_generation: int | None = None,
+        allow_missing_search_region: bool = False,
     ) -> None:
         """Close one mission binding without touching a replacement task."""
         sm = self.allocator.sm
@@ -2512,6 +2543,7 @@ class SimulationEngine:
                 uav_id=None,
                 current_time=current_time,
                 reason=reason,
+                allow_missing_region=allow_missing_search_region,
             )
 
         if task.target_contact_id is not None:
@@ -2582,7 +2614,7 @@ class SimulationEngine:
                 finished_at_min=current_time,
                 release_reason=reason,
             )
-        if desired == record:
+        if desired == record and task.task_type is not OperationMode.COVERAGE:
             return
         self._mission_task_records[task.task_id] = desired
         sm.current_time = max(float(sm.current_time), float(current_time))
@@ -2711,6 +2743,10 @@ class SimulationEngine:
         region_id = task.task_id if task and task.task_type is OperationMode.COVERAGE else None
         if region_id is None:
             region_id = event.payload.get("task_id")
+        has_search_region = any(
+            item.id == region_id and item.type == "search"
+            for item in self.allocator.sm.get_search_regions()
+        )
         if task is not None and task.task_type is OperationMode.COVERAGE:
             self._close_mission_task(
                 uav.id,
@@ -2719,6 +2755,7 @@ class SimulationEngine:
                 reason="search_complete",
                 current_time=event.timestamp_min,
                 coverage_generation=coverage_generation,
+                allow_missing_search_region=not has_search_region,
             )
         region = next(
             (
