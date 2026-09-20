@@ -40,6 +40,21 @@ def pending_search_fixture():
     region.completion_pct = 37.5
     task = engine.control_coordinator.active_task(edge.uav_id)
     assert task is not None
+    generation = engine.allocator.sm.coverage_task_generation(candidate.task_id)
+    assert generation is not None
+    progress = engine.allocator.sm.coverage_service.progress(
+        candidate.task_id,
+        generation,
+        uav_id=edge.uav_id,
+    )
+    assert progress is not None
+    engine.allocator.sm.coverage_service.record(
+        candidate.task_id,
+        generation,
+        (progress.required_cells[0],),
+        at_min=0.5,
+        uav_id=edge.uav_id,
+    )
     engine._close_mission_task(
         edge.uav_id,
         task,
@@ -273,4 +288,94 @@ def test_unmatchable_pending_geometry_remains_pending():
         "active",
         None,
         bbox,
+    )
+
+
+def test_pending_reassignment_preserves_region_and_sar_progress():
+    engine, task_id, old_uav_id, bbox = pending_search_fixture()
+    old_generation = engine.allocator.sm.coverage_task_generation(task_id)
+    assert old_generation is not None
+    progress = engine.allocator.sm.coverage_service.progress(task_id, old_generation)
+    assert progress is not None
+    preserved_cell = progress.scanned_cells[0]
+
+    reassigned = engine._apply_pending_search_reassignments(1.0)
+
+    assert reassigned == 1
+    record = engine._mission_task_records[task_id]
+    assert record.status == "executing"
+    assert record.assigned_uav_id is not None
+    assert record.assigned_uav_id != old_uav_id
+    region = next(
+        region
+        for region in engine.allocator.sm.get_search_regions()
+        if region.id == task_id
+    )
+    assert (region.id, tuple(region.bbox), region.completion_pct) == (
+        task_id,
+        bbox,
+        37.5,
+    )
+    assert region.assigned_uav_id == record.assigned_uav_id
+    active = engine.control_coordinator.active_task(record.assigned_uav_id)
+    assert active is not None and active.task_id == task_id
+    new_generation = engine.allocator.sm.coverage_task_generation(task_id)
+    assert new_generation is not None
+    assert new_generation == engine.control_coordinator.current_lease(
+        record.assigned_uav_id
+    ).generation
+    new_progress = engine.allocator.sm.coverage_service.progress(
+        task_id,
+        new_generation,
+        uav_id=record.assigned_uav_id,
+    )
+    assert new_progress is not None
+    assert preserved_cell in new_progress.scanned_cells
+    assert len([
+        item for item in engine.allocator.sm.get_search_regions()
+        if item.id == task_id
+    ]) == 1
+
+
+def test_pending_reassignment_route_failure_keeps_pending_state(monkeypatch):
+    engine, task_id, _old_uav_id, _bbox = pending_search_fixture()
+    before_record = engine._mission_task_records[task_id]
+    before_regions = tuple(engine.allocator.sm.get_search_regions())
+
+    def fail_route(*_args, **_kwargs):
+        raise RuntimeError("forced pending route failure")
+
+    monkeypatch.setattr("src.env.simulation.plan_search_route", fail_route)
+
+    assert engine._apply_pending_search_reassignments(1.0) == 0
+    assert engine._mission_task_records[task_id] == before_record
+    assert engine.allocator.sm.get_search_regions() == list(before_regions)
+    assert all(
+        engine.control_coordinator.active_task(uav.id) is None
+        for uav in engine.uavs
+        if uav.id in {"UAV-1", "UAV-2"}
+    )
+
+
+def test_pending_reassignment_coordinator_failure_keeps_pending_state(monkeypatch):
+    engine, task_id, _old_uav_id, _bbox = pending_search_fixture()
+    before_record = engine._mission_task_records[task_id]
+    before_regions = tuple(engine.allocator.sm.get_search_regions())
+
+    def fail_commit(*_args, **_kwargs):
+        raise RuntimeError("forced pending coordinator failure")
+
+    monkeypatch.setattr(
+        engine.control_coordinator,
+        "assign_tasks_atomically",
+        fail_commit,
+    )
+
+    assert engine._apply_pending_search_reassignments(1.0) == 0
+    assert engine._mission_task_records[task_id] == before_record
+    assert engine.allocator.sm.get_search_regions() == list(before_regions)
+    assert all(
+        engine.control_coordinator.active_task(uav.id) is None
+        for uav in engine.uavs
+        if uav.id in {"UAV-1", "UAV-2"}
     )

@@ -109,11 +109,14 @@ class CoverageService:
         uav_id: str,
         bbox: tuple[int, int, int, int],
         at_min: float,
+        *,
+        initial_scanned_cells: Iterable[tuple[int, int]] = (),
     ) -> None:
         task_id, generation, uav_id, bbox, started_at_min, required_cells = (
             self._validated_start(task_id, generation, uav_id, bbox, at_min)
         )
         key = (task_id, generation, uav_id)
+        initial_cells = set(_cell_tuple(initial_scanned_cells, "initial_scanned_cells"))
 
         for state in self._tasks.values():
             if state.task_id == task_id and not state.closed:
@@ -127,7 +130,7 @@ class CoverageService:
             bbox=bbox,
             started_at_min=started_at_min,
             required_cells=frozenset(required_cells),
-            scanned_cells=set(),
+            scanned_cells=initial_cells & set(required_cells),
         )
         self._latest_generation[(task_id, uav_id)] = generation
         self._latest_key[task_id] = key

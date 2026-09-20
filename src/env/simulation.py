@@ -1270,6 +1270,16 @@ class SimulationEngine:
             result = self.allocator.step(t)
             self._sync_assignments()
         else:
+            pending_reassigned = self._apply_pending_search_reassignments(t)
+            if pending_reassigned:
+                # Refresh the immutable snapshot after the atomic handoff so
+                # the following trigger sees the new owner and generation.
+                self.allocator.build_mission_snapshot(
+                    t,
+                    active_tasks=tuple(self._mission_task_records.values()),
+                    intents=self.intents.intents(),
+                    intent_statuses=self._evaluate_intent_statuses(t),
+                )
             result, batch = self.allocator.mission_step(
                 t,
                 active_tasks=tuple(self._mission_task_records.values()),
@@ -1283,6 +1293,18 @@ class SimulationEngine:
                     result = {
                         **result,
                         "action": "mission_assignment_rejected",
+                    }
+            if pending_reassigned:
+                result = {
+                    **result,
+                    "pending_search_reassignments": pending_reassigned,
+                }
+                if result.get("trigger_type") == "none":
+                    result = {
+                        **result,
+                        "trigger_type": "light",
+                        "action": "pending_searches_reassigned",
+                        "assignments": pending_reassigned,
                     }
             timing = getattr(self.allocator, "last_decision_timing", None)
             if timing is not None:
@@ -1406,7 +1428,14 @@ class SimulationEngine:
             return False
 
         prepared: list[
-            tuple[object, ControlTask, TaskCandidate, object, ControlTask | None]
+            tuple[
+                object,
+                ControlTask,
+                TaskCandidate,
+                object,
+                ControlTask | None,
+                Region | None,
+            ]
         ] = []
         route_plans: dict[str, SearchRoutePlan] = {}
         reservations: list[tuple[str, str, str | None]] = []
@@ -1448,14 +1477,30 @@ class SimulationEngine:
             if candidate.kind in _SEARCH_TASK_KINDS:
                 if candidate.bbox is None:
                     return False
-                region = Region(
-                    candidate.task_id,
-                    BBox(*candidate.bbox),
-                    "search",
-                    priority=candidate.priority,
-                    created_cycle=self.allocator.sm.cycle,
-                    assigned_uav_id=assignment.uav_id,
+                existing_region = next(
+                    (
+                        item
+                        for item in self.allocator.sm.get_search_regions()
+                        if item.id == candidate.task_id
+                    ),
+                    None,
                 )
+                if existing_region is not None and candidate.kind == "search":
+                    region = replace(
+                        existing_region,
+                        status="active",
+                        priority=candidate.priority,
+                        assigned_uav_id=assignment.uav_id,
+                    )
+                else:
+                    region = Region(
+                        candidate.task_id,
+                        BBox(*candidate.bbox),
+                        "search",
+                        priority=candidate.priority,
+                        created_cycle=self.allocator.sm.cycle,
+                        assigned_uav_id=assignment.uav_id,
+                    )
                 if self.allocator.sm.coverage_service is not None:
                     try:
                         self.allocator.sm.coverage_service.validate_start(
@@ -1581,7 +1626,16 @@ class SimulationEngine:
                 reserved_contacts.add(contact_id)
             else:
                 return False
-            prepared.append((uav, control_task, candidate, assignment, active))
+            prepared.append(
+                (
+                    uav,
+                    control_task,
+                    candidate,
+                    assignment,
+                    active,
+                    region if candidate.kind in _SEARCH_TASK_KINDS else None,
+                )
+            )
 
         reservation_state = self.allocator.sm.contacts.capture_reservation_state(
             contact_id for contact_id, _, _ in reservations
@@ -1592,7 +1646,7 @@ class SimulationEngine:
             leases = self.control_coordinator.assign_tasks_atomically(
                 tuple(
                     (assignment.uav_id, task, assignment.expected_generation)
-                    for _, task, _, assignment, _ in prepared
+                    for _, task, _, assignment, _, _ in prepared
                 ),
                 current_time=self.clock.time,
                 dt_min=self.clock.dt_min,
@@ -1628,11 +1682,15 @@ class SimulationEngine:
             })
 
         by_uav = {
-            assignment.uav_id: (uav, task, candidate, assignment, previous_task)
-            for (uav, task, candidate, assignment, previous_task) in prepared
+            assignment.uav_id: (
+                uav, task, candidate, assignment, previous_task, region
+            )
+            for (
+                uav, task, candidate, assignment, previous_task, region
+            ) in prepared
         }
         for lease, assignment in zip(leases, batch.assignments):
-            uav, task, candidate, _, old_task = by_uav[assignment.uav_id]
+            uav, task, candidate, _, old_task, prepared_region = by_uav[assignment.uav_id]
             if old_task is not None and old_task.task_id != task.task_id:
                 old_record = self._mission_task_records.get(old_task.task_id)
                 if old_record is not None:
@@ -1657,14 +1715,9 @@ class SimulationEngine:
                     assignment.uav_id, self.clock.time,
                 )
             if candidate.kind in _SEARCH_TASK_KINDS:
-                region = Region(
-                    candidate.task_id,
-                    BBox(*candidate.bbox),
-                    "search",
-                    priority=candidate.priority,
-                    created_cycle=self.allocator.sm.cycle,
-                    assigned_uav_id=assignment.uav_id,
-                )
+                region = prepared_region
+                if region is None:
+                    return False
                 regions = [
                     item for item in self.allocator.sm.get_search_regions()
                     if item.id != region.id
@@ -1744,12 +1797,17 @@ class SimulationEngine:
             self._mission_task_records[task.task_id] = replace(
                 existing_record,
                 kind=candidate.kind,
-                status="approved",
+                status=("executing" if candidate.kind == "search" else "approved"),
                 bbox=candidate.bbox,
                 contact_id=task.target_contact_id,
                 intent_ids=candidate.intent_ids,
                 assigned_uav_id=uav.id,
                 approved_call_id=batch.selection_call_id,
+                started_at_min=(
+                    existing_record.started_at_min
+                    if existing_record.started_at_min is not None
+                    else self.clock.time
+                ),
                 finished_at_min=None,
                 release_reason=None,
             )
@@ -1776,6 +1834,26 @@ class SimulationEngine:
         })
         self._publish_control_routes()
         return True
+
+    def _apply_pending_search_reassignments(self, current_time: float) -> int:
+        """Install deterministic pending-search handoffs at one engine boundary."""
+        batch = self.allocator.build_pending_search_batch(
+            current_time,
+            active_tasks=tuple(self._mission_task_records.values()),
+        )
+        if batch is None:
+            return 0
+        if not self.apply_assignment_batch(batch):
+            return 0
+        self.allocator.sm.add_event("pending_search_reassigned", {
+            "snapshot_id": batch.snapshot_id,
+            "selection_call_id": batch.selection_call_id,
+            "assignments": [
+                {"task_id": item.task_id, "uav_id": item.uav_id}
+                for item in batch.assignments
+            ],
+        })
+        return len(batch.assignments)
 
     def _prepare_red_decision(self, current_time: float) -> None:
         """Build one red-only fleet snapshot and install its validated plan."""
@@ -2347,6 +2425,13 @@ class SimulationEngine:
             tuple(task.region_bbox),
             current_time,
         )
+        previous_progress = None
+        latest_generation = service.latest_generation(task.task_id)
+        if latest_generation is not None:
+            previous_progress = service.progress(
+                task.task_id,
+                latest_generation,
+            )
         if previous_generation is not None:
             service.close(
                 task.task_id,
@@ -2360,6 +2445,10 @@ class SimulationEngine:
             uav.id,
             tuple(task.region_bbox),
             current_time,
+            initial_scanned_cells=(
+                previous_progress.scanned_cells
+                if previous_progress is not None else ()
+            ),
         )
         self._coverage_assignment_generations[key] = generation
         self.allocator.sm.register_coverage_task_generation(
