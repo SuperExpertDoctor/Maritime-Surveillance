@@ -665,13 +665,29 @@ def _validate_selection(
         errors.append("duplicate_preempt_uav_id")
 
     candidates, active = _task_maps(snapshot)
+    pending_search_ids = set(snapshot.pending_search_task_ids)
+    # Pending ordinary searches are retained-region audit records.  They stay
+    # in the snapshot for overlap and replay checks, but are not legal model
+    # selections or new-candidate representatives.
+    candidates = {
+        task_id: task
+        for task_id, task in candidates.items()
+        if task_id not in pending_search_ids
+    }
+    active = {
+        task_id: task
+        for task_id, task in active.items()
+        if task_id not in pending_search_ids
+    }
     resources = _resource_maps(snapshot)
     visible = set(candidates) if visible_task_ids is None else set(visible_task_ids)
     if len(resources) != len(snapshot.resources):
         errors.append("duplicate_resource_id")
     known_tasks = set(candidates) | set(active)
     for task_id in selected_task_ids:
-        if task_id not in known_tasks:
+        if task_id in pending_search_ids:
+            errors.append(f"pending_search_not_selectable:{task_id}")
+        elif task_id not in known_tasks:
             errors.append(f"unknown_task_id: {task_id}")
         elif task_id in candidates and task_id not in visible:
             errors.append(f"selected_task_not_visible:{task_id}")

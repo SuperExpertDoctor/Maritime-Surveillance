@@ -151,6 +151,36 @@ def test_pending_search_is_a_reserved_audit_region_not_a_new_llm_candidate():
     assert task_id not in snapshot.coverage_constraint.must_service_task_ids
 
 
+def test_pending_search_is_rejected_if_the_model_selects_it_directly():
+    engine, task_id, _uav_id, _bbox = pending_search_fixture()
+    snapshot = engine.allocator.build_mission_snapshot(
+        active_tasks=tuple(engine._mission_task_records.values()),
+    )
+
+    errors = MissionScheduler(selection_provider=lambda *_: None).validate_selection(
+        _selection_for(snapshot, task_id), snapshot,
+    )
+
+    assert f"pending_search_not_selectable:{task_id}" in errors
+
+
+def test_scheduler_prompt_distinguishes_retained_work_from_new_search_additions():
+    engine, task_id, _uav_id, _bbox = pending_search_fixture()
+    snapshot = engine.allocator.build_mission_snapshot(
+        active_tasks=tuple(engine._mission_task_records.values()),
+    )
+    prompt = engine.allocator.mission_scheduler._prompt_payload(snapshot)
+
+    instructions = prompt["instructions"]
+    assert "pending_search_task_ids are retained work" in instructions
+    assert "do not select or recreate pending search regions" in instructions
+    assert "selected ordinary searches are additions only" in instructions
+    assert "required_new_search_count is the residual addition count" in instructions
+    assert task_id not in {
+        candidate["task_id"] for candidate in prompt["snapshot"]["candidates"]
+    }
+
+
 def _two_pending_searches():
     engine = _engine()
     snapshot = engine.allocator.build_mission_snapshot(0.0)

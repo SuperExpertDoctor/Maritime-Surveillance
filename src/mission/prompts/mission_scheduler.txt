@@ -13,6 +13,11 @@ Return exactly one JSON object with this schema:
 Select only supplied candidate task IDs. Search candidates already contain a
 legal rectangle; never invent a bbox. Probe and track tasks reference the
 supplied contact ID through the task record and have no search geometry.
+pending_search_task_ids are retained work, not new model candidates.
+do not select or recreate pending search regions; deterministic reassignment
+handles them before this decision.
+selected ordinary searches are additions only and must not overlap retained
+or executing search regions.
 Never select two supplied search candidates whose rectangles overlap.
 Respect feasible_edges, remaining range, UAV generations, active tasks, map
 version, contact state, intent status, and reviewer summary. For large snapshots
@@ -28,6 +33,8 @@ effective zone gap; it is not an actual SAR observation and does not make cells 
 When coverage_constraint is present, select EXACTLY required_new_search_count
 new ordinary search tasks (kind=search with a bbox), including every global
 must_service_task_ids entry, unless global infeasible_reason is present.
+required_new_search_count is the residual addition count after active searches
+and matchable pending searches; it is not the total search-region count.
 Investigation and direction_search do not count toward this exact search budget.
 For every feasible zone_requirements entry, meet required_search_count from its
 representative_task_ids and include all its must_service_task_ids. These feasible
