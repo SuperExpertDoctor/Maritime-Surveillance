@@ -24,8 +24,8 @@ def test_config_loader_reads_merged_environment_and_llm_parameters():
     assert config.ship.population.type_ii_ratio == pytest.approx(0.375)
     assert config.mission.contact.near_standoff_cells == 1.2
     assert config.mission.scheduling.allow_probe_preempt_search is True
-    assert config.mission.information_update.planning_deadline_seconds == pytest.approx(30.0)
-    assert config.mission.information_update.postprocess_reserve_seconds == pytest.approx(0.5)
+    assert config.mission.information_update.planning_deadline_seconds == pytest.approx(60.0)
+    assert config.mission.information_update.postprocess_reserve_seconds == pytest.approx(1.0)
 
 
 def test_llm_configuration_declares_all_isolated_roles():

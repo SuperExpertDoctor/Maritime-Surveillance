@@ -238,7 +238,9 @@ test("live and replay dashboard acceptance", async ({ page }) => {
       ).then((response) => response.json());
       return { file, total: Number(payload.total) || 0 };
     }));
-    return candidates.sort((left, right) => right.total - left.total)[0]?.file || "";
+    return candidates
+      .filter(({ file }) => /^simulation_.*\.jsonl$/i.test(file))
+      .sort((left, right) => right.total - left.total)[0]?.file || "";
   });
   expect(replayFile).toMatch(/^simulation_.*\.jsonl$/);
   await fileSelect.selectOption(replayFile);

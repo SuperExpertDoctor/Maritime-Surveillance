@@ -393,16 +393,28 @@ class TrackingController(HeuristicControllerBase):
         )
         if contact is None or contact.observed_at_min <= self.target_observed_at_min:
             return
-        self.target_position = tuple(map(float, contact.estimated_position))
+        next_target = tuple(map(float, contact.estimated_position))
+        target_shift = (
+            math.dist(self.target_position, next_target)
+            if self.target_position is not None else math.inf
+        )
+        self.target_position = next_target
         self.target_observed_at_min = float(contact.observed_at_min)
         self._avoidance_follower = None
         self.avoidance_route = ()
         self._avoidance_planning_map_version = None
-        if self.phase in (
-            TrackingPhase.CREATED,
-            TrackingPhase.APPROACH_ASTAR,
-            TrackingPhase.ORBIT_ENTRY,
+        if self.phase in (TrackingPhase.CREATED, TrackingPhase.APPROACH_ASTAR):
+            self.route = ()
+            self.follower = None
+            self.planning_map_version = None
+            self.phase = TrackingPhase.CREATED
+            self._route_status = "pending"
+        elif (
+            self.phase is TrackingPhase.ORBIT_ENTRY
+            and target_shift > self.standoff_radius_cells
         ):
+            # Keep a commanded orbit entry stable across ordinary motion
+            # updates. A large estimate jump still invalidates the approach.
             self.route = ()
             self.follower = None
             self.planning_map_version = None

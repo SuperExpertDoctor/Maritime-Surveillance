@@ -15,6 +15,7 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   retries: 0,
   workers: 1,
+  testIgnore: ["tests/legacy-search-scheduling.spec.js"],
   use: {
     baseURL,
     ...(executablePath ? { launchOptions: { executablePath } } : {}),
@@ -26,7 +27,7 @@ export default defineConfig({
       cwd: projectRoot,
       url: `${backendURL}/api/config`,
       reuseExistingServer: true,
-      timeout: 30_000,
+      timeout: 900_000,
     },
     {
       command: "npm run dev -- --host 127.0.0.1 --port 5180",

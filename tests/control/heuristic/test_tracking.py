@@ -438,6 +438,40 @@ def test_tracking_replans_for_only_a_newer_contact_update(
     assert len(controller.navigator.plan_arguments) == 2
 
 
+def test_tracking_keeps_orbit_entry_for_small_newer_contact_updates(
+    action_spec, observation
+):
+    near_target = _with_pose(observation, (10.0, 13.0, 0.0))
+    tracker = TrackerSpy(
+        entry_paths=(((10.0, 13.0, 0.0), (11.0, 13.0, 0.0), (11.0, 14.0, 0.0)),)
+    )
+    controller = TrackingController(
+        observation_spec=ObservationSpec("control-observation/v1", 11),
+        action_spec=action_spec,
+        navigator=TrackingNavigatorSpy(),
+        tracker=tracker,
+        storm_avoider=StormAvoiderSpy(),
+        eo_range_cells=2.5,
+        standoff_radius_cells=1.8,
+        r_min=1.0,
+        nominal_speed_cells_min=0.75,
+    )
+    _start_tracking(controller, near_target)
+    controller.act(near_target)
+    assert controller.phase is TrackingPhase.ORBIT_ENTRY
+
+    newer = replace(
+        near_target.contacts[0],
+        estimated_position=(12.1, 13.0),
+        observed_at_min=6.0,
+    )
+    controller.act(replace(near_target, contacts=(newer,)))
+
+    assert controller.phase is TrackingPhase.ORBIT_ENTRY
+    assert controller.target_position == (12.1, 13.0)
+    assert len(tracker.entry_arguments) == 1
+
+
 def test_tracking_replans_an_approach_route_invalidated_by_a_new_map_version(
     action_spec, observation
 ):
