@@ -129,6 +129,43 @@ test("sensor beam renderer exposes SAR and EO scan shapes", async ({ page }) => 
   await page.screenshot({ path: "test-results/sensor-beams-live.png", fullPage: true });
 });
 
+test("search-region labels are bounded, nonoverlapping, and retain pending work", async ({ page }) => {
+  await page.goto("/");
+  const labels = await page.evaluate(async () => {
+    const { drawSearchRegions } = await import("/src/renderer/layers.js");
+    const canvas = document.createElement("canvas");
+    canvas.width = 560;
+    canvas.height = 560;
+    const context = canvas.getContext("2d");
+    return drawSearchRegions(context, [
+      { id: "search:pending", bbox: [10, 10, 14, 14], completion_pct: 25, assigned_uav_id: null },
+      { id: "search:assigned-a", bbox: [11, 10, 15, 14], completion_pct: 50, assigned_uav_id: "UAV-1" },
+      { id: "search:assigned-b", bbox: [10, 11, 14, 15], completion_pct: 75, assigned_uav_id: "UAV-2" },
+      { id: "search:assigned-c", bbox: [11, 11, 15, 15], completion_pct: 90, assigned_uav_id: "UAV-3" },
+    ], [], 16, 20, 20);
+  });
+
+  expect(Array.isArray(labels)).toBe(true);
+  const visible = labels.filter((label) => !label.hidden);
+  expect(visible.some((label) => label.id === "search:search:pending")).toBe(true);
+  for (const label of visible) {
+    expect(label.x).toBeGreaterThanOrEqual(20);
+    expect(label.y).toBeGreaterThanOrEqual(20);
+    expect(label.x + label.width).toBeLessThanOrEqual(500);
+    expect(label.y + label.height).toBeLessThanOrEqual(500);
+  }
+  for (let left = 0; left < visible.length; left += 1) {
+    for (let right = left + 1; right < visible.length; right += 1) {
+      const a = visible[left];
+      const b = visible[right];
+      expect(a.x + a.width <= b.x
+        || b.x + b.width <= a.x
+        || a.y + a.height <= b.y
+        || b.y + b.height <= a.y).toBe(true);
+    }
+  }
+});
+
 test("live and replay dashboard acceptance", async ({ page }) => {
   const runtimeErrors = [];
   page.on("console", (message) => {

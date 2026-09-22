@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 
 from src.mission.config import CoverageConfig
-from src.mission.contracts import CoverageConstraint, ZoneCoverageRequirement
+from src.mission.contracts import (
+    CoverageConstraint,
+    FeasibleEdge,
+    ZoneCoverageRequirement,
+)
 from src.mission.coverage_metrics import CoverageMetrics
 from src.mission.coverage_policy import (
     CoveragePolicy,
@@ -173,7 +177,7 @@ def test_budget_endpoints_and_available_anchor():
             edges=(_edge("S1"), _edge("S2", "U2")),
             fraction=1,
         ).required_new_search_count
-        == 0
+        == 2
     )
 
 
@@ -194,6 +198,76 @@ def test_distinct_zone_candidates_and_augmenting_paths():
         for z in result.zone_requirements
     ] == [(("S1",), ("S1",)), (("S2",), ("S2",))]
     assert result.required_new_search_count == 2
+
+
+def test_zone_quota_matching_minimizes_global_transit_cost():
+    quota = (
+        ZoneQuotaInput("z1", ("A", "B")),
+        ZoneQuotaInput("z2", ("C",)),
+    )
+    edges = (
+        FeasibleEdge("A", "U1", 1.0, 1.0, 1.0, 0.0, "A:U1"),
+        FeasibleEdge("A", "U2", 100.0, 1.0, 1.0, 0.0, "A:U2"),
+        FeasibleEdge("B", "U2", 2.0, 1.0, 1.0, 0.0, "B:U2"),
+        FeasibleEdge("C", "U1", 1.0, 1.0, 1.0, 0.0, "C:U1"),
+    )
+
+    result = _constraint(
+        ids=("U1", "U2"),
+        reps=("A", "B", "C"),
+        edges=edges,
+        quota=quota,
+    )
+
+    assert [
+        zone.must_service_task_ids for zone in result.zone_requirements
+    ] == [("B",), ("C",)]
+    assert result.required_new_search_count == 2
+
+
+def test_zone_quota_does_not_reuse_one_task_for_multiple_zones():
+    quota = (
+        ZoneQuotaInput("z1", ("shared", "z1-only")),
+        ZoneQuotaInput("z2", ("shared", "z2-only")),
+    )
+    edges = (
+        FeasibleEdge("shared", "U1", 1.0, 1.0, 1.0, 0.0, "shared:U1"),
+        FeasibleEdge("shared", "U2", 1.0, 1.0, 1.0, 0.0, "shared:U2"),
+        FeasibleEdge("z1-only", "U1", 2.0, 1.0, 1.0, 0.0, "z1-only:U1"),
+        FeasibleEdge("z2-only", "U2", 2.0, 1.0, 1.0, 0.0, "z2-only:U2"),
+    )
+
+    result = _constraint(
+        ids=("U1", "U2"),
+        reps=("shared", "z1-only", "z2-only"),
+        edges=edges,
+        quota=quota,
+    )
+
+    selected = tuple(
+        task_id
+        for zone in result.zone_requirements
+        for task_id in zone.must_service_task_ids
+    )
+    assert len(result.zone_requirements) == 2
+    assert len(selected) == len(set(selected)) == 2
+
+
+def test_zone_quota_front_loads_the_candidate_with_shortest_minimum_transit():
+    quota = (ZoneQuotaInput("remote-zone", ("near", "remote")),)
+    edges = (
+        _edge("near", "U1"),
+        FeasibleEdge("remote", "U1", 10.0, 1.0, 1.0, 0.0, "remote:U1"),
+    )
+
+    result = _constraint(
+        ids=("U1",),
+        reps=("near", "remote"),
+        edges=edges,
+        quota=quota,
+    )
+
+    assert result.zone_requirements[0].must_service_task_ids == ("near",)
 
 
 def test_unreachable_zone_and_global_shortage_are_explicit():
@@ -237,23 +311,40 @@ def test_first_round_ten_searches_nine_quotas_and_prompt_budget():
     assert set(snapshot.coverage_constraint.must_service_task_ids) <= visible
     payload["selected_task_ids"] = payload["selected_task_ids"][:4]
     errors = scheduler.validate_selection(payload, snapshot)
-    assert "search_count_not_exact:10:4" in errors
+    assert "coverage_floor_not_met:10:4" in errors
     assert any(e.startswith("zone_quota_not_met:") for e in errors)
 
 
-def test_exact_count_rejects_excess_and_zero_budget_search():
+def test_coverage_floor_allows_excess_but_rejects_zero_budget_ordinary_search():
     snapshot = _fleet_snapshot()
     scheduler = MissionScheduler(selection_provider=lambda *_: {})
-    for required in (0, 4):
-        constrained = replace(
-            snapshot,
-            coverage_constraint=CoverageConstraint(required, 0, required, (), ()),
-        )
-        payload = _selection(constrained)
-        payload["selected_task_ids"] = [t.task_id for t in snapshot.candidates]
-        assert f"search_count_not_exact:{required}:10" in scheduler.validate_selection(
-            payload, constrained
-        )
+    zero_budget = replace(
+        snapshot,
+        coverage_constraint=CoverageConstraint(0, 0, 0, (), ()),
+    )
+    payload = _selection(zero_budget)
+    payload["selected_task_ids"] = [t.task_id for t in snapshot.candidates]
+    errors = scheduler.validate_selection(payload, zero_budget)
+    assert not any(error.startswith("coverage_floor_not_met:") for error in errors)
+    assert any(
+        error.startswith("ordinary_search_without_residual_budget:")
+        for error in errors
+    )
+
+    required = 4
+    constrained = replace(
+        snapshot,
+        coverage_constraint=CoverageConstraint(required, 0, required, (), ()),
+    )
+    payload = _selection(constrained)
+    payload["selected_task_ids"] = [t.task_id for t in snapshot.candidates]
+    assert scheduler.validate_selection(payload, constrained) == ()
+    payload["selected_task_ids"] = [
+        t.task_id for t in snapshot.candidates[:required - 1]
+    ]
+    assert f"coverage_floor_not_met:{required}:{required - 1}" in scheduler.validate_selection(
+        payload, constrained
+    )
 
 
 @pytest.mark.parametrize("kind", ["investigation", "direction_search"])
@@ -268,7 +359,7 @@ def test_urgent_search_shapes_do_not_count_as_ordinary(kind):
     )
     payload = _selection(snapshot)
     payload["selected_task_ids"] = [t.task_id for t in snapshot.candidates]
-    assert "search_count_not_exact:10:9" in MissionScheduler(
+    assert "coverage_floor_not_met:10:9" in MissionScheduler(
         selection_provider=lambda *_: {}
     ).validate_selection(payload, snapshot)
 
@@ -386,11 +477,14 @@ def test_prompt_budget_guard_includes_large_zone_summary():
     assert scheduler.last_selection_errors[0].startswith("prompt_budget_exceeded:")
 
 
-def test_prompt_preserves_geometry_safety_and_exact_policy():
+def test_prompt_preserves_geometry_safety_and_coverage_floor_policy():
     scheduler = MissionScheduler(selection_provider=lambda *_: {})
     for fragment in (
         "never invent a bbox",
-        "EXACTLY required_new_search_count",
+        "AT LEAST required_new_search_count",
+        "When required_new_search_count is zero",
+        "urgent high-priority",
+        "except when a feasible zone obligation requires them",
         "zone_requirements",
         "160 characters",
         "generation",
@@ -467,7 +561,7 @@ def test_six_probes_four_searches_are_not_first_round_coverage():
     errors = MissionScheduler(selection_provider=lambda *_: {}).validate_selection(
         payload, snapshot
     )
-    assert "search_count_not_exact:10:4" in errors
+    assert "coverage_floor_not_met:10:4" in errors
 
 
 def test_matching_cardinality_agrees_with_exhaustive_small_graph_oracle():

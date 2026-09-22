@@ -27,6 +27,22 @@ def _frame(engine, **overrides):
     )
 
 
+def test_baseline_git_output_uses_utf8_for_dirty_diff(monkeypatch):
+    from scripts import capture_coverage_baseline as capture
+
+    observed = {}
+
+    def fake_run(*args, **kwargs):
+        observed.update(kwargs)
+        return type("Completed", (), {"stdout": "\u8986\u76d6\u5dee\u5f02"})()
+
+    monkeypatch.setattr(capture.subprocess, "run", fake_run)
+
+    assert capture._git_output("diff", "--binary") == "\u8986\u76d6\u5dee\u5f02"
+    assert observed["encoding"] == "utf-8"
+    assert observed["errors"] == "surrogateescape"
+
+
 def test_legacy_state_frame_has_explicit_null_coverage_without_matrices():
     config = ConfigLoader.load()
     state = StateManager(config)

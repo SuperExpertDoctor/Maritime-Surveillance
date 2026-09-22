@@ -1,4 +1,4 @@
-"""Strict mission selection validation and exact feasible-task matching."""
+"""Strict mission selection validation and feasible-task matching."""
 from __future__ import annotations
 
 import math
@@ -716,13 +716,31 @@ def _validate_selection(
         )
         if (
             not floor_infeasible
-            and coverage_constraint.required_new_search_count
-            != ordinary_count
+            and ordinary_count < coverage_constraint.required_new_search_count
         ):
             errors.append(
-                "search_count_not_exact:"
+                "coverage_floor_not_met:"
                 f"{coverage_constraint.required_new_search_count}:{ordinary_count}"
             )
+        if (
+            not floor_infeasible
+            and coverage_constraint.required_new_search_count == 0
+        ):
+            for task in selected_tasks:
+                is_new_ordinary_search = (
+                    task.kind == "search"
+                    and task.bbox is not None
+                    and task.task_id in candidates
+                    and task.task_id not in active
+                )
+                is_explicitly_urgent = (
+                    task.priority == "high" or bool(task.intent_ids)
+                )
+                if is_new_ordinary_search and not is_explicitly_urgent:
+                    errors.append(
+                        "ordinary_search_without_residual_budget:"
+                        f"{task.task_id}"
+                    )
         if (
             not floor_infeasible
             and coverage_constraint.required_new_search_count > 0

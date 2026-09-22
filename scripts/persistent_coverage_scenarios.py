@@ -118,27 +118,77 @@ class CoverageFixtureGateway(_FixtureGateway):
             if task_id in feasible_ids
         }
         kind_rank = {"investigation": 0, "direction_search": 1, "search": 2}
+        available_uav_ids = set(snapshot.get("available_uav_ids", ()))
+        if not available_uav_ids:
+            for edge in snapshot.get("feasible_edges", ()):
+                if not isinstance(edge, dict):
+                    continue
+                if isinstance(edge.get("uav_id"), str):
+                    available_uav_ids.add(edge["uav_id"])
+                available_uav_ids.update(
+                    option.get("uav_id")
+                    for option in edge.get("uav_options", ())
+                    if isinstance(option, dict)
+                    and isinstance(option.get("uav_id"), str)
+                )
+        target_search_count = len(available_uav_ids) if required else 0
+        transit_costs: dict[str, float] = {}
+        for edge in snapshot.get("feasible_edges", ()):
+            if not isinstance(edge, dict):
+                continue
+            task_id = edge.get("task_id")
+            if not isinstance(task_id, str) or task_id not in visible:
+                continue
+            values = []
+            direct = edge.get("transit_time_min")
+            if isinstance(direct, (int, float)):
+                values.append(float(direct))
+            values.extend(
+                float(option["transit_time_min"])
+                for option in edge.get("uav_options", ())
+                if isinstance(option, dict)
+                and isinstance(option.get("transit_time_min"), (int, float))
+            )
+            if values:
+                transit_costs[task_id] = min(
+                    transit_costs.get(task_id, float("inf")),
+                    min(values),
+                )
+
+        def order_key(task_id: str):
+            item = visible[task_id]
+            return (
+                kind_rank.get(item.get("kind"), 3),
+                0 if item.get("priority") == "high" else 1,
+                transit_costs.get(task_id, float("inf"))
+                if item.get("kind") == "search" else 0.0,
+                1 if task_id.startswith("fragment:") else 0,
+                task_id,
+            )
+
         representative_order = self._spread_representatives(
             representatives,
             visible,
             must_service,
-            len(snapshot.get("available_uav_ids", ())),
+            target_search_count,
         )
-        ordered = []
-        for task_id in (*must_service, *representative_order):
-            if task_id in visible and task_id not in ordered:
-                ordered.append(task_id)
+        ordered_must = [
+            task_id for task_id in must_service
+            if task_id in visible
+        ]
+        floor_count = max(required, len(ordered_must))
+        floor_representatives = [
+            task_id for task_id in representative_order
+            if task_id in visible and task_id not in ordered_must
+        ]
+        floor_representatives = sorted(
+            floor_representatives,
+            key=order_key,
+        )[:max(0, floor_count - len(ordered_must))]
+        ordered = [*ordered_must, *floor_representatives]
         ordered.extend(
             task_id
-            for task_id, item in sorted(
-                visible.items(),
-                key=lambda pair: (
-                    1 if pair[0].startswith("fragment:") else 0,
-                    kind_rank.get(pair[1].get("kind"), 3),
-                    0 if pair[1].get("priority") == "high" else 1,
-                    pair[0],
-                ),
-            )
+            for task_id in sorted(visible, key=order_key)
             if task_id not in ordered
         )
 
@@ -147,14 +197,20 @@ class CoverageFixtureGateway(_FixtureGateway):
             "underutilized_feasible_work:",
             "coverage_floor_not_met",
             "coverage_oldest_not_selected",
-            "search_count_not_exact:",
             "zone_quota_not_met:",
             "zone_must_service_not_selected:",
         )
         for task_id in ordered:
+            candidate = candidates[task_id]
+            explicitly_urgent = (
+                candidate.get("priority") == "high"
+                or bool(candidate.get("intent_ids"))
+            )
             if (not snapshot.get("coverage_constraint", {}).get("infeasible_reason")
-                    and candidates[task_id].get("kind") == "search"
-                    and sum(candidates[s].get("kind") == "search" for s in selected) >= required):
+                    and candidate.get("kind") == "search"
+                    and not explicitly_urgent
+                    and sum(candidates[s].get("kind") == "search" for s in selected)
+                    >= target_search_count):
                 continue
             proposed = [*selected, task_id]
             payload = self._selection_payload(snapshot, proposed)

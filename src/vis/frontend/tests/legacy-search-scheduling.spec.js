@@ -35,7 +35,7 @@ test("legacy pending search keeps identity through replay and coverage panel", a
   expect(replayFile).toBeTruthy();
 
   const chunk = await firstChunk(page, replayFile);
-  expect(chunk.total).toBeGreaterThanOrEqual(6);
+  expect(Number(chunk.total)).toBe(480);
   const frames = chunk.frames;
   const reassignmentEvents = frames.flatMap((frame) => frame.events || [])
     .filter((event) => event.type === "pending_search_reassigned");
@@ -100,6 +100,29 @@ test("legacy pending search keeps identity through replay and coverage panel", a
   await expect(regionRow).toContainText(transition.after.region.assigned_uav_id);
   await expect(regionRow).toContainText(transition.after.region.bbox.join(", "));
   await page.screenshot({ path: screenshotPath(testInfo, "assigned-after") });
+
+  for (const [frameIndex, name] of [[78, "minute-79"], [119, "minute-120"]]) {
+    await timeline.fill(String(frameIndex));
+    await expect(page.locator(".playback-readout").first()).toContainText(`${frameIndex + 1} / ${chunk.total}`);
+    await expect.poll(async () => page.locator(".connection-state").textContent()).not.toContain("载入目标帧");
+    await page.screenshot({ path: screenshotPath(testInfo, name) });
+  }
+
+  await timeline.fill(String(chunk.total - 1));
+  await expect(page.locator(".playback-readout").first()).toContainText(`${chunk.total} / ${chunk.total}`);
+  await expect.poll(async () => page.locator(".connection-state").textContent()).not.toContain("载入目标帧");
+  const terminalCanvasPixels = await page.locator("canvas").evaluate((canvas) => {
+    const context = canvas.getContext("2d");
+    if (!context || !canvas.width || !canvas.height) return 0;
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let nonTransparent = 0;
+    for (let index = 3; index < pixels.length; index += 4) {
+      if (pixels[index] > 0) nonTransparent += 1;
+    }
+    return nonTransparent;
+  });
+  expect(terminalCanvasPixels).toBeGreaterThan(1000);
+  await page.screenshot({ path: screenshotPath(testInfo, "terminal-frame-480") });
 
   await page.getByRole("tab", { name: "时间线" }).click();
   await expect(page.locator(".timeline-list")).toBeVisible();

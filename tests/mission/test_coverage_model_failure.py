@@ -115,3 +115,26 @@ def test_failed_decision_maker_retry_stays_paused():
     assert engine.runtime_status == "paused_model"
     assert engine.blocked_role == "decision_maker"
 
+
+def test_no_model_selection_skip_is_a_successful_heavy_decision():
+    engine = _engine()
+    engine._decision_failure_streak = 2
+    engine.allocator.mission_step = lambda _time, **_kwargs: (
+        {
+            "trigger_type": "heavy",
+            "action": "mission_selection_skipped",
+            "snapshot_id": "capacity-satisfied",
+            "skip_reason": "ordinary_search_capacity_satisfied",
+        },
+        None,
+    )
+
+    result = engine.step()
+
+    assert result["action"] == "mission_selection_skipped"
+    assert engine.runtime_status == "running"
+    assert engine._decision_failure_streak == 0
+    assert not any(
+        event["type"] == "mission_model_failure"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )

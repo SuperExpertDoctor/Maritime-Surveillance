@@ -1527,11 +1527,16 @@ class SimulationEngine:
                         "assignments": pending_reassigned,
                     }
             timing = getattr(self.allocator, "last_decision_timing", None)
+            skipped_model_selection = (
+                result.get("action") == "mission_selection_skipped"
+            )
+            if skipped_model_selection:
+                self._decision_failure_streak = 0
             if timing is not None:
                 decision_succeeded = assignment_applied or (
                     result.get("trigger_type") == "light"
                     and result.get("action") == "approved_tasks_deferred"
-                )
+                ) or skipped_model_selection
                 if result.get("trigger_type") == "heavy":
                     if decision_succeeded:
                         self._decision_failure_streak = 0
@@ -1582,14 +1587,17 @@ class SimulationEngine:
                 intent_statuses=self._evaluate_intent_statuses(self.clock.time),
                 force_heavy=True,
             )
-            if batch is not None and self.apply_assignment_batch(batch):
+            skipped = result.get("action") == "mission_selection_skipped"
+            if skipped or (batch is not None and self.apply_assignment_batch(batch)):
                 self.allocator.trigger_manager.clear_heavy_retry()
                 self._decision_failure_streak = 0
                 self._set_runtime_state("running")
                 self.last_result = result
                 self.allocator.sm.add_event("mission_model_retry_succeeded", {
                     "snapshot_id": result.get("snapshot_id"),
-                    "selection_call_id": batch.selection_call_id,
+                    "selection_call_id": (
+                        None if skipped else batch.selection_call_id
+                    ),
                 })
             else:
                 self._set_runtime_state("paused_model", "decision_maker")

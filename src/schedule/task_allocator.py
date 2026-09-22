@@ -265,9 +265,10 @@ class TaskAllocator:
                 and self.sm.is_uav_operational(record.assigned_uav_id)
                 for record in active_records
             )
+            healthy_count = len(resources)
             reserved_search_count = len(unfinished_regions)
             matchable_pending_count = len(pending_matching)
-            desired_search_count = math.ceil(len(available) * fraction)
+            desired_search_count = math.ceil(healthy_count * fraction)
             residual_new_slots = max(
                 0,
                 desired_search_count
@@ -284,6 +285,7 @@ class TaskAllocator:
                 active_search_count=active_search_count,
                 reserved_search_count=reserved_search_count,
                 matchable_pending_count=matchable_pending_count,
+                healthy_count=healthy_count,
                 available_ids=available,
                 representatives=representative_task_ids,
                 edges=edges,
@@ -530,6 +532,44 @@ class TaskAllocator:
             or "decide" in vars(self.llm_client)
         )
 
+    @staticmethod
+    def _model_selection_skip_reason(snapshot: MissionSnapshot) -> str | None:
+        """Return a no-model reason only when the frozen snapshot has no work.
+
+        The coverage constraint is the authoritative residual-search budget.
+        An idle aircraft alone must not create a new ordinary-search decision
+        once that budget is satisfied.  Urgent, intent-backed, and approved
+        non-search work deliberately remains on the model path.
+        """
+        unassigned_approved = tuple(
+            task
+            for task in snapshot.active_tasks
+            if task.status == "approved" and task.assigned_uav_id is None
+        )
+        if not snapshot.candidates and not unassigned_approved:
+            return "no_model_candidates"
+
+        constraint = snapshot.coverage_constraint
+        if constraint is None or constraint.required_new_search_count != 0:
+            return None
+        if constraint.must_service_task_ids:
+            return None
+        if any(
+            zone.required_search_count > 0 and zone.infeasible_reason is None
+            for zone in constraint.zone_requirements
+        ):
+            return None
+        if any(task.kind != "search" for task in unassigned_approved):
+            return None
+        if snapshot.candidates and all(
+            task.kind == "search"
+            and not task.intent_ids
+            and task.priority != "high"
+            for task in snapshot.candidates
+        ):
+            return "ordinary_search_capacity_satisfied"
+        return None
+
     def decide_mission(self, now_min: float | None = None, **kwargs):
         """Run T11 selection on a fresh snapshot; T12 owns application."""
         snapshot = self.build_mission_snapshot(now_min, **kwargs)
@@ -583,6 +623,48 @@ class TaskAllocator:
             intent_statuses=intent_statuses,
         )
         snapshot_frozen_wall = time.perf_counter()
+        skip_reason = self._model_selection_skip_reason(snapshot)
+        if skip_reason is not None:
+            decision_finished_wall = time.perf_counter()
+            self.last_decision_timing = {
+                "snapshot_frozen_wall": snapshot_frozen_wall,
+                "decision_finished_wall": decision_finished_wall,
+                "snapshot_seconds": snapshot_frozen_wall - wall_started,
+                "elapsed_before_snapshot_seconds": snapshot_frozen_wall - wall_started,
+                "prompt_seconds": 0.0,
+                "prompt_bytes": 0,
+                "llm_seconds": 0.0,
+                "validation_seconds": 0.0,
+                "matching_seconds": 0.0,
+                "total_seconds": decision_finished_wall - wall_started,
+                "failure_reason": None,
+            }
+            self.trigger_manager.mark_triggered("heavy", current_time)
+            self.sm.cycle += 1
+            self.sm.add_event("mission_selection_skipped", {
+                "reason": skip_reason,
+                "snapshot_id": snapshot.snapshot_id,
+                "candidate_count": len(snapshot.candidates),
+            })
+            self.sm.add_event("mission_decision", {
+                "cycle": self.sm.cycle,
+                "success": True,
+                "assignments": 0,
+                "snapshot_id": snapshot.snapshot_id,
+                "skipped": skip_reason,
+            })
+            return {
+                "trigger_type": "heavy",
+                "action": "mission_selection_skipped",
+                "skip_reason": skip_reason,
+                "search_regions": [
+                    {"id": region.id, "bbox": list(region.bbox)}
+                    for region in self.sm.get_active_search_regions()
+                ],
+                "pairs": [],
+                "notes": skip_reason,
+                "snapshot_id": snapshot.snapshot_id,
+            }, None
         decision_deadline = (
             snapshot_frozen_wall
             + self.config.mission.information_update.planning_deadline_seconds
@@ -871,6 +953,7 @@ class TaskAllocator:
                 or self.sm.is_uav_operational(record.assigned_uav_id)
             )
         }
+        active_task_ids = set(active_candidates)
         tasks_by_id = {candidate.task_id: candidate for candidate in candidates}
         tasks_by_id.update(active_candidates)
         edges = []
@@ -890,7 +973,11 @@ class TaskAllocator:
                 if task.feasible_uav_ids and resource.uav_id not in task.feasible_uav_ids:
                     continue
                 route_metrics = self._mission_route_metrics(
-                    resource, task, target, planning_map_version,
+                    resource,
+                    task,
+                    target,
+                    planning_map_version,
+                    task.task_id in active_task_ids,
                 )
                 if route_metrics is None:
                     continue
@@ -1005,6 +1092,7 @@ class TaskAllocator:
         task: TaskCandidate,
         target: tuple[float, float],
         planning_map_version: int,
+        allow_revisit: bool = False,
     ) -> tuple[float, float, tuple[float, float]] | None:
         self._prepare_route_caches(planning_map_version)
         scan_revision = int(getattr(
@@ -1024,6 +1112,7 @@ class TaskAllocator:
             tuple(task.bbox)
             if task.bbox is not None
             else tuple(round(value, 6) for value in target),
+            bool(allow_revisit),
             scan_revision if task.kind in _SEARCH_TASK_KINDS else None,
         )
         cache = self._mission_route_metrics_cache
@@ -1066,7 +1155,7 @@ class TaskAllocator:
                         unscanned_mask=~np.isfinite(
                             self.sm.get_last_scan_matrix()
                         ),
-                        allow_revisit=False,
+                        allow_revisit=bool(allow_revisit),
                         seed=17,
                         along_track_cells=0.8,
                     )

@@ -431,13 +431,14 @@ class _FixtureGateway:
                         continue
                     if (not coverage.get("infeasible_reason")
                             and candidates[task_id].get("kind") == "search"
-                            and sum(candidates[s].get("kind") == "search" for s in selected) >= required):
+                            and sum(candidates[s].get("kind") == "search" for s in selected)
+                            >= required):
                         continue
                     proposed = [*selected, task_id]
                     payload = self._selection_payload(snapshot, proposed)
                     errors = tuple(validate(payload)) if validate else ()
                     if not errors or all(
-                        error.startswith(tolerated) or error.startswith("search_count_not_exact:")
+                        error.startswith(tolerated)
                         for error in errors
                     ):
                         selected.append(task_id)

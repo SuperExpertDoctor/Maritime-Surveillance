@@ -377,7 +377,7 @@ def test_coverage_fixture_spreads_visible_bounded_search_work():
     )
 
 
-def test_coverage_fixture_respects_zero_exact_search_budget():
+def test_coverage_fixture_skips_ordinary_work_when_search_budget_is_zero():
     from scripts.persistent_coverage_scenarios import CoverageFixtureGateway
 
     candidates = [
@@ -414,3 +414,57 @@ def test_coverage_fixture_respects_zero_exact_search_budget():
 
     assert result.success
     assert result.payload["selected_task_ids"] == []
+
+
+def test_coverage_fixture_prefers_shortest_search_transit_at_positive_floor():
+    from scripts.persistent_coverage_scenarios import CoverageFixtureGateway
+
+    candidates = [
+        {
+            "task_id": "search-far",
+            "kind": "search",
+            "priority": "normal",
+            "bbox": [20, 0, 24, 4],
+        },
+        {
+            "task_id": "search-near",
+            "kind": "search",
+            "priority": "normal",
+            "bbox": [0, 0, 4, 4],
+        },
+    ]
+    snapshot = {
+        "snapshot_id": "coverage-transit-order",
+        "information_version": 1,
+        "available_uav_ids": ["UAV-1"],
+        "candidates": candidates,
+        "feasible_edges": [
+            {
+                "task_id": "search-far",
+                "uav_options": [
+                    {"uav_id": "UAV-1", "transit_time_min": 12.0},
+                ],
+            },
+            {
+                "task_id": "search-near",
+                "uav_options": [
+                    {"uav_id": "UAV-1", "transit_time_min": 1.0},
+                ],
+            },
+        ],
+        "coverage_constraint": {
+            "required_new_search_count": 1,
+            "representative_task_ids": ["search-far", "search-near"],
+            "must_service_task_ids": [],
+        },
+    }
+
+    result = CoverageFixtureGateway().request_json(
+        role="decision_maker",
+        snapshot_id=snapshot["snapshot_id"],
+        user_payload={"snapshot": snapshot},
+        validate=lambda _payload: (),
+    )
+
+    assert result.success
+    assert result.payload["selected_task_ids"] == ["search-near"]
