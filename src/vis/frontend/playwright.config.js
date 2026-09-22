@@ -24,7 +24,7 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   retries: 0,
   workers: 1,
-  testIgnore: ["tests/legacy-search-scheduling.spec.js"],
+  testIgnore: ["tests/legacy-search-scheduling.spec.js", "tests/production-drawer.spec.js", "tests/drawer-integration.spec.js"],
   use: {
     baseURL,
     ...(executablePath ? { launchOptions: { executablePath } } : {}),

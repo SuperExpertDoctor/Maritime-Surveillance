@@ -128,7 +128,7 @@ class RecoveryPlanner:
                 continue
             if not _poses_match(path[-1], base.position):
                 continue
-            if _route_blocked(path, planning_obstacle_mask):
+            if recovery_route_blocked(path, planning_obstacle_mask):
                 continue
             actual_length = path_length_cells(path)
             if actual_length + reserve_cells > remaining_range_cells:
@@ -238,7 +238,7 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise ValueError("RecoveryPlan path_length_cells does not match path")
         if (
             plan.planning_map_version == observation.planning_map_version
-            and _route_blocked(route, observation.planning_obstacle_mask)
+            and recovery_route_blocked(route, observation.planning_obstacle_mask)
         ):
             raise NoSafeRecoveryPath(
                 plan.base_id,
@@ -305,7 +305,7 @@ class ReturnToBaseController(HeuristicControllerBase):
         current_pose = _current_pose(observation)
         suffix = self.route[self.follower.index + 1 :]
         route_to_validate = (current_pose, *suffix)
-        if not _route_blocked(
+        if not recovery_route_blocked(
             route_to_validate, observation.planning_obstacle_mask
         ):
             self.planning_map_version = observation.planning_map_version
@@ -332,7 +332,7 @@ class ReturnToBaseController(HeuristicControllerBase):
             raise self._fail_recovery(
                 observation, "replanned route does not end at the reserved base"
             )
-        if _route_blocked(route, observation.planning_obstacle_mask):
+        if recovery_route_blocked(route, observation.planning_obstacle_mask):
             raise self._fail_recovery(
                 observation, "replanned route intersects planning mask"
             )
@@ -552,7 +552,7 @@ def _poses_match(actual: Sequence[float], expected: Sequence[float]) -> bool:
     )
 
 
-def _route_blocked(route: Sequence[Pose], obstacle_mask: object) -> bool:
+def recovery_route_blocked(route: Sequence[Pose], obstacle_mask: object) -> bool:
     if not route:
         return True
     if SafetyEnvelope._point_blocked(*route[0][:2], obstacle_mask):
@@ -574,4 +574,5 @@ __all__ = [
     "SystemHoldingController",
     "legacy_return_endpoints",
     "path_length_cells",
+    "recovery_route_blocked",
 ]

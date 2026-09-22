@@ -1,4 +1,4 @@
-﻿"""FastAPI + WebSocket 服务器。
+"""FastAPI + WebSocket 服务器。
 
 嵌入仿真进程运行，提供:
   - /              前端可视化界面 (dist 静态文件)
@@ -35,6 +35,8 @@ from src.mission.vessel_commands import CommandConflict as VesselCommandConflict
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend.replay_adapter import normalize_replay_frame
+from src.vis.backend.config_snapshot import configuration_snapshot
+from src.vis.backend.public_details import model_calls, public_frame
 
 OUTPUT_DIR = "outputs"
 _FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
@@ -593,160 +595,19 @@ def create_app(
     async def abort_runtime(request: Request):
         return await _enqueue_runtime_command(app, request, "abort")
 
+    @app.get("/api/model-calls")
+    async def get_model_calls(episode_id: str | None = None, limit: int = Query(100, ge=1, le=100)):
+        current = getattr(app.state.state_manager, "episode_id", "")
+        if episode_id is not None and episode_id != current:
+            return _api_error("stale_episode", "episode no longer active", 409)
+        return JSONResponse({"episode_id": current, "calls": model_calls(app.state.engine, current, limit=limit)})
+
     @app.get("/api/config")
     async def get_config():
         """返回只读配置参数（分组格式）。"""
         cfg = app.state.config
-        return JSONResponse({
-            "environment": {
-                "sea_area_km": list(cfg.environment.sea_area_km),
-                "base_position": list(cfg.environment.base_position),
-                "base_count": cfg.environment.base_count,
-                "base_capacity": cfg.environment.base_capacity,
-                "base_min_distance_cells": cfg.environment.base_min_distance_cells,
-                "base_land_margin": cfg.environment.base_land_margin,
-                "mainland_width_cells": cfg.environment.mainland_width_cells,
-                "base_task_min_distance_cells": cfg.environment.base_task_min_distance_cells,
-                "base_obstacle_clearance_cells": cfg.environment.base_obstacle_clearance_cells,
-                "island_count_min": cfg.environment.island_count_min,
-                "island_count_max": cfg.environment.island_count_max,
-                "thunderstorm_count_min": cfg.environment.thunderstorm_count_min,
-                "thunderstorm_count_max": cfg.environment.thunderstorm_count_max,
-            },
-            "grid": {
-                "resolution": list(cfg.grid.resolution),
-                "cell_size_km": cfg.grid.cell_size_km,
-                "decay_half_life_min": cfg.grid.decay_half_life_min,
-                "track_decay_half_life_min": cfg.grid.track_decay_half_life_min,
-                "white_threshold": cfg.grid.white_threshold,
-                "gray_threshold": cfg.grid.gray_threshold,
-                "search_min_cells": cfg.grid.search_min_cells,
-                "search_max_cells": cfg.grid.search_max_cells,
-                "track_min_cells": cfg.grid.track_min_cells,
-                "track_max_cells": cfg.grid.track_max_cells,
-                "aspect_ratio_max": cfg.grid.aspect_ratio_max,
-                "fragment_threshold_cells": cfg.grid.fragment_threshold_cells,
-            },
-            "uav": {
-                "count": cfg.uav.count,
-                "cruise_speed_kmh": cfg.uav.cruise_speed_kmh,
-                "endurance_h": cfg.uav.endurance_h,
-                "sortie_endurance_h": cfg.uav.sortie_endurance_h,
-                "lifecycle_rotation_start_min": cfg.uav.lifecycle_rotation_start_min,
-                "lifecycle_coverage_threshold_pct": cfg.uav.lifecycle_coverage_threshold_pct,
-                "lifecycle_search_dwell_min": cfg.uav.lifecycle_search_dwell_min,
-                "lifecycle_candidate_max_distance_cells": cfg.uav.lifecycle_candidate_max_distance_cells,
-                "lifecycle_required_cycles": cfg.uav.lifecycle_required_cycles,
-                "refuel_time_min": cfg.uav.refuel_time_min,
-            },
-            "ship": {
-                "population": {
-                    "total_count": cfg.ship.population.total_count,
-                    "type_i_ratio": cfg.ship.population.type_i_ratio,
-                    "type_ii_ratio": cfg.ship.population.type_ii_ratio,
-                },
-                "type_ii_ais_on_probability": cfg.ship.type_ii_ais_on_probability,
-                "speed_kn": cfg.ship.speed_kn,
-                "ais_update_interval_min": cfg.ship.ais_update_interval_min,
-                "ais_position_noise_cells": cfg.ship.ais_position_noise_cells,
-                "max_turn_rate_deg_min": cfg.ship.max_turn_rate_deg_min,
-                "yaw_time_constant_min": cfg.ship.yaw_time_constant_min,
-                "heading_control_gain_per_min": cfg.ship.heading_control_gain_per_min,
-                "turn_speed_loss_fraction": cfg.ship.turn_speed_loss_fraction,
-                "max_acceleration_kn_per_min": cfg.ship.max_acceleration_kn_per_min,
-                "detect_uav_radius_cells": cfg.ship.detect_uav_radius_cells,
-                "clear_uav_radius_cells": cfg.ship.clear_uav_radius_cells,
-                "clear_hold_min": cfg.ship.clear_hold_min,
-                "red_decision_cycle_min": cfg.ship.red_decision_cycle_min,
-                "red_plan_valid_min": cfg.ship.red_plan_valid_min,
-                "speed_min_kn": cfg.ship.speed_min_kn,
-                "speed_max_kn": cfg.ship.speed_max_kn,
-                "heading_offset_max_deg": cfg.ship.heading_offset_max_deg,
-                "zigzag_heading_max_deg": cfg.ship.zigzag_heading_max_deg,
-                "zigzag_period_min_min": cfg.ship.zigzag_period_min_min,
-                "zigzag_period_max_min": cfg.ship.zigzag_period_max_min,
-                "min_evasion_heading_deg": cfg.ship.min_evasion_heading_deg,
-                "min_evasion_speed_delta_kn": cfg.ship.min_evasion_speed_delta_kn,
-                "navigation_horizon_min": cfg.ship.navigation_horizon_min,
-                "integration_dt_min": cfg.ship.integration_dt_min,
-                "navigation_clearance_cells": cfg.ship.navigation_clearance_cells,
-            },
-            "llm": {
-                "heavy_cycle_min": cfg.llm.heavy_cycle_min,
-                "reviewer_cycle_min": cfg.llm.reviewer_cycle_min,
-                "max_retries": cfg.llm.max_retries,
-            },
-            "sensor": {
-                "passive": {
-                    "measurement_interval_min": cfg.sensor.passive.measurement_interval_min,
-                    "reference_detection_probability": cfg.sensor.passive.reference_detection_probability,
-                    "detection_range_cells": cfg.sensor.passive.detection_range_cells,
-                    "range_scale_cells": cfg.sensor.passive.range_scale_cells,
-                    "bearing_std_deg": cfg.sensor.passive.bearing_std_deg,
-                    "minimum_received_power_db": cfg.sensor.passive.minimum_received_power_db,
-                    "position_association_radius_cells": cfg.sensor.passive.position_association_radius_cells,
-                },
-                "emitter": {
-                    "mean_silent_interval_min": cfg.sensor.emitter.mean_silent_interval_min,
-                    "burst_duration_min": list(cfg.sensor.emitter.burst_duration_min),
-                    "source_power_at_reference_db": cfg.sensor.emitter.source_power_at_reference_db,
-                },
-            },
-            "mission_alignment": {
-                "activity": {
-                    "regulated_bboxes": [list(bbox) for bbox in cfg.mission.activity.regulated_bboxes],
-                    "schedule_start_min": list(cfg.mission.activity.schedule_start_min),
-                    "schedule_duration_min": list(cfg.mission.activity.schedule_duration_min),
-                    "survey_command_speed_kn": cfg.mission.activity.survey_command_speed_kn,
-                    "survey_track_spacing_cells": cfg.mission.activity.survey_track_spacing_cells,
-                    "min_observed_duration_min": cfg.mission.activity.min_observed_duration_min,
-                    "observed_speed_max_kn": cfg.mission.activity.observed_speed_max_kn,
-                    "min_reversal_count": cfg.mission.activity.min_reversal_count,
-                    "min_distinct_bursts": cfg.mission.activity.min_distinct_bursts,
-                },
-                "evasion": {
-                    "observer_range_cells": cfg.mission.evasion.observer_range_cells,
-                    "history_window_min": cfg.mission.evasion.history_window_min,
-                    "response_window_min": cfg.mission.evasion.response_window_min,
-                    "minimum_course_change_deg": cfg.mission.evasion.minimum_course_change_deg,
-                    "minimum_speed_increase_kn": cfg.mission.evasion.minimum_speed_increase_kn,
-                    "minimum_outward_speed_kn": cfg.mission.evasion.minimum_outward_speed_kn,
-                    "enabled": cfg.mission.evasion.enabled,
-                },
-                "information_update": {
-                    "value_alpha": cfg.mission.information_update.value_alpha,
-                    "value_beta": cfg.mission.information_update.value_beta,
-                    "value_gamma": cfg.mission.information_update.value_gamma,
-                    "material_delta_threshold": cfg.mission.information_update.material_delta_threshold,
-                    "planning_deadline_seconds": cfg.mission.information_update.planning_deadline_seconds,
-                },
-            },
-            "control": {
-                "default_mode": cfg.control.default_mode,
-                "per_uav": dict(cfg.control.per_uav),
-                "observation": {
-                    "schema_version": cfg.control.observation.schema_version,
-                    "local_window_cells": cfg.control.observation.local_window_cells,
-                },
-                "safety": {
-                    "min_speed_fraction": cfg.control.safety.min_speed_fraction,
-                    "max_speed_fraction": cfg.control.safety.max_speed_fraction,
-                    "reserve_range_cells": cfg.control.safety.reserve_range_cells,
-                    "max_invalid_commands": cfg.control.safety.max_invalid_commands,
-                },
-                "heuristic": {
-                    "astar_dynamic_replan_limit": cfg.control.heuristic.astar_dynamic_replan_limit,
-                    "astar_xy_resolution_cells": cfg.control.heuristic.astar_xy_resolution_cells,
-                    "astar_heading_bins": cfg.control.heuristic.astar_heading_bins,
-                    "astar_candidate_limit": cfg.control.heuristic.astar_candidate_limit,
-                    "astar_primitive_length_cells": cfg.control.heuristic.astar_primitive_length_cells,
-                    "path_sample_step_cells": cfg.control.heuristic.path_sample_step_cells,
-                },
-            },
-            "common": {
-                "clear_outputs_before_run": cfg.common.clear_outputs_before_run,
-            },
-        })
+        return JSONResponse(configuration_snapshot(cfg))
+
 
     return app
 
@@ -1065,6 +926,8 @@ def _build_frame_inner(app: FastAPI) -> dict:
         cfg,
         total_steps=app.state.total_steps,
         llm_cycle=app.state.llm_cycle,
+        model_calls=model_calls(app.state.engine, getattr(state, "episode_id", "")),
+        event_history_limit=300,
         ships=getattr(app.state, "ships", None),
         uav_entities=getattr(app.state, "uav_entities", None),
         obstacles=getattr(app.state, "obstacles", None),
@@ -1089,7 +952,7 @@ async def broadcast_payload(app: FastAPI, frame: dict) -> None:
     clients = tuple(getattr(app.state, "_live_clients", set()))
     send_locks = getattr(app.state, "_live_send_locks", {})
     dead = set()
-    payload = json.dumps(frame, ensure_ascii=False)
+    payload = json.dumps(public_frame(frame), ensure_ascii=False)
     for ws in clients:
         try:
             send_lock = send_locks.get(ws)

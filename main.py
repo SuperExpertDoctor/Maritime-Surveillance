@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
 from pathlib import Path
@@ -29,16 +30,24 @@ def _check_port_available(port: int) -> None:
         raise RuntimeError(f"visualization port {port} is unavailable: {exc}") from exc
 
 
-def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_server: bool) -> dict:
+def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_server: bool,
+                      wall_seconds: float | None = None) -> dict:
     """Keep paused live runs responsive without advancing time or replaying idle frames."""
-    if not start_server:
+    if wall_seconds is not None and (not math.isfinite(wall_seconds) or wall_seconds <= 0):
+        raise ValueError("wall_seconds must be finite and positive")
+    if not start_server and wall_seconds is None:
         return engine.run(steps, on_step=on_step)
 
+    started = time.monotonic()
     completed = 0
     while completed < steps or engine.runtime_status == "paused_model":
+        if wall_seconds is not None and time.monotonic() - started >= wall_seconds:
+            break
         if engine.runtime_status == "finished":
             break
         if engine.runtime_status == "paused_model":
+            if not start_server:
+                break
             # These boundaries consume commands on the simulation thread and
             # leave the clock untouched. Match step()'s command ordering.
             runtime_results = engine.apply_pending_runtime_commands()
@@ -95,6 +104,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-probe-timeout", type=float, default=20.0)
     parser.add_argument("--memory-version", default="baseline")
     parser.add_argument("--memory-root", default="outputs/strategy_memory")
+    parser.add_argument("--wall-seconds", type=float, default=None,
+                        help="stop at a simulation boundary after this wall-clock budget")
+    parser.add_argument("--run-report-dir", default=None,
+                        help="new directory for final runtime evidence (never overwritten)")
     return parser
 
 
@@ -109,7 +122,14 @@ def main(
     llm_probe_timeout: float = 20.0,
     memory_version: str = "baseline",
     memory_root: str | os.PathLike[str] = "outputs/strategy_memory",
+    wall_seconds: float | None = None,
+    run_report_dir: str | None = None,
 ) -> dict:
+    if wall_seconds is not None and (not math.isfinite(wall_seconds) or wall_seconds <= 0):
+        raise ValueError("wall_seconds must be finite and positive")
+    report_dir = Path(run_report_dir) if run_report_dir is not None else None
+    if report_dir is not None and report_dir.exists():
+        raise FileExistsError(f"run report directory already exists: {report_dir}")
     config = ConfigLoader.load(config_path)
     memory_store = StrategyMemoryStore(memory_root)
     if config.common.clear_outputs_before_run:
@@ -121,6 +141,8 @@ def main(
             )
         removed = clear_output_cache()
         print(f"Cleared {removed} cached output item(s)")
+    if report_dir is not None:
+        report_dir.mkdir(parents=True, exist_ok=False)
     resolved_memory_version = memory_store.resolve_version(memory_version)
     engine = SimulationEngine(
         config,
@@ -183,12 +205,17 @@ def main(
         if step_delay > 0:
             time.sleep(step_delay)
 
+    run_started = time.monotonic()
     try:
-        summary = _run_runtime_loop(engine, steps, publish, start_server=start_server)
+        summary = _run_runtime_loop(engine, steps, publish, start_server=start_server,
+                                    wall_seconds=wall_seconds)
+        elapsed_wall_seconds = time.monotonic() - run_started
+        runtime_before_finalize = engine.runtime_status
         # The engine currently enters finished only on an operator abort.
         # Capture that before marking normal CLI completion as read-only.
         aborted = engine.runtime_status == "finished"
-        if start_server and engine.runtime_status == "running":
+        if start_server and (engine.runtime_status == "running" or
+                             (wall_seconds is not None and engine.runtime_status == "paused_model")):
             engine._set_runtime_state("finished")
             # Reject commands queued during the last step/publication instead
             # of leaving their receipts pending forever. New writes are gated
@@ -206,7 +233,21 @@ def main(
             frame_publisher.close()
     output_path = app.state.frame_logger.path if app is not None else logger.path
     summary["jsonl_path"] = output_path
-    if engine.runtime_status == "paused_model":
+    summary["wall_seconds"] = elapsed_wall_seconds
+    summary["runtime_before_finalize"] = runtime_before_finalize
+    if report_dir is not None:
+        gateway = engine.allocator.llm_client.gateway
+        fields = ("call_id", "role", "snapshot_id", "sim_time_min", "model",
+                  "provider", "thinking_mode", "success", "failure_category", "validation_errors")
+        calls = [{key: call.get(key) for key in fields} for call in gateway.redact_log(gateway.call_log)]
+        report = {"entrypoint": "main.py", "transport": "live",
+                  "requested_wall_seconds": wall_seconds, "summary": summary,
+                  "model_calls": calls,
+                  "events": engine.allocator.sm.get_recent_events(0.0)}
+        (report_dir / "report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8")
+    if runtime_before_finalize == "paused_model":
         print(f"仿真提前暂停：完成 {summary['steps']}/{steps} 步，模型决策失败；详见 JSONL 日志。")
     else:
         print(f"仿真运行结束：完成 {summary['steps']}/{steps} 步。")
@@ -235,4 +276,6 @@ if __name__ == "__main__":
         llm_probe_timeout=args.llm_probe_timeout,
         memory_version=args.memory_version,
         memory_root=args.memory_root,
+        wall_seconds=args.wall_seconds,
+        run_report_dir=args.run_report_dir,
     )

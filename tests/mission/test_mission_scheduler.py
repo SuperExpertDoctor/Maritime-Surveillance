@@ -484,6 +484,9 @@ def test_pairing_exception_is_logged_with_exception_type_and_context(caplog, mon
         raise RuntimeError("route graph exploded")
 
     monkeypatch.setattr(mission_scheduler_module, "_minimum_cost_matching", explode)
+    # Capture this logger directly so this assertion does not depend on the
+    # root logging configuration left by earlier tests in the suite.
+    monkeypatch.setattr(mission_scheduler_module._LOGGER, "handlers", [caplog.handler])
     result = pair_selected_tasks(_selection(snapshot, ["Q1"]), snapshot)
     log_output = caplog.text
 

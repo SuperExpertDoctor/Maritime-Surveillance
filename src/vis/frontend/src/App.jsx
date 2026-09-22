@@ -30,6 +30,7 @@ export default function App() {
   const commandContext = useRef(null);
   const activeCommand = useRef(null);
   const commandAbort = useRef(null);
+  const eventContext = useRef(null);
   const live = useWebSocket(mode === "live");
   const replay = useReplay(mode === "replay");
   const mp4Export = useMp4Export(replay, mapExporterRef);
@@ -74,13 +75,18 @@ export default function App() {
 
   useEffect(() => {
     if (mode !== "live" || !live.frame) return;
-    setLiveEvents((current) => {
+    const keyContext = `${live.frame.episode_id}|${live.frame.reset_generation}`;
+    const changed = eventContext.current !== keyContext;
+    eventContext.current = keyContext;
+    if (changed) setLastLlmCycle(null);
+    setLiveEvents((previous) => {
+      const current = changed ? [] : previous;
       const incoming = live.frame.events || [];
       const keys = new Set(current.map((event) => `${event.time}|${event.type}|${JSON.stringify(event.data)}`));
       const merged = [...current];
       for (const event of incoming) {
         const key = `${event.time}|${event.type}|${JSON.stringify(event.data)}`;
-        if (!keys.has(key)) merged.push(event);
+        if (!keys.has(key)) { merged.push(event); keys.add(key); }
       }
       return merged.slice(-300);
     });
@@ -89,14 +95,19 @@ export default function App() {
 
   const replayEvents = useMemo(() => {
     if (mode !== "replay") return [];
-    return replay.markers.map((marker) => marker.event);
-  }, [mode, replay.markers]);
+    return replay.markers.filter((marker) => marker.frameIndex <= replay.index).map((marker) => marker.event);
+  }, [mode, replay.markers, replay.index]);
 
   const replayLlmCycle = useMemo(() => {
     if (mode !== "replay") return null;
-    return replay.frame?.llm_cycle || null;
-  }, [mode, replay.frame]);
-  const displayedLlmCycle = mode === "replay" ? replayLlmCycle : lastLlmCycle;
+    if (!replay.frame) return null;
+    for (let i = replay.index; i >= 0; i -= 1) {
+      const item = replay.frames[i];
+      if (item?.episode_id === replay.frame.episode_id && item?.llm_cycle) return item.llm_cycle;
+    }
+    return null;
+  }, [mode, replay.frame, replay.frames, replay.index]);
+  const displayedLlmCycle = mode === "replay" ? replayLlmCycle : frame ? lastLlmCycle : null;
 
   const replayConnectionStatus = replay.targetLoadingIndex != null || replay.loading
     ? "connecting"
@@ -419,6 +430,8 @@ export default function App() {
         vesselCommandBusy={vesselCommandBusy}
       />
       <BottomDrawer
+        key={`${mode}|${frame?.episode_id}|${replay.selectedFile}`}
+        mode={mode}
         frame={frame}
         events={mode === "live" ? liveEvents : replayEvents}
         llmCycle={displayedLlmCycle}

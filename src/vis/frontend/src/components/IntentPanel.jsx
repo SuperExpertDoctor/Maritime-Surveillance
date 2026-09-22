@@ -62,7 +62,7 @@ export default function IntentPanel({ frame, readOnly = false, selection, onClea
         setCommand(next);
         if (next.status === "queued") timer = window.setTimeout(poll, 700);
       } catch (pollError) {
-        if (!stopped) setError(pollError.message || "命令状态不可用");
+        if (!stopped) { setError(pollError.message || "命令状态不可用"); timer = window.setTimeout(poll, 700); }
       }
     };
     timer = window.setTimeout(poll, 250);
@@ -85,7 +85,7 @@ export default function IntentPanel({ frame, readOnly = false, selection, onClea
         setRuntimeCommand(next);
         if (next.status === "queued") timer = window.setTimeout(poll, 700);
       } catch (pollError) {
-        if (!stopped) setError(pollError.message || "运行命令状态不可用");
+        if (!stopped) { setError(pollError.message || "运行命令状态不可用"); timer = window.setTimeout(poll, 700); }
       }
     };
     timer = window.setTimeout(poll, 250);

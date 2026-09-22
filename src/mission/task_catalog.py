@@ -7,6 +7,7 @@ mission scheduler approves and the coordinator commits it.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from src.mission.contracts import ContactSnapshot, Intent, TaskCandidate
 from src.mission.intent_store import build_scheduling_value
 from src.schedule.candidate_extractor import CandidateExtractor
@@ -62,14 +63,40 @@ class TaskCatalog:
 
         tasks: list[TaskCandidate] = []
         for contact in contacts:
+            manager = getattr(state, "handoff_manager", None)
+            handoff = manager.latest_for_contact(contact.contact_id) if manager else None
+            if handoff is not None and handoff.state != "succeeded" and contact.state not in {"cleared", "departed"}:
+                observed = manager.observed_successors(contact, now)
+                if observed and self._is_track_candidate(contact):
+                    task = self._contact_task(contact, "track", resources, state, now)
+                    tasks.append(replace(task, feasible_uav_ids=tuple(
+                        uid for uid in task.feasible_uav_ids if uid in observed)))
+                elif handoff.state == "required":
+                    evidence = manager.evidence(handoff.handoff_id)
+                    if evidence.mean is not None:
+                        cols, rows = state.config.grid.resolution
+                        radius = max(2, int(math.ceil(3 * math.sqrt(
+                            evidence.covariance_cells2[0][0]))))
+                        x, y = evidence.mean
+                        bbox = (max(0, int(math.floor(x)) - radius),
+                                max(0, int(math.floor(y)) - radius),
+                                min(cols, int(math.floor(x)) + radius + 1),
+                                min(rows, int(math.floor(y)) + radius + 1))
+                        if bbox[0] < bbox[2] and bbox[1] < bbox[3]:
+                            task = self._search_task({
+                                "task_id": f"handoff-search:{handoff.handoff_id}",
+                                "kind": "investigation", "bbox": bbox,
+                                "eligible_since_min": handoff.required_at_min,
+                                "priority": "high", "total_value": 1.0,
+                            }, resources, state, intents, now)
+                            tasks.append(replace(task, contact_id=contact.contact_id,
+                                feasible_uav_ids=tuple(uid for uid in task.feasible_uav_ids
+                                                       if uid != handoff.source_uav_id)))
+                continue
             if self._is_probe_candidate(contact, now):
-                tasks.append(self._contact_task(
-                    contact, "probe", resources, state, now,
-                ))
+                tasks.append(self._contact_task(contact, "probe", resources, state, now))
             elif self._is_track_candidate(contact):
-                tasks.append(self._contact_task(
-                    contact, "track", resources, state, now,
-                ))
+                tasks.append(self._contact_task(contact, "track", resources, state, now))
 
         for candidate in self._search_candidates(state, intents, now):
             task = self._search_task(candidate, resources, state, intents, now)

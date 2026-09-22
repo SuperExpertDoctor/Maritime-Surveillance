@@ -48,6 +48,15 @@ class ModelResult:
     validation_seconds: float = field(default=0.0, compare=False)
 
 
+class ProviderOutput(str):
+    """Text plus explicit external API output channels (never prompt-derived)."""
+
+    def __new__(cls, content, channels=()):
+        instance = super().__new__(cls, content)
+        instance.channels = list(channels)
+        return instance
+
+
 class OpenAICompatibleTransport:
     """Existing LongCat route through the OpenAI-compatible chat API."""
 
@@ -94,7 +103,16 @@ class OpenAICompatibleTransport:
             choice = response.choices[0]
             if getattr(choice, "finish_reason", None) == "length":
                 raise LLMOutputTruncated()
-            return choice.message.content or ""
+            channels = []
+            for name, kind in (("reasoning_content", "external_provider_reasoning"),
+                               ("thinking", "external_provider_reasoning"),
+                               ("reasoning_summary", "public_provider_summary")):
+                value = getattr(choice.message, name, None)
+                if isinstance(value, (str, list, dict)) and value:
+                    channels.append({"kind": kind, "source": f"choices[0].message.{name}",
+                                     "content": value, "model": model,
+                                     "provenance": "external_api_response"})
+            return ProviderOutput(choice.message.content or "", channels)
         finally:
             client.close()
 
@@ -396,6 +414,8 @@ class LLMGateway:
             "sim_time_min": self._context["sim_time_min"],
             "memory_version": self._redact(self._context["memory_version"]),
             "model": self._redact(binding["model"]),
+            "provider": binding["provider"],
+            "thinking_mode": binding["thinking"],
             "attempts": [],
             "raw_attempts": [],
             "validation_errors": [],
@@ -488,6 +508,9 @@ class LLMGateway:
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
                 break
+            if isinstance(raw, ProviderOutput):
+                attempt["provider_channels"] = self.redact_log(raw.channels)
+                call["provider_channels"] = self.redact_log(raw.channels)
             if not isinstance(raw, str):
                 raw = str(raw)
             attempt["raw_output"] = self._redact(raw)

@@ -284,3 +284,26 @@ def _wait_until(predicate, timeout=2):
             return True
         __import__("time").sleep(0.01)
     return predicate()
+
+
+def test_publication_keeps_commands_applied_after_previous_frame_boundary(tmp_path):
+    config = ConfigLoader.load()
+    state = StateManager(config)
+    state.episode_id = 'boundary'
+    state.current_time = 1.
+    publisher = FramePublisher(FrameLogger(str(tmp_path)))
+    engine = _engine_with_time(config, state)
+    publisher.push_snapshot(engine, {}, total_steps=10)
+    # The next step drains UI commands before advancing its clock.
+    state.add_event('vessel_created', {'vessel_id': 'operator-ship'})
+    state.current_time = 2.
+    publisher.push_snapshot(engine, {}, total_steps=10)
+    # A slow client can miss the second frame; a later frame must retain it.
+    state.current_time = 10.
+    publisher.push_snapshot(engine, {}, total_steps=10)
+    assert publisher.flush(timeout=5)
+    publisher.close()
+    frames = [json.loads(line) for line in open(publisher.logger.path)]
+    assert not frames[0]['events']
+    assert [e['type'] for e in frames[1]['events']] == ['vessel_created']
+    assert frames[2]['events'] == frames[1]['events']

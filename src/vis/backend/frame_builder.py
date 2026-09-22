@@ -7,6 +7,8 @@ from functools import lru_cache
 from src.control.common.contracts import _immutable_snapshot
 from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
+from src.vis.backend.config_snapshot import configuration_snapshot
+from src.vis.backend.public_details import public_frame
 
 
 def _search_domain(state, config):
@@ -352,12 +354,16 @@ def _contact_snapshot(contact, *, realtime: bool) -> dict:
         "last_assessment": _assessment_snapshot(contact.last_assessment),
         "cleared_at_min": contact.cleared_at_min,
         "next_probe_not_before_min": contact.next_probe_not_before_min,
+        "sample_count": len(contact.samples),
+        "latest_ais_sample": next((_sample_snapshot(sample) for sample in reversed(contact.samples) if sample.source == "ais"), None),
         "samples": [_sample_snapshot(sample) for sample in samples],
     }
 
 
 def build_frame(state: StateManager, cycle: int, config: AppConfig,
                 total_steps: int = 480, llm_cycle: dict | None = None,
+                model_calls: list | None = None,
+                event_history_limit: int = 0,
                 ships: list | None = None,
                 uav_entities: list | None = None,
                 obstacles: list | None = None,
@@ -554,12 +560,17 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
             "source_uav_id": m.source_uav_id,
         })
 
-    # 近期事件（本帧内新事件）
+    # Production publishers retain bounded history: commands are drained
+    # before advancing the clock and can share the previous frame timestamp.
+    # A time-exclusive delta would permanently lose those events, and live
+    # conflation can skip whole frames. Consumers already deduplicate history.
     recent_events = state.get_recent_events(
-        state.current_time - 1.0,
+        0.0 if event_history_limit else state.current_time - 1.0,
         until_time=state.current_time,
-        include_since=False,
+        include_since=bool(event_history_limit),
     )
+    if event_history_limit:
+        recent_events = recent_events[-event_history_limit:]
 
     coverage = state.get_coverage_stats()
     published_intents, published_intent_statuses = (
@@ -733,6 +744,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "scenario_vessels": scenario_vessels,
         "memory_version": getattr(state, "memory_version", "baseline"),
         "llm_cycle": llm_cycle,
+        "model_calls": model_calls or [],
+        "config_snapshot": configuration_snapshot(config),
         # Retain V1 fields while appending the richer GOAL2 base model.
         "base_position": base_list[0]["position"],
         "support_base_positions": [base["position"] for base in base_list[1:]],
@@ -746,7 +759,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         value_mat = state.get_value_matrix()
         frame["info_matrix"] = info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat
         frame["value_matrix"] = value_mat.tolist() if hasattr(value_mat, "tolist") else value_mat
-    return frame
+    return public_frame(frame)
 
 
 def _format_time(minutes: float) -> str:

@@ -266,6 +266,7 @@ export default function RightSidebar({
           </section>
 
           <IntentPanel
+            key={`${readOnly}|${frame?.episode_id}|${frame?.reset_generation}`}
             frame={frame}
             readOnly={readOnly}
             selection={selection}

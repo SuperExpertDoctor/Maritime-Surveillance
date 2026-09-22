@@ -1,6 +1,7 @@
 """Normalize historical frames at the replay boundary."""
 
 from copy import deepcopy
+from src.vis.backend.public_details import public_frame
 
 from src.mission.vessel_compat import (
     normalize_legacy_ais_enabled,
@@ -115,7 +116,7 @@ def normalize_replay_frame(frame: dict) -> dict:
     result["vessel_mutation_allowed"] = False
     result.pop("configured_vessel_count", None)
     result.pop("editing_allowed", None)
-    return result
+    return public_frame(result)
 
 
 __all__ = ["normalize_replay_frame"]

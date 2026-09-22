@@ -62,6 +62,25 @@ class HandoffManager:
     def attempts(self) -> tuple[HandoffAttempt, ...]:
         return tuple(self._attempts[key] for key in sorted(self._attempts))
 
+    def latest_for_contact(self, contact_id: str):
+        attempts = [item for item in self.attempts() if item.contact_id == contact_id]
+        return max(attempts, key=lambda item: item.required_at_min, default=None)
+
+    def observed_successors(self, contact, now_min: float) -> frozenset[str]:
+        """Only recent SAR/EO samples authorize seamless or reacquired tracking."""
+        attempt = self.latest_for_contact(contact.contact_id)
+        if attempt is None:
+            return frozenset()
+        return frozenset(
+            sample.source_id for sample in contact.samples
+            if sample.source in {"sar", "eo"}
+            and sample.source_id != attempt.source_uav_id
+            and max(attempt.required_at_min - 1.0, now_min - 1.0)
+                <= sample.observed_at_min <= now_min
+            and (attempt.successor_uav_id is None
+                 or sample.source_id == attempt.successor_uav_id)
+        )
+
     def evidence(self, handoff_id: str) -> HandoffEvidence:
         return self._evidence[handoff_id]
 

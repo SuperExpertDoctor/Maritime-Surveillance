@@ -1,5 +1,6 @@
 """JSONL 帧日志——仿真每步写入一行完整帧 JSON。"""
 import json
+from src.vis.backend.public_details import public_frame
 import os
 import time
 from datetime import datetime
@@ -31,6 +32,7 @@ class FrameLogger:
 
     def write(self, frame: dict) -> None:
         """追加一帧到 JSONL 文件。"""
+        frame = public_frame(frame)
         if self._episode_logger is not None:
             self._episode_logger.append("frames", "frames", frame)
             self._count += 1

@@ -16,6 +16,7 @@ from threading import Condition, Event, Lock, Thread
 from typing import Any
 
 from src.vis.backend.frame_builder import build_frame
+from src.vis.backend.public_details import model_calls
 from src.vis.backend.server import broadcast_payload_sync
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class FrameSnapshot:
     uavs: list
     obstacles: list
     bases: list
+    model_calls: list | None = None
 
 
 class FramePublisher:
@@ -106,6 +108,7 @@ class FramePublisher:
             uavs=deepcopy(engine.uavs),
             obstacles=deepcopy(engine.obstacles),
             bases=deepcopy(engine.bases),
+            model_calls=model_calls(engine, getattr(state, "episode_id", "")),
         )
         with self._condition:
             self._record_accepted += 1
@@ -330,6 +333,8 @@ def _build(snapshot: FrameSnapshot, *, realtime: bool, include_matrices: bool) -
         snapshot.config,
         total_steps=snapshot.total_steps,
         llm_cycle=snapshot.llm_cycle,
+        model_calls=snapshot.model_calls,
+        event_history_limit=300,
         ships=snapshot.ships,
         uav_entities=snapshot.uavs,
         obstacles=snapshot.obstacles,

@@ -15,6 +15,7 @@ export default function useWebSocket(enabled) {
   useEffect(() => {
     if (!enabled) {
       setStatus("idle");
+      setFrame(null);
       return undefined;
     }
     let disposed = false;
@@ -38,6 +39,7 @@ export default function useWebSocket(enabled) {
         if (pendingFrame.current) {
           latestFrame.current = pendingFrame.current;
           setFrame(pendingFrame.current);
+          pendingFrame.current = null;
         }
       });
     };
@@ -66,9 +68,16 @@ export default function useWebSocket(enabled) {
             // Matrix deltas are omitted from most live frames.  Preserve the
             // last known matrices locally so canvas rendering and inspection
             // keep a complete view without paying to transmit them every time.
+            const previous = pendingFrame.current || latestFrame.current;
+            const sameContext = previous?.episode_id === next.episode_id
+              && previous?.reset_generation === next.reset_generation;
             pendingFrame.current = {
-              ...(pendingFrame.current || latestFrame.current || {}),
+              ...(sameContext ? { info_matrix: previous?.info_matrix, value_matrix: previous?.value_matrix } : {}),
               ...next,
+              ...(sameContext && pendingFrame.current ? {
+                events: [...(pendingFrame.current.events || []), ...(next.events || [])],
+                llm_cycle: next.llm_cycle || pendingFrame.current.llm_cycle,
+              } : {}),
             };
             scheduleFramePublish();
           }

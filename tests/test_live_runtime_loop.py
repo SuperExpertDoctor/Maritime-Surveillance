@@ -315,3 +315,75 @@ def test_compatibility_wrapper_keeps_cli_options():
     ])
     assert (args.steps, args.port, args.step_delay) == (7, 8888, 0)
     assert args.no_server and args.hold_server and args.skip_llm_probe
+
+
+def test_wall_budget_finishes_step_without_starting_another(monkeypatch):
+    engine = StubEngine(tick_before_pause=True)
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, 'monotonic', lambda: clock[0])
+    published = []
+    def publish(current, result):
+        published.append(current.clock.time)
+        current.runtime_status = 'running'
+        clock[0] += 4.0
+    result = cli._run_runtime_loop(engine, 100, publish, start_server=True, wall_seconds=3.)
+    assert engine.step_calls == 1
+    assert published == [1]
+    assert result['steps'] == 1
+
+
+def test_wall_budget_exits_model_pause_without_fake_steps(monkeypatch):
+    engine = StubEngine()
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(cli.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    published = []
+    cli._run_runtime_loop(engine, 100, lambda *args: published.append(True), start_server=True, wall_seconds=.3)
+    assert engine.runtime_status == 'paused_model'
+    assert engine.clock.time == 0
+    assert engine.step_calls == 1
+    assert len(published) == 1
+
+
+@pytest.mark.parametrize('seconds', [0, -1, float('inf'), float('nan')])
+def test_wall_budget_rejects_invalid_duration(seconds):
+    with pytest.raises(ValueError, match='wall_seconds'):
+        cli._run_runtime_loop(StubEngine(), 1, lambda *args: None, start_server=True, wall_seconds=seconds)
+
+
+def test_wall_budget_closes_paused_live_session_as_readonly(harness, monkeypatch):
+    engine, publisher = harness
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(cli.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    result = cli.main(steps=100, step_delay=0, probe_llm=False, wall_seconds=.3)
+    assert engine.runtime_status == 'finished'
+    assert result['runtime_before_finalize'] == 'paused_model'
+    assert result['steps'] == 0
+    assert publisher.frames[-1][1] == 'finished'
+    assert publisher.closed
+
+
+def test_run_report_preserves_pause_and_filters_request_payloads(harness, monkeypatch, tmp_path):
+    import json
+    engine, publisher = harness
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(cli.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    engine.allocator.llm_client = SimpleNamespace(gateway=SimpleNamespace(
+        call_log=[{'role': 'decision_maker', 'success': False, 'failure_category': 'timeout',
+                   'messages': [{'content': 'not report data'}]}],
+        redact_log=lambda calls: calls,
+    ))
+    engine.allocator.sm.get_recent_events = lambda _: [{'type': 'mission_model_failure'}]
+    report_dir = tmp_path / 'run'
+    cli.main(steps=100, step_delay=0, probe_llm=False, wall_seconds=.3,
+             run_report_dir=str(report_dir))
+    report = json.loads((report_dir / 'report.json').read_text())
+    assert report['entrypoint'] == 'main.py'
+    assert report['summary']['runtime_before_finalize'] == 'paused_model'
+    assert report['summary']['wall_seconds'] >= .3
+    assert report['model_calls'][0]['failure_category'] == 'timeout'
+    assert 'messages' not in report['model_calls'][0]
+    with pytest.raises(FileExistsError):
+        cli.main(probe_llm=False, run_report_dir=str(report_dir))

@@ -28,13 +28,15 @@ export default function useReplay(enabled) {
   useEffect(() => {
     if (!enabled) return;
     setError("");
-    fetch("/api/replay/list")
+    const controller = new AbortController();
+    fetch("/api/replay/list", { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
-      .then((data) => setFiles(data.files || []))
-      .catch(() => setError("无法读取回放列表"));
+      .then((data) => { if (!controller.signal.aborted) setFiles(data.files || []); })
+      .catch(() => { if (!controller.signal.aborted) setError("无法读取回放列表"); });
+    return () => controller.abort();
   }, [enabled]);
 
   /** Fetch one chunk [offset, offset+CHUNK_SIZE) and merge into framesRef. */
@@ -99,6 +101,7 @@ export default function useReplay(enabled) {
     setTargetLoadingIndex(null);
     if (!filename) {
       framesRef.current = [];
+      totalRef.current = 0;
       loadedOffsetsRef.current.clear();
       setLoading(false);
       setFrames([]);

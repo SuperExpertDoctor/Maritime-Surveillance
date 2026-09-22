@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 function downloadMp4(blob, replayFile) {
   const link = document.createElement("a");
@@ -11,6 +11,8 @@ function downloadMp4(blob, replayFile) {
 }
 
 export default function useMp4Export(replay, mapExporterRef) {
+  const selection = useRef(replay.selectedFile);
+  selection.current = replay.selectedFile;
   const [available, setAvailable] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -30,6 +32,7 @@ export default function useMp4Export(replay, mapExporterRef) {
     setError("");
     setExporting(true);
     setProgress(0);
+    const filename = replay.selectedFile;
     const previousIndex = replay.index;
     const wasPlaying = replay.isPlaying;
     replay.setIsPlaying(false);
@@ -49,13 +52,17 @@ export default function useMp4Export(replay, mapExporterRef) {
         const detail = await response.json().catch(() => ({}));
         throw new Error(detail.error || "MP4 export failed");
       }
-      downloadMp4(await response.blob(), replay.selectedFile);
+      const blob = await response.blob();
+      if (selection.current !== filename) throw new Error("Replay selection changed");
+      downloadMp4(blob, filename);
       setProgress(100);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : "MP4 export failed");
     } finally {
-      replay.seek(previousIndex);
-      replay.setIsPlaying(wasPlaying);
+      if (selection.current === filename) {
+        replay.seek(previousIndex);
+        replay.setIsPlaying(wasPlaying);
+      }
       setExporting(false);
     }
   }, [exporting, mapExporterRef, replay]);

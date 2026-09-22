@@ -62,6 +62,7 @@ from src.control.heuristic.navigation import AStarNavigator
 from src.control.heuristic.return_to_base import (
     NoSafeRecoveryPath,
     RecoveryPlanner,
+    recovery_route_blocked,
 )
 from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Region
@@ -1708,9 +1709,16 @@ class SimulationEngine:
             if resource.generation != assignment.expected_generation:
                 return False
             active = self.control_coordinator.active_task(assignment.uav_id)
-            if assignment.previous_task_id != (
-                active.task_id if active is not None else None
+            previous_task_id = active.task_id if active is not None else None
+            if (
+                active is not None
+                and active.task_type is OperationMode.HOLDING
+                and lease.owner is ControlOwner.SYSTEM
+                and resource.current_task_id is None
             ):
+                # System holding is not a mission assignment in the snapshot.
+                previous_task_id = None
+            if assignment.previous_task_id != previous_task_id:
                 return False
             uav = next(
                 (entity for entity in self.uavs if entity.id == assignment.uav_id),
@@ -1718,6 +1726,23 @@ class SimulationEngine:
             )
             if uav is None:
                 return False
+
+            if candidate.contact_id is not None:
+                handoff = self.handoff_manager.latest_for_contact(candidate.contact_id)
+                if handoff is not None and handoff.state != "succeeded":
+                    contact = self.allocator.sm.contacts.snapshot(candidate.contact_id)
+                    if assignment.uav_id == handoff.source_uav_id:
+                        return False
+                    if candidate.kind == "track" and assignment.uav_id not in (
+                        self.handoff_manager.observed_successors(contact, self.clock.time)
+                    ):
+                        return False
+                    if handoff.state == "pending" and handoff.successor_uav_id != assignment.uav_id:
+                        return False
+                    if candidate.kind in _SEARCH_TASK_KINDS:
+                        if handoff.state != "required" or self.clock.time > handoff.assignment_deadline_min:
+                            return False
+                        handoff_commits.append((handoff, assignment.uav_id, candidate.contact_id))
 
             if candidate.kind in _SEARCH_TASK_KINDS:
                 if candidate.bbox is None:
@@ -1923,7 +1948,7 @@ class SimulationEngine:
             self.allocator.sm.add_event("handoff_assignment_committed", {
                 "handoff_id": attempt.handoff_id,
                 "contact_id": contact_id,
-                "successor_uav_id": assignment.uav_id,
+                "successor_uav_id": successor_uav_id,
             })
 
         by_uav = {
@@ -2211,6 +2236,11 @@ class SimulationEngine:
             lease = self.control_coordinator.current_lease(uav.id)
 
         try:
+            if (
+                lease.owner is ControlOwner.SYSTEM
+                and self.control_coordinator.operation_mode(uav.id) is OperationMode.RETURN
+            ):
+                self._divert_blocked_return(uav, current_time)
             tick = self.control_coordinator.step_uav(
                 uav,
                 current_time=current_time,
@@ -3022,6 +3052,62 @@ class SimulationEngine:
             "base_id": base.id,
             "reservation_id": reservation_id,
             "reason": "range_reserve",
+        })
+        return True
+
+    def _divert_blocked_return(self, uav: UAVEntity, current_time: float) -> bool:
+        """Replace a blocked inbound plan and its capacity reservation together."""
+        task = self.control_coordinator.active_task(uav.id)
+        if task is None or task.recovery_plan is None:
+            return False
+        exported = self.control_coordinator.route_snapshot(uav.id).route
+        suffix = (exported.route[exported.next_index:]
+                  if exported.status == "ready" else task.recovery_plan.path[1:])
+        if not recovery_route_blocked((uav.pose, *suffix), self.allocator.sm.obstacle_mask):
+            return False
+        bases = tuple(
+            BaseObservation(
+                base.id, tuple(map(float, base.position)), base.capacity,
+                self._base_maintenance_load(base, exclude_uav_id=uav.id),
+            ) for base in self.bases
+        )
+        planner = RecoveryPlanner()
+        args = (uav.pose, uav.remaining_range_cells, bases,
+                self.allocator.sm.obstacle_mask, self.allocator.sm.obstacle_version,
+                uav.R_min, task.recovery_plan.reserve_cells)
+        candidates = planner.evaluate(*args)
+        if not candidates:
+            # Full bases still permit a safe inbound flight followed by holding.
+            candidates = planner.evaluate(*args, allow_reserved_bases=True)
+        if not candidates:
+            raise NoSafeRecoveryPath(task.recovery_plan.base_id,
+                                     self.allocator.sm.obstacle_version,
+                                     "no base has a safe route within fuel reserve")
+        candidate = candidates[0]
+        base = next(base for base in self.bases if base.id == candidate.base.base_id)
+        reservation_id = f"{uav.id}:return:{self._return_reservation_sequence}"
+        plan = RecoveryPlan(base.id, candidate.base.position, reservation_id,
+                            candidate.path, candidate.path_length_cells,
+                            candidate.reserve_cells, candidate.planning_map_version)
+        replacement = ControlTask(reservation_id, OperationMode.RETURN, recovery_plan=plan)
+        previous = self._return_base_by_uav.get(uav.id)
+        self._return_base_by_uav[uav.id] = base
+        try:
+            self.control_coordinator.assign_system_task(
+                uav.id, replacement, current_time=current_time)
+        except Exception:
+            if previous is None:
+                self._return_base_by_uav.pop(uav.id, None)
+            else:
+                self._return_base_by_uav[uav.id] = previous
+            raise
+        self._return_reservation_sequence += 1
+        self._coordinator_tasks[uav.id] = replacement
+        uav.plan_return(plan.path)
+        self.allocator.sm.add_event("return_diverted", {
+            "uav_id": uav.id, "previous_base_id": task.recovery_plan.base_id,
+            "base_id": base.id, "reservation_id": reservation_id,
+            "path_length_cells": plan.path_length_cells,
         })
         return True
 
@@ -4556,6 +4642,35 @@ class SimulationEngine:
             ship.id, "sar", True, current_time, detection.sample_id,
         )
         self._publish_contact_events(current_time)
+        handoff = self.handoff_manager.latest_for_contact(cid)
+        if (
+            handoff is not None
+            and handoff.state == "pending"
+            and handoff.successor_uav_id == uav.id
+        ):
+            task = self.control_coordinator.active_task(uav.id)
+            if task is not None and task.task_id == f"handoff-search:{handoff.handoff_id}":
+                # Reacquisition ends this investigation, not whole-area SAR
+                # coverage. Retire its remaining swaths without crediting them.
+                self._close_mission_task(
+                    uav.id, task, status="cancelled", reason="handoff_redetected",
+                    current_time=current_time,
+                )
+                holding = ControlTask(f"holding:{uav.id}:{current_time}", OperationMode.HOLDING)
+                self.control_coordinator.promote_to_system_holding(
+                    uav.id, current_time=current_time, task_id=holding.task_id,
+                )
+                self._coordinator_tasks[uav.id] = holding
+                uav.start_holding(uav.position)
+            # Re-observing an existing contact does not emit contact_created.
+            # Wake the scheduler so this SAR investigation can become EO work.
+            self.allocator.trigger_manager.notify_event(
+                "target_found", time=current_time, uav_id=uav.id, contact_id=cid,
+            )
+            self.allocator.sm.add_event("handoff_redetected", {
+                "handoff_id": handoff.handoff_id, "contact_id": cid,
+                "successor_uav_id": uav.id, "sample_id": detection.sample_id,
+            })
         return cid
 
     def _observe_evaluation(self, current_time: float) -> None:
