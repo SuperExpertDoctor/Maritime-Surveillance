@@ -657,16 +657,31 @@ class CoverageConstraint:
     infeasible_reason: str | None = None
     zone_requirements: tuple[ZoneCoverageRequirement, ...] = ()
     zone_infeasible: tuple[tuple[str, str], ...] = ()
+    reserved_search_count: int = 0
+    matchable_pending_count: int = 0
 
     def __post_init__(self) -> None:
         for name in (
             "desired_search_count",
             "active_search_count",
             "required_new_search_count",
+            "reserved_search_count",
+            "matchable_pending_count",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        reserved = self.reserved_search_count
+        if reserved == 0 and self.active_search_count:
+            # Older positional callers did not publish the reserved total.
+            reserved = self.active_search_count
+            object.__setattr__(self, "reserved_search_count", reserved)
+        if self.active_search_count > reserved:
+            raise ValueError("active_search_count exceeds reserved_search_count")
+        if self.active_search_count + self.matchable_pending_count > reserved:
+            raise ValueError(
+                "matchable_pending_count exceeds reserved pending capacity"
+            )
         if self.required_new_search_count > self.desired_search_count:
             raise ValueError("required_new_search_count exceeds desired_search_count")
         representatives = tuple(self.representative_task_ids)
@@ -712,6 +727,7 @@ class MissionSnapshot:
     _information_version: int = field(default=0, repr=False, kw_only=True)
     prompt_task_ids: tuple[str, ...] = field(default=(), kw_only=True)
     prompt_sources: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
+    pending_search_task_ids: tuple[str, ...] = field(default=(), kw_only=True)
     coverage_constraint: CoverageConstraint | None = field(default=None, kw_only=True)
     coverage_summary: dict | None = field(default=None, kw_only=True)
 
@@ -736,6 +752,12 @@ class MissionSnapshot:
             "prompt_sources",
             tuple(tuple(item) for item in self.prompt_sources),
         )
+        pending_ids = tuple(self.pending_search_task_ids)
+        if any(not isinstance(item, str) or not item for item in pending_ids):
+            raise ValueError(
+                "pending_search_task_ids must contain non-empty strings"
+            )
+        object.__setattr__(self, "pending_search_task_ids", tuple(sorted(set(pending_ids))))
         if self.coverage_constraint is not None and not isinstance(
             self.coverage_constraint, CoverageConstraint
         ):

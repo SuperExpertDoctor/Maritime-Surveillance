@@ -97,7 +97,8 @@ information_update:
   material_delta_threshold: 0.05
   normal_heavy_cooldown_min: 1.0
   kernel_epsilon: 0.01
-  # The configured LongCat live route currently returns validated decisions
-  # in roughly 6-20 seconds; keep a reserve for validation and matching.
-  planning_deadline_seconds: 30.0
-  postprocess_reserve_seconds: 0.5
+  # LongCat decisions are usually returned in 6-20 seconds, with observed
+  # live responses near 30 seconds. Keep enough budget for that tail and for
+  # validation/matching after the transport returns.
+  planning_deadline_seconds: 60.0
+  postprocess_reserve_seconds: 1.0

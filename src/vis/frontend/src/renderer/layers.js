@@ -265,6 +265,8 @@ function taskCells(region) {
 }
 
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
+  const labels = [];
+  const labelSources = new Map();
   for (const region of regions || []) {
     const color = "#F59E0B";
     const cells = taskCells(region);
@@ -284,11 +286,38 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
       const point = coordToPixel(labelCell[0], labelCell[1], cellSize, ox, oy);
       const label = cellSize >= 14 ? fullLabel : region.id;
       const labelWidth = ctx.measureText(label).width + 8;
-      ctx.fillStyle = "rgba(255, 255, 255, .9)";
-      ctx.fillRect(point.x + 2, point.y + 2, labelWidth, fontSize + 6);
-      text(ctx, label, point.x + 6, point.y + fontSize + 4, color, fontSize, 700);
+      const id = `search:${region.id}`;
+      labels.push({
+        id,
+        anchor: { x: point.x + cellSize / 2, y: point.y + cellSize / 2 },
+        width: labelWidth,
+        height: fontSize + 6,
+        priority: assigned ? 0 : 2,
+      });
+      labelSources.set(id, { color, fontSize, text: label });
     }
   }
+  const placed = layoutLabels(labels, {
+    x: ox,
+    y: oy,
+    width: 30 * cellSize,
+    height: 30 * cellSize,
+  });
+  for (const label of placed) {
+    if (label.hidden) continue;
+    const source = labelSources.get(label.id);
+    if (!source) continue;
+    ctx.save();
+    ctx.strokeStyle = `${source.color}99`;
+    ctx.lineWidth = 0.8;
+    drawLabelLeader(ctx, label.anchor, label);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255, 255, 255, .9)";
+    ctx.fillRect(label.x, label.y, label.width, label.height);
+    text(ctx, source.text, label.x + 4, label.y + source.fontSize + 2, source.color, source.fontSize, 700);
+    ctx.restore();
+  }
+  return placed;
 }
 
 export function drawIntents(ctx, intents, statuses, cellSize, ox, oy) {

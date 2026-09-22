@@ -134,7 +134,7 @@ def test_ship_and_mission_config_fields_match_design():
     )
     assert config.mission.activity.regulated_bboxes == ((8, 8, 22, 22),)
     assert config.mission.evasion.enabled is True
-    assert config.mission.information_update.planning_deadline_seconds == 30.0
+    assert config.mission.information_update.planning_deadline_seconds == 60.0
 
 
 def test_coverage_configuration_defaults_and_explicit_values(tmp_path: Path):

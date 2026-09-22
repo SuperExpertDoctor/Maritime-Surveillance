@@ -300,6 +300,8 @@ def adaptive_search_fraction(gap_pct: float, minimum: float = 0.4, maximum: floa
 def build_coverage_constraint(
     *,
     active_search_count: int,
+    reserved_search_count: int | None = None,
+    matchable_pending_count: int = 0,
     available_ids: Iterable[str],
     representatives: Iterable[Any],
     edges: Iterable[Any],
@@ -307,20 +309,44 @@ def build_coverage_constraint(
     zone_requirements_input=(),
     healthy_count: int | None = None,
 ):
-    """Build an available-fleet budget with one quota-first maximum matching.
+    """Build a healthy-fleet budget with one quota-first maximum matching.
 
     The return type is imported lazily to keep this policy module independent
     from the broader mission contract graph.
-    ``healthy_count`` is accepted for source compatibility only; the budget
-    deliberately uses idle ``available_ids`` without subtracting busy work.
+    ``healthy_count`` anchors the desired total search count. ``available_ids``
+    remains the idle, legally matchable set for new work; active search work is
+    subtracted only from the desired total, never from the healthy denominator.
+    When omitted, the idle set remains the compatibility denominator.
     """
     from src.mission.contracts import CoverageConstraint, ZoneCoverageRequirement
 
     if any(
         isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0
-        for value in ((active_search_count,) if healthy_count is None else (healthy_count, active_search_count))
+        for value in (
+            (active_search_count, matchable_pending_count)
+            if healthy_count is None
+            else (healthy_count, active_search_count, matchable_pending_count)
+        )
     ):
-        raise ValueError("healthy_count and active_search_count must be non-negative integers")
+        raise ValueError(
+            "healthy_count, active_search_count, and matchable_pending_count "
+            "must be non-negative integers"
+        )
+    if reserved_search_count is None:
+        reserved_search_count = int(active_search_count) + int(matchable_pending_count)
+    if (
+        isinstance(reserved_search_count, bool)
+        or not isinstance(reserved_search_count, Integral)
+        or int(reserved_search_count) < 0
+    ):
+        raise ValueError("reserved_search_count must be a non-negative integer")
+    reserved_search_count = int(reserved_search_count)
+    if int(active_search_count) > reserved_search_count:
+        raise ValueError("active_search_count exceeds reserved_search_count")
+    if int(active_search_count) + int(matchable_pending_count) > reserved_search_count:
+        raise ValueError(
+            "matchable_pending_count exceeds reserved pending capacity"
+        )
     if isinstance(fraction, bool) or not isinstance(fraction, Real):
         raise ValueError("fraction must be finite and in (0, 1]")
     fraction = float(fraction)
@@ -335,24 +361,73 @@ def build_coverage_constraint(
     if any(not isinstance(item, str) or not item for item in representative_ids):
         raise ValueError("representatives must contain task IDs or task objects")
     representative_ids = tuple(dict.fromkeys(representative_ids))
-    desired = int(math.ceil(len(available) * fraction))
-    quota_inputs = tuple(zone_requirements_input)[:desired]
+    healthy = len(available) if healthy_count is None else int(healthy_count)
+    desired = int(math.ceil(healthy * fraction))
+    residual_target = max(
+        0,
+        desired - int(active_search_count) - int(matchable_pending_count),
+    )
+    quota_inputs = tuple(zone_requirements_input)[:residual_target]
     if len({item.zone_id for item in quota_inputs}) != len(quota_inputs):
         raise ValueError("duplicate quota zone")
     representative_ids = tuple(dict.fromkeys((*representative_ids,
         *(task_id for item in quota_inputs for task_id in item.candidate_task_ids))))
     adjacency = {task_id: [] for task_id in representative_ids}
+    minimum_transit: dict[str, float] = {}
+    edges = tuple(edges)
     for edge in edges:
         if isinstance(edge, Mapping):
             task_id = edge.get("task_id")
             uav_id = edge.get("uav_id")
+            transit = edge.get("transit_time_min")
         else:
             task_id = getattr(edge, "task_id", None)
             uav_id = getattr(edge, "uav_id", None)
+            transit = getattr(edge, "transit_time_min", None)
         if task_id in adjacency and uav_id in available_set:
             adjacency[task_id].append(uav_id)
+            if isinstance(transit, Real) and math.isfinite(float(transit)):
+                minimum_transit[task_id] = min(
+                    minimum_transit.get(task_id, float("inf")),
+                    float(transit),
+                )
     for task_id in adjacency:
         adjacency[task_id] = sorted(set(adjacency[task_id]))
+
+    transit_by_uav: dict[str, dict[str, float]] = {}
+    for edge in edges:
+        if isinstance(edge, Mapping):
+            task_id = edge.get("task_id")
+            uav_id = edge.get("uav_id")
+            transit = edge.get("transit_time_min")
+        else:
+            task_id = getattr(edge, "task_id", None)
+            uav_id = getattr(edge, "uav_id", None)
+            transit = getattr(edge, "transit_time_min", None)
+        if (
+            task_id in adjacency
+            and uav_id in available_set
+            and isinstance(transit, Real)
+            and math.isfinite(float(transit))
+        ):
+            transit_by_uav.setdefault(task_id, {})[uav_id] = min(
+                transit_by_uav.get(task_id, {}).get(uav_id, float("inf")),
+                float(transit),
+            )
+
+    def quota_order(task_ids: Iterable[str]) -> tuple[str, ...]:
+        """Start short-transit legal work early while preserving deterministic ties."""
+        ordered = tuple(task_ids)
+        return tuple(
+            task_id for _index, task_id in sorted(
+                enumerate(ordered),
+                key=lambda item: (
+                    0 if item[1] in minimum_transit else 1,
+                    minimum_transit.get(item[1], float("inf")),
+                    item[0],
+                ),
+            )
+        )
 
     matched_uav: dict[str, str] = {}
 
@@ -369,21 +444,160 @@ def build_coverage_constraint(
 
     zone_matched, zone_infeasible = [], []
     matched_tasks = set()
-    for item in quota_inputs:
-        for task_id in item.candidate_task_ids:
-            if task_id not in matched_tasks and visit(task_id, set()):
-                matched_tasks.add(task_id)
-                zone_matched.append(ZoneCoverageRequirement(
-                    item.zone_id, 1, item.candidate_task_ids, (task_id,)))
+
+    # Solve the quota subproblem as a min-cost maximum flow.  A greedy zone
+    # order can consume the only short route for a later zone, even when a
+    # full and cheaper assignment exists.
+    quota_graph: list[list[dict[str, Any]]] = []
+
+    def add_quota_node() -> int:
+        quota_graph.append([])
+        return len(quota_graph) - 1
+
+    def add_quota_edge(
+        source: int,
+        target: int,
+        cost: float,
+    ) -> tuple[int, int]:
+        forward_index = len(quota_graph[source])
+        reverse_index = len(quota_graph[target])
+        quota_graph[source].append({
+            "to": target,
+            "reverse": reverse_index,
+            "capacity": 1,
+            "cost": float(cost),
+        })
+        quota_graph[target].append({
+            "to": source,
+            "reverse": forward_index,
+            "capacity": 0,
+            "cost": -float(cost),
+        })
+        return source, forward_index
+
+    quota_source = add_quota_node()
+    quota_zone_nodes = [add_quota_node() for _item in quota_inputs]
+    quota_task_entry_nodes = {
+        task_id: add_quota_node()
+        for task_id in representative_ids
+    }
+    quota_task_exit_nodes = {
+        task_id: add_quota_node()
+        for task_id in representative_ids
+    }
+    quota_uav_nodes = {
+        uav_id: add_quota_node()
+        for uav_id in available
+    }
+    quota_sink = add_quota_node()
+    quota_zone_task_edges: dict[tuple[int, str], tuple[int, int]] = {}
+    quota_task_uav_edges: dict[tuple[str, str], tuple[int, int]] = {}
+    finite_transits = [
+        transit
+        for costs in transit_by_uav.values()
+        for transit in costs.values()
+    ]
+    unknown_transit_cost = max(finite_transits, default=0.0) + 1_000_000.0
+
+    for zone_index, item in enumerate(quota_inputs):
+        zone_node = quota_zone_nodes[zone_index]
+        add_quota_edge(quota_source, zone_node, 0.0)
+        for task_id in quota_order(item.candidate_task_ids):
+            if task_id not in quota_task_entry_nodes:
+                continue
+            quota_zone_task_edges[(zone_index, task_id)] = add_quota_edge(
+                zone_node,
+                quota_task_entry_nodes[task_id],
+                0.0,
+            )
+    for task_id in representative_ids:
+        # A representative can fulfill at most one zone quota, even when
+        # a boundary candidate appears in more than one zone input.
+        add_quota_edge(
+            quota_task_entry_nodes[task_id],
+            quota_task_exit_nodes[task_id],
+            0.0,
+        )
+        task_node = quota_task_exit_nodes[task_id]
+        for uav_id in adjacency[task_id]:
+            transit = transit_by_uav.get(task_id, {}).get(
+                uav_id,
+                unknown_transit_cost,
+            )
+            quota_task_uav_edges[(task_id, uav_id)] = add_quota_edge(
+                task_node,
+                quota_uav_nodes[uav_id],
+                transit,
+            )
+    for uav_node in quota_uav_nodes.values():
+        add_quota_edge(uav_node, quota_sink, 0.0)
+
+    while True:
+        distances = [float("inf")] * len(quota_graph)
+        previous: list[tuple[int, int] | None] = [None] * len(quota_graph)
+        distances[quota_source] = 0.0
+        for _iteration in range(len(quota_graph) - 1):
+            changed = False
+            for node, node_distance in enumerate(distances):
+                if not math.isfinite(node_distance):
+                    continue
+                for edge_index, edge in enumerate(quota_graph[node]):
+                    if edge["capacity"] <= 0:
+                        continue
+                    candidate_distance = node_distance + edge["cost"]
+                    if candidate_distance < distances[edge["to"]] - 1e-12:
+                        distances[edge["to"]] = candidate_distance
+                        previous[edge["to"]] = (node, edge_index)
+                        changed = True
+            if not changed:
                 break
-        else:
+        if previous[quota_sink] is None:
+            break
+        node = quota_sink
+        while node != quota_source:
+            source, edge_index = previous[node]
+            edge = quota_graph[source][edge_index]
+            edge["capacity"] = 0
+            quota_graph[node][edge["reverse"]]["capacity"] = 1
+            node = source
+
+    for zone_index, item in enumerate(quota_inputs):
+        selected_task = None
+        selected_uav = None
+        for task_id in quota_order(item.candidate_task_ids):
+            handle = quota_zone_task_edges.get((zone_index, task_id))
+            if handle is None:
+                continue
+            source, edge_index = handle
+            if quota_graph[source][edge_index]["capacity"] != 0:
+                continue
+            for uav_id in adjacency[task_id]:
+                task_handle = quota_task_uav_edges[(task_id, uav_id)]
+                task_source, task_edge_index = task_handle
+                if quota_graph[task_source][task_edge_index]["capacity"] == 0:
+                    selected_task = task_id
+                    selected_uav = uav_id
+                    break
+            if selected_task is not None:
+                break
+        if selected_task is None or selected_uav is None:
             zone_infeasible.append((item.zone_id, "no_feasible_zone_representative"))
+            continue
+        matched_tasks.add(selected_task)
+        matched_uav[selected_uav] = selected_task
+        zone_matched.append(ZoneCoverageRequirement(
+            item.zone_id, 1, item.candidate_task_ids, (selected_task,)))
     for task_id in representative_ids:
         if task_id not in matched_tasks and visit(task_id, set()):
             matched_tasks.add(task_id)
     feasible_slots = len(matched_uav)
-    required = min(desired, feasible_slots)
-    infeasible_reason = None if feasible_slots >= desired else "insufficient_available_resources"
+    required = min(residual_target, feasible_slots)
+    infeasible_reason = (
+        None
+        if int(active_search_count) + int(matchable_pending_count) + feasible_slots
+        >= desired
+        else "insufficient_available_resources"
+    )
     # Quota witnesses already consume budget; never add an incompatible extra
     # oldest obligation when every budget slot belongs to a different zone.
     must_service = tuple(task for zone in zone_matched for task in zone.must_service_task_ids)
@@ -398,6 +612,8 @@ def build_coverage_constraint(
         infeasible_reason=infeasible_reason,
         zone_requirements=tuple(zone_matched),
         zone_infeasible=tuple(zone_infeasible),
+        reserved_search_count=reserved_search_count,
+        matchable_pending_count=int(matchable_pending_count),
     )
 
 

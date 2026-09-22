@@ -99,3 +99,21 @@ def test_new_replay_preserves_persistent_coverage_as_a_deep_copy():
 
     assert source["coverage_metrics"] == coverage
     assert coverage["windows"][0]["covered_cells"] == 3
+
+
+def test_replay_preserves_pending_region_identity_and_assignment_state():
+    source = {
+        "search_regions": [{
+            "id": "search:pending",
+            "bbox": [2, 2, 4, 4],
+            "type": "search",
+            "status": "active",
+            "assigned_uav_id": None,
+        }],
+    }
+
+    normalized = normalize_replay_frame(source)
+
+    assert normalized["search_regions"] == source["search_regions"]
+    normalized["search_regions"][0]["assigned_uav_id"] = "UAV-2"
+    assert source["search_regions"][0]["assigned_uav_id"] is None

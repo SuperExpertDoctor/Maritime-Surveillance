@@ -49,9 +49,11 @@ def _git_output(*args: str) -> str:
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         check=False,
     )
-    return result.stdout
+    return result.stdout or ""
 
 
 def _git_commit() -> str | None:

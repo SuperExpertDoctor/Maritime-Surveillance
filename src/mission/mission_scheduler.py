@@ -1,4 +1,4 @@
-"""Strict mission selection validation and exact feasible-task matching."""
+"""Strict mission selection validation and feasible-task matching."""
 from __future__ import annotations
 
 import math
@@ -504,6 +504,90 @@ def _minimum_cost_matching(
     return {task_id: edge for task_id, edge in result[1]}
 
 
+def _minimum_cost_maximum_matching(
+    task_ids: tuple[str, ...],
+    options: dict[str, tuple[FeasibleEdge, ...]],
+    resources: dict[str, UavResource],
+) -> dict[str, FeasibleEdge]:
+    """Find a deterministic minimum-cost matching of maximum cardinality."""
+    if not task_ids or not resources:
+        return {}
+    order = tuple(sorted(
+        task_ids,
+        key=lambda task_id: (len(options.get(task_id, ())), task_id),
+    ))
+    resource_ids = tuple(sorted(resources))
+    resource_bits = {uav_id: 1 << index for index, uav_id in enumerate(resource_ids)}
+
+    @lru_cache(maxsize=None)
+    def solve(index: int, used_mask: int):
+        if index == len(order):
+            return 0, 0.0, ()
+        task_id = order[index]
+        best = solve(index + 1, used_mask)
+        for edge in options.get(task_id, ()):
+            bit = resource_bits.get(edge.uav_id)
+            if bit is None or used_mask & bit:
+                continue
+            remainder = solve(index + 1, used_mask | bit)
+            candidate = (
+                remainder[0] + 1,
+                edge.transit_time_min + remainder[1],
+                ((task_id, edge.uav_id, edge),) + remainder[2],
+            )
+            if (
+                candidate[0] > best[0]
+                or (
+                    candidate[0] == best[0]
+                    and (
+                        candidate[1] < best[1] - 1e-12
+                        or (
+                            abs(candidate[1] - best[1]) <= 1e-12
+                            and tuple((item[0], item[1]) for item in candidate[2])
+                            < tuple((item[0], item[1]) for item in best[2])
+                        )
+                    )
+                )
+            ):
+                best = candidate
+        return best
+
+    result = solve(0, 0)
+    return {task_id: edge for task_id, _uav_id, edge in result[2]}
+
+
+def match_task_ids(
+    task_ids: tuple[str, ...] | list[str],
+    options: dict[str, tuple[FeasibleEdge, ...]],
+    resources: dict[str, UavResource],
+    *,
+    required_preempt_uav_ids: frozenset[str] = frozenset(),
+    require_all: bool = True,
+) -> dict[str, FeasibleEdge] | None:
+    """Share deterministic task/resource matching across validation paths."""
+    normalized_ids = tuple(task_ids)
+    normalized_options = {
+        task_id: tuple(sorted(
+            options.get(task_id, ()),
+            key=lambda edge: (edge.transit_time_min, edge.uav_id),
+        ))
+        for task_id in normalized_ids
+    }
+    if not require_all:
+        return _minimum_cost_maximum_matching(
+            normalized_ids, normalized_options, resources,
+        )
+    maximum = _maximum_matching(normalized_ids, normalized_options)
+    if len(maximum) < len(normalized_ids):
+        return None
+    return _minimum_cost_matching(
+        normalized_ids,
+        normalized_options,
+        resources,
+        required_preempt_uav_ids,
+    )
+
+
 def _actual_preempted(
     matching: dict[str, FeasibleEdge],
     selection: MissionSelection,
@@ -581,13 +665,29 @@ def _validate_selection(
         errors.append("duplicate_preempt_uav_id")
 
     candidates, active = _task_maps(snapshot)
+    pending_search_ids = set(snapshot.pending_search_task_ids)
+    # Pending ordinary searches are retained-region audit records.  They stay
+    # in the snapshot for overlap and replay checks, but are not legal model
+    # selections or new-candidate representatives.
+    candidates = {
+        task_id: task
+        for task_id, task in candidates.items()
+        if task_id not in pending_search_ids
+    }
+    active = {
+        task_id: task
+        for task_id, task in active.items()
+        if task_id not in pending_search_ids
+    }
     resources = _resource_maps(snapshot)
     visible = set(candidates) if visible_task_ids is None else set(visible_task_ids)
     if len(resources) != len(snapshot.resources):
         errors.append("duplicate_resource_id")
     known_tasks = set(candidates) | set(active)
     for task_id in selected_task_ids:
-        if task_id not in known_tasks:
+        if task_id in pending_search_ids:
+            errors.append(f"pending_search_not_selectable:{task_id}")
+        elif task_id not in known_tasks:
             errors.append(f"unknown_task_id: {task_id}")
         elif task_id in candidates and task_id not in visible:
             errors.append(f"selected_task_not_visible:{task_id}")
@@ -616,13 +716,31 @@ def _validate_selection(
         )
         if (
             not floor_infeasible
-            and coverage_constraint.required_new_search_count
-            != ordinary_count
+            and ordinary_count < coverage_constraint.required_new_search_count
         ):
             errors.append(
-                "search_count_not_exact:"
+                "coverage_floor_not_met:"
                 f"{coverage_constraint.required_new_search_count}:{ordinary_count}"
             )
+        if (
+            not floor_infeasible
+            and coverage_constraint.required_new_search_count == 0
+        ):
+            for task in selected_tasks:
+                is_new_ordinary_search = (
+                    task.kind == "search"
+                    and task.bbox is not None
+                    and task.task_id in candidates
+                    and task.task_id not in active
+                )
+                is_explicitly_urgent = (
+                    task.priority == "high" or bool(task.intent_ids)
+                )
+                if is_new_ordinary_search and not is_explicitly_urgent:
+                    errors.append(
+                        "ordinary_search_without_residual_budget:"
+                        f"{task.task_id}"
+                    )
         if (
             not floor_infeasible
             and coverage_constraint.required_new_search_count > 0
@@ -695,20 +813,16 @@ def _validate_selection(
         errors.append("preempt_requires_selected_task")
     matching = None
     if selected_task_ids:
-        maximum = _maximum_matching(selected_task_ids, options)
-        if len(maximum) < len(selected_task_ids):
-            errors.append("infeasible_assignment")
-        else:
-            matching = _minimum_cost_matching(
+            matching = match_task_ids(
                 selected_task_ids,
                 options,
                 resources,
-                frozenset(preempt_uav_ids),
+                required_preempt_uav_ids=frozenset(preempt_uav_ids),
             )
             if matching is None:
                 # Keep a local exact matching only to report unused declared
                 # preemptions when the unconstrained assignment is legal.
-                matching = _minimum_cost_matching(
+                matching = match_task_ids(
                     selected_task_ids, options, resources,
                 )
                 if matching is None:
@@ -835,11 +949,11 @@ def _pair_selected_tasks(
             allow_probe_preempt_search=allow_probe_preempt_search,
             allow_intent_preempt_search=allow_intent_preempt_search,
         )
-        matching = _minimum_cost_matching(
+        matching = match_task_ids(
             parsed.selected_task_ids,
             options,
             _resource_maps(snapshot),
-            frozenset(parsed.preempt_uav_ids),
+            required_preempt_uav_ids=frozenset(parsed.preempt_uav_ids),
         )
         if matching is None:
             return PairingResult((), ("infeasible_assignment",), False)
@@ -1462,6 +1576,7 @@ class MissionScheduler:
             "prompt_skip_cycles": prompt_skip_cycles,
             "prompt_fairness_bound_cycles": fairness_bound_cycles,
             "prompt_geometry_filtered": geometry_filtered,
+            "pending_search_task_ids": list(snapshot.pending_search_task_ids),
         }
         if snapshot.coverage_constraint is not None:
             full["coverage_constraint"] = _jsonable(snapshot.coverage_constraint)
@@ -1552,6 +1667,7 @@ __all__ = [
     "PairingResult",
     "TaskRecord",
     "UavResource",
+    "match_task_ids",
     "pair_selected_tasks",
     "validate_selection",
     ]

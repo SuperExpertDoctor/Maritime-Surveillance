@@ -114,13 +114,15 @@ def test_emergency_failure_releases_task_service_and_does_not_return_or_hold():
     assert state.failure_reason == "no_safe_recovery_path"
     assert uav.status == "failed"
     assert uav.float_position == old_position
-    assert record.status == "blocked"
+    assert record.status == "approved"
     assert record.assigned_uav_id is None
     assert engine.control_coordinator.controller(uav.id) is None
     assert engine.control_coordinator.active_task(uav.id) is None
     assert engine.control_coordinator.current_lease(uav.id).owner is ControlOwner.SYSTEM
     assert engine.control_coordinator.route_snapshot(uav.id).route.status == "cleared"
-    assert engine.allocator.sm.get_search_regions()[0].assigned_uav_id is None
+    region = engine.allocator.sm.get_search_regions()[0]
+    assert region.status == "active"
+    assert region.assigned_uav_id is None
     assert engine.allocator.sm.coverage_service.progress(
         task.task_id, generation, uav_id=uav.id,
     ) is not None

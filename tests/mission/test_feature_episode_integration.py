@@ -17,7 +17,15 @@ from src.control.common.contracts import (
 )
 from src.env.simulation import SimulationEngine
 from src.mission.episode_logger import EpisodeLogger
-from src.mission.contracts import Intent, IntentStatus
+from src.mission.contracts import (
+    CoverageConstraint,
+    FeasibleEdge,
+    Intent,
+    IntentStatus,
+    MissionSnapshot,
+    TaskCandidate,
+    UavResource,
+)
 from src.mission.outcome_evaluator import OutcomeEvaluator, EpisodeOutcome
 from src.mission.strategy_memory import (
     StrategyMemory,
@@ -59,6 +67,106 @@ def _allocator_with_selection_provider():
         "heavy", reason="integration test"
     )
     return allocator
+
+
+def _coverage_capacity_satisfied_snapshot(*, candidates=None):
+    resource = UavResource(
+        "U1", (1.0, 1.0), 0.0, 1.0, 100.0, "idle", None, 0, 0.0,
+    )
+    ordinary = TaskCandidate(
+        "search:spare", "search", (10, 10, 14, 14), None, (), ("U1",),
+        0.0, "medium", 4.0, 0.5, 0.5,
+    )
+    tasks = (ordinary,) if candidates is None else tuple(candidates)
+    return MissionSnapshot(
+        "coverage-capacity-satisfied",
+        10.0,
+        tasks,
+        ("U1",),
+        (),
+        (("U1", 0),),
+        (resource,),
+        tuple(
+            FeasibleEdge(task.task_id, "U1", 1.0, 1.0, 1.0, 0.0, "test")
+            for task in tasks
+        ),
+        (),
+        (),
+        (),
+        (),
+        "baseline",
+        0,
+        "",
+        coverage_constraint=CoverageConstraint(
+            desired_search_count=1,
+            active_search_count=1,
+            required_new_search_count=0,
+            representative_task_ids=("search:spare",),
+            must_service_task_ids=(),
+        ),
+    )
+
+
+def test_mission_step_skips_model_when_ordinary_coverage_capacity_is_satisfied(
+    monkeypatch,
+):
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    snapshot = _coverage_capacity_satisfied_snapshot()
+    allocator.reviewer = _ReviewerDouble()
+    allocator.trigger_manager.check = lambda _time: TriggerDecision(
+        "heavy", reason="coverage capacity test"
+    )
+    monkeypatch.setattr(
+        allocator, "build_mission_snapshot", lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        allocator.mission_scheduler,
+        "decide",
+        lambda *_args, **_kwargs: pytest.fail("the model must not be called"),
+    )
+
+    result, batch = allocator.mission_step(10.0)
+
+    assert batch is None
+    assert result["trigger_type"] == "heavy"
+    assert result["action"] == "mission_selection_skipped"
+    assert result["skip_reason"] == "ordinary_search_capacity_satisfied"
+    assert allocator.last_decision_timing["llm_seconds"] == 0.0
+    assert allocator.sm.cycle == 1
+    skipped = [
+        event for event in allocator.sm.get_recent_events(0.0)
+        if event["type"] == "mission_selection_skipped"
+    ]
+    assert skipped[-1]["data"] == {
+        "reason": "ordinary_search_capacity_satisfied",
+        "snapshot_id": snapshot.snapshot_id,
+        "candidate_count": 1,
+    }
+
+
+def test_model_skip_only_applies_to_no_work_or_nonurgent_ordinary_searches():
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    snapshot = _coverage_capacity_satisfied_snapshot()
+
+    assert allocator._model_selection_skip_reason(snapshot) == (
+        "ordinary_search_capacity_satisfied"
+    )
+    assert allocator._model_selection_skip_reason(
+        replace(snapshot, candidates=(), feasible_edges=())
+    ) == "no_model_candidates"
+
+    probe = TaskCandidate(
+        "probe:urgent", "probe", None, "contact-1", (), ("U1",),
+        0.0, "high", 4.0, 1.0, 1.0,
+    )
+    assert allocator._model_selection_skip_reason(
+        _coverage_capacity_satisfied_snapshot(candidates=(probe,))
+    ) is None
+
+    high_priority_search = replace(snapshot.candidates[0], priority="high")
+    assert allocator._model_selection_skip_reason(
+        _coverage_capacity_satisfied_snapshot(candidates=(high_priority_search,))
+    ) is None
 
 
 def test_mission_step_propagates_reviewer_summary_to_the_next_prompt():

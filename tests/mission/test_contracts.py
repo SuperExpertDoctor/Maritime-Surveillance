@@ -8,6 +8,7 @@ from src.mission.contracts import (
     ContactSnapshot,
     Intent,
     MissionSelection,
+    MissionSnapshot,
     ObservationSample,
     ProbeSession,
     RedMotionParameters,
@@ -228,6 +229,40 @@ def test_ship_truth_is_owned_by_the_environment_not_public_mission_contracts():
     }
     assert "Ship" not in vars(contracts)
     assert "SimulationEngine" not in vars(contracts)
+
+
+def test_mission_snapshot_normalizes_pending_search_task_ids():
+    snapshot = MissionSnapshot(
+        snapshot_id="pending-contract",
+        sim_time_min=0.0,
+        candidates=(),
+        available_uav_ids=(),
+        preemptible_uav_ids=(),
+        uav_generations=(),
+        resources=(),
+        feasible_edges=(),
+        active_tasks=(),
+        contacts=(),
+        intents=(),
+        intent_statuses=(),
+        memory_version="baseline",
+        planning_map_version=0,
+        reviewer_summary="",
+        pending_search_task_ids=("z", "a", "z"),
+    )
+
+    assert snapshot.pending_search_task_ids == ("a", "z")
+
+    with pytest.raises(ValueError, match="pending_search_task_ids"):
+        MissionSnapshot(
+            "invalid-pending-contract",
+            0.0,
+            (), (), (), (), (), (), (), (), (), (),
+            "baseline",
+            0,
+            "",
+            pending_search_task_ids=("",),
+        )
 
 
 def test_ship_identity_and_ais_rng_substreams_are_independent_and_recordable():

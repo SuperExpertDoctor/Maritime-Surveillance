@@ -4,7 +4,7 @@ import numpy as np
 from dataclasses import replace
 
 from src.schedule.config_loader import ConfigLoader
-from src.schedule.datatypes import GridCoord, BBox, UAVState
+from src.schedule.datatypes import GridCoord, BBox, Region, UAVState
 from src.mission.contracts import ProbeSession
 from src.schedule.state_manager import StateManager
 
@@ -69,6 +69,36 @@ def test_get_available_uavs(sm):
     sm.update_uav_status("UAV-2", "transit", GridCoord(10, 10), assigned_region_id="S2")
     available = sm.get_available_uavs()
     assert len(available) == sm.config.uav.count_max - 2
+
+
+def test_ordinary_search_region_queries_are_sorted_and_side_effect_free(sm):
+    regions = [
+        Region("track", BBox(0, 0, 2, 2), "track"),
+        Region("stale", BBox(2, 0, 4, 2), "search", status="stale"),
+        Region("pending", BBox(4, 0, 6, 2), "search"),
+        Region("assigned", BBox(6, 0, 8, 2), "search", assigned_uav_id="UAV-2"),
+        Region("completed", BBox(8, 0, 10, 2), "search", status="completed"),
+    ]
+    sm.set_search_regions(regions)
+    before = [
+        (region.id, region.status, region.assigned_uav_id)
+        for region in sm.get_search_regions()
+    ]
+
+    assert tuple(region.id for region in sm.get_pending_search_regions()) == (
+        "pending",
+    )
+    assert tuple(region.id for region in sm.get_assigned_search_regions()) == (
+        "assigned",
+    )
+    assert tuple(region.id for region in sm.get_unfinished_search_regions()) == (
+        "assigned",
+        "pending",
+    )
+    assert [
+        (region.id, region.status, region.assigned_uav_id)
+        for region in sm.get_search_regions()
+    ] == before
 
 
 def test_available_uavs_excludes_refueling_despite_idle_operation_snapshot(sm):

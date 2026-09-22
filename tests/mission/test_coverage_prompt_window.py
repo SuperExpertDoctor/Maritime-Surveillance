@@ -1,4 +1,7 @@
+from dataclasses import replace
+
 import numpy as np
+import pytest
 
 from src.mission.contracts import (
     FeasibleEdge,
@@ -89,9 +92,28 @@ def test_constraint_uses_maximum_matching_not_minimum_of_counts():
         fraction=1.0,
     )
 
-    assert constraint.desired_search_count == 2
+    assert constraint.desired_search_count == 5
     assert constraint.required_new_search_count == 2
     assert constraint.must_service_task_ids == ("S1",)
+    assert constraint.infeasible_reason == "insufficient_available_resources"
+
+
+def test_constraint_anchors_budget_to_healthy_fleet_not_only_idle_uavs():
+    constraint = build_coverage_constraint(
+        healthy_count=10,
+        active_search_count=5,
+        available_ids=("U6", "U7", "U8", "U9", "U10"),
+        representatives=("S1", "S2", "S3", "S4", "S5"),
+        edges=tuple(
+            _edge(task_id, uav_id)
+            for task_id in ("S1", "S2", "S3", "S4", "S5")
+            for uav_id in ("U6", "U7", "U8", "U9", "U10")
+        ),
+        fraction=0.6,
+    )
+
+    assert constraint.desired_search_count == 6
+    assert constraint.required_new_search_count == 1
     assert constraint.infeasible_reason is None
 
 
@@ -109,8 +131,65 @@ def test_constraint_reports_infeasible_floor_without_fabricating_a_slot():
     assert constraint.infeasible_reason == "insufficient_available_resources"
 
 
+@pytest.mark.parametrize(
+    ("available_count", "active", "reserved", "pending", "edge_count", "expected"),
+    [
+        (10, 0, 10, 10, 10, 0),
+        (10, 4, 7, 3, 10, 3),
+        (4, 4, 6, 2, 4, 0),
+        (4, 1, 1, 0, 2, 2),
+    ],
+)
+def test_residual_new_search_budget_accounts_for_pending_capacity(
+    available_count, active, reserved, pending, edge_count, expected,
+):
+    uavs = tuple(f"U{index}" for index in range(available_count))
+    task_ids = tuple(f"S{index}" for index in range(edge_count))
+    edges = tuple(
+        _edge(task_id, uavs[index % len(uavs)])
+        for index, task_id in enumerate(task_ids)
+    )
+
+    constraint = build_coverage_constraint(
+        active_search_count=active,
+        reserved_search_count=reserved,
+        matchable_pending_count=pending,
+        available_ids=uavs,
+        representatives=task_ids,
+        edges=edges,
+        fraction=1.0,
+    )
+
+    assert constraint.desired_search_count == available_count
+    assert constraint.required_new_search_count == expected
+    assert constraint.reserved_search_count == reserved
+    assert constraint.matchable_pending_count == pending
+
+
+def test_unmatchable_pending_geometry_is_reserved_but_does_not_satisfy_capacity():
+    constraint = build_coverage_constraint(
+        active_search_count=1,
+        reserved_search_count=2,
+        matchable_pending_count=0,
+        available_ids=("U1", "U2"),
+        representatives=("S-new",),
+        edges=(_edge("S-new", "U1"),),
+        fraction=1.0,
+    )
+
+    assert constraint.required_new_search_count == 1
+    assert constraint.reserved_search_count == 2
+    assert constraint.matchable_pending_count == 0
+
+
 def test_validator_requires_oldest_representative_and_floor():
-    tasks = (_task("S1", bbox=(1, 1, 2, 2)), _task("S2", bbox=(3, 1, 4, 2)))
+    tasks = (
+        _task("S1", bbox=(1, 1, 2, 2), priority="medium"),
+        _task("S2", bbox=(3, 1, 4, 2), priority="medium"),
+    )
+    tasks = tuple(
+        replace(task, feasible_uav_ids=("U1", "U2")) for task in tasks
+    )
     resources = (_resource("U1"), _resource("U2"))
     edges = (_edge("S1", "U1"), _edge("S2", "U2"))
     snapshot = MissionSnapshot(
@@ -151,8 +230,60 @@ def test_validator_requires_oldest_representative_and_floor():
 
     errors = scheduler.validate_selection(payload, snapshot)
 
-    assert "search_count_not_exact:2:1" in errors
+    assert "coverage_floor_not_met:2:1" in errors
     assert "coverage_oldest_not_selected" in errors
+
+
+def test_validator_allows_legal_searches_above_coverage_floor():
+    tasks = tuple(
+        replace(
+            task,
+            feasible_uav_ids=("U1", "U2"),
+        )
+        for task in (
+            _task("S1", bbox=(1, 1, 2, 2)),
+            _task("S2", bbox=(3, 1, 4, 2)),
+        )
+    )
+    resources = (_resource("U1"), _resource("U2"))
+    edges = (_edge("S1", "U1"), _edge("S2", "U2"))
+    snapshot = MissionSnapshot(
+        snapshot_id="snapshot-coverage-floor",
+        sim_time_min=10.0,
+        candidates=tasks,
+        available_uav_ids=("U1", "U2"),
+        preemptible_uav_ids=(),
+        uav_generations=(("U1", 0), ("U2", 0)),
+        resources=resources,
+        feasible_edges=edges,
+        active_tasks=(),
+        contacts=(),
+        intents=(),
+        intent_statuses=(),
+        memory_version="baseline",
+        planning_map_version=0,
+        reviewer_summary="",
+        prompt_task_ids=("S1", "S2"),
+        prompt_sources=(("S1", "ordinary"), ("S2", "ordinary")),
+        coverage_constraint=CoverageConstraint(
+            desired_search_count=2,
+            active_search_count=0,
+            required_new_search_count=1,
+            representative_task_ids=("S1", "S2"),
+            must_service_task_ids=("S1",),
+        ),
+    )
+    scheduler = MissionScheduler(selection_provider=lambda _snapshot, _payload: {})
+    payload = {
+        "schema_version": SELECTION_SCHEMA,
+        "snapshot_id": snapshot.snapshot_id,
+        "selected_task_ids": ["S1", "S2"],
+        "preempt_uav_ids": [],
+        "defer_reason": None,
+        "notes": "",
+    }
+
+    assert scheduler.validate_selection(payload, snapshot) == ()
 
 
 def test_validator_allows_partial_floor_when_snapshot_reports_infeasible_resources():
