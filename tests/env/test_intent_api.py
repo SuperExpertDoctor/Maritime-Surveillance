@@ -220,3 +220,68 @@ def test_reset_rejects_pending_commands_from_the_previous_episode():
             "/api/intents",
             json=_payload(engine, episode_id=old_episode, command_id="old-2"),
         ).status_code == 409
+
+
+def test_bounded_red_retries_pause_until_manual_retry_and_resume_in_place():
+    import json
+    from src.mission.llm_gateway import LLMGateway
+
+    class RecoveringTransport:
+        calls = 0
+
+        def complete(self, **kwargs):
+            assert kwargs['role'] == 'red_commander'
+            self.calls += 1
+            if self.calls <= 6:
+                raise TimeoutError('Request timed out.')
+            snapshot = json.loads(kwargs['messages'][1]['content'])['snapshot']
+            return json.dumps({
+                'schema_version': 'red-plan/v1', 'snapshot_id': snapshot['snapshot_id'],
+                'valid_for_min': 3.0, 'notes': '',
+                'commands': [{
+                    'ship_id': ship_id, 'heading_offset_deg': 12.0, 'speed_kn': 18.0,
+                    'zigzag_heading_deg': 0.0, 'zigzag_period_min': 10.0, 'phase_deg': 37.0,
+                } for ship_id, _stage in snapshot['active_signature']],
+            })
+
+    transport = RecoveringTransport()
+    engine = SimulationEngine(ConfigLoader.load(), seed=42,
+                              llm_gateway=LLMGateway(transport=transport))
+    target = next(ship for ship in engine.ships if ship.vessel_class == 'type_ii')
+    engine.surveillance_stages.set_fact(target.id, 'sar', True, 0.0, 'test-retry')
+    episode = engine.episode_id
+    positions = [ship.float_position for ship in engine.ships]
+    app = create_app(engine.config, engine.allocator.sm, engine=engine)
+    engine.step()
+    assert transport.calls == 3
+    assert engine.runtime_status == 'paused_model'
+    for _ in range(5):
+        engine.step()
+    assert transport.calls == 3
+
+    with TestClient(app) as client:
+        for command_id, expected_status, expected_calls in [
+            ('failed-retry', 'rejected', 6), ('successful-retry', 'applied', 7),
+        ]:
+            response = client.post('/api/runtime/retry', json={
+                'episode_id': episode, 'command_id': command_id,
+            })
+            assert response.status_code == 202
+            engine.apply_pending_runtime_commands()
+            result = client.get(f'/api/intent-commands/{command_id}').json()
+            assert result['status'] == expected_status
+            assert transport.calls == expected_calls
+            assert engine.clock.time == 0.0
+            assert engine.episode_id == episode
+            assert [ship.float_position for ship in engine.ships] == positions
+            if expected_status == 'rejected':
+                assert engine.runtime_status == 'paused_model'
+                for _ in range(5):
+                    engine.step()
+                assert transport.calls == 6
+
+    assert engine.runtime_status == 'running'
+    assert engine.blocked_role is None
+    assert target._navigation_params is not None
+    assert engine.last_result['trigger_type'] == 'model_resumed'
+    assert engine.last_result['action'] == 'red_decision_retry_succeeded'

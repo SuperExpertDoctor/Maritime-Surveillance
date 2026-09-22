@@ -1630,6 +1630,13 @@ class SimulationEngine:
             self._prepare_red_decision(self.clock.time)
         except RedDecisionBlocked:
             return
+        self.last_result = {
+            "trigger_type": "model_resumed",
+            "action": "red_decision_retry_succeeded",
+        }
+        self.allocator.sm.add_event("red_decision_retry_succeeded", {
+            "sim_time_min": self.clock.time,
+        })
 
     def apply_assignment_batch(self, batch: AssignmentBatch) -> bool:
         """Validate and install one scheduler batch at the simulation boundary."""

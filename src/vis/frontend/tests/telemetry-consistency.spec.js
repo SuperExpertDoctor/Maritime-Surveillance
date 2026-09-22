@@ -191,3 +191,30 @@ test('map and sidebar use the frame information thresholds', async ({ page }) =>
   });
   expect(color).toContain('13, 148, 136');
 });
+
+test('model pause explains bounded retries and requires an explicit manual retry', async ({ page }) => {
+  let retries = 0;
+  await installFrameSocket(page, frameFixture('live', {
+    runtime_status: 'paused_model', blocked_role: 'red_commander',
+  }));
+  await page.route('**/api/runtime/retry', route => {
+    retries += 1;
+    return route.fulfill({ json: { command_id: 'manual-retry', status: 'queued' } });
+  });
+  await page.route('**/api/intent-commands/manual-retry', route => route.fulfill({
+    json: { command_id: 'manual-retry', status: 'rejected', error_code: 'model_blocked' },
+  }));
+  await page.goto('/');
+  const panel = page.locator('.runtime-blocked');
+  await expect(panel).toContainText('不会自动恢复');
+  await expect(panel).toContainText('有限次自动重试');
+  expect(retries).toBe(0);
+  await page.getByRole('button', { name: '重试', exact: true }).click();
+  await expect(panel).toContainText('本轮重试仍失败');
+  await expect(page.getByRole('button', { name: '重试', exact: true })).toBeEnabled();
+  expect(retries).toBe(1);
+  await page.evaluate(() => window.__pushFrame({
+    ...window.__lastFixture, runtime_status: 'running', blocked_role: null,
+  }));
+  await expect(panel).toHaveCount(0);
+});

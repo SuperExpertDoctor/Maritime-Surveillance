@@ -228,7 +228,12 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
       {runtimeBlocked && (
         <div className="runtime-blocked" role="alert">
           <div className="runtime-blocked-title"><AlertTriangle size={14} /><strong>模型暂停</strong><span>{frame.blocked_role || "unknown"}</span></div>
-          <p>当前回合等待模型决策，仿真时钟保持不变。</p>
+          <p>模型决策失败，当前进度已保留，仿真时钟暂停；单纯等待不会自动恢复。</p>
+          <p>点击“重试”发起新一轮有限次自动重试，成功后从当前位置继续，无需重启回合。</p>
+          {runtimeBusy && <p role="status">运行命令处理中，请等待结果。</p>}
+          {!runtimeBusy && runtimeCommand?.error_code === "model_blocked" && (
+            <p role="status">本轮重试仍失败，仿真保持暂停。若持续超时，请检查模型服务响应速度和超时设置。</p>
+          )}
           {!readOnly && (
             <div className="runtime-actions">
               <button type="button" disabled={!canWrite || runtimeBusy} onClick={() => sendRuntimeCommand("retry")}><RotateCcw size={13} />重试</button>
