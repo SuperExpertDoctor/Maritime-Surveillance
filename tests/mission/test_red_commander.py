@@ -649,3 +649,23 @@ def test_changed_snapshot_authority_is_checked_even_when_plan_unexpired(scripted
     with pytest.raises(red_module().RedDecisionBlocked):
         commander.decide(current)
     assert len(transport.calls) == 1
+
+
+def test_map_change_replans_before_cycle_deadline(scripted_transport, ship_config):
+    commander, _, transport = commander_with(
+        scripted_transport, ship_config, [plan_payload(), plan_payload("S2")],
+    )
+    commander.decide(snapshot())
+    result = commander.decide(replace(snapshot("S2", .1), land_mask_version=2))
+    assert result.snapshot_id == "S2"
+    assert len(transport.calls) == 2
+
+
+def test_map_change_cannot_fall_back_to_old_plan(scripted_transport, ship_config):
+    commander, _, _ = commander_with(
+        scripted_transport, ship_config, [plan_payload()] + ["invalid"] * 3,
+    )
+    commander.decide(snapshot())
+    with pytest.raises(red_module().RedDecisionBlocked):
+        commander.decide(replace(snapshot("S2", .1), land_mask_version=2))
+    assert commander.installation is None

@@ -253,6 +253,10 @@ def build_coverage_scenario(name: str, *, seed: int, transport: str):
             ship=replace(
                 config.ship,
                 population=replace(config.ship.population, total_count=0),
+                # Keep this coverage-only scenario free of vessel arrivals.
+                opponent_population=replace(
+                    config.ship.opponent_population, enabled=False,
+                ),
             ),
         )
     gateway = CoverageFixtureGateway() if transport == "fixture" else None

@@ -59,6 +59,7 @@ def test_ship_and_mission_config_fields_match_design():
         "navigation_horizon_min",
         "integration_dt_min",
         "navigation_clearance_cells",
+        "opponent_population",
     )
     assert tuple(field.name for field in fields(config.mission)) == (
         "contact",

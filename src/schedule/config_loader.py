@@ -133,6 +133,34 @@ class UAVConfig:
 
 
 @dataclass(frozen=True)
+class OpponentPopulationConfig:
+    enabled: bool = True
+    interval_min_min: float = 5.0
+    interval_max_min: float = 15.0
+    max_active: int = 12
+    type_i_probability: float = 0.5
+
+    def __post_init__(self):
+        prefix = "ship.opponent_population"
+        if type(self.enabled) is not bool:
+            raise ValueError(f"{prefix}.enabled: expected boolean")
+        if type(self.max_active) is not int or self.max_active < 1:
+            raise ValueError(f"{prefix}.max_active: expected positive integer")
+        for name in ("interval_min_min", "interval_max_min", "type_i_probability"):
+            value = getattr(self, name)
+            try:
+                finite = type(value) in (int, float) and math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(f"{prefix}.{name}: expected finite number")
+        if not 0 < self.interval_min_min <= self.interval_max_min:
+            raise ValueError(f"{prefix}: expected 0 < interval_min_min <= interval_max_min")
+        if not 0 <= self.type_i_probability <= 1:
+            raise ValueError(f"{prefix}.type_i_probability: expected probability in [0, 1]")
+
+
+@dataclass(frozen=True)
 class ShipConfig:
     population: PopulationConfig
     type_ii_ais_on_probability: float
@@ -160,6 +188,7 @@ class ShipConfig:
     navigation_horizon_min: float
     integration_dt_min: float
     navigation_clearance_cells: float
+    opponent_population: OpponentPopulationConfig = OpponentPopulationConfig()
 
 @dataclass
 class LLMConfig:
@@ -334,6 +363,11 @@ class ConfigLoader:
         )
 
         ship_data = load_strict_yaml(ship_path) if ship_path is not None else _read("ship.yaml")
+        ship_data["opponent_population"] = strict_dataclass(
+            ship_data.get("opponent_population", {}),
+            OpponentPopulationConfig,
+            "ship.opponent_population",
+        )
         population_data = ship_data.pop("population", None)
         if population_data is None:
             raise ValueError(

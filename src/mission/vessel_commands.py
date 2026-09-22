@@ -95,8 +95,13 @@ def _payload(command: VesselCommand) -> dict:
 def _validate(command: VesselCommand) -> None:
     if not isinstance(command, VesselCommand):
         raise TypeError("command must be VesselCommand")
-    if not command.command_id or not command.episode_id:
+    if any(not isinstance(value, str) or not value.strip()
+           for value in (command.command_id, command.episode_id)):
         raise ValueError("command_id and episode_id are required")
+    if command.vessel_id is not None and (
+        not isinstance(command.vessel_id, str) or not command.vessel_id.strip()
+    ):
+        raise ValueError("vessel_id must be a nonempty string")
     if command.operation == "create":
         if command.vessel_id is not None or command.expected_revision is not None:
             raise ValueError("create command cannot contain vessel_id or revision")
@@ -104,10 +109,15 @@ def _validate(command: VesselCommand) -> None:
             raise ValueError("create command requires vessel_class")
         if command.ais_enabled is not None:
             raise ValueError("create command cannot contain ais_enabled")
-        if command.position_cells is None or len(command.position_cells) != 2:
+        if (not isinstance(command.position_cells, (tuple, list))
+                or len(command.position_cells) != 2):
             raise ValueError("create command requires position_cells")
-        if any(isinstance(value, bool) or not isinstance(value, (int, float))
-               or not math.isfinite(float(value)) for value in command.position_cells):
+        try:
+            finite = all(type(value) in (int, float) and math.isfinite(value)
+                         for value in command.position_cells)
+        except OverflowError:
+            finite = False
+        if not finite:
             raise ValueError("position_cells must be finite")
     elif command.operation == "delete":
         if (not command.vessel_id or command.vessel_class is not None

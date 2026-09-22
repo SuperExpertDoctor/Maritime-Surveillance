@@ -112,7 +112,7 @@ export function drawBackground(ctx, width, height, cellSize, ox, oy, mapBounds, 
   ctx.save();
   ctx.fillStyle = "rgba(255, 255, 255, .88)";
   ctx.fillRect(ox + 5, oy + 5, Math.min(30 * cellSize - 10, Math.max(158, cellSize * 8.7)), Math.max(15, cellSize * 0.7));
-  text(ctx, "TASK AREA / 300 x 300 KM", ox + 9, oy + Math.max(16, cellSize * 0.62), "#0B3857", Math.max(7, cellSize * 0.27), 700);
+  text(ctx, "SIM GRID / 300 x 300 KM", ox + 9, oy + Math.max(16, cellSize * 0.62), "#0B3857", Math.max(7, cellSize * 0.27), 700);
   ctx.restore();
 
   ctx.save();
@@ -128,6 +128,45 @@ export function drawBackground(ctx, width, height, cellSize, ox, oy, mapBounds, 
     const y = oy + (index + 0.5) * cellSize + 3;
     ctx.fillText(String(index).padStart(2, "0"), ox - Math.max(4, cellSize * 0.25), y);
   }
+  ctx.restore();
+}
+
+/** Render only the authoritative search mask; legacy frames have no inferred mask. */
+export function drawSearchDomain(ctx, domain, cellSize, ox, oy) {
+  if (!domain) return;
+  ctx.save();
+  for (const [col, row] of domain.excluded_cells || []) {
+    const x = ox + col * cellSize;
+    const y = oy + row * cellSize;
+    ctx.fillStyle = "rgba(100, 116, 139, .75)";
+    ctx.fillRect(x, y, cellSize, cellSize);
+    ctx.strokeStyle = "rgba(226, 232, 240, .8)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y + cellSize);
+    ctx.lineTo(x + cellSize, y);
+    ctx.stroke();
+  }
+  const cells = domain.searchable_cells || [];
+  const included = new Set(cells.map(([col, row]) => `${col},${row}`));
+  ctx.strokeStyle = "#0F766E";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  for (const [col, row] of cells) {
+    const edges = [
+      [col - 1, row, col, row, col, row + 1],
+      [col + 1, row, col + 1, row, col + 1, row + 1],
+      [col, row - 1, col, row, col + 1, row],
+      [col, row + 1, col, row + 1, col + 1, row + 1],
+    ];
+    for (const [neighborCol, neighborRow, x0, y0, x1, y1] of edges) {
+      if (included.has(`${neighborCol},${neighborRow}`)) continue;
+      ctx.moveTo(ox + x0 * cellSize, oy + y0 * cellSize);
+      ctx.lineTo(ox + x1 * cellSize, oy + y1 * cellSize);
+    }
+  }
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -478,7 +517,7 @@ export function drawContacts(ctx, contacts, cellSize, ox, oy, selectedId, phase 
   }
 }
 
-export function drawPassiveEvidence(ctx, evidence, cellSize, ox, oy, phase = 0) {
+export function drawPassiveEvidence(ctx, evidence, cellSize, ox, oy, phase = 0, detectionRange = 10) {
   for (const item of evidence || []) {
     if (item.kind === "passive_bearing") {
       const origin = item.observer_position || item.origin;
@@ -486,7 +525,8 @@ export function drawPassiveEvidence(ctx, evidence, cellSize, ox, oy, phase = 0) 
       const center = gridCenter(Number(origin[0]), Number(origin[1]), cellSize, ox, oy);
       // The public evidence contract is bearing-only. Use the configured
       // receiver envelope as a rendering bound instead of a measured range.
-      const radius = Math.max(cellSize * 1.5, 10 * cellSize);
+      const configuredRange = Number(detectionRange);
+      const radius = (Number.isFinite(configuredRange) && configuredRange > 0 ? configuredRange : 10) * cellSize;
       const bearing = Number(item.bearing_deg || 0) * Math.PI / 180;
       const spread = Math.max(0.04, Number(item.bearing_std_deg || 3) * 2 * Math.PI / 180);
       ctx.save();
@@ -1490,7 +1530,7 @@ export function drawTransparencyLegend(ctx, bounds) {
     { color: "#2563EB", label: "UAV TRANSIT" },
     { color: "#BE123C", label: "TARGET CONTACT" },
     { color: "#DC2626", label: "BASE STAR" },
-    { color: "#334155", label: "TASK BORDER" },
+    { color: "#334155", label: "SIM GRID BORDER" },
   ];
   const horizontalInset = 8;
   const width = Math.max(128, bounds.width - horizontalInset * 2);
@@ -1589,13 +1629,14 @@ export function renderFrame(ctx, frame, options = {}) {
     drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
+    drawSearchDomain(ctx, frame.search_domain, cellSize, offsetX, offsetY);
     drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
     drawIntents(ctx, frame.intents, frame.intent_statuses, cellSize, offsetX, offsetY);
     drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
     const contacts = Array.isArray(frame.contacts) && frame.contacts.length
       ? frame.contacts : frame.ships;
     drawTrackRegions(ctx, frame.track_regions, contacts, cellSize, offsetX, offsetY);
-    drawPassiveEvidence(ctx, frame.evidence, cellSize, offsetX, offsetY, frameCount);
+    drawPassiveEvidence(ctx, frame.evidence, cellSize, offsetX, offsetY, frameCount, frame.passive_detection_range_cells);
     drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, baseCenters);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY, frameCount);
@@ -1624,6 +1665,16 @@ export function renderFrame(ctx, frame, options = {}) {
       showScenario,
     );
     drawTransparencyLegend(ctx, legendBounds);
+    const domain = frame.search_domain;
+    const gridLabel = domain
+      ? `SIM GRID / ${domain.cols * domain.cell_size_km} x ${domain.rows * domain.cell_size_km} KM`
+      : "SIM GRID / 300 x 300 KM";
+    ctx.save();
+    ctx.fillStyle = "rgba(255, 255, 255, .94)";
+    ctx.fillRect(offsetX + 5, offsetY + 5, Math.min(30 * cellSize - 10, 280), 32);
+    text(ctx, gridLabel, offsetX + 9, offsetY + 17, "#0B3857", 9, 700);
+    text(ctx, domain ? `SEARCH DOMAIN / ${domain.area_km2} KM² · HATCH = EXCLUDED` : "SEARCH DOMAIN / DATA MISSING", offsetX + 9, offsetY + 30, "#0F766E", 8, 700);
+    ctx.restore();
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);
 }

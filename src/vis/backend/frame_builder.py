@@ -9,6 +9,27 @@ from src.schedule.state_manager import StateManager
 from src.schedule.config_loader import AppConfig
 
 
+def _search_domain(state, config):
+    """Publish the actual static denominator, not the decorative chart extent."""
+    metrics = getattr(state, "coverage_metrics", None)
+    if metrics is None:
+        return None
+    fixed = metrics.fixed_mask
+    cols, rows = fixed.shape
+    included, excluded = [], []
+    for col in range(cols):
+        for row in range(rows):
+            (included if fixed[col, row] else excluded).append([col, row])
+    return {
+        "cols": cols,
+        "rows": rows,
+        "cell_size_km": config.grid.cell_size_km,
+        "searchable_cells": included,
+        "excluded_cells": excluded,
+        "area_km2": len(included) * config.grid.cell_size_km ** 2,
+    }
+
+
 def sample_route_overview(poses, limit):
     """Sample a complete route while preserving its endpoints."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 2:
@@ -637,9 +658,11 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "scenario_seed": getattr(state, "scenario_seed", None),
         "reset_generation": getattr(state, "scenario_generation", 0),
         "coverage_metrics": state.get_persistent_coverage_stats(),
+        "search_domain": _search_domain(state, config),
+        "passive_detection_range_cells": config.sensor.passive.detection_range_cells,
         "task_area": {
-            "width_km": config.grid.resolution[1] * config.grid.cell_size_km,
-            "height_km": config.grid.resolution[0] * config.grid.cell_size_km,
+            "width_km": config.grid.resolution[0] * config.grid.cell_size_km,
+            "height_km": config.grid.resolution[1] * config.grid.cell_size_km,
             "cell_size_km": config.grid.cell_size_km,
         },
         **coverage,

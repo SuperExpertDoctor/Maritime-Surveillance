@@ -105,7 +105,12 @@ class InformationUpdatePolicy:
             )
             corridor = np.exp(-0.5 * (perpendicular / np.maximum(sigma, 1e-6)) ** 2)
             decay = np.exp(-np.maximum(forward, 0.0) / spatial.range_decay_cells)
-            return np.where(forward >= 0.0, corridor * decay, 0.0)
+            # A bearing constrains a forward sector, not the receiver's own
+            # location or cells outside its known detection capability.
+            in_range = dx * dx + dy * dy <= float(
+                self.config.sensor.passive.detection_range_cells
+            ) ** 2
+            return np.where((forward > 1e-9) & in_range, corridor * decay, 0.0)
         diagonal = max(
             float(spatial.covariance_cells2[0][0]),
             float(spatial.covariance_cells2[1][1]),
@@ -374,6 +379,10 @@ class InformationUpdatePolicy:
             if existing is not None and existing == record:
                 continue
             key = self.evidence_store.subject_key(record)
+            if record.kind == "passive_bearing":
+                # Independent rays from the same signal must coexist until
+                # expiry or suppression by their released position.
+                key = (*key, record.evidence_id)
             is_new_urgent = record.kind in {
                 "evasive_maneuver", "passive_position", "type_ii_assessment",
                 "violation_assessment", "handoff",

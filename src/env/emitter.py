@@ -69,7 +69,7 @@ class RadarEmitter:
         if not math.isfinite(end_min) or end_min < self._last_advanced_min:
             raise ValueError("emitter time must be finite and monotonic")
         emitted_before = len(self._intervals)
-        while self._next_transition_min <= end_min + 1e-12:
+        while self._next_transition_min <= end_min:
             transition = self._next_transition_min
             if not self._active:
                 self._active = True
@@ -98,7 +98,8 @@ class RadarEmitter:
     def current_burst_at(self, at_min: float) -> EmitterState | None:
         if not math.isfinite(at_min) or at_min < 0.0:
             return None
-        if self._active and self._active_start_min is not None and at_min >= self._active_start_min:
+        if (self._active and self._active_start_min is not None
+                and self._active_start_min <= at_min < self._next_transition_min):
             return self.state
         for interval in reversed(self._intervals):
             if interval.start_min <= at_min < interval.end_min:

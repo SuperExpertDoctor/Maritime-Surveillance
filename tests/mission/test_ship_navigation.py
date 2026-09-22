@@ -861,3 +861,93 @@ def test_actual_defaults_clear_plan_keeps_configured_horizon(normal_mode, monkey
     assert route.status == "ready"
     assert sum(c.duration_min for c in route._commands) == pytest.approx(8.)
     assert route.reference_deviation_cells == 0.
+
+
+def test_closed_patrol_keeps_final_leg_until_reaching_start():
+    patrol = ((5., 5., 0.), (15., 5., 0.), (15., 15., 0.), (5., 5., 0.))
+    ship = Ship("V1", GridCoord(5, 5), 18., normal_route=patrol,
+                patrol_route=patrol, land_mask=np.zeros((30, 30), bool))
+    ship.position = GridCoord(12, 12)
+    ship._route_index = 3
+    assert ship.normal_tangent_rad() == pytest.approx(-3 * math.pi / 4)
+    heading, index = ship.navigator._normal_guidance(ship.pose, 3, ship.land_mask)
+    assert heading == pytest.approx(-3 * math.pi / 4)
+    assert index == 3
+    ship.position = GridCoord(5, 5)
+    assert ship.normal_tangent_rad() == pytest.approx(0.)
+    assert ship._route_index == 1
+
+
+def test_survey_final_leg_is_not_redirected_to_patrol_start():
+    patrol = ((5., 5., 0.), (20., 5., 0.), (5., 5., 0.))
+    ship = Ship("V1", GridCoord(5, 5), 18., normal_route=patrol,
+                patrol_route=patrol, vessel_class="type_ii",
+                activity_schedule=((0., 30.),), land_mask=np.zeros((30, 30), bool))
+    ship.survey_route = ((6., 6., 0.), (16., 6., 0.), (16., 8., 0.), (6., 8., math.pi))
+    ship._set_activity_for_time(1.)
+    ship.position = GridCoord(12, 8)
+    ship._route_index = 3
+    assert abs(ship.normal_tangent_rad()) == pytest.approx(math.pi)
+    heading, index = ship.navigator._normal_guidance(ship.pose, 3, ship.land_mask)
+    assert abs(heading) == pytest.approx(math.pi)
+    assert index == 3
+
+
+def test_activity_change_invalidates_previously_planned_controls():
+    ship = vessel(vessel_class="type_ii", activity_schedule=((1., 10.),),
+                  land_mask=np.zeros((70, 40), bool))
+    ship.survey_route = ((5., 15., 0.), (5., 25., math.pi / 2))
+    route = ship.navigator.plan(ship.pose, None, 0., 0., ship.land_mask)
+    ship._set_activity_for_time(1.)
+    ship.advance(route, .1)
+    assert ship.navigation_status == "blocked"
+    assert "stale" in ship.blocked_reason
+
+
+def test_survey_uses_configured_slow_speed_without_changing_transit_baseline():
+    ship = vessel(vessel_class="type_ii", activity_schedule=((0., 20.),),
+                  land_mask=np.zeros((70, 40), bool))
+    ship.survey_route = ship.normal_route
+    ship.survey_speed_kn = 10.
+    ship.step(5., current_time=0.)
+    assert ship.speed_kn == pytest.approx(10.)
+    assert ship.normal_speed_kn == 18.
+    ship.step(5., current_time=21.)
+    assert ship.speed_kn == pytest.approx(18.)
+
+
+def test_closed_patrol_execution_commits_wrapped_prediction_cursor():
+    patrol = ((5., 5., 0.), (15., 5., 0.), (15., 15., 0.), (5., 5., 0.))
+    ship = Ship("V1", GridCoord(5, 5), 18., cell_size_km=1.,
+                normal_route=patrol, patrol_route=patrol,
+                land_mask=np.zeros((30, 30), bool))
+    ship._col, ship._row, ship.heading_rad = 5.01, 5.01, -3 * math.pi / 4
+    ship._route_index = 3
+    ship.navigator.horizon_min = 1.
+    route = ship.navigator.plan(ship.pose, None, ship.normal_tangent_rad(), 0., ship.land_mask)
+    assert route.status == "ready"
+    assert route._normal_indices[0] == 3
+    assert route._normal_indices[2] == 1
+    ship.advance(route, .2)
+    assert ship._route_index == 1
+
+
+def test_closed_patrol_cannot_use_transit_boundary_exit_gate():
+    ship = Ship("V1", GridCoord(20, 10), 18.,
+                normal_route=((20., 10., 0.), (29., 10., 0.)),
+                patrol_route=((20., 10., 0.), (29., 10., 0.), (20., 10., 0.)),
+                land_mask=np.zeros((30, 30), bool))
+    ship.position = GridCoord(29, 10)
+    heading, index = ship.navigator._normal_guidance(ship.pose, 1, ship.land_mask)
+    assert abs(heading) == pytest.approx(math.pi)
+    assert index == 2
+    assert not ship.navigator.has_exited((30., 10., 0.), ship.land_mask)
+
+
+def test_llm_escape_speed_overrides_survey_speed():
+    ship = vessel(vessel_class="type_ii", activity_schedule=((0., 20.),),
+                  land_mask=np.zeros((70, 40), bool), survey_speed_kn=10.)
+    ship.survey_route = ship.normal_route
+    ship.navigator.install(parameters(speed=22.), 0.)
+    ship.step(5., current_time=0.)
+    assert ship.speed_kn == pytest.approx(22.)

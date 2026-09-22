@@ -214,3 +214,15 @@ def test_engine_uses_actual_land_and_islands_for_population(monkeypatch):
     assert {c.ais_mmsi for c in engine.allocator.sm.contacts.list_snapshots()} == {
         ship.ais_signal.mmsi for ship in engine.ships if ship.ais_signal is not None
     }
+
+
+def test_population_passes_configured_survey_speed_to_ship():
+    config = _config(1, 1)
+    object.__setattr__(config.mission, "activity", replace(
+        config.mission.activity, survey_command_speed_kn=11.,
+    ))
+    ship = _create_ship_population(config, 713, _water_mask(), AStarNavigator())[0]
+    start, _ = ship.truth.activity_schedule[0]
+    ship._set_activity_for_time(start)
+    assert ship.activity_speed_kn == 11.
+    assert ship.normal_speed_kn == config.ship.speed_kn

@@ -31,6 +31,13 @@ class LLMConfigurationError(RuntimeError):
     """The required LongCat model route is not configured for use."""
 
 
+class LLMOutputTruncated(RuntimeError):
+    """The provider exhausted its output budget; no response content is retained."""
+
+    def __init__(self):
+        super().__init__("output_truncated: finish_reason=length")
+
+
 @dataclass(frozen=True)
 class ModelResult:
     call_id: str
@@ -84,7 +91,10 @@ class OpenAICompatibleTransport:
             kwargs["extra_body"] = {"thinking": {"type": thinking}}
         try:
             response = client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content or ""
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                raise LLMOutputTruncated()
+            return choice.message.content or ""
         finally:
             client.close()
 
@@ -376,6 +386,8 @@ class LLMGateway:
             {"role": "user", "content": user_content},
         ]
         binding = self._binding(role)
+        attempt_max_tokens = max_tokens if max_tokens is not None else binding["max_tokens"]
+        retry_token_limit = min(attempt_max_tokens * 4, 16384)
         call = {
             "call_id": call_id,
             "role": role,
@@ -403,6 +415,7 @@ class LLMGateway:
         for attempt_number in range(1, total_attempts + 1):
             attempt = {
                 "attempt": attempt_number,
+                "max_tokens": attempt_max_tokens,
                 "messages": self.redact_log(messages),
                 "raw_output": None,
                 "errors": [],
@@ -429,9 +442,7 @@ class LLMGateway:
                     model=binding["model"],
                     messages=deepcopy(messages),
                     temperature=binding["temperature"],
-                    max_tokens=(
-                        max_tokens if max_tokens is not None else binding["max_tokens"]
-                    ),
+                    max_tokens=attempt_max_tokens,
                     thinking=binding["thinking"],
                     json_mode=validate is not None,
                     api_base=binding["api_base"],
@@ -441,6 +452,19 @@ class LLMGateway:
                 )
             except AssertionError:
                 raise
+            except LLMOutputTruncated:
+                last_errors = ("output_truncated: finish_reason=length",)
+                attempt["errors"] = list(last_errors)
+                failure_category = "output_truncated"
+                if self._transport_deadline_expired(
+                    transport_deadline_monotonic, deadline_monotonic
+                ):
+                    last_errors = ("decision_deadline_exceeded",)
+                    attempt["errors"].extend(last_errors)
+                    failure_category = "timeout"
+                    break
+                attempt_max_tokens = min(attempt_max_tokens * 2, retry_token_limit)
+                continue
             except Exception as exc:
                 error = self._redact(str(exc)) or type(exc).__name__
                 last_errors = (error,)
@@ -585,6 +609,7 @@ class LLMGateway:
 
 __all__ = [
     "LLMConfigurationError",
+    "LLMOutputTruncated",
     "LLMGateway",
     "ModelResult",
     "OpenAICompatibleTransport",

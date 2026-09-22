@@ -190,3 +190,66 @@ def test_public_matrices_and_last_scan_time_are_policy_owned():
     assert policy.value_matrix(7.0).shape == (30, 30)
     assert policy.last_scan_time[2, 3] == 7.0
     assert policy.last_scan_time[3, 4] == 7.0
+
+
+def _direction_observation(identifier, observer, angle):
+    return PassiveBearingObservation(
+        identifier, "S-DIRECTION", "E-DIRECTION", "B-DIRECTION", 0.0,
+        observer, (5.0, 5.0), angle, 3.0,
+    )
+
+
+def test_distinct_bearings_keep_both_directions_regardless_of_batch_order():
+    east = _direction_observation("OBS-E", "U1", 0.0)
+    north = _direction_observation("OBS-N", "U2", 90.0)
+    first = InformationUpdatePolicy(ConfigLoader.load())
+    second = InformationUpdatePolicy(ConfigLoader.load())
+    first.apply_batch([east, north], 0.0)
+    second.apply_batch([north, east], 0.0)
+    snapshot = first.snapshot(0.0)
+    assert snapshot.strategic[8][5] > 0.3
+    assert snapshot.strategic[5][8] > 0.3
+    assert snapshot.strategic == second.snapshot(0.0).strategic
+    assert not first.has_point_evidence("E-DIRECTION")
+
+
+def test_direction_kernel_is_forward_and_within_receiver_range_without_coverage():
+    policy = InformationUpdatePolicy(ConfigLoader.load())
+    before = policy.snapshot(0.0)
+    policy.apply_batch([_direction_observation("OBS-E", "U1", 0.0)], 0.0)
+    after = policy.snapshot(0.0)
+    assert after.strategic[8][5] > 0.0
+    assert after.strategic[2][5] == 0.0
+    assert after.strategic[5][5] == 0.0
+    assert after.strategic[20][5] == 0.0
+    assert after.info == before.info
+    assert after.value[8][5] > before.value[8][5]
+
+
+def test_passive_position_gain_is_local_and_does_not_mark_scan_coverage():
+    policy = InformationUpdatePolicy(ConfigLoader.load())
+    before = policy.snapshot(0.0)
+    position = PassivePosition("LOCAL", "E", "B", "S", 0.0, (5.0, 5.0), ("O1", "O2"))
+    policy.apply_batch([position], 0.0)
+    after = policy.snapshot(0.0)
+    assert after.info == before.info
+    assert after.strategic[5][5] == 1.0
+    assert after.strategic[25][25] < 1e-6
+    assert after.value[5][5] > before.value[5][5]
+
+
+def test_position_suppresses_only_its_source_rays_across_batches():
+    east = _direction_observation("OBS-E", "U1", 0.0)
+    north = _direction_observation("OBS-N", "U2", 90.0)
+    position = PassivePosition("P", "E-DIRECTION", "B-DIRECTION", "S-DIRECTION",
+                               0.0, (8.0, 8.0), ("OBS-E", "OBS-N"))
+    policy = InformationUpdatePolicy(ConfigLoader.load())
+    policy.apply_batch([east, north], 0.0)
+    policy.apply_batch([position], 0.0)
+    point_only = InformationUpdatePolicy(ConfigLoader.load())
+    point_only.apply_batch([position], 0.0)
+    assert policy.snapshot(0.0).strategic == point_only.snapshot(0.0).strategic
+    assert policy.snapshot(0.0).timeliness == point_only.snapshot(0.0).timeliness
+    version = policy.version
+    assert policy.apply_batch([east, north, position], 0.0) is None
+    assert policy.version == version

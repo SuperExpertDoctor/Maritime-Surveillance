@@ -932,3 +932,39 @@ def test_infeasible_live_selection_remains_rejected_after_bounded_corrections():
     assert scheduler.decide(snapshot) is None
     assert 1 <= len(transport.calls) <= 3
     assert scheduler.last_selection_success is False
+
+@pytest.mark.parametrize('active_count,desired,preempt_count,infeasible,allowed', [
+    (2, 2, 1, None, False),
+    (2, 3, 1, 'insufficient_available_resources', False),
+    (2, 1, 1, None, True),
+    (3, 2, 1, None, True),
+    (3, 2, 2, None, False),
+])
+def test_probe_preemption_preserves_existing_sar_coverage_floor(
+    active_count, desired, preempt_count, infeasible, allowed,
+):
+    from src.mission.contracts import CoverageConstraint
+    ids = range(1, active_count + 1)
+    probes = range(1, preempt_count + 1)
+    snapshot = _snapshot(
+        [_task(f'Q{i}', kind='probe', contact_id=f'C{i}') for i in probes],
+        [_resource(f'U{i}', operation='coverage', current_task_id=f'S{i}') for i in ids],
+        [_edge(f'Q{i}', f'U{i}', 1.0) for i in probes],
+        available=(), preemptible=tuple(f'U{i}' for i in ids),
+        active_tasks=tuple(TaskRecord(
+            f'S{i}', 'search', 'executing', (i * 6, 1, i * 6 + 4, 6),
+            None, (), f'U{i}', None, 0., 1., None, None,
+        ) for i in ids),
+    )
+    snapshot = replace(snapshot, coverage_constraint=CoverageConstraint(
+        desired_search_count=desired, active_search_count=active_count,
+        required_new_search_count=0, representative_task_ids=(),
+        must_service_task_ids=(), infeasible_reason=infeasible,
+    ))
+    errors = validate_selection(_selection(
+        snapshot, [f'Q{i}' for i in probes], preempt=tuple(f'U{i}' for i in probes),
+    ), snapshot)
+    if allowed:
+        assert errors == ()
+    else:
+        assert any(error.startswith('coverage_preemption_floor:') for error in errors)

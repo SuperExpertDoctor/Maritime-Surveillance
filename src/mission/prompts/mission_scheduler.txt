@@ -7,7 +7,7 @@ Return exactly one JSON object with this schema:
   "selected_task_ids": ["task ids in priority order"],
   "preempt_uav_ids": ["ordinary-search UAV ids actually being preempted"],
   "defer_reason": null,
-  "notes": "short operational explanation, at most 160 characters"
+  "notes": ""
 }
 
 Select only supplied candidate task IDs. Search candidates already contain a
@@ -40,6 +40,11 @@ intent-backed work in that case.
 required_new_search_count is the residual addition count after active searches
 and matchable pending searches; it is not the total search-region count.
 Investigation and direction_search do not count toward this coverage floor.
+Preemption must preserve the existing SAR floor: active_search_count plus
+matchable_pending_count plus new ordinary searches minus preempted searches
+must remain at least min(desired_search_count, active_search_count plus
+matchable_pending_count), even when infeasible_reason is present. A zero
+required_new_search_count does not authorize removing the searches satisfying it.
 For every feasible zone_requirements entry, meet required_search_count from its
 representative_task_ids and include all its must_service_task_ids. These feasible
 zone obligations remain binding even when the global budget is infeasible.
@@ -48,8 +53,11 @@ At full gap with ten available UAVs and sufficient legal candidates, choose ten
 ordinary searches across nine zones plus one extra non-overlapping search, zero probes.
 As coverage improves, the server reduces the search budget and other work may use
 remaining resources. Task completion and periodic decisions refresh the summary.
-Do not invent tasks or append hidden representatives. The validator rejects notes
-longer than 160 characters.
+Do not invent tasks or append hidden representatives. Prefer notes="" to conserve
+output tokens; if needed, keep notes to at most 80 Unicode characters (code points,
+not words). The validator counts the decoded string, including spaces and
+punctuation, and rejects notes longer than 160 characters (Unicode code points). This hard limit
+must not be exceeded.
 
 The optional strategy_memories in the snapshot are advisory evidence from
 validated earlier episodes. Use them only to prioritize the supplied tasks.

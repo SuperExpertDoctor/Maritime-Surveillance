@@ -188,12 +188,15 @@ class CoveragePolicy:
             # Scan each zone until a usable candidate is found; blocked rounds
             # must not hide later non-overlapping work. Contained candidates
             # precede cross-tile candidates so quotas remain representable.
-            grouped = {zone: [] for zone in zones.zone_ids}
+            # Visit zones in the order of their highest-ranked candidate.
+            # Sorting by zone ID would let fresh low-ID zones displace unseen
+            # or overdue work when the window is smaller than the zone count.
+            grouped = {}
             for task in ordinary:
                 if task.bbox is not None:
                     zone = zones.zone_of_bbox(task.bbox)
                     if zone is not None:
-                        grouped[zone].append(task)
+                        grouped.setdefault(zone, []).append(task)
             for zone, tasks in grouped.items():
                 tasks.sort(key=lambda task: not zones.contains_bbox(zone, task.bbox))
             indices = dict.fromkeys(grouped, 0)
@@ -213,6 +216,8 @@ class CoveragePolicy:
         representative_ordinary: list[Any] = []
         representative_boxes: list[tuple[float, float, float, float]] = []
         for task in ordinary:
+            if len(representative_ordinary) >= reserve_count:
+                break
             bbox = getattr(task, "bbox", None)
             if bbox is None:
                 continue
@@ -221,8 +226,6 @@ class CoveragePolicy:
                 continue
             representative_ordinary.append(task)
             representative_boxes.append(normalized_bbox)
-            if len(representative_ordinary) >= reserve_count:
-                break
         selected = [*urgent[:urgent_count], *representative_ordinary]
         selected_ids = {task.task_id for task in selected}
 

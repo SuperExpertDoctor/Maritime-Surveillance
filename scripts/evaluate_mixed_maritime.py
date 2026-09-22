@@ -175,6 +175,11 @@ def _dry_run(args) -> dict:
 
 def _scenario_config(config, scenario: str):
     """Apply only deterministic, production-safe scenario changes."""
+    # Acceptance scenarios retain their fixed initial population and class mix.
+    config = replace(config, ship=replace(
+        config.ship,
+        opponent_population=replace(config.ship.opponent_population, enabled=False),
+    ))
     if scenario == "all-type-i":
         population = replace(
             config.ship.population,

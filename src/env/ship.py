@@ -107,6 +107,7 @@ class Ship:
         ais_enabled: bool = True,
         activity_schedule: tuple[tuple[float, float], ...] = (),
         patrol_route: tuple[Pose, ...] = (),
+        survey_speed_kn: float = 10.0,
     ) -> None:
         route = tuple(normal_route)
         heading = (
@@ -131,6 +132,7 @@ class Ship:
         self._col, self._row = float(route[0][0]), float(route[0][1])
         self.speed_kn = float(speed_kn)
         self.normal_speed_kn = self.speed_kn
+        self.survey_speed_kn = float(survey_speed_kn)
         self.cell_size_km = float(cell_size_km)
         self.speed_cells_per_min = self.speed_kn * 1.852 / 60.0 / cell_size_km
         self.ais_position_noise_cells = float(ais_position_noise_cells)
@@ -236,11 +238,36 @@ class Ship:
             return
         self._active_activity = activity
         self._route_index = 1
+        self._navigation_generation += 1
 
     def active_route(self) -> tuple[Pose, ...]:
         if self._active_activity == "survey" and self.survey_route:
             return self.survey_route
         return self.patrol_route if self.closed_route else self.normal_route
+
+    @property
+    def active_route_closed(self) -> bool:
+        return self.closed_route and not (
+            self._active_activity == "survey" and bool(self.survey_route)
+        )
+
+    @property
+    def activity_speed_kn(self) -> float:
+        return self.survey_speed_kn if self._active_activity == "survey" else self.normal_speed_kn
+
+    def normal_route_index(self, pose: Pose, index: int) -> int:
+        """Advance a local cursor, wrapping only after completing the last leg."""
+        route = self.active_route()
+        if len(route) < 2:
+            return len(route)
+        index = max(1, min(index, len(route) - 1))
+        while True:
+            a, b = route[index - 1], route[index]
+            if (pose[0] - b[0]) * (b[0] - a[0]) + (pose[1] - b[1]) * (b[1] - a[1]) < 0:
+                return index
+            if index == len(route) - 1:
+                return 1 if self.active_route_closed else index
+            index += 1
 
     @property
     def normal_route(self) -> tuple[Pose, ...]:
@@ -306,16 +333,7 @@ class Ship:
     def normal_tangent_rad(self) -> float:
         """Direction of the current normal-route segment, never current yaw."""
         route = self.active_route()
-        if self.closed_route and self._route_index >= len(route) - 1:
-            self._route_index = 1
-        while self._route_index < len(route) - 1:
-            a, b = route[self._route_index - 1], route[self._route_index]
-            dx, dy = b[0] - a[0], b[1] - a[1]
-            if (self._col - b[0]) * dx + (self._row - b[1]) * dy < 0:
-                break
-            self._route_index += 1
-        if self.closed_route and self._route_index >= len(route) - 1:
-            self._route_index = 1
+        self._route_index = self.normal_route_index(self.pose, self._route_index)
         if len(route) < 2:
             return route[0][2]
         a, b = route[self._route_index - 1], route[self._route_index]
@@ -388,7 +406,7 @@ class Ship:
             # pose whose cursor was validated. A partial step cannot claim a
             # downstream rejoin, and replacement braking has no such metadata.
             if route._normal_indices and dt == command.duration_min:
-                self._route_index = max(self._route_index, route._normal_indices[pose_index])
+                self._route_index = route._normal_indices[pose_index]
             actual.append(self.pose)
             remaining -= dt
             self._motion_time_min += dt
@@ -518,6 +536,7 @@ def create_ship_population(
                 vessel_class=vessel_class,
                 ais_enabled=ais_enabled,
                 patrol_route=tuple(planned) + tuple(reversed(planned[:-1])),
+                survey_speed_kn=config.mission.activity.survey_command_speed_kn,
             )
             if vessel_class == "type_ii":
                 start_low, start_high = config.mission.activity.schedule_start_min

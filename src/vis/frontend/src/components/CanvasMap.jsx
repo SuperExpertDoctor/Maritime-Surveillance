@@ -33,6 +33,7 @@ const CanvasMap = forwardRef(function CanvasMap({
   onSelectContact,
   selectedContactId,
   placementMode = false,
+  editingAllowed = false,
   onPlaceVessel,
   onDropVessel,
   selectedScenarioVesselId,
@@ -250,7 +251,10 @@ const CanvasMap = forwardRef(function CanvasMap({
       offsetY,
     );
 
-    if (coord && frame.info_matrix && frame.value_matrix) {
+    const excluded = coord && frame.search_domain?.excluded_cells?.some(
+      ([col, row]) => col === coord.col && row === coord.row,
+    );
+    if (coord && !excluded && frame.info_matrix && frame.value_matrix) {
       const info = Number(frame.info_matrix?.[coord.col]?.[coord.row] || 0);
       const value = Number(frame.value_matrix?.[coord.col]?.[coord.row] || 0);
       const category = info >= 0.7 ? "white" : info >= 0.2 ? "gray" : "black";
@@ -373,7 +377,7 @@ const CanvasMap = forwardRef(function CanvasMap({
         return;
       }
     }
-    for (const vessel of frame.scenario_vessels || []) {
+    for (const vessel of showScenario ? frame.scenario_vessels || [] : []) {
       const position = vessel.position;
       if (!Array.isArray(position)) continue;
       const centerX = offsetX + (Number(position[0]) + 0.5) * cellSize;
@@ -385,24 +389,24 @@ const CanvasMap = forwardRef(function CanvasMap({
         return;
       }
     }
-  }, [frame, onPlaceVessel, onSelectContact, onSelectScenarioVessel, onSelectUav, placementMode, pointerPosition, selectedScenarioVesselId, selectedUavId, selectionMode]);
+  }, [frame, onPlaceVessel, onSelectContact, onSelectScenarioVessel, onSelectUav, placementMode, pointerPosition, selectedScenarioVesselId, selectedUavId, selectionMode, showScenario]);
 
   const handleDragOver = useCallback((event) => {
-    if (!placementMode && !event.dataTransfer.types.includes("application/x-vessel-class")) return;
+    if (!editingAllowed || !event.dataTransfer.types.includes("application/x-vessel-class")) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
-  }, [placementMode]);
+  }, [editingAllowed]);
 
   const handleDrop = useCallback((event) => {
     event.preventDefault();
     const vesselClass = event.dataTransfer.getData("application/x-vessel-class");
-    if (!vesselClass) return;
+    if (!editingAllowed || !["type_i", "type_ii"].includes(vesselClass)) return;
     const point = pointerPosition(event);
     const { cellSize, offsetX, offsetY } = layoutRef.current;
     const coord = point && pixelToCoord(point.x, point.y, cellSize, offsetX, offsetY);
     if (!coord) return;
     onDropVessel?.(vesselClass, [coord.col + 0.5, coord.row + 0.5]);
-  }, [onDropVessel, pointerPosition]);
+  }, [editingAllowed, onDropVessel, pointerPosition]);
 
   const selectionBox = selection?.start && selection?.end
     ? {
@@ -442,6 +446,11 @@ const CanvasMap = forwardRef(function CanvasMap({
           <span>Live telemetry or replay frames will appear here.</span>
         </div>
       )}
+      {frame && <div className="search-domain-note" aria-label="搜索域说明">
+        {frame.search_domain
+          ? `搜索域 ${frame.search_domain.area_km2} km² · 灰色斜线为排除区（不计入搜索覆盖）`
+          : "搜索域数据缺失 · 不推断排除区"}
+      </div>}
       <div className="map-scale" aria-hidden="true"><i />20 KM</div>
     </div>
   );

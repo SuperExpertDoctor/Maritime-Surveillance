@@ -234,6 +234,7 @@ class RedCommander:
         self.config = config
         self.threat_gate = threat_gate or ThreatGate(config)
         self._installation: RedPlanInstallation | None = None
+        self._installation_map_version: int | None = None
         self._installation_episode_revision: int | None = None
         self._last_snapshot: RedSnapshot | None = None
         self._last_snapshot_episode_revision: int | None = None
@@ -320,6 +321,7 @@ class RedCommander:
 
     def _retire_installation(self) -> None:
         self._installation = None
+        self._installation_map_version = None
         self._installation_episode_revision = None
 
     def remove_ship(self, ship_id: str) -> None:
@@ -376,6 +378,7 @@ class RedCommander:
         can_reuse = (
             installed is not None
             and installed.active_signature == active_signature
+            and self._installation_map_version == snapshot.land_mask_version
             and snapshot.sim_time_min < installed.expires_at_min
         )
         if installed is not None:
@@ -410,5 +413,6 @@ class RedCommander:
             plan, snapshot.sim_time_min, active_signature,
         )
         self._installation_episode_revision = episode_revision
+        self._installation_map_version = snapshot.land_mask_version
         self._mark_delivered(snapshot.snapshot_id, episode_revision)
         return plan

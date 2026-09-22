@@ -43,3 +43,21 @@ def test_type_i_ship_does_not_create_type_ii_emitter():
 
     ship = Ship("Ship-3", GridCoord(10, 10), 10.0, vessel_class="type_i")
     assert ship.radar_emitter is None
+
+
+def test_active_burst_does_not_extend_past_its_end_before_next_advance():
+    emitter = RadarEmitter("Ship-1", seed=1, config=EmitterConfig(
+        mean_silent_interval_min=0.5, burst_duration_min=(1.0, 1.0)))
+    start = emitter.state.next_transition_min
+    emitter.advance(start)
+    end = emitter.state.next_transition_min
+    assert emitter.current_burst_at(start) is not None
+    assert emitter.current_burst_at(end) is None
+    assert emitter.current_burst_at(end + 100.0) is None
+
+
+def test_advance_does_not_activate_a_future_burst_with_epsilon_lookahead():
+    emitter = RadarEmitter("Ship-1", seed=1, config=EmitterConfig())
+    start = emitter.state.next_transition_min
+    emitter.advance(start - 5e-13)
+    assert not emitter.state.active

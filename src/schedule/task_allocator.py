@@ -292,6 +292,10 @@ class TaskAllocator:
                 fraction=fraction,
                 zone_requirements_input=quota_inputs,
             )
+            if active_search_count + matchable_pending_count <= desired_search_count:
+                # Do not advertise preemptions that would immediately violate
+                # the standing SAR floor; validator also checks partial excess.
+                preemptible = ()
         self._mission_snapshot_counter += 1
         snapshot_id = f"mission:{now:g}:{self._mission_snapshot_counter}"
         snapshot = MissionSnapshot(

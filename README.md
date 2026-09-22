@@ -10,12 +10,20 @@
 [系统参数手册](docs/SYSTEM_PARAMS.md)。本文后面的 GOAL/GOAL2 章节是历史能力说明，
 不替代当前方案的 `vessel_class/activity`、观测证据和 live 验证口径。
 
+2026-09-22 的地图、船舶交互、对手自主行为、传感器与运行入口审查见
+[对抗仿真审查](docs/validation/adversarial-audit-20260922/review.md)。当前阵营定义为
+红方 UAV 探测/跟踪、蓝方船舶干扰/逃逸；内部 `red_commander` 名称保留接口兼容，实际控制蓝方船舶。
+默认启用随机船舶投放，可在 `configs/ship.yaml` 的 `opponent_population` 配置中关闭。
+直播支持拖放创建船舶及切换 II 类 AIS；回放只读。地图斜线区域是后端排除区，不计入搜索覆盖。
+
 ## 2026-09-15 需求对齐
 
 - 船舶类别与活动状态分离：`unknown/type_i/type_ii` 和
   `unknown/normal/suspected_violation/confirmed_violation`。
-- 被动接收器只向蓝方发布含噪方位；只有同一 `sample/source/burst` 中至少两架不同
-  UAV 成功探测时，环境边界才释放真实 `PassivePosition`。硬探测范围外不产生观测。
+- 被动接收器只向探测方发布含噪方位；只有同一 `sample/source/burst`、同一时刻中至少两架不同
+  有效 UAV 成功探测且交汇几何合法时，才释放测向估计的 `PassivePosition`，不会直接公开真值。
+  硬探测范围外不产生观测，失效平台不参与定位。单站增加方向证据，多站增加局部位置证据；
+  SAR 才计入搜索覆盖，EO 负责目标跟踪和局部信息更新。
 - 中央信息策略以 `EvidenceRecord` 更新 `I/S/A/V`，每个事务只递增一个
   `information_version`，并把 dirty bbox、原因和证据 ID 传给候选池及调度审计。
 - 调度使用完整可行候选池和公平 Prompt 窗口；LLM 选择任务 ID，确定性匹配器选择 UAV。
@@ -357,7 +365,7 @@ python main.py --steps 480 --no-server --step-delay 0
 # 使用自定义 Python 环境
 .\scripts\console.ps1 start -PythonPath C:\path\to\python.exe
 
-# 跳过 LLM 探活（离线调试）
+# 跳过启动探活（后续决策仍使用真实 LLM）
 python main.py --skip-llm-probe
 ```
 

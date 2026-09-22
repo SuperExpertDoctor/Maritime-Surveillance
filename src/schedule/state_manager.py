@@ -897,9 +897,14 @@ class StateManager:
         return searchable
 
     def get_coverage_stats(self) -> dict[str, float | int]:
-        """Measure unique coverage over searchable sea cells only."""
-        searchable = self.get_searchable_mask()
-        scanned = np.isfinite(self.get_last_scan_matrix()) & searchable
+        """Use actual SAR coverage when present; EO evidence is not a search pass."""
+        if self.coverage_metrics is not None:
+            searchable = self.coverage_metrics.fixed_mask
+            last_scan = self.coverage_metrics.last_scan_matrix()
+            scanned = np.isfinite(last_scan) & (last_scan <= self.current_time) & searchable
+        else:
+            searchable = self.get_searchable_mask()
+            scanned = np.isfinite(self.get_last_scan_matrix()) & searchable
         searchable_cells = int(searchable.sum())
         scanned_cells = int(scanned.sum())
         coverage_pct = (

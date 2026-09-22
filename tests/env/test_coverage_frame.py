@@ -52,6 +52,39 @@ def test_legacy_state_frame_has_explicit_null_coverage_without_matrices():
     assert frame["coverage_metrics"] is None
     assert "info_matrix" not in frame
     assert "value_matrix" not in frame
+    assert frame["search_domain"] is None
+    assert frame["passive_detection_range_cells"] == config.sensor.passive.detection_range_cells
+
+
+def test_frame_exposes_authoritative_search_domain_even_without_matrices():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=_FixtureGateway())
+    frame = _frame(engine, include_matrices=False)
+    domain = frame["search_domain"]
+    fixed = engine.allocator.sm.coverage_metrics.fixed_mask
+    included = {tuple(cell) for cell in domain["searchable_cells"]}
+    excluded = {tuple(cell) for cell in domain["excluded_cells"]}
+    assert included == {tuple(cell) for cell in np.argwhere(fixed)}
+    assert excluded == {tuple(cell) for cell in np.argwhere(~fixed)}
+    assert included.isdisjoint(excluded)
+    assert len(included | excluded) == fixed.size
+    assert domain["area_km2"] == frame["coverage_metrics"]["fixed_searchable_area_km2"]
+    assert (2, 14) in excluded
+    assert domain["cols"] == fixed.shape[0]
+    assert domain["rows"] == fixed.shape[1]
+    json.dumps(domain, allow_nan=False)
+
+
+def test_eo_information_refresh_cannot_inflate_cumulative_search_coverage():
+    from src.schedule.datatypes import GridCoord
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=_FixtureGateway())
+    state = engine.allocator.sm
+    state.current_time = 1.
+    state.scan_cell(GridCoord(10, 10), 1., is_track=True)
+    assert state.get_info_matrix()[10, 10] > 0
+    assert state.get_coverage_stats()["scanned_searchable_cells"] == 0
+    state.coverage_metrics.record_sar(((10, 10),), at_min=1.)
+    assert state.get_coverage_stats()["scanned_searchable_cells"] == 1
+    assert _frame(engine)["coverage_pct"] == state.get_persistent_coverage_stats()["cumulative_pct"]
 
 
 def test_frame_coverage_is_pure_json_safe_and_timestamp_aligned():

@@ -662,3 +662,142 @@ def test_real_sdk_uses_no_hidden_retries_and_closes_http_clients(monkeypatch, ou
     assert len(requests) == expected_calls
     assert all(client.is_closed for client in http_clients)
     assert "offline-sdk-key" not in json.dumps(gateway.call_log)
+
+
+@pytest.fixture
+def length_provider(monkeypatch):
+    """Exercise the production transport without any network calls."""
+    import openai
+
+    state = SimpleNamespace(responses=[], calls=[], closed=0, on_create=None)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            assert kwargs['max_retries'] == 0
+            self.timeout = kwargs['timeout']
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        def create(self, **kwargs):
+            state.calls.append(dict(kwargs, timeout_seconds=self.timeout))
+            if state.on_create:
+                state.on_create()
+            assert state.responses, 'no scripted provider response'
+            reason, content = state.responses.pop(0)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    finish_reason=reason,
+                    message=SimpleNamespace(content=content, reasoning_content='private-thinking'),
+                )],
+                usage=SimpleNamespace(completion_tokens=4096),
+            )
+
+        def close(self):
+            state.closed += 1
+
+    monkeypatch.setenv('LONGCAT_API_KEY', 'offline-length-key')
+    monkeypatch.setattr(openai, 'OpenAI', FakeOpenAI)
+    return state
+
+
+@pytest.mark.parametrize('content', ['', None, '{"answer":', '{"answer": 9}'])
+def test_transport_rejects_length_even_with_parseable_json(length_provider, content):
+    from src.mission import llm_gateway
+
+    length_provider.responses = [('length', content)]
+    gateway = LLMGateway()
+    binding = gateway.resolve_binding('decision_maker')
+    binding.pop('provider')
+    with pytest.raises(RuntimeError) as caught:
+        gateway.transport.complete(
+            **binding,
+            messages=[], json_mode=True, timeout_seconds=1.0,
+        )
+    assert isinstance(caught.value, llm_gateway.LLMOutputTruncated)
+    assert 'finish_reason=length' in str(caught.value)
+    assert 'private-thinking' not in repr(caught.value)
+    assert 'answer' not in repr(caught.value)
+    assert length_provider.closed == 1
+
+
+@pytest.mark.parametrize('initial,expected', [
+    (None, [4096, 8192, 16384]),
+    (1000, [1000, 2000, 4000]),
+    (6000, [6000, 12000, 16384]),
+])
+def test_length_retries_increase_only_request_budget(length_provider, initial, expected):
+    length_provider.responses = [('length', '')] * 2 + [('stop', '{"answer": 7}')]
+    gateway = LLMGateway()
+    result = gateway.request_json(
+        role='decision_maker', snapshot_id='length', system_prompt='system',
+        user_payload={}, validate=_validate_answer, max_tokens=initial,
+    )
+    assert result.success
+    assert result.payload == {'answer': 7}
+    assert [c['max_tokens'] for c in length_provider.calls] == expected
+    attempts = gateway.call_log[-1]['attempts']
+    assert [a['max_tokens'] for a in attempts] == expected
+    assert all('output_truncated' in a['errors'][0] for a in attempts[:2])
+    assert all(c['messages'] == length_provider.calls[0]['messages'] for c in length_provider.calls)
+    assert gateway.call_log[-1]['validation_errors'] == []
+    assert gateway.call_log[-1]['raw_attempts'] == ['{"answer": 7}']
+    assert gateway.resolve_binding('decision_maker')['max_tokens'] == 4096
+    length_provider.responses = [('stop', '{"answer": 8}')]
+    assert _request_json(gateway).success
+    assert length_provider.calls[-1]['max_tokens'] == 4096
+
+
+@pytest.mark.parametrize('text_mode', [False, True])
+def test_length_exhaustion_is_classified_without_content_leaks(length_provider, text_mode):
+    length_provider.responses = [('length', '{"answer": 9}')] * 3
+    gateway = LLMGateway()
+    if text_mode:
+        result = gateway.request_text(
+            role='reviewer', snapshot_id='length', system_prompt='system', user_payload={},
+        )
+    else:
+        result = _request_json(gateway)
+    assert not result.success
+    assert result.payload is None
+    assert result.failure_category == 'output_truncated'
+    assert 'output_truncated' in result.errors[0]
+    call = gateway.call_log[-1]
+    assert call['failure_category'] == 'output_truncated'
+    assert call['raw_attempts'] == []
+    assert all(a['raw_output'] is None for a in call['attempts'])
+    serialized = json.dumps(call) + repr(result)
+    assert 'private-thinking' not in serialized
+    assert 'answer' not in serialized
+    assert 'valid JSON' not in serialized
+    initial = 2048 if text_mode else 4096
+    assert [c['max_tokens'] for c in length_provider.calls] == [initial, initial * 2, initial * 4]
+    assert length_provider.closed == 3
+
+
+@pytest.mark.parametrize('elapsed,expected_calls', [(2.0, 3), (6.0, 1)])
+def test_length_retries_share_original_deadline(monkeypatch, length_provider, elapsed, expected_calls):
+    now = [100.0]
+    monkeypatch.setattr('src.mission.llm_gateway.time.perf_counter', lambda: now[0])
+    def advance():
+        now[0] += elapsed
+    length_provider.on_create = advance
+    length_provider.responses = [('length', '')] * 3
+    gateway = LLMGateway()
+    result = gateway.request_json(
+        role='decision_maker', snapshot_id='length', system_prompt='system',
+        user_payload={}, validate=_validate_answer,
+        deadline_monotonic=110.0, transport_deadline_monotonic=105.0,
+    )
+    assert not result.success
+    assert result.failure_category == 'timeout'
+    assert len(length_provider.calls) == expected_calls
+    assert [c['timeout_seconds'] for c in length_provider.calls] == [5.0 - i * elapsed for i in range(expected_calls)]
+    assert 'output_truncated' in gateway.call_log[-1]['attempts'][0]['errors'][0]
+
+
+@pytest.mark.parametrize('retries,expected_calls', [(0, 1), (1, 2), (20, 3)])
+def test_length_respects_configured_retry_limit(tmp_path, length_provider, retries, expected_calls):
+    path = _write_llm_config(tmp_path, lambda data: data['cycles'].update(max_retries=retries))
+    length_provider.responses = [('length', '')] * expected_calls
+    result = _request_json(LLMGateway(path))
+    assert result.failure_category == 'output_truncated'
+    assert len(length_provider.calls) == expected_calls

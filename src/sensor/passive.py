@@ -83,10 +83,14 @@ class PassiveSensor:
 class PassivePositionResolver:
     """Triangulate noisy bearing reports after the multi-UAV release gate."""
 
-    def __init__(self, *, association_radius_cells: float = 1.0) -> None:
+    def __init__(self, *, association_radius_cells: float = 1.0,
+                 detection_range_cells: float = 10.0) -> None:
         if not math.isfinite(association_radius_cells) or association_radius_cells <= 0.0:
             raise ValueError("association_radius_cells must be finite and positive")
         self.association_radius_cells = float(association_radius_cells)
+        if not math.isfinite(detection_range_cells) or detection_range_cells <= 0.0:
+            raise ValueError("detection_range_cells must be finite and positive")
+        self.detection_range_cells = float(detection_range_cells)
 
     def release(
         self,
@@ -109,12 +113,22 @@ class PassivePositionResolver:
         if len(groups) != 1:
             return None
         sample_id, emitter_track_id, burst_id = next(iter(groups))
+        if len({item.observed_at_min for item in observations}) != 1:
+            return None
         by_observer: dict[str, PassiveBearingObservation] = {}
+        by_id: dict[str, PassiveBearingObservation] = {}
         for item in sorted(observations, key=lambda value: (value.observer_uav_id, value.observation_id)):
+            if item.observation_id in by_id and by_id[item.observation_id] != item:
+                return None
+            by_id[item.observation_id] = item
+            if item.observer_uav_id in by_observer and by_observer[item.observer_uav_id] != item:
+                return None
             by_observer.setdefault(item.observer_uav_id, item)
         if len(by_observer) < 2:
             return None
         selected = tuple(by_observer[key] for key in sorted(by_observer))
+        if len({item.observer_position_cells for item in selected}) < 2:
+            return None
         position = self._triangulate(selected)
         if position is None:
             return None
@@ -167,13 +181,17 @@ class PassivePositionResolver:
                 - right_hand_side[0] * normal_matrix[1][0]
             ) / determinant,
         )
+        if not all(math.isfinite(value) for value in position):
+            return None
         for observation, direction in zip(observations, directions):
             origin = observation.observer_position_cells
+            if math.dist(position, origin) > self.detection_range_cells + 1e-9:
+                return None
             along_ray = (
                 (position[0] - origin[0]) * direction[0]
                 + (position[1] - origin[1]) * direction[1]
             )
-            if along_ray < -self.association_radius_cells:
+            if along_ray <= 1e-9:
                 return None
             cross_track = abs(
                 (position[0] - origin[0]) * direction[1]

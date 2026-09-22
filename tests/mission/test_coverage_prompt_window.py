@@ -40,6 +40,45 @@ def _edge(task_id, uav_id="U1"):
     return FeasibleEdge(task_id, uav_id, 1.0, 1.0, 1.0, 0.0, f"{uav_id}:{task_id}")
 
 
+@pytest.mark.parametrize("capacity", [1, 3])
+def test_zero_ordinary_reserve_never_exceeds_prompt_capacity(capacity):
+    urgent = tuple(_task(f"P{i}", "probe") for i in range(capacity))
+    window = CoveragePolicy(np.ones((4, 4), dtype=bool)).select_window(
+        (*urgent, _task("S", bbox=(0, 0, 2, 2))),
+        ordinary_reserve=0, capacity=capacity, now_min=0,
+    )
+    assert window.tasks == urgent
+    assert window.representative_task_ids == ()
+
+
+def test_zero_ordinary_reserve_still_fills_unused_capacity():
+    task = _task("S", bbox=(0, 0, 2, 2))
+    window = CoveragePolicy(np.ones((4, 4), dtype=bool)).select_window(
+        (task,), ordinary_reserve=0, capacity=1, now_min=0,
+    )
+    assert window.tasks == (task,)
+
+
+def test_zone_window_preserves_sar_urgency_before_zone_id():
+    from src.mission.coverage_zones import ZonePartition
+
+    fixed = np.ones((6, 2), dtype=bool)
+    zones = ZonePartition(fixed, 3, 1)
+    tasks = tuple(_task(f"S{i}", bbox=(2 * i, 0, 2 * i + 1, 1)) for i in range(3))
+    last = np.full(fixed.shape, 120.0)
+    last[4, 0] = -np.inf
+    last[2, 0] = 0.0
+    policy = CoveragePolicy(fixed)
+    ranked = policy.rank_search_candidates(
+        tasks, now_min=120, last_sar=last,
+        estimated_minutes={task.task_id: 1.0 for task in tasks},
+    )
+    window = policy.select_window(
+        ranked, ordinary_reserve=2, capacity=2, now_min=120, zones=zones,
+    )
+    assert tuple(task.task_id for task in window.tasks) == ("S2", "S1")
+
+
 def test_window_reserves_ordinary_candidates_and_non_overlapping_representatives():
     tasks = [
         _task(f"P{index}", "probe", priority="high")

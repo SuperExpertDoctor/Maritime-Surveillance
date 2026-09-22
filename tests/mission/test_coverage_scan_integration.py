@@ -292,6 +292,8 @@ def test_shared_coverage_scenarios_and_constraint_aware_fixture():
     assert open_water.config.uav.count == 10
     assert open_water.config.environment.base_count == 2
     assert open_water.config.ship.population.total_count == 0
+    assert open_water.config.ship.opponent_population.enabled is False
+    assert ConfigLoader.load().ship.opponent_population.enabled is True
     assert open_water.config.environment.island_count_max == 0
     assert open_water.config.environment.thunderstorm_count_max == 0
     assert mixed.config.ship.population.total_count == ConfigLoader.load().ship.population.total_count

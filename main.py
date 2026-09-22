@@ -4,9 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import signal
-import subprocess
-import sys
+import socket
 from pathlib import Path
 import shutil
 import threading
@@ -22,72 +20,51 @@ from src.vis.backend.frame_publisher import FramePublisher
 from src.vis.backend.server import create_app
 
 
-def _free_port(port: int) -> None:
-    """Kill any process currently bound to *port* so the server can start.
-
-    On Windows the check covers ``python.exe`` only; on POSIX it targets any
-    process that matches the listening socket.
-    """
-    if sys.platform == "win32":
-        try:
-            raw = subprocess.check_output(
-                ["netstat", "-ano"], text=True, timeout=5
-            )
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-            return
-        for line in raw.splitlines():
-            if f":{port}" not in line or "LISTENING" not in line:
-                continue
-            parts = line.strip().split()
-            pid = parts[-1]
-            if not pid.isdigit():
-                continue
-            # Only kill python processes — never touch system services
-            try:
-                info = subprocess.check_output(
-                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
-                    text=True, timeout=5,
-                )
-                if "python.exe" not in info.lower() and "python" not in info.lower():
-                    print(
-                        f"Port {port} held by non-Python PID {pid}, refusing to kill"
-                    )
-                    continue
-            except subprocess.CalledProcessError:
-                continue
-            print(f"Port {port} occupied by PID {pid} (python.exe) — killing...")
-            try:
-                subprocess.check_call(
-                    ["taskkill", "/PID", pid, "/F"],
-                    timeout=10,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                print(f"  -> PID {pid} terminated, port {port} released.")
-            except subprocess.CalledProcessError as exc:
-                print(f"  -> Failed to kill PID {pid}: {exc}")
-        return
-
-    # POSIX (Linux / macOS)
+def _check_port_available(port: int) -> None:
+    """Fail clearly on an occupied port; never terminate another process."""
     try:
-        raw = subprocess.check_output(
-            ["lsof", "-ti", f":{port}"], text=True, timeout=5
-        )
-        pids = [pid.strip() for pid in raw.splitlines() if pid.strip().isdigit()]
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
-        return
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("0.0.0.0", port))
+    except OSError as exc:
+        raise RuntimeError(f"visualization port {port} is unavailable: {exc}") from exc
 
-    for pid_str in pids:
-        pid = int(pid_str)
-        # Never kill our own process
-        if pid == os.getpid():
+
+def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_server: bool) -> dict:
+    """Keep paused live runs responsive without advancing time or replaying idle frames."""
+    if not start_server:
+        return engine.run(steps, on_step=on_step)
+
+    completed = 0
+    while completed < steps or engine.runtime_status == "paused_model":
+        if engine.runtime_status == "finished":
+            break
+        if engine.runtime_status == "paused_model":
+            # These boundaries consume commands on the simulation thread and
+            # leave the clock untouched. Match step()'s command ordering.
+            runtime_results = engine.apply_pending_runtime_commands()
+            intent_results = engine.apply_pending_intent_commands()
+            vessel_results = engine.apply_pending_vessel_commands()
+            if runtime_results or intent_results or vessel_results:
+                # Preserve a successful retry's decision payload, but never
+                # repeat an old heavy decision for an unrelated edit/abort.
+                result = (
+                    engine.last_result
+                    if runtime_results and engine.runtime_status == "running"
+                    else {"trigger_type": "none", "action": None}
+                )
+                on_step(engine, result)
+            if engine.runtime_status == "paused_model":
+                time.sleep(0.1)
             continue
-        print(f"Port {port} occupied by PID {pid} — killing...")
-        try:
-            os.kill(pid, signal.SIGKILL)
-            print(f"  -> PID {pid} terminated, port {port} released.")
-        except OSError as exc:
-            print(f"  -> Failed to kill PID {pid}: {exc}")
+
+        previous_time = engine.clock.time
+        result = engine.step()
+        if engine.clock.time != previous_time:
+            completed += 1
+        on_step(engine, result)
+        if engine.clock.time == previous_time and engine.runtime_status != "paused_model":
+            break
+    return engine.summary()
 
 
 def clear_output_cache(output_dir: str = "outputs") -> int:
@@ -157,7 +134,7 @@ def main(
     logger = None
 
     if start_server:
-        _free_port(port)
+        _check_port_available(port)
         app = create_app(config, engine.allocator.sm, engine=engine)
         app.state.total_steps = steps
         def run_server():
@@ -206,11 +183,27 @@ def main(
         if step_delay > 0:
             time.sleep(step_delay)
 
-    summary = engine.run(steps, on_step=publish)
-    if not frame_publisher.flush(timeout=120):
-        frame_publisher.close()
-        raise RuntimeError("timed out while flushing replay frames")
-    frame_publisher.close()
+    try:
+        summary = _run_runtime_loop(engine, steps, publish, start_server=start_server)
+        # The engine currently enters finished only on an operator abort.
+        # Capture that before marking normal CLI completion as read-only.
+        aborted = engine.runtime_status == "finished"
+        if start_server and engine.runtime_status == "running":
+            engine._set_runtime_state("finished")
+            # Reject commands queued during the last step/publication instead
+            # of leaving their receipts pending forever. New writes are gated
+            # by the API's finished check.
+            engine.apply_pending_runtime_commands()
+            engine.apply_pending_intent_commands()
+            engine.apply_pending_vessel_commands()
+            publish(engine, {"trigger_type": "none", "action": None})
+            summary = engine.summary()
+    finally:
+        try:
+            if not frame_publisher.flush(timeout=120):
+                raise RuntimeError("timed out while flushing replay frames")
+        finally:
+            frame_publisher.close()
     output_path = app.state.frame_logger.path if app is not None else logger.path
     summary["jsonl_path"] = output_path
     if engine.runtime_status == "paused_model":
@@ -219,8 +212,8 @@ def main(
         print(f"仿真运行结束：完成 {summary['steps']}/{steps} 步。")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"JSONL 日志: {output_path}")
-    if hold_server and app is not None:
-        print(f"网页服务保持运行（不代表仿真继续推进），按 Ctrl+C 停止: http://localhost:{port}")
+    if hold_server and app is not None and not aborted:
+        print(f"网页服务保持只读回放，按 Ctrl+C 停止: http://localhost:{port}")
         try:
             while True:
                 time.sleep(1)

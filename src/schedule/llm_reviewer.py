@@ -59,7 +59,9 @@ class LLMReviewer:
             ],
         }
         system_prompt = (
-            "你是 UAV 海上侦察任务 Reviewer。根据结构化态势生成一段不超过200字的长期记忆，"
+            "你是 UAV 海上侦察任务 Reviewer。用中文输出80至120字符的单行长期记忆。"
+            "硬上限为200个Unicode字符，标点、空格、数字和英文字母也逐个计数，不是200个词。"
+            "只保留最重要的两三项，不逐架罗列UAV或复述事件流水。"
             "供下一轮决策模型使用。只陈述输入支持的事实、风险和优先方向，不输出标题或列表。"
         )
         user_prompt = json.dumps(payload, ensure_ascii=False, default=str)

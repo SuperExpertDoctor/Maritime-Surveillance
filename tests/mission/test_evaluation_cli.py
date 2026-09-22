@@ -207,3 +207,20 @@ def test_alignment_report_prefers_canonical_metric_denominators(monkeypatch, tmp
 
     assert report["metrics"]["handoff_success_rate"]["denominator"] == 4
     assert report["metrics"]["continuous_observation_rate"]["denominator"] == 6
+
+
+def test_fixed_scenario_configs_disable_arrivals_without_changing_production_defaults():
+    from dataclasses import replace
+
+    from scripts.evaluate_mixed_maritime import SCENARIOS, _scenario_config
+    from src.schedule.config_loader import ConfigLoader
+
+    production = ConfigLoader.load()
+    for name in SCENARIOS:
+        scenario = _scenario_config(production, name)
+        assert scenario.ship.opponent_population == replace(
+            production.ship.opponent_population, enabled=False,
+        ), name
+        assert scenario.ship.population.total_count == production.ship.population.total_count
+    assert production.ship.opponent_population.enabled is True
+    assert ConfigLoader.load().ship.opponent_population.enabled is True

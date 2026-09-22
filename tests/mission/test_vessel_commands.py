@@ -52,3 +52,24 @@ def test_set_ais_requires_only_id_revision_and_boolean():
         "a-1", "episode-1", "set_ais", "Ship-2", 4, None, None, False,
     )
     assert VesselCommandQueue().enqueue(command).status == "queued"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("command_id", 123), ("command_id", " "), ("episode_id", True),
+    ("position_cells", "12"), ("position_cells", {1: 2, 3: 4}),
+    ("position_cells", (10 ** 400, 1)),
+])
+def test_malformed_commands_are_rejected_before_queueing(field, value):
+    from dataclasses import replace
+    queue = VesselCommandQueue()
+    with pytest.raises(ValueError):
+        queue.enqueue(replace(_create(), **{field: value}))
+    assert queue.pending() == ()
+
+
+@pytest.mark.parametrize("vessel_id", [123, True, " "])
+def test_delete_requires_nonempty_string_vessel_id(vessel_id):
+    with pytest.raises(ValueError):
+        VesselCommandQueue().enqueue(VesselCommand(
+            "d-1", "episode-1", "delete", vessel_id, 1, None, None,
+        ))

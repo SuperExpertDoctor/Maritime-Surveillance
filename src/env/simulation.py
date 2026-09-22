@@ -27,6 +27,7 @@ from src.env.obstacle import (
 )
 from src.env.sar_sensor import SARSensor
 from src.env.ship import Ship, create_ship_population
+from src.mission.opponent_population import OpponentPopulation
 from src.env.sim_clock import SimClock
 from src.env.uav_entity import UAVEntity
 from src.sensor.passive import PassivePositionResolver, PassiveSensor
@@ -379,7 +380,10 @@ class SimulationEngine:
             )
             for uav in self.uavs
         }
-        self._passive_position_resolver = PassivePositionResolver()
+        self._passive_position_resolver = PassivePositionResolver(
+            association_radius_cells=config.sensor.passive.position_association_radius_cells,
+            detection_range_cells=config.sensor.passive.detection_range_cells,
+        )
         self._next_passive_sample_min = float(config.sensor.passive.measurement_interval_min)
         self._passive_sample_index = 0
         self._ship_position_history: dict[str, list[tuple[float, tuple[float, float]]]] = {
@@ -401,6 +405,11 @@ class SimulationEngine:
             config=config.mission.contact,
         )
         self._red_snapshot_sequence = 0
+        self._installed_red_plan_id = None
+        self.opponent_population = OpponentPopulation(
+            config.ship.opponent_population, seed=self.seed,
+            start_time=self.clock.time,
+        )
         self._refresh_ais_signals(0.0)
         self.heavy_triggers = 0
         self.light_triggers = 0
@@ -494,6 +503,12 @@ class SimulationEngine:
             else:
                 try:
                     if command.operation == "create":
+                        if (
+                            self.opponent_population.owns_command(command.command_id)
+                            and sum(not ship.departed for ship in self.ships)
+                            >= self.opponent_population.config.max_active
+                        ):
+                            raise ValueError("opponent_capacity_reached")
                         vessel = self._create_scenario_vessel(command)
                         self.ships.append(vessel)
                         self._vessel_revisions[vessel.id] = 1
@@ -1396,6 +1411,8 @@ class SimulationEngine:
     def step(self) -> dict:
         self.apply_pending_runtime_commands()
         self.apply_pending_intent_commands()
+        if self.runtime_status == "running":
+            self.opponent_population.tick(self)
         self.apply_pending_vessel_commands()
         self._editing_allowed = False
         if self.runtime_status != "running":
@@ -2114,14 +2131,15 @@ class SimulationEngine:
         ships = []
         active_signature = []
         for ship in self.ships:
-            if not ship.departed:
-                minimum_distance = min(
-                    math.dist(ship.float_position, uav.float_position)
-                    for uav in self.uavs
-                )
-                self.red_commander.threat_gate.update(
-                    ship.id, ship.vessel_class, minimum_distance, current_time
-                )
+            if ship.departed:
+                continue
+            minimum_distance = min(
+                (math.dist(ship.float_position, uav.float_position)
+                 for uav in self.uavs), default=math.inf,
+            )
+            self.red_commander.threat_gate.update(
+                ship.id, ship.vessel_class, minimum_distance, current_time
+            )
             stage = self.surveillance_stages.snapshot(ship.id).stage
             ships.append(
                 RedShipSnapshot(
@@ -2158,6 +2176,8 @@ class SimulationEngine:
             raise
         self._set_runtime_state("running")
         commands = {} if plan is None else {command.ship_id: command for command in plan.commands}
+        plan_id = None if plan is None else plan.snapshot_id
+        new_plan = plan_id != self._installed_red_plan_id
         for ship in self.ships:
             params = (
                 commands.get(ship.id)
@@ -2165,8 +2185,14 @@ class SimulationEngine:
                 and any(item[0] == ship.id for item in snapshot.active_signature)
                 else None
             )
-            if params != ship._navigation_params:
+            if params != ship._navigation_params or (params is not None and new_plan):
                 ship.navigator.install(params, current_time)
+                if params is not None:
+                    self.allocator.sm.add_event("opponent_maneuver_installed", {
+                        "side": "blue", "vessel_id": ship.id,
+                        "plan_id": plan_id, "parameters": asdict(params),
+                    })
+        self._installed_red_plan_id = plan_id
 
     def _step_controlled_uav(self, uav: UAVEntity, current_time: float) -> bool:
         """Run one coordinator tick and return the low-fuel edge trigger."""
@@ -3736,6 +3762,8 @@ class SimulationEngine:
                 if emitter_position is None:
                     emitter_position = ship.float_position
                 for uav in self.uavs:
+                    if uav.id in self._emergency_failures:
+                        continue
                     sensor = self.passive_sensors[uav.id]
                     observer_position = self._position_from_history(
                         self._uav_position_history.get(uav.id, []), sample_time,

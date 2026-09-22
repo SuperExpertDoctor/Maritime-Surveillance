@@ -714,6 +714,22 @@ def _validate_selection(
             and task.task_id in candidates and task.task_id not in active
             for task in selected_tasks
         )
+        # A zero addition budget does not authorize removing the searches
+        # that satisfied it. Even an infeasible floor must not be worsened.
+        preempted_searches = sum(
+            task.kind == "search"
+            and task.status in _ACTIVE_RECORD_STATUSES
+            and task.assigned_uav_id in set(preempt_uav_ids)
+            for task in snapshot.active_tasks
+        )
+        retained_budget = (
+            coverage_constraint.active_search_count
+            + coverage_constraint.matchable_pending_count
+        )
+        protected_budget = min(coverage_constraint.desired_search_count, retained_budget)
+        projected_budget = retained_budget + ordinary_count - preempted_searches
+        if preempted_searches and projected_budget < protected_budget:
+            errors.append(f"coverage_preemption_floor:{protected_budget}:{projected_budget}")
         if (
             not floor_infeasible
             and ordinary_count < coverage_constraint.required_new_search_count

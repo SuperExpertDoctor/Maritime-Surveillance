@@ -176,9 +176,15 @@ def test_deleted_vessel_removes_ais_history_key():
 def test_passive_gates_publish_bearing_or_position_then_investigation_task():
     one_observer = _passive_engine(((3.0, 5.0), (20.0, 20.0)))
     one_observer.allocator.sm.current_time = 1.0
+    before = one_observer.allocator.sm.information_policy.snapshot(1.0)
     one_observer._update_passive_sensors(1.0)
     assert len(one_observer.allocator.sm.get_passive_observations(1.0)) == 1
     assert one_observer.allocator.sm.get_passive_positions(1.0) == ()
+    after = one_observer.allocator.sm.information_policy.snapshot(1.0)
+    assert after.info == before.info
+    assert np.max(after.strategic) > np.max(before.strategic)
+    assert not one_observer.allocator.sm.information_policy.has_point_evidence(
+        "EMITTER-INTEGRATION")
     assert any(
         event["type"] == "passive_bearing_observed"
         and "vessel_class" not in event["data"]
@@ -187,12 +193,18 @@ def test_passive_gates_publish_bearing_or_position_then_investigation_task():
 
     two_observers = _passive_engine(((3.0, 5.0), (3.0, 7.0)))
     two_observers.allocator.sm.current_time = 1.0
+    before = two_observers.allocator.sm.information_policy.snapshot(1.0)
     two_observers._update_passive_sensors(1.0)
     positions = two_observers.allocator.sm.get_passive_positions(1.0)
     assert len(two_observers.allocator.sm.get_passive_observations(1.0)) == 2
     assert len(positions) == 1
     position = positions[0]
     assert len(position.source_observation_ids) == 2
+    after = two_observers.allocator.sm.information_policy.snapshot(1.0)
+    assert after.info == before.info
+    assert two_observers.allocator.sm.information_policy.has_point_evidence(
+        "EMITTER-INTEGRATION")
+    assert np.max(after.strategic) > np.max(before.strategic)
 
     tasks = two_observers.allocator.task_catalog.build(
         two_observers.allocator.sm,
@@ -206,6 +218,18 @@ def test_passive_gates_publish_bearing_or_position_then_investigation_task():
     )
     assert investigation.priority == "high"
     assert investigation.bbox is not None
+
+
+def test_failed_receiver_cannot_supply_second_passive_bearing_for_position():
+    engine = _passive_engine(((3.0, 5.0), (3.0, 7.0)))
+    engine._emergency_failures[engine.uavs[1].id] = "test_receiver_failure"
+    engine.allocator.sm.current_time = 1.0
+
+    engine._update_passive_sensors(1.0)
+
+    observations = engine.allocator.sm.get_passive_observations(1.0)
+    assert tuple(item.observer_uav_id for item in observations) == (engine.uavs[0].id,)
+    assert engine.allocator.sm.get_passive_positions(1.0) == ()
 
 
 def test_information_version_flows_from_evidence_to_selection_and_commit():

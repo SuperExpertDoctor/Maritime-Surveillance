@@ -49,6 +49,7 @@ export default function RightSidebar({
   onDeleteVessel,
   onSetVesselAis,
   vesselCommandStatus,
+  vesselCommandBusy = vesselCommandStatus?.status === "queued",
 }) {
   const uavs = frame?.uavs || [];
   const ships = frame?.ships || [];
@@ -59,13 +60,17 @@ export default function RightSidebar({
   let scanned = 0;
   let total = 0;
   const situations = { white: 0, gray: 0, black: 0 };
-  info.forEach((column) => column.forEach((value) => {
+  const domainCells = frame?.search_domain?.searchable_cells;
+  const infoValues = domainCells
+    ? domainCells.map(([col, row]) => Number(info[col]?.[row] || 0))
+    : info.flat();
+  infoValues.forEach((value) => {
     total += 1;
     if (value > 0) scanned += 1;
     if (value > 0.7) situations.white += 1;
     else if (value >= 0.2) situations.gray += 1;
     else situations.black += 1;
-  }));
+  });
   const coverage = Number.isFinite(frame?.coverage_pct)
     ? frame.coverage_pct
     : (total ? scanned / total * 100 : 0);
@@ -74,7 +79,6 @@ export default function RightSidebar({
   const selectedScenarioVessel = scenarioVessels.find(
     (vessel) => vessel.scenario_entity_id === selectedScenarioVesselId,
   );
-  const vesselCommandBusy = vesselCommandStatus?.status === "queued";
   const canEditVessels = Boolean(editingAllowed) && !vesselCommandBusy;
 
   return (
@@ -98,7 +102,7 @@ export default function RightSidebar({
 
           <section className="sidebar-section vessel-editor" aria-label="初始化船舶编辑">
             <div className="section-heading">
-              <span><Ship size={15} />场景船舶</span>
+              <span><Ship size={15} />蓝方船舶（对方）</span>
               <small>{frame.actual_vessel_count ?? ships.length}/{frame.initial_vessel_count ?? ships.length}</small>
             </div>
             <div className="vessel-palette" role="group" aria-label="船舶组件库">
@@ -165,7 +169,7 @@ export default function RightSidebar({
                 <Trash2 size={14} />删除选中船舶
               </button>
             )}
-            {!editingAllowed && <p className="editor-note">当前场景只读；回放和已结束任务不可编辑</p>}
+            {!editingAllowed && <p className="editor-note">当前场景只读；断线、回放和已结束任务不可编辑</p>}
             {vesselCommandBusy && <p className="editor-note">命令处理中，等待权威 frame 更新</p>}
             {vesselCommandStatus && (
               <div className={`vessel-command-status ${vesselCommandStatus.status}`} role="status">
@@ -214,17 +218,17 @@ export default function RightSidebar({
           )}
 
           <section className="sidebar-section">
-            <div className="section-heading"><span>信息态势</span><small>{frame.searchable_cells || total || 900} CELLS</small></div>
+            <div className="section-heading"><span>信息态势</span><small>{domainCells ? total : frame.searchable_cells || total || 900} CELLS</small></div>
             <div className="situation-strip">
               <Situation label="白" value={situations.white} tone="white" />
               <Situation label="灰" value={situations.gray} tone="gray" />
-              <Situation label="黑" value={situations.black || (total ? 0 : 900)} tone="black" />
+              <Situation label="黑" value={domainCells ? situations.black : situations.black || (total ? 0 : 900)} tone="black" />
             </div>
             <div className="coverage-track"><i style={{ width: `${coverage}%` }} /></div>
           </section>
 
           <section className="sidebar-section uav-section">
-            <div className="section-heading"><span>飞行单元</span><small>{uavs.filter((uav) => uav.operational_status !== "failed" && uav.status !== "idle").length} ACTIVE</small></div>
+            <div className="section-heading"><span>红方 UAV（我方探测）</span><small>{uavs.filter((uav) => uav.operational_status !== "failed" && uav.status !== "idle").length} ACTIVE</small></div>
             <div className="uav-list">
               {uavs.map((uav) => {
                 const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";

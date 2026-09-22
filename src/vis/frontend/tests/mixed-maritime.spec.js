@@ -1,7 +1,12 @@
 import { expect, test } from "@playwright/test";
 import { frameFixture, installFrameSocket } from "./helpers/frameSocket.js";
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/export/capabilities', route => route.fulfill({ json: { mp4: false } }));
+});
+
 test("drag geometry is direction-independent, clamped, and ignores clicks", async ({ page }) => {
+  await installFrameSocket(page, frameFixture());
   await page.goto("/");
   const result = await page.evaluate(async () => {
     const { computeLayout, dragToBBox } = await import("/src/renderer/geometry.js");

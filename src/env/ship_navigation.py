@@ -150,7 +150,7 @@ class ShipNavigator:
         return None
 
     def has_exited(self, pose, mask) -> bool:
-        if getattr(self.ship, "closed_route", False):
+        if self.ship.closed_route or self.ship._active_activity == "survey":
             return False
         gate = self._exit_gate(mask)
         if gate is None:
@@ -315,7 +315,7 @@ class ShipNavigator:
             heading = self.reference_heading(params, tangent, now_min + elapsed)
             if params is None:
                 heading, normal_index = self._normal_guidance(state.pose, normal_index, mask)
-            speed = self.ship.normal_speed_kn if params is None else params.speed_kn
+            speed = self.ship.activity_speed_kn if params is None else params.speed_kn
             command = MotionCommand(dt, heading, speed)
             state = self.ship.motion_dynamics.roll(state, heading, speed, dt)
             elapsed += dt
@@ -325,25 +325,19 @@ class ShipNavigator:
         route = self.ship.active_route()
         if len(route) < 2:
             return route[0][2], index
-        if self.ship.closed_route and index >= len(route) - 1:
-            index = 1
-        index = min(index, len(route) - 1)
-        while index < len(route) - 1:
-            a, b = route[index - 1], route[index]
-            if (pose[0] - b[0]) * (b[0] - a[0]) + (pose[1] - b[1]) * (b[1] - a[1]) < 0:
-                break
-            index += 1
+        index = self.ship.normal_route_index(pose, index)
         dynamics = self.ship.motion_dynamics
-        lookahead = max(.15, self.ship.normal_speed_kn * 1.852 / 60 / dynamics.cell_size_km
+        lookahead = max(.15, self.ship.activity_speed_kn * 1.852 / 60 / dynamics.cell_size_km
                         * (dynamics.yaw_time_constant + 1 / dynamics.heading_gain))
         target_index = index
         while target_index < len(route) - 1 and math.dist(pose[:2], route[target_index][:2]) < lookahead:
             target_index += 1
         target = route[target_index][:2]
-        if self.ship.closed_route and target_index == len(route) - 1:
+        if self.ship.active_route_closed and target_index == len(route) - 1:
             target = route[0][:2]
             return math.atan2(target[1] - pose[1], target[0] - pose[0]), index
-        gate = self._exit_gate(mask)
+        gate = (None if self.ship.closed_route or self.ship._active_activity == "survey"
+                else self._exit_gate(mask))
         if target_index == len(route) - 1 and gate is not None and math.dist(pose[:2], target) < lookahead:
             axis, sign, boundary, cross = gate
             target = (boundary + sign, cross) if axis == 0 else (cross, boundary + sign)
