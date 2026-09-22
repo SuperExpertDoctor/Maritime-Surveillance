@@ -189,22 +189,22 @@ def test_probe_session_updates_same_owner_but_rejects_owner_conflict(sm):
         sm.set_probe_session(replace(original, uav_id="UAV-2"))
 
 
-def test_coverage_excludes_obstacles_and_boundary(sm):
+def test_searchability_keeps_task_edges_and_coast_but_respects_obstacles(sm):
     cols, rows = sm.config.grid.resolution
     obstacle_mask = np.zeros((cols, rows), dtype=bool)
     obstacle_mask[8, 8] = True
     sm.set_environment_obstacles([], obstacle_mask)
+    land_mask = np.zeros((cols, rows), dtype=bool)
+    land_mask[:5, :] = True
+    sm.set_land_mask(land_mask)
     sm.scan_cell(GridCoord(7, 7), 10.0)
     sm.scan_cell(GridCoord(8, 8), 10.0)
     sm.scan_cell(GridCoord(0, 0), 10.0)
 
     stats = sm.get_coverage_stats()
 
-    land_bases = set(sm.get_base_positions())
-    assert stats["searchable_cells"] == (
-        (cols - 2) * (rows - 2) - 1 - len(land_bases)
-    )
-    assert stats["scanned_searchable_cells"] == 1
+    assert stats["searchable_cells"] == cols * rows - 1
+    assert stats["scanned_searchable_cells"] == 2
     assert stats["coverage_pct"] == pytest.approx(
-        100 / stats["searchable_cells"]
+        200 / stats["searchable_cells"]
     )

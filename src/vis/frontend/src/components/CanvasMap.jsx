@@ -448,7 +448,9 @@ const CanvasMap = forwardRef(function CanvasMap({
       )}
       {frame && <div className="search-domain-note" aria-label="搜索域说明">
         {frame.search_domain
-          ? `搜索域 ${frame.search_domain.area_km2} km² · 灰色斜线为排除区（不计入搜索覆盖）`
+          ? frame.search_domain.excluded_cells?.length
+            ? `搜索域 ${frame.search_domain.area_km2} km² · 灰色斜线为排除区（不计入搜索覆盖）`
+            : `全任务区域 ${frame.search_domain.area_km2} km² · 全部网格计入侦察覆盖`
           : "搜索域数据缺失 · 不推断排除区"}
       </div>}
       <div className="map-scale" aria-hidden="true"><i />20 KM</div>

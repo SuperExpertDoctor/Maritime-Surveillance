@@ -884,17 +884,12 @@ class StateManager:
         return value.copy()
 
     def get_searchable_mask(self) -> np.ndarray:
-        """Return cells that can be searched under the operational rules."""
-        searchable = ~np.asarray(self.obstacle_mask, dtype=bool).copy()
-        searchable &= ~self.land_mask
-        if searchable.size:
-            searchable[0, :] = False
-            searchable[-1, :] = False
-            searchable[:, 0] = False
-            searchable[:, -1] = False
-            for col, row in self._base_positions:
-                searchable[col, row] = False
-        return searchable
+        """Return current availability across the full reconnaissance grid.
+
+        Edges, mainland and base cells remain part of the mission. Route
+        validators enforce aircraft clearance independently of this mask.
+        """
+        return ~np.asarray(self.obstacle_mask, dtype=bool).copy()
 
     def get_coverage_stats(self) -> dict[str, float | int]:
         """Use actual SAR coverage when present; EO evidence is not a search pass."""

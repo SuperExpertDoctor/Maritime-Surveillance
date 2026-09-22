@@ -185,15 +185,28 @@ def test_initial_candidates_use_sortie_sized_tiles(sm):
     )
 
 
-def test_candidates_leave_room_for_radius_one_boundary_turns(sm):
+def test_candidates_stay_within_task_area(sm):
     result = CandidateExtractor().extract(sm)
     cols, rows = sm.config.grid.resolution
     for candidate in result.candidate_regions:
         bbox = candidate["bbox"]
-        assert bbox.col_start >= 1
-        assert bbox.row_start >= 1
-        assert bbox.col_end <= cols - 1
-        assert bbox.row_end <= rows - 1
+        assert bbox.col_start >= 0
+        assert bbox.row_start >= 0
+        assert bbox.col_end <= cols
+        assert bbox.row_end <= rows
+
+
+def test_candidate_pool_includes_entire_task_grid(sm):
+    shape = sm.config.grid.resolution
+    land = np.zeros(shape, dtype=bool)
+    land[:5, :] = True
+    sm.set_land_mask(land)
+    sm.configure_coverage_metrics(np.ones(shape, dtype=bool), "full-task-area")
+
+    pool = CandidateExtractor().extract_pool(sm)
+    covered = {cell for candidate in pool.candidates for cell in candidate.cells}
+
+    assert covered == {(col, row) for col in range(shape[0]) for row in range(shape[1])}
 
 
 # --- Bug 1 regression: candidate count cap ---

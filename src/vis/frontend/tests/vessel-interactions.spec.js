@@ -96,6 +96,24 @@ test('search domain uses authoritative mask and labels missing legacy domain', a
   await expect(page.getByLabel('搜索域说明')).toContainText('域数据缺失');
 });
 
+test('full task area has no excluded shading and counts all 900 cells', async ({ page }, testInfo) => {
+  const cells = Array.from({ length: 900 }, (_, i) => [Math.floor(i / 30), i % 30]);
+  const domain = { cols: 30, rows: 30, cell_size_km: 10, searchable_cells: cells, excluded_cells: [], area_km2: 90000 };
+  await installFrameSocket(page, frameFixture('live', { search_domain: domain }));
+  await page.goto('/');
+  await expect(page.getByLabel('搜索域说明')).toHaveText('全任务区域 90000 km² · 全部网格计入侦察覆盖');
+  await expect(page.getByText('900 CELLS', { exact: true })).toBeVisible();
+  const fills = await page.evaluate(async d => {
+    const { drawSearchDomain } = await import('/src/renderer/layers.js');
+    const fills = [];
+    const ctx = new Proxy({}, { get: (_, key) => (...args) => { if (key === 'fillRect') fills.push(args); }, set: () => true });
+    drawSearchDomain(ctx, d, 10, 0, 0);
+    return fills;
+  }, domain);
+  expect(fills).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath('full-task-area.png') });
+});
+
 
 test('palette drop sends spawn coordinates and selection mode cannot swallow placement', async ({ page }) => {
   await installFrameSocket(page, frameFixture());

@@ -1673,7 +1673,12 @@ export function renderFrame(ctx, frame, options = {}) {
     ctx.fillStyle = "rgba(255, 255, 255, .94)";
     ctx.fillRect(offsetX + 5, offsetY + 5, Math.min(30 * cellSize - 10, 280), 32);
     text(ctx, gridLabel, offsetX + 9, offsetY + 17, "#0B3857", 9, 700);
-    text(ctx, domain ? `SEARCH DOMAIN / ${domain.area_km2} KM² · HATCH = EXCLUDED` : "SEARCH DOMAIN / DATA MISSING", offsetX + 9, offsetY + 30, "#0F766E", 8, 700);
+    const domainLabel = domain
+      ? domain.excluded_cells?.length
+        ? `SEARCH DOMAIN / ${domain.area_km2} KM² · HATCH = EXCLUDED`
+        : `FULL TASK AREA / ${domain.area_km2} KM²`
+      : "SEARCH DOMAIN / DATA MISSING";
+    text(ctx, domainLabel, offsetX + 9, offsetY + 30, "#0F766E", 8, 700);
     ctx.restore();
   }
   drawHoverTooltip(ctx, hoverInfo, cellSize, offsetX, offsetY, width, height);

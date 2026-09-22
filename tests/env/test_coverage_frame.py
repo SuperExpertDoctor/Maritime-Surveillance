@@ -68,10 +68,26 @@ def test_frame_exposes_authoritative_search_domain_even_without_matrices():
     assert included.isdisjoint(excluded)
     assert len(included | excluded) == fixed.size
     assert domain["area_km2"] == frame["coverage_metrics"]["fixed_searchable_area_km2"]
-    assert (2, 14) in excluded
+    assert excluded == set()
+    assert included == {(col, row) for col in range(30) for row in range(30)}
+    assert domain["area_km2"] == 90000
     assert domain["cols"] == fixed.shape[0]
     assert domain["rows"] == fixed.shape[1]
     json.dumps(domain, allow_nan=False)
+
+
+def test_sar_scans_on_task_edges_and_coast_count_toward_full_area():
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=_FixtureGateway())
+    state = engine.allocator.sm
+    cells = ((0, 0), (29, 0), (0, 29), (29, 29), (2, 14))
+    state.current_time = 1.0
+    state.coverage_metrics.record_sar(cells, at_min=1.0)
+
+    frame = _frame(engine)
+
+    assert frame["coverage_metrics"]["fixed_searchable_cells"] == 900
+    assert frame["coverage_metrics"]["ever_scanned_cells"] == len(cells)
+    assert frame["coverage_pct"] == pytest.approx(100 * len(cells) / 900)
 
 
 def test_eo_information_refresh_cannot_inflate_cumulative_search_coverage():

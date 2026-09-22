@@ -448,16 +448,12 @@ class SimulationEngine:
         self._publish_runtime_state()
 
     def _intent_searchable_mask(self) -> np.ndarray:
-        """Build the static water denominator used by intent metrics."""
-        searchable = ~np.asarray(self.ship_land_mask, dtype=bool).copy()
-        if searchable.size:
-            searchable[0, :] = False
-            searchable[-1, :] = False
-            searchable[:, 0] = False
-            searchable[:, -1] = False
-            for base in self.bases:
-                searchable[base.position.col, base.position.row] = False
-        return searchable
+        """The entire task grid is the fixed reconnaissance responsibility.
+
+        Vessel terrain and aircraft maneuver constraints must not shrink the
+        mission area or its coverage denominator.
+        """
+        return np.ones(self.config.grid.resolution, dtype=bool)
 
     @property
     def runtime_status(self) -> str:

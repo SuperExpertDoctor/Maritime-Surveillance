@@ -132,7 +132,7 @@ class CandidateExtractor:
 
         gc = sm.config.grid
         cols, rows = fixed.shape
-        max_area = min(gc.search_max_cells, max(1, (cols - 2) * (rows - 2)))
+        max_area = min(gc.search_max_cells, cols * rows)
         swath_width = sm.config.sensor.sar.swath_km / sm.config.grid.cell_size_km
         uavs = sm.get_all_uavs()
         reference = uavs[0] if uavs else None
@@ -142,16 +142,16 @@ class CandidateExtractor:
         accepted_boxes: set[tuple[int, int, int, int]] = set()
         served = np.zeros_like(due, dtype=bool)
 
-        for width in range(1, min(cols - 1, max_area) + 1):
-            for height in range(1, min(rows - 1, max_area // width) + 1):
+        for width in range(1, min(cols, max_area) + 1):
+            for height in range(1, min(rows, max_area // width) + 1):
                 area = width * height
                 if area < gc.search_min_cells:
                     continue
                 if area > max_area or max(width, height) / min(width, height) > gc.aspect_ratio_max:
                     continue
-                for c0 in range(1, cols - width):
+                for c0 in range(cols - width + 1):
                     c1 = c0 + width
-                    for r0 in range(1, rows - height):
+                    for r0 in range(rows - height + 1):
                         r1 = r0 + height
                         bbox = BBox(c0, r0, c1, r1)
                         patch_due = due[c0:c1, r0:r1]
@@ -244,18 +244,9 @@ class CandidateExtractor:
         )
         seen = np.isfinite(last_sar)
         searchable = sm.get_searchable_mask()
-        occupied = np.zeros((cols, rows), dtype=bool)
-        occupied |= np.asarray(getattr(sm, "obstacle_mask", occupied), dtype=bool)
-        occupied |= np.asarray(getattr(sm, "land_mask", occupied), dtype=bool)
+        occupied = ~searchable
         if coverage_context is not None:
             occupied |= ~coverage_context["fixed"]
-        for col, row in sm.get_base_positions():
-            if 0 <= col < cols and 0 <= row < rows:
-                occupied[col, row] = True
-        occupied[0, :] = True
-        occupied[-1, :] = True
-        occupied[:, 0] = True
-        occupied[:, -1] = True
         for region in (
             *sm.get_track_regions(),
             *self._valid_active_search_regions(sm),
@@ -276,8 +267,8 @@ class CandidateExtractor:
                     continue
                 if max(width, height) / min(width, height) > gc.aspect_ratio_max:
                     continue
-                for col in range(1, cols - width):
-                    for row in range(1, rows - height):
+                for col in range(cols - width + 1):
+                    for row in range(rows - height + 1):
                         bbox = BBox(col, row, col + width, row + height)
                         if self._rect_sum(occupied_prefix, bbox) > 0:
                             continue
@@ -423,19 +414,9 @@ class CandidateExtractor:
         exploration_mode = unique_coverage < 0.80
 
         # Step 1: track-region occupancy mask
-        occupied = np.zeros((cols, rows), dtype=bool)
-        occupied |= getattr(sm, "obstacle_mask", occupied)
-        occupied |= getattr(sm, "land_mask", occupied)
+        occupied = ~searchable
         if coverage_context is not None:
             occupied |= ~coverage_context["fixed"]
-        for col, row in sm.get_base_positions():
-            occupied[col, row] = True
-        # A one-cell flight margin lets a radius-1 Dubins U-turn bulge
-        # outside every candidate rectangle without leaving the map.
-        occupied[0, :] = True
-        occupied[cols - 1, :] = True
-        occupied[:, 0] = True
-        occupied[:, rows - 1] = True
         for tr in sm.get_track_regions():
             b = tr.bbox
             occupied[b.col_start:b.col_end, b.row_start:b.row_end] = True
@@ -939,8 +920,8 @@ class CandidateExtractor:
                     continue
                 if max(width, height) / min(width, height) > gc.aspect_ratio_max:
                     continue
-                for c0 in range(1, cols - width):
-                    for r0 in range(1, rows - height):
+                for c0 in range(cols - width + 1):
+                    for r0 in range(rows - height + 1):
                         c1, r1 = c0 + width, r0 + height
                         if occupied[c0:c1, r0:r1].any():
                             continue
