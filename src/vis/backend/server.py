@@ -948,6 +948,10 @@ async def broadcast_frame(app: FastAPI) -> None:
 
 async def broadcast_payload(app: FastAPI, frame: dict) -> None:
     """Send a pre-built live frame without touching replay persistence."""
+    engine = getattr(app.state, "engine", None)
+    if engine is not None and frame.get("episode_id") != engine.episode_id:
+        # A background publisher may still hold a snapshot from before reset.
+        return
     # 广播给所有直播客户端
     clients = tuple(getattr(app.state, "_live_clients", set()))
     send_locks = getattr(app.state, "_live_send_locks", {})
@@ -960,6 +964,8 @@ async def broadcast_payload(app: FastAPI, frame: dict) -> None:
                 await ws.send_text(payload)
             else:
                 async with send_lock:
+                    if engine is not None and frame.get("episode_id") != engine.episode_id:
+                        continue
                     await ws.send_text(payload)
         except Exception:
             _LOGGER.info("live websocket send failed", exc_info=True)

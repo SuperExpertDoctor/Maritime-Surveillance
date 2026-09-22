@@ -5,6 +5,73 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/export/capabilities', route => route.fulfill({ json: { mp4: false } }));
 });
 
+test("stationary cell tooltip and shade refresh with every frame and episode", async ({ page }) => {
+  const matrix = value => Array.from({ length: 30 }, () => Array(30).fill(value));
+  await installFrameSocket(page, frameFixture('live', {
+    sim_time_min: 0, info_matrix: matrix(0), value_matrix: matrix(0.45),
+  }));
+  await page.addInitScript(() => {
+    window.__cellTooltip = [];
+    const fillText = CanvasRenderingContext2D.prototype.fillText;
+    const fillRect = CanvasRenderingContext2D.prototype.fillRect;
+    CanvasRenderingContext2D.prototype.fillText = function (value, ...args) {
+      if (this.canvas.getAttribute('aria-label') === 'Operational map'
+        && /^(CELL |INFO |SHADE |FRESH$|AGING$|UNSCANNED$)/.test(value)) {
+        window.__cellTooltip.push(value);
+      }
+      return fillText.call(this, value, ...args);
+    };
+    CanvasRenderingContext2D.prototype.fillRect = function (x, y, w, h) {
+      if (this.canvas.getAttribute('aria-label') === 'Operational map') {
+        if (x === 0 && y === 0) window.__cellTooltip = [];
+        const cell = window.__inspectedCell;
+        if (cell && Math.abs(x - cell.x) < 0.01 && Math.abs(y - cell.y) < 0.01
+          && this.fillStyle.startsWith('rgba(15, 23, 42,')) {
+          window.__cellShade = Number(this.fillStyle.match(/, ([\d.]+)\)$/)[1]);
+        }
+      }
+      return fillRect.call(this, x, y, w, h);
+    };
+  });
+  await page.goto('/');
+  const point = await page.evaluate(async () => {
+    const { computeLayout } = await import('/src/renderer/geometry.js');
+    const rect = document.querySelector('.canvas-area canvas').getBoundingClientRect();
+    const layout = computeLayout(rect.width, rect.height);
+    window.__inspectedCell = { x: layout.offsetX + 4 * layout.cellSize, y: layout.offsetY + 5 * layout.cellSize };
+    return { x: window.__inspectedCell.x + layout.cellSize / 2, y: window.__inspectedCell.y + layout.cellSize / 2 };
+  });
+  await page.getByLabel('Operational map').hover({ position: point });
+  await expect.poll(() => page.evaluate(() => window.__cellTooltip)).toEqual([
+    'CELL 04 / 05', 'INFO 0.00   VALUE 0.45', 'SHADE 0.10', 'UNSCANNED',
+  ]);
+  for (const [i, info, value, shade, status] of [
+    [2, 1, 0.05, 0.02, 'FRESH'],
+    [3, 0.5, 0.3, 0.06, 'AGING'],
+    [4, 0.5, 0.8, 0.06, 'AGING'],
+  ]) {
+    await page.evaluate(f => window.__pushFrame({ ...window.__lastFixture, ...f }), {
+      frame_id: i, sim_time_min: i / 10, info_matrix: matrix(info), value_matrix: matrix(value),
+    });
+    await expect.poll(() => page.evaluate(() => window.__cellTooltip)).toEqual([
+      'CELL 04 / 05', `INFO ${info.toFixed(2)}   VALUE ${value.toFixed(2)}`, `SHADE ${shade.toFixed(2)}`, status,
+    ]);
+    await expect.poll(() => page.evaluate(() => window.__cellShade)).toBeCloseTo(shade, 2);
+  }
+  // A new episode without matrices must not display the previous episode's values.
+  await page.evaluate(() => {
+    const { info_matrix, value_matrix, ...rest } = window.__lastFixture;
+    window.__pushFrame({ ...rest, episode_id: 'reset-episode', frame_id: 0, sim_time_min: 0 });
+  });
+  await expect.poll(() => page.evaluate(() => window.__cellTooltip)).toEqual([]);
+  await page.evaluate(f => window.__pushFrame({ ...window.__lastFixture, ...f }), {
+    frame_id: 1, info_matrix: matrix(0), value_matrix: matrix(0.45),
+  });
+  await expect.poll(() => page.evaluate(() => window.__cellTooltip)).toEqual([
+    'CELL 04 / 05', 'INFO 0.00   VALUE 0.45', 'SHADE 0.10', 'UNSCANNED',
+  ]);
+});
+
 test("drag geometry is direction-independent, clamped, and ignores clicks", async ({ page }) => {
   await installFrameSocket(page, frameFixture());
   await page.goto("/");

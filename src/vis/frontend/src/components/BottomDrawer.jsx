@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, Bot, Clipboard, GripHorizontal, Map, Satellite, SlidersHorizontal, X } from "lucide-react";
+import { Activity, Bot, Clipboard, GripHorizontal, Map as MapIcon, Satellite, SlidersHorizontal, X } from "lucide-react";
 
 const TABS = [
   { label: "时间线", icon: Activity },
-  { label: "区域", icon: Map },
+  { label: "区域", icon: MapIcon },
   { label: "模型日志", icon: Bot },
   { label: "参数", icon: SlidersHorizontal },
   { label: "AIS", icon: Satellite },
@@ -142,19 +142,35 @@ function ModelCallsTab({ frame, llm, mode }) {
         const response = await fetch(`/api/model-calls?episode_id=${encodeURIComponent(frame.episode_id)}`, { signal: controller.signal });
         if (!response.ok) throw new Error(`Model calls HTTP ${response.status}`);
         const data = await response.json();
-        if (!controller.signal.aborted && data.episode_id === frame.episode_id) { setRemote(data.calls); setError(""); }
+        if (!controller.signal.aborted && data.episode_id === frame.episode_id) {
+          setRemote({ episodeId: frame.episode_id, generation: frame.reset_generation, calls: data.calls || [] });
+          setError("");
+        }
       } catch (err) { if (!controller.signal.aborted) setError(err.message); }
       if (!controller.signal.aborted) timer = window.setTimeout(refresh, 3000);
     };
     void refresh();
     return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [mode, frame?.episode_id]);
-  const calls = remote || frame?.model_calls || [];
+  }, [mode, frame?.episode_id, frame?.reset_generation]);
+  // HTTP polling can finish after a newer WebSocket frame. Merge their logs
+  // instead of letting an older response hide calls or undo completed results.
+  const remoteCalls = mode === "live" && remote?.episodeId === frame?.episode_id
+    && remote?.generation === frame?.reset_generation ? remote?.calls || [] : [];
+  const byId = new Map(remoteCalls.map(call => [call.call_id, call]));
+  for (const call of frame?.model_calls || []) {
+    const prior = byId.get(call.call_id);
+    const terminal = item => item?.success === true || Boolean(item?.failure_category);
+    if (!prior || terminal(call) || (!terminal(prior)
+      && (call.attempts?.length || 0) >= (prior.attempts?.length || 0))) {
+      byId.set(call.call_id, call);
+    }
+  }
+  const calls = [...byId.values()].sort((a, b) => (a.sim_time_min || 0) - (b.sim_time_min || 0));
   const call = calls.find((item) => item.call_id === selected) || calls.at(-1) || llm;
   if (!call) return <EmptyState text={error || "Model calls: not provided"} />;
   const latest = calls.at(-1);
   return <div>
-    {error && <small role="status">{error} · showing last frame data</small>}
+    {error && <small role="status">{error} · showing last available data</small>}
     {calls.length > 0 && <label>Model call <select aria-label="Model call" value={call.call_id || ""} onChange={(event) => setSelected(event.target.value)}>
       {[...calls].reverse().map((item) => <option key={item.call_id} value={item.call_id}>{item.role} · {item.sim_time_min} min · {item.call_id}</option>)}
     </select></label>}

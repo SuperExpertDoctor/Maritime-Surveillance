@@ -1,6 +1,6 @@
 import { Bot, CircleX, Crosshair, MousePointer2, Plane, Radio, RadioTower, Radar, Ship, Trash2, Waypoints } from "lucide-react";
 import { UAV_STATUS_COLORS } from "../renderer/colors";
-import { uavDisplayState } from "../renderer/displayState";
+import { informationCategory, uavDisplayState } from "../renderer/displayState";
 import ContactPanel from "./ContactPanel";
 import CoveragePanel from "./CoveragePanel";
 import IntentPanel from "./IntentPanel";
@@ -67,9 +67,7 @@ export default function RightSidebar({
   infoValues.forEach((value) => {
     total += 1;
     if (value > 0) scanned += 1;
-    if (value > 0.7) situations.white += 1;
-    else if (value >= 0.2) situations.gray += 1;
-    else situations.black += 1;
+    situations[informationCategory(value, frame?.config_snapshot?.grid)] += 1;
   });
   const coverage = Number.isFinite(frame?.coverage_pct)
     ? frame.coverage_pct
@@ -269,6 +267,7 @@ export default function RightSidebar({
             key={`${readOnly}|${frame?.episode_id}|${frame?.reset_generation}`}
             frame={frame}
             readOnly={readOnly}
+            connectionStatus={connectionStatus}
             selection={selection}
             onClearSelection={onClearSelection}
           />

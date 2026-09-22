@@ -9,7 +9,6 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import logging
-import math
 import time
 from queue import Empty, Full, Queue
 from threading import Condition, Event, Lock, Thread
@@ -61,8 +60,6 @@ class FramePublisher:
         self._live_completed = 0
         self._live_error: Exception | None = None
         self._broadcast_future = None
-        self._last_matrix_time: float | None = None
-        self._next_matrix_time = 0.0
         self._record_done.set()
         self._live_done.set()
         self._record_thread = Thread(target=self._record_loop, name="frame-recorder", daemon=True)
@@ -258,9 +255,10 @@ class FramePublisher:
                 frame = _build(
                     snapshot,
                     realtime=True,
-                    include_matrices=self._should_include_matrices(
-                        snapshot.state.current_time,
-                    ),
+                    # The live queue already conflates slow-client updates.
+                    # Each delivered frame must carry cell values for its own
+                    # simulation time, including same-tick evidence changes.
+                    include_matrices=True,
                 )
                 self._broadcast_future = broadcast_payload_sync(self.app, frame)
                 with self._condition:
@@ -313,17 +311,6 @@ class FramePublisher:
                     self._mark_live_idle_locked()
                     self._condition.notify_all()
             return
-
-    def _should_include_matrices(self, sim_time: float) -> bool:
-        """Include large matrices once per crossed five-minute sim threshold."""
-        sim_time = float(sim_time)
-        with self._condition:
-            if sim_time < self._next_matrix_time:
-                return False
-            self._last_matrix_time = sim_time
-            crossed = sim_time - self._next_matrix_time
-            self._next_matrix_time += (math.floor(crossed / 5.0) + 1) * 5.0
-            return True
 
 
 def _build(snapshot: FrameSnapshot, *, realtime: bool, include_matrices: bool) -> dict:

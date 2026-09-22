@@ -3,6 +3,7 @@ import { RadioTower } from "lucide-react";
 
 import { computeLayout, dragToBBox, pixelToCoord } from "../renderer/geometry";
 import { renderFrame } from "../renderer/layers";
+import { informationCategory } from "../renderer/displayState";
 
 const MAP_ASSET_SOURCES = {
   background: "/assets/background.png",
@@ -90,7 +91,6 @@ const CanvasMap = forwardRef(function CanvasMap({
   }, [updateSize]);
 
   useEffect(() => {
-    if (!frame) return;
     prevFrameRef.current = targetFrameRef.current;
     targetFrameRef.current = frame;
     frameReceivedRef.current = performance.now();
@@ -100,7 +100,6 @@ const CanvasMap = forwardRef(function CanvasMap({
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     const context = canvas.getContext("2d");
-    if (!targetFrameRef.current) return undefined;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let animationFrame = null;
     let phase = 0;
@@ -160,6 +159,17 @@ const CanvasMap = forwardRef(function CanvasMap({
       }
 
       const { cellSize, offsetX, offsetY, mapBounds, legendBounds } = layoutRef.current;
+      // Keep only the pointed cell between frames; its values must come from
+      // the same current frame as the heatmap, even when the mouse is still.
+      const coord = hoverRef.current;
+      const info = displayFrame?.info_matrix?.[coord?.col]?.[coord?.row];
+      const value = displayFrame?.value_matrix?.[coord?.col]?.[coord?.row];
+      const excluded = coord && displayFrame?.search_domain?.excluded_cells?.some(
+        ([col, row]) => col === coord.col && row === coord.row,
+      );
+      const hoverInfo = coord && !excluded && Number.isFinite(info) && Number.isFinite(value)
+        ? { ...coord, I: info, V: value, category: informationCategory(info, displayFrame.config_snapshot?.grid) }
+        : null;
       context.save();
       renderFrame(context, displayFrame, {
         cellSize,
@@ -172,7 +182,7 @@ const CanvasMap = forwardRef(function CanvasMap({
         trailMode,
         selectedContactId,
         selectedScenarioVesselId,
-        hoverInfo: hoverRef.current,
+        hoverInfo,
         selectedUavId,
         frameCount: phase,
         assets: mapAssets,
@@ -254,11 +264,8 @@ const CanvasMap = forwardRef(function CanvasMap({
     const excluded = coord && frame.search_domain?.excluded_cells?.some(
       ([col, row]) => col === coord.col && row === coord.row,
     );
-    if (coord && !excluded && frame.info_matrix && frame.value_matrix) {
-      const info = Number(frame.info_matrix?.[coord.col]?.[coord.row] || 0);
-      const value = Number(frame.value_matrix?.[coord.col]?.[coord.row] || 0);
-      const category = info >= 0.7 ? "white" : info >= 0.2 ? "gray" : "black";
-      hoverRef.current = { col: coord.col, row: coord.row, I: info, V: value, category };
+    if (coord && !excluded) {
+      hoverRef.current = coord;
       setHovered(true);
       setHoverVersion((version) => version + 1);
     } else {

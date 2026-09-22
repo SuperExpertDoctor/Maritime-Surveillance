@@ -1,3 +1,9 @@
+export function informationCategory(value, grid = {}) {
+  const white = grid.white_threshold ?? 0.7;
+  const gray = grid.gray_threshold ?? 0.2;
+  return value >= white ? "white" : value >= gray ? "gray" : "black";
+}
+
 const TASK_PHASES = {
   coverage: {
     transit: { label: "转场搜索", tone: "transit", phase: "coverage_transit" },

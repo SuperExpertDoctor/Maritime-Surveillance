@@ -1,6 +1,6 @@
 import { coordToPixel } from "./geometry";
 import { markerColor, UAV_STATUS_COLORS } from "./colors";
-import { uavDisplayState } from "./displayState";
+import { informationCategory, uavDisplayState } from "./displayState";
 import { layoutLabels } from "./labelLayout";
 
 const FONT = '"Fira Code", "Microsoft YaHei", monospace';
@@ -170,14 +170,15 @@ export function drawSearchDomain(ctx, domain, cellSize, ox, oy) {
   ctx.restore();
 }
 
-export function drawHeatmap(ctx, info, values, cellSize, ox, oy) {
+export function drawHeatmap(ctx, info, values, cellSize, ox, oy, grid) {
   for (let col = 0; col < 30; col += 1) {
     for (let row = 0; row < 30; row += 1) {
       const freshness = Number(info?.[col]?.[row] || 0);
       const value = Number(values?.[col]?.[row] || 0);
       const { x, y } = coordToPixel(col, row, cellSize, ox, oy);
-      if (freshness > 0.7) ctx.fillStyle = `rgba(13, 148, 136, ${0.12 + freshness * 0.2})`;
-      else if (freshness >= 0.2) ctx.fillStyle = `rgba(217, 119, 6, ${0.08 + freshness * 0.14})`;
+      const category = informationCategory(freshness, grid);
+      if (category === "white") ctx.fillStyle = `rgba(13, 148, 136, ${0.12 + freshness * 0.2})`;
+      else if (category === "gray") ctx.fillStyle = `rgba(217, 119, 6, ${0.08 + freshness * 0.14})`;
       else ctx.fillStyle = `rgba(37, 99, 235, ${0.018 + value * 0.045})`;
       ctx.fillRect(x + 0.5, y + 0.5, Math.max(0, cellSize - 1), Math.max(0, cellSize - 1));
     }
@@ -1625,7 +1626,7 @@ export function renderFrame(ctx, frame, options = {}) {
   const baseCenters = buildBaseCenters(bases, resolvedMapBounds);
   drawBackground(ctx, width, height, cellSize, offsetX, offsetY, resolvedMapBounds, assets);
   if (frame) {
-    drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY);
+    drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY, frame.config_snapshot?.grid);
     drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);

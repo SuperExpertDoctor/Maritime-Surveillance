@@ -148,7 +148,7 @@ export default function useReplay(enabled) {
       if (loaded && generation === loadGenerationRef.current && hasFrame(framesRef.current, safe)) {
         setTargetLoadingIndex((current) => current === safe ? null : current);
       }
-      return loaded;
+      return loaded && hasFrame(framesRef.current, safe);
     } catch {
       if (generation === loadGenerationRef.current && filename === selectedFileRef.current) {
         setError("回放加载失败");
@@ -189,19 +189,19 @@ export default function useReplay(enabled) {
 
   useEffect(() => {
     if (!enabled || !isPlaying) return undefined;
-    const timer = window.setInterval(() => {
-      setIndex((current) => {
-        if (current >= Math.max(0, totalRef.current - 1)) {
-          setIsPlaying(false);
-          return current;
-        }
-        const next = current + 1;
-        ensureLoaded(next);
-        return next;
-      });
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      if (index >= Math.max(0, totalRef.current - 1)) {
+        setIsPlaying(false);
+        return;
+      }
+      const loaded = await ensureLoaded(index + 1);
+      if (cancelled) return;
+      if (loaded) setIndex(index + 1);
+      else setIsPlaying(false);
     }, 1000 / speed);
-    return () => window.clearInterval(timer);
-  }, [enabled, isPlaying, speed, ensureLoaded]);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [enabled, isPlaying, index, selectedFile, speed, ensureLoaded]);
 
   useEffect(() => {
     const onKeyDown = (event) => {

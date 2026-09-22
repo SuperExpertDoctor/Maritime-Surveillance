@@ -3,8 +3,12 @@ import threading
 from concurrent.futures import Future
 from types import SimpleNamespace
 
+import pytest
+
 from src.control.common.contracts import ControlRouteSnapshot, UavRouteSnapshot
+from src.mission.contracts import PassivePosition
 from src.schedule.config_loader import ConfigLoader
+from src.schedule.datatypes import GridCoord
 from src.schedule.state_manager import StateManager
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
@@ -214,34 +218,57 @@ def test_broadcast_future_exception_is_observed_and_logged(monkeypatch):
     publisher.close()
 
 
-def test_matrices_use_sim_time_threshold_crossing_not_float_modulo(monkeypatch):
+def test_live_matrices_refresh_on_scan_decay_evidence_and_reset(monkeypatch, tmp_path):
     config = ConfigLoader.load()
     state = StateManager(config)
     engine = _engine_with_time(config, state)
-    built = []
-
-    monkeypatch.setattr(
-        frame_publisher_module,
-        "_build",
-        lambda snapshot, *, realtime, include_matrices: (
-            built.append((realtime, include_matrices, snapshot.state.current_time))
-            or {"sim_time_min": snapshot.state.current_time}
-        ),
-    )
+    frames = []
     monkeypatch.setattr(
         frame_publisher_module,
         "broadcast_payload_sync",
-        lambda _app, _frame: None,
+        lambda _app, frame: frames.append(frame),
     )
-    publisher = FramePublisher(_FailingFrameLogger(), app=object())
+    publisher = FramePublisher(FrameLogger(str(tmp_path)), app=object())
 
-    for current_time in (0.1, 4.9, 5.1, 10.1):
-        state.current_time = current_time
-        publisher.push_snapshot(engine, {}, total_steps=4)
+    def publish():
+        publisher.push_snapshot(engine, {}, total_steps=5)
         assert publisher.wait_live_idle(timeout=2)
 
-    assert [item[1] for item in built if item[0]] == [True, False, True, True]
-    publisher.close()
+    try:
+        publish()
+        state.current_time = 0.1
+        state.scan_cell(GridCoord(4, 5), state.current_time)
+        publish()
+        state.step(0.2)
+        publish()
+        state.apply_information_facts([
+            PassivePosition("P1", "E1", "B1", "S1", 0.2, (4., 5.), ("O1", "O2")),
+        ], state.current_time)
+        publish()
+        engine.allocator.sm = StateManager(config)
+        engine.allocator.sm.episode_id = "reset-episode"
+        publish()
+        assert publisher.flush(timeout=5)
+    finally:
+        publisher.close()
+
+    assert len(frames) == 5
+    assert all("info_matrix" in frame and "value_matrix" in frame for frame in frames)
+    initial, scanned, decayed, evidence, reset = frames
+    assert initial["info_matrix"][4][5] == 0.0
+    assert scanned["info_matrix"][4][5] == 1.0
+    assert 0 < decayed["info_matrix"][4][5] < scanned["info_matrix"][4][5]
+    assert scanned["value_matrix"][4][5] < decayed["value_matrix"][4][5]
+    assert evidence["info_matrix"] == decayed["info_matrix"]
+    assert evidence["value_matrix"][4][5] > decayed["value_matrix"][4][5]
+    assert reset["info_matrix"] == initial["info_matrix"]
+    assert reset["value_matrix"] == initial["value_matrix"]
+    assert [frame["sim_time_min"] for frame in frames] == pytest.approx([0, .1, .2, .2, 0])
+    with open(publisher.logger.path, encoding="utf-8") as stream:
+        recorded = [json.loads(line) for line in stream]
+    assert [(f["info_matrix"], f["value_matrix"]) for f in recorded] == [
+        (f["info_matrix"], f["value_matrix"]) for f in frames
+    ]
 
 
 def test_llm_cycle_is_present_only_on_decision_frames(monkeypatch):

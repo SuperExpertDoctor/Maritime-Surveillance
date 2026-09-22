@@ -396,6 +396,25 @@ def test_broadcast_uses_snapshot_of_clients_and_keeps_new_client():
     assert second in app.state._live_clients
 
 
+def test_broadcast_drops_queued_frames_from_before_engine_reset():
+    app, engine = _runtime_app()
+    old_frame = build_frame(engine.allocator.sm, 0, engine.config)
+    messages = []
+
+    class Client:
+        async def send_text(self, payload):
+            messages.append(json.loads(payload))
+
+    app.state._live_clients.add(Client())
+    engine.reset()
+    new_frame = build_frame(engine.allocator.sm, 0, engine.config)
+
+    asyncio.run(server.broadcast_payload(app, old_frame))
+    asyncio.run(server.broadcast_payload(app, new_frame))
+
+    assert [frame["episode_id"] for frame in messages] == [engine.episode_id]
+
+
 def test_websocket_initial_frame_is_serialized_before_registration(monkeypatch):
     app = create_app(ConfigLoader.load(), StateManager(ConfigLoader.load()))
     observed = []

@@ -753,8 +753,8 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
         "obstacles": obstacle_list,
     }
     if include_matrices:
-        # Matrix conversion dominates live payload size, so compact live
-        # frames carry it periodically while the client retains the last copy.
+        # Live publication includes both matrices on every delivered frame so
+        # cell values describe the same simulation instant as the telemetry.
         info_mat = state.get_info_matrix()
         value_mat = state.get_value_matrix()
         frame["info_matrix"] = info_mat.tolist() if hasattr(info_mat, "tolist") else info_mat

@@ -63,7 +63,7 @@ export default function ContactPanel({ frame, selectedContactId, onSelectContact
               >
                 <span className={`contact-state-dot vessel-class-${contact.vessel_class || "unknown"}`}><CircleDot size={15} /></span>
                 <span className="contact-copy"><strong>{contact.contact_id}</strong><small>{VESSEL_CLASS_LABELS[contact.vessel_class] || "待核查"} · {STATE_LABELS[contact.state] || contact.state}{assigned ? ` · ${uavDisplayState(assigned).label}` : ""}</small></span>
-                <span className="contact-seen">{contact.samples?.length || 0}</span>
+                <span className="contact-seen">{contact.sample_count ?? contact.samples?.length ?? 0}</span>
               </button>
                 );
               })()
@@ -76,7 +76,7 @@ export default function ContactPanel({ frame, selectedContactId, onSelectContact
                 <div><dt>阶段</dt><dd>{STATE_LABELS[selected.state] || selected.state || "-"}</dd></div>
                 <div><dt>AIS 来源</dt><dd>{selected.ais_mmsi || "无"}</dd></div>
                 <div><dt>位置</dt><dd className="mono">{position(selected.estimated_position)}</dd></div>
-                <div><dt>观测次数</dt><dd>{selected.samples?.length || 0}</dd></div>
+                <div><dt>观测次数</dt><dd>{selected.sample_count ?? selected.samples?.length ?? 0}</dd></div>
                 <div><dt>任务阶段</dt><dd>{assignedUav ? uavDisplayState(assignedUav).label : "未派工"}</dd></div>
               </dl>
               <div className="evidence-heading"><span><Eye size={13} />证据关键点</span><small>{samples.length}</small></div>

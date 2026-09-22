@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { frameFixture, installFrameSocket } from "./helpers/frameSocket.js";
 
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/export/capabilities', route => route.fulfill({ json: { mp4: false } }));
+});
+
 function coverageFrame({
   minute = 120,
   cells60 = 8,

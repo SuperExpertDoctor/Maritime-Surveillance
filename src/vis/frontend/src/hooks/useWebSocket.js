@@ -22,6 +22,8 @@ export default function useWebSocket(enabled) {
     let socket = null;
     let heartbeat = null;
     let reconnect = null;
+    const retiredContexts = new Set();
+    const contextOf = item => JSON.stringify([item?.episode_id || "", item?.reset_generation ?? 0]);
 
     const scheduleFramePublish = () => {
       if (publishFrame.current != null || publishTimer.current != null) return;
@@ -48,8 +50,11 @@ export default function useWebSocket(enabled) {
       if (disposed) return;
       setStatus(retryCount.current ? "reconnecting" : "connecting");
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${protocol}//${window.location.host}/ws/live`);
+      const connection = new WebSocket(`${protocol}//${window.location.host}/ws/live`);
+      socket = connection;
+      const isCurrent = () => !disposed && socket === connection;
       socket.onopen = () => {
+        if (!isCurrent()) return;
         retryCount.current = 0;
         setStatus("connected");
         heartbeat = window.setInterval(() => {
@@ -57,6 +62,7 @@ export default function useWebSocket(enabled) {
         }, 25000);
       };
       socket.onmessage = (event) => {
+        if (!isCurrent() || connection.readyState !== WebSocket.OPEN) return;
         if (event.data === "pong") return;
         try {
           const next = JSON.parse(event.data);
@@ -65,12 +71,19 @@ export default function useWebSocket(enabled) {
             // simulator is faster than the display.  Conflate snapshots and
             // publish at a 60 Hz animation cadence instead of
             // scheduling an unbounded React render queue.
-            // Matrix deltas are omitted from most live frames.  Preserve the
-            // last known matrices locally so canvas rendering and inspection
-            // keep a complete view without paying to transmit them every time.
+            // Current live frames include their own matrices. Retain support
+            // for compact frames from older servers within the same episode.
             const previous = pendingFrame.current || latestFrame.current;
-            const sameContext = previous?.episode_id === next.episode_id
-              && previous?.reset_generation === next.reset_generation;
+            const sameContext = previous && contextOf(previous) === contextOf(next);
+            if (retiredContexts.has(contextOf(next))) return;
+            if (previous?.episode_id === next.episode_id
+              && (next.reset_generation ?? 0) < (previous.reset_generation ?? 0)) return;
+            // Initial/reconnect snapshots can overtake a queued background
+            // broadcast. Equal times remain valid for paused command updates.
+            if (sameContext && Number.isFinite(next.sim_time_min)
+              && Number.isFinite(previous.sim_time_min)
+              && next.sim_time_min < previous.sim_time_min) return;
+            if (previous && !sameContext) retiredContexts.add(contextOf(previous));
             pendingFrame.current = {
               ...(sameContext ? { info_matrix: previous?.info_matrix, value_matrix: previous?.value_matrix } : {}),
               ...next,
@@ -79,16 +92,18 @@ export default function useWebSocket(enabled) {
                 llm_cycle: next.llm_cycle || pendingFrame.current.llm_cycle,
               } : {}),
             };
+            setStatus("connected");
             scheduleFramePublish();
           }
         } catch {
           setStatus("error");
         }
       };
-      socket.onerror = () => socket?.close();
+      socket.onerror = () => { if (isCurrent()) connection.close(); };
       socket.onclose = () => {
+        if (!isCurrent()) return;
+        socket = null;
         if (heartbeat) window.clearInterval(heartbeat);
-        if (disposed) return;
         setStatus("reconnecting");
         const delay = Math.min(1000 * 2 ** retryCount.current, 30000);
         retryCount.current += 1;
