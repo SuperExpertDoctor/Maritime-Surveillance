@@ -206,6 +206,19 @@ class TaskAllocator:
             planning_map_version,
             active_tasks=active_records,
         )
+        viable_ids = {edge.task_id for edge in edges if edge.uav_id in available}
+        rejected_partitions = {
+            task.task_id for task in edge_candidates
+            if task.task_id.startswith("partition:") and task.task_id not in viable_ids
+        }
+        if rejected_partitions:
+            candidates = tuple(task for task in candidates if task.task_id not in rejected_partitions)
+            prompt_window = self._coverage_prompt_window(candidates, now)
+            edge_candidates = prompt_window.tasks if prompt_window is not None else candidates
+            edges = self._mission_edges(
+                edge_candidates, resources, published_contacts, planning_map_version,
+                active_tasks=active_records,
+            )
         pending_matching = self._match_pending_search_edges(
             pending_search_task_ids,
             resources,
@@ -502,14 +515,25 @@ class TaskAllocator:
                 ),
             )
         )
-        ranked = (*urgent, *ranked_search)
+        # Full residual partitions precede small fallback windows. Preserve
+        # their shared boundaries instead of forcing them into fixed 3x3 tiles.
+        partitioned = tuple(task for task in ranked_search
+                            if task.task_id.startswith("partition:") and task.feasible_uav_ids)
+        partition_ids = {task.task_id for task in partitioned}
+        # After large partitions, favor broad coverage over many tiny windows;
+        # the existing responsibility ranking breaks equal-area ties.
+        fallback = sorted(
+            (task for task in ranked_search if task.task_id not in partition_ids),
+            key=lambda task: -((task.bbox[2] - task.bbox[0]) * (task.bbox[3] - task.bbox[1])),
+        )
+        ranked = (*urgent, *partitioned, *fallback)
         zones = ZonePartition(metrics.fixed_mask, coverage_config.zone_cols, coverage_config.zone_rows)
         return policy.select_window(
             ranked,
             ordinary_reserve=min(max(ordinary_reserve, len(self.sm.get_available_uavs())), capacity),
             capacity=capacity,
             now_min=now_min,
-            zones=zones,
+            zones=None if partitioned else zones,
         )
 
     def set_strategy_memory_version(self, version: str) -> None:
@@ -537,13 +561,23 @@ class TaskAllocator:
         )
 
     @staticmethod
+    def _has_idle_candidate_work(snapshot: MissionSnapshot) -> bool:
+        """Published legal edges identify new work for currently idle aircraft."""
+        available = set(snapshot.available_uav_ids)
+        candidates = {task.task_id for task in snapshot.candidates}
+        return any(
+            edge.uav_id in available and edge.task_id in candidates
+            for edge in snapshot.feasible_edges
+        )
+
+    @staticmethod
     def _model_selection_skip_reason(snapshot: MissionSnapshot) -> str | None:
         """Return a no-model reason only when the frozen snapshot has no work.
 
         The coverage constraint is the authoritative residual-search budget.
-        An idle aircraft alone must not create a new ordinary-search decision
-        once that budget is satisfied.  Urgent, intent-backed, and approved
-        non-search work deliberately remains on the model path.
+        A satisfied coverage floor is not a ceiling: available aircraft with
+        legal candidate edges must still be dispatched. Urgent, intent-backed,
+        and approved non-search work also remains on the model path.
         """
         unassigned_approved = tuple(
             task
@@ -558,6 +592,8 @@ class TaskAllocator:
             # select, even when a search is still waiting for an aircraft.
             return "pending_search_reassignment"
 
+        if TaskAllocator._has_idle_candidate_work(snapshot):
+            return None
         constraint = snapshot.coverage_constraint
         if constraint is None or constraint.required_new_search_count != 0:
             return None
@@ -613,6 +649,17 @@ class TaskAllocator:
             if new_memory:
                 self.llm_client.set_reviewer_memory(new_memory)
             decision = self.trigger_manager.check(current_time)
+        snapshot = None
+        wall_started = time.perf_counter()
+        if decision.trigger_type in {"none", "light"} and self.sm.get_available_uavs():
+            # Availability is level-triggered: refuelling/completion events can
+            # be coalesced or throttled, but an idle airframe must not be lost.
+            snapshot = self.build_mission_snapshot(
+                current_time, active_tasks=active_tasks,
+                intents=intents, intent_statuses=intent_statuses,
+            )
+            if self._has_idle_candidate_work(snapshot):
+                decision = TriggerDecision("heavy", "available fleet has feasible work")
         if decision.trigger_type == "none":
             return {"trigger_type": "none", "action": None}, None
         if decision.trigger_type == "light":
@@ -624,13 +671,13 @@ class TaskAllocator:
                 intent_statuses=intent_statuses,
             )
 
-        wall_started = time.perf_counter()
-        snapshot = self.build_mission_snapshot(
-            current_time,
-            active_tasks=active_tasks,
-            intents=intents,
-            intent_statuses=intent_statuses,
-        )
+        if snapshot is None:
+            snapshot = self.build_mission_snapshot(
+                current_time,
+                active_tasks=active_tasks,
+                intents=intents,
+                intent_statuses=intent_statuses,
+            )
         snapshot_frozen_wall = time.perf_counter()
         skip_reason = self._model_selection_skip_reason(snapshot)
         if skip_reason is not None:
@@ -813,26 +860,12 @@ class TaskAllocator:
         """Re-pair only approved work; light events cannot create work."""
         del decision
         wall_started = time.perf_counter()
-        previous = self._last_mission_snapshot
-        if previous is None:
-            snapshot = self.build_mission_snapshot(
-                current_time,
-                active_tasks=active_tasks,
-                intents=intents,
-                intent_statuses=intent_statuses,
-            )
-        else:
-            # Light events are allowed to re-pair approved work only. Reuse
-            # the last frozen candidate/edge graph instead of rebuilding all
-            # geometry and information matrices for a pairing-only tick.
-            snapshot = replace(
-                previous,
-                sim_time_min=float(current_time),
-                active_tasks=tuple(active_tasks),
-                intents=tuple(intents),
-                intent_statuses=tuple(intent_statuses),
-            )
-            self._last_mission_snapshot = snapshot
+        # A refuelled airframe has new availability and generation; never
+        # pair it against the resources frozen before its return to base.
+        snapshot = self.build_mission_snapshot(
+            current_time, active_tasks=active_tasks,
+            intents=intents, intent_statuses=intent_statuses,
+        )
         snapshot_frozen_wall = time.perf_counter()
         approved_ids = tuple(
             task.task_id
@@ -1018,7 +1051,7 @@ class TaskAllocator:
                 if (
                     return_range is not None
                     and task.kind in _SEARCH_TASK_KINDS
-                    and not task.task_id.startswith(("search:", "fragment:"))
+                    and not task.task_id.startswith(("search:", "fragment:", "partition:"))
                 ):
                     return_range = max(
                         return_range,

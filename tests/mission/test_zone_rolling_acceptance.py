@@ -315,7 +315,7 @@ def test_first_round_ten_searches_nine_quotas_and_prompt_budget():
     assert any(e.startswith("zone_quota_not_met:") for e in errors)
 
 
-def test_coverage_floor_allows_excess_but_rejects_zero_budget_ordinary_search():
+def test_coverage_floor_allows_idle_capacity_fill_even_with_zero_residual():
     snapshot = _fleet_snapshot()
     scheduler = MissionScheduler(selection_provider=lambda *_: {})
     zero_budget = replace(
@@ -326,10 +326,7 @@ def test_coverage_floor_allows_excess_but_rejects_zero_budget_ordinary_search():
     payload["selected_task_ids"] = [t.task_id for t in snapshot.candidates]
     errors = scheduler.validate_selection(payload, zero_budget)
     assert not any(error.startswith("coverage_floor_not_met:") for error in errors)
-    assert any(
-        error.startswith("ordinary_search_without_residual_budget:")
-        for error in errors
-    )
+    assert errors == ()
 
     required = 4
     constrained = replace(
@@ -373,7 +370,11 @@ def test_real_allocator_wiring_and_legacy():
     snapshot = engine.allocator.build_mission_snapshot()
     assert snapshot.coverage_summary["gap_pct"] == 100
     assert snapshot.coverage_constraint.required_new_search_count == 10
-    assert len(snapshot.coverage_constraint.zone_requirements) == 9
+    # Fleet partitions may cross the fixed reporting zones; do not force
+    # nine tiny contained representatives back into the candidate window.
+    assert len(snapshot.coverage_constraint.zone_requirements) + len(snapshot.coverage_constraint.zone_infeasible) == 9
+    assert any(task.task_id.startswith("partition:") for task in snapshot.candidates
+               if task.task_id in snapshot.prompt_task_ids)
     assert set(snapshot.coverage_constraint.must_service_task_ids) <= set(
         snapshot.prompt_task_ids
     )
@@ -482,9 +483,9 @@ def test_prompt_preserves_geometry_safety_and_coverage_floor_policy():
     for fragment in (
         "never invent a bbox",
         "AT LEAST required_new_search_count",
-        "When required_new_search_count is zero",
-        "urgent high-priority",
-        "except when a feasible zone obligation requires them",
+        "required_new_search_count is zero",
+        "available UAV",
+        "minimum coverage floor, not a fleet utilization ceiling",
         "zone_requirements",
         "160 characters",
         "generation",

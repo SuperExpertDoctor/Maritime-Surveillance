@@ -135,7 +135,7 @@ def test_decision_maker_override_is_explicitly_limited():
     scheduler = MissionScheduler(gateway=gateway)
 
     assert scheduler.decide(snapshot) is not None
-    assert gateway.kwargs["max_tokens"] == 1536
+    assert gateway.kwargs["max_tokens"] == 4096
 
 
 def test_prompt_budget_failure_names_the_largest_field():

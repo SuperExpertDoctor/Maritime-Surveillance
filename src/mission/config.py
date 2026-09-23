@@ -471,6 +471,12 @@ def validate_mission_config(config: "AppConfig") -> None:
     cols, rows = config.grid.resolution
     if population.total_count > cols * rows:
         raise ValueError("population.total_count exceeds grid capacity")
+    limits = ship.opponent_population
+    if population.total_count > limits.max_active:
+        raise ValueError("population.total_count exceeds opponent_population.max_active")
+    for kind, count in population.allocate().items():
+        if count > getattr(limits, f"max_active_{kind}"):
+            raise ValueError(f"population initial {kind} exceeds opponent_population class limit")
 
     _probability(
         ship.type_ii_ais_on_probability, "ship.type_ii_ais_on_probability"

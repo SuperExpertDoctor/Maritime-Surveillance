@@ -867,3 +867,21 @@ def test_timeout_backoff_does_not_exceed_shared_deadline(scripted_transport, mon
     assert result.failure_category == 'timeout'
     assert waits == [0.5]
     assert len(transport.calls) == 1
+
+
+def test_soft_thinking_target_preserves_complete_json(scripted_transport):
+    from src.mission.mission_scheduler import MissionScheduler
+    payload = {'answer': 1, 'detail': 'complete output ' * 1200}
+    transport = scripted_transport({'decision_maker': [json.dumps(payload)]})
+    gateway = LLMGateway(transport=transport)
+    prompt = MissionScheduler(selection_provider=lambda *_: {}).system_prompt
+    result = gateway.request_json(
+        role='decision_maker', snapshot_id='soft-budget', system_prompt=prompt,
+        user_payload={}, validate=lambda value: () if value == payload else ('incomplete',),
+    )
+    assert result.success
+    assert result.payload == payload
+    call = transport.calls[0]
+    assert call['thinking'] == 'enabled'
+    assert 'approximately 1024 tokens' in call['messages'][0]['content']
+    assert call['max_tokens'] == 4096

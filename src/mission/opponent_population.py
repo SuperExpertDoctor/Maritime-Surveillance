@@ -47,6 +47,18 @@ class OpponentPopulation:
         """Identify the actual in-flight release, even after the queue drains."""
         return command_id == self._inflight
 
+    def capacity_error(self, ships, vessel_class: str) -> str | None:
+        """Shared apply-time limits also govern operator-created vessels."""
+        active = [ship for ship in ships if not ship.departed]
+        if len(active) >= self.config.max_active:
+            return "opponent_capacity_reached"
+        limit = getattr(self.config, f"max_active_{vessel_class}", None)
+        if limit is not None and sum(
+            getattr(ship, "vessel_class", None) == vessel_class for ship in active
+        ) >= limit:
+            return f"opponent_{vessel_class}_capacity_reached"
+        return None
+
     def tick(self, engine) -> VesselCommandResult | None:
         """Enqueue a due create and return its queued result, or return None."""
         now = engine.clock.time
@@ -68,6 +80,10 @@ class OpponentPopulation:
             return None
         vessel_class = ("type_i" if self._rng.random() < self.config.type_i_probability
                         else "type_ii")
+        if self.capacity_error(engine.ships, vessel_class):
+            vessel_class = "type_ii" if vessel_class == "type_i" else "type_i"
+            if self.capacity_error(engine.ships, vessel_class):
+                return None
         self._sequence += 1
         command = VesselCommand(
             command_id=f"opponent-release-{self._sequence:08d}",

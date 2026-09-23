@@ -137,7 +137,9 @@ class OpponentPopulationConfig:
     enabled: bool = True
     interval_min_min: float = 5.0
     interval_max_min: float = 15.0
-    max_active: int = 12
+    max_active: int = 5
+    max_active_type_i: int = 2
+    max_active_type_ii: int = 3
     type_i_probability: float = 0.5
 
     def __post_init__(self):
@@ -146,6 +148,10 @@ class OpponentPopulationConfig:
             raise ValueError(f"{prefix}.enabled: expected boolean")
         if type(self.max_active) is not int or self.max_active < 1:
             raise ValueError(f"{prefix}.max_active: expected positive integer")
+        for name in ("max_active_type_i", "max_active_type_ii"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{prefix}.{name}: expected non-negative integer")
         for name in ("interval_min_min", "interval_max_min", "type_i_probability"):
             value = getattr(self, name)
             try:

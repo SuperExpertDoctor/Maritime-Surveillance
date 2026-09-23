@@ -18,7 +18,7 @@ def load(tmp_path, value, *, omit=False):
 
 def test_defaults_enabled_and_legacy_omission(tmp_path):
     config = ConfigLoader.load().ship.opponent_population
-    assert config.enabled is True and config.max_active == 12
+    assert config.enabled is True and config.max_active == 5
     assert config.type_i_probability == 0.5
     assert load(tmp_path, None, omit=True) == OpponentPopulationConfig()
 
@@ -30,6 +30,8 @@ def test_defaults_enabled_and_legacy_omission(tmp_path):
     {"interval_max_min": float("inf")}, {"interval_min_min": float("nan")},
     {"interval_min_min": 9, "interval_max_min": 8},
     {"max_active": 0}, {"max_active": 1.5}, {"max_active": True},
+    {"max_active_type_i": -1}, {"max_active_type_ii": True},
+    {"max_active_type_i": 1.5}, {"max_active_type_ii": 0},
     {"type_i_probability": -0.1}, {"type_i_probability": 1.1},
     {"type_i_probability": False}, {"type_i_probability": float("nan")},
 ])

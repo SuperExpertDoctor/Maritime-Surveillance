@@ -20,8 +20,8 @@ def test_config_loader_reads_merged_environment_and_llm_parameters():
     # Retaining prior runs is required for replay after a new live run starts.
     assert config.common.clear_outputs_before_run is False
     assert config.environment.base_position == (2, 14)
-    assert config.ship.population.total_count == 8
-    assert config.ship.population.type_ii_ratio == pytest.approx(0.375)
+    assert config.ship.population.total_count == 2
+    assert config.ship.population.type_ii_ratio == pytest.approx(0.5)
     assert config.mission.contact.near_standoff_cells == 1.2
     assert config.mission.scheduling.allow_probe_preempt_search is True
     assert config.mission.information_update.planning_deadline_seconds == pytest.approx(60.0)
@@ -36,7 +36,7 @@ def test_llm_configuration_declares_all_isolated_roles():
             "model": "LongCat-2.0",
             "temperature": 0.3,
             "max_tokens": 4096,
-            "thinking": "disabled",
+            "thinking": "enabled",
         },
         "contact_assessor": {
             "model": "LongCat-2.0",

@@ -663,8 +663,8 @@ def test_scheduler_prompt_compacts_large_feasible_edge_graph():
     assert next(edge for edge in prompt_edges if edge["task_id"] == "Q1") == {
         "task_id": "Q1",
         "uav_options": [
-            {"uav_id": "U1", "transit_time_min": 1.0, "total_range_cells": 12.0},
-            {"uav_id": "U2", "transit_time_min": 1.0, "total_range_cells": 12.0},
+            {"uav_id": "U1", "transit_time_min": 1.0, "total_range_cells": 13.0},
+            {"uav_id": "U2", "transit_time_min": 1.0, "total_range_cells": 13.0},
         ],
     }
 

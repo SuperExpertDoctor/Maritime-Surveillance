@@ -500,12 +500,11 @@ class SimulationEngine:
             else:
                 try:
                     if command.operation == "create":
-                        if (
-                            self.opponent_population.owns_command(command.command_id)
-                            and sum(not ship.departed for ship in self.ships)
-                            >= self.opponent_population.config.max_active
-                        ):
-                            raise ValueError("opponent_capacity_reached")
+                        capacity_error = self.opponent_population.capacity_error(
+                            self.ships, command.vessel_class,
+                        )
+                        if capacity_error:
+                            raise ValueError(capacity_error)
                         vessel = self._create_scenario_vessel(command)
                         self.ships.append(vessel)
                         self._vessel_revisions[vessel.id] = 1

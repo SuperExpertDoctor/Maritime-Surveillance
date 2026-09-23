@@ -107,11 +107,11 @@ def _coverage_capacity_satisfied_snapshot(*, candidates=None):
     )
 
 
-def test_mission_step_skips_model_when_ordinary_coverage_capacity_is_satisfied(
+def test_mission_step_skips_satisfied_coverage_without_available_aircraft(
     monkeypatch,
 ):
     allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
-    snapshot = _coverage_capacity_satisfied_snapshot()
+    snapshot = replace(_coverage_capacity_satisfied_snapshot(), available_uav_ids=())
     allocator.reviewer = _ReviewerDouble()
     allocator.trigger_manager.check = lambda _time: TriggerDecision(
         "heavy", reason="coverage capacity test"
@@ -148,9 +148,10 @@ def test_model_skip_only_applies_to_no_work_or_nonurgent_ordinary_searches():
     allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
     snapshot = _coverage_capacity_satisfied_snapshot()
 
-    assert allocator._model_selection_skip_reason(snapshot) == (
-        "ordinary_search_capacity_satisfied"
-    )
+    assert allocator._model_selection_skip_reason(snapshot) is None
+    assert allocator._model_selection_skip_reason(
+        replace(snapshot, available_uav_ids=())
+    ) == "ordinary_search_capacity_satisfied"
     assert allocator._model_selection_skip_reason(
         replace(snapshot, candidates=(), feasible_edges=())
     ) == "no_model_candidates"

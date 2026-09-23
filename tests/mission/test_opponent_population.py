@@ -229,7 +229,7 @@ def test_apply_rechecks_automatic_capacity_after_interleaved_manual_create(
     limit = config.ship.population.total_count + 1
     config = replace(config, ship=replace(config.ship, opponent_population=replace(
         config.ship.opponent_population, max_active=limit,
-        interval_min_min=1., interval_max_min=1.,
+        interval_min_min=1., interval_max_min=1., type_i_probability=0.,
     )))
     e = SimulationEngine(config, seed=42, llm_gateway=_FixtureGateway())
     p = e.opponent_population
@@ -265,7 +265,7 @@ def test_apply_rechecks_automatic_capacity_after_interleaved_manual_create(
                if event["type"] == "vessel_created"]
     assert len(created) == 1 + depart_before_apply
 
-    # Manual commands remain an operator override, even with a release-like ID.
+    # A release-like command ID cannot bypass the shared manual/automatic cap.
     monkeypatch.setattr(p, "_position", original_position)
     e.vessel_commands.enqueue(VesselCommand(
         command_id="opponent-release-99999999", episode_id=e.episode_id,
@@ -273,5 +273,17 @@ def test_apply_rechecks_automatic_capacity_after_interleaved_manual_create(
         vessel_class="type_i", position_cells=original_position(e),
     ))
     override, = e.apply_pending_vessel_commands()
-    assert override.status == "applied"
-    assert sum(not ship.departed for ship in e.ships) == limit + 1
+    assert override.status == "rejected"
+    assert override.error_code == "opponent_capacity_reached"
+    assert sum(not ship.departed for ship in e.ships) == limit
+
+
+def test_automatic_release_uses_other_class_when_preferred_class_is_full():
+    e = engine()
+    e.ships = [SimpleNamespace(departed=False, vessel_class="type_i", float_position=(10 + i, 10))
+               for i in range(2)]
+    p = population(type_i_probability=1.)
+    e.clock.time = 2.
+    assert p.tick(e).status == "queued"
+    command, = e.vessel_commands.drain()
+    assert command.vessel_class == "type_ii"

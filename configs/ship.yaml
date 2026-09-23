@@ -1,13 +1,16 @@
 population:
-  total_count: 8
-  type_i_ratio: 0.625
-  type_ii_ratio: 0.375
+  total_count: 2  # Initial population: one type I and one type II.
+  type_i_ratio: 0.5
+  type_ii_ratio: 0.5
 opponent_population:
   enabled: true
   # Random release interval in simulation minutes (one vessel per attempt).
   interval_min_min: 5.0
   interval_max_min: 15.0
-  max_active: 12
+  # Concurrent in-game limits, shared by initial, manual and automatic vessels.
+  max_active: 5
+  max_active_type_i: 2
+  max_active_type_ii: 3
   type_i_probability: 0.5
 type_ii_ais_on_probability: 0.5
 speed_kn: 18.0

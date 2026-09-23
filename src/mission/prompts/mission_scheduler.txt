@@ -33,10 +33,10 @@ effective zone gap; it is not an actual SAR observation and does not make cells 
 When coverage_constraint is present, select AT LEAST required_new_search_count
 new ordinary search tasks (kind=search with a bbox), including every global
 must_service_task_ids entry, unless global infeasible_reason is present. This is
-a coverage floor while required_new_search_count is positive. When required_new_search_count is zero, do not select additional ordinary searches
-solely because an idle UAV exists: the residual coverage budget is already
-satisfied. Select only supplied urgent high-priority, non-search, or
-intent-backed work in that case.
+a minimum coverage floor, not a fleet utilization ceiling. Even when
+required_new_search_count is zero, select additional legal non-overlapping work
+for every available UAV that can be matched. Do not keep ready aircraft idle at
+base merely because the coverage floor is already satisfied.
 required_new_search_count is the residual addition count after active searches
 and matchable pending searches; it is not the total search-region count.
 Investigation and direction_search do not count toward this coverage floor.
@@ -72,12 +72,32 @@ version, and reviewer summary are authoritative. A defer_reason documents why
 work is deferred; it does not override a legal feasible task that can use an
 otherwise idle UAV when the snapshot requires that work. Select additional legal
 visible work only when it does not require an additional preemption. Do not add
-ordinary capacity-fill searches beyond the residual ordinary-search budget,
-except when a feasible zone obligation requires them; urgent high-priority and
-intent-backed work is governed by its supplied priority or intent contract.
+unnecessary preemptions merely to increase utilization. Fill idle capacity with
+supplied feasible work while respecting coverage, priority, intent and safety
+constraints; never invent tasks or unsafe routes.
 
 selected_task_ids are simultaneous assignments, NOT a sequential task queue.
 Each selected task needs a distinct eligible UAV. Never count one UAV twice
 or describe future sequential work in notes as justification for overbooking.
 Busy search UAVs require explicit preemption; ordinary search and investigation
 cannot preempt them unless the supplied policy explicitly permits it.
+
+
+Planning objectives, in priority order:
+1. Preserve safe executing assignments and their region boundaries. Repartition
+   only the remaining unreserved searchable domain when UAV availability changes.
+2. Match simultaneous search subregions to available search aircraft, aiming to
+   cover as much of the whole task domain as route and range limits permit.
+   Prefer supplied partition:* candidates: these are larger, contiguous,
+   non-overlapping fleet-sized partitions. Small search:* candidates are fallbacks
+   for weather, geometry, or energy limitations, not the default sparse layout.
+3. Minimize task switching, boundary churn, uncovered gaps, and redundant scans.
+4. Among safe feasible assignments, minimize transit plus search plus recovery
+   range cost. Use the supplied edge costs; do not claim an unverified global
+   energy optimum. The deterministic matcher assigns distinct UAVs afterward.
+
+Soft thinking budget: aim for approximately 1024 tokens in the provider's
+internal thinking/think block. This is a target, NOT an exact token count or
+hard cutoff. Finish the necessary checks and emit one complete valid JSON
+object. Keep reasoning in the provider reasoning channel; do not put think
+markup, partial thoughts, or commentary in the final JSON response.

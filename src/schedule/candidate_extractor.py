@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.mission.coverage_policy import CoveragePolicy
+from src.mission.coverage_partition import partition_search_mask
 from src.mission.contracts import Intent
 from src.mission.prompt_window import CandidatePool, PoolCandidate
 from src.schedule.datatypes import BBox, GridCoord
@@ -260,6 +261,38 @@ class CandidateExtractor:
         candidates: list[PoolCandidate] = []
         covered = np.zeros((cols, rows), dtype=bool)
         candidate_number = 0
+        if coverage_context is not None:
+            # Executing reservations are already removed from occupied. The
+            # fleet-sized partition is additive: retain smaller legal options
+            # when a large region cannot satisfy route/range constraints.
+            free = ~occupied
+            for region in sm.get_unfinished_search_regions():
+                b = region.bbox
+                free[b.col_start:b.col_end, b.row_start:b.row_end] = False
+            for raw_box in partition_search_mask(free, len(sm.get_available_uavs())):
+                bbox = BBox(*raw_box)
+                if (bbox.col_end - bbox.col_start) * (bbox.row_end - bbox.row_start) < gc.search_min_cells:
+                    continue
+                if not self._pool_geometry_feasible(sm, bbox):
+                    continue
+                cells = tuple((c, r) for c in range(bbox.col_start, bbox.col_end)
+                              for r in range(bbox.row_start, bbox.row_end))
+                area = len(cells)
+                total = self._rect_sum(value_prefix, bbox)
+                unseen = self._rect_sum(seen_prefix, bbox) / area
+                candidates.append(PoolCandidate(
+                    task_id=self._candidate_id(bbox, prefix="partition"),
+                    kind="search", bbox=tuple(bbox), cells=cells,
+                    total_value=total, mean_value=total / area,
+                    max_value=float(V[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end].max()),
+                    unseen_fraction=unseen, utility=total / area,
+                    information_version=snapshot.version,
+                    eligible_since_min=self._candidate_age(
+                        bbox, last_sar, sm.current_time,
+                        coverage_context["policy"].primary_window_min,
+                    ),
+                ))
+                covered[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end] = True
         for width in range(1, min(cols, gc.search_max_cells) + 1):
             for height in range(1, min(rows, gc.search_max_cells) + 1):
                 area = width * height

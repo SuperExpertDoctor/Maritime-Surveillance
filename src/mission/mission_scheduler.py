@@ -448,6 +448,11 @@ def _maximum_matching(
     return {task_id: edge for task_id, edge in assigned_uav.values()}
 
 
+def _flight_range_cost(edge: FeasibleEdge, resources: dict[str, UavResource]) -> float:
+    return (edge.transit_time_min * resources[edge.uav_id].speed_cells_min
+            + edge.mission_range_cells + edge.return_range_cells)
+
+
 def _minimum_cost_matching(
     task_ids: tuple[str, ...], options: dict[str, tuple[FeasibleEdge, ...]],
     resources: dict[str, UavResource],
@@ -491,7 +496,7 @@ def _minimum_cost_matching(
             if remainder is None:
                 continue
             candidate = (
-                edge.transit_time_min + remainder[0],
+                _flight_range_cost(edge, resources) + remainder[0],
                 ((task_id, edge),) + remainder[1],
             )
             if best_result is None or candidate[0] < best_result[0] - 1e-12:
@@ -532,7 +537,7 @@ def _minimum_cost_maximum_matching(
             remainder = solve(index + 1, used_mask | bit)
             candidate = (
                 remainder[0] + 1,
-                edge.transit_time_min + remainder[1],
+                _flight_range_cost(edge, resources) + remainder[1],
                 ((task_id, edge.uav_id, edge),) + remainder[2],
             )
             if (
@@ -738,25 +743,6 @@ def _validate_selection(
                 "coverage_floor_not_met:"
                 f"{coverage_constraint.required_new_search_count}:{ordinary_count}"
             )
-        if (
-            not floor_infeasible
-            and coverage_constraint.required_new_search_count == 0
-        ):
-            for task in selected_tasks:
-                is_new_ordinary_search = (
-                    task.kind == "search"
-                    and task.bbox is not None
-                    and task.task_id in candidates
-                    and task.task_id not in active
-                )
-                is_explicitly_urgent = (
-                    task.priority == "high" or bool(task.intent_ids)
-                )
-                if is_new_ordinary_search and not is_explicitly_urgent:
-                    errors.append(
-                        "ordinary_search_without_residual_budget:"
-                        f"{task.task_id}"
-                    )
         if (
             not floor_infeasible
             and coverage_constraint.required_new_search_count > 0
@@ -1004,7 +990,7 @@ def pair_selected_tasks(
     selection: MissionSelection | dict,
     snapshot: MissionSnapshot,
 ) -> PairingResult:
-    """Pair selected work on legal edges at minimum total transit cost."""
+    """Pair selected work on legal edges at minimum total flight range cost."""
     return _pair_selected_tasks(
         selection,
         snapshot,
@@ -1261,7 +1247,9 @@ class MissionScheduler:
                 transport_deadline_monotonic=(
                     deadline_monotonic - self.postprocess_reserve_seconds
                 ),
-                max_tokens=1536,
+                # Leave room for the soft 1024-token thinking target and a
+                # complete JSON selection; never truncate reasoning ourselves.
+                max_tokens=4096,
             )
             call_id = result.call_id
             success = result.success
@@ -1571,7 +1559,8 @@ class MissionScheduler:
             "preemptible_uav_ids": list(snapshot.preemptible_uav_ids),
             "uav_generations": [list(item) for item in snapshot.uav_generations],
             "resources": [_jsonable(resource) for resource in snapshot.resources],
-            "feasible_edges": _compact_prompt_edges(prompt_edges, prompt_task_ids),
+            "feasible_edges": _compact_prompt_edges(prompt_edges, prompt_task_ids,
+                {resource.uav_id: resource.speed_cells_min for resource in snapshot.resources}),
             "feasible_edges_compacted": True,
             "active_tasks": [
                 _active_task_payload(task) for task in snapshot.active_tasks
@@ -1616,7 +1605,9 @@ class MissionScheduler:
         }
 
 
-def _compact_prompt_edges(edges: list[dict], task_ids: set[str]) -> list[dict]:
+def _compact_prompt_edges(
+    edges: list[dict], task_ids: set[str], speeds: dict[str, float]
+) -> list[dict]:
     """Keep model-facing route facts small; validation still uses full edges."""
     grouped: dict[str, list[dict]] = {}
     for edge in edges:
@@ -1634,7 +1625,8 @@ def _compact_prompt_edges(edges: list[dict], task_ids: set[str]) -> list[dict]:
                     "uav_id": edge["uav_id"],
                     "transit_time_min": edge["transit_time_min"],
                     "total_range_cells": (
-                        edge["mission_range_cells"]
+                        edge["transit_time_min"] * speeds[edge["uav_id"]]
+                        + edge["mission_range_cells"]
                         + edge["return_range_cells"]
                         + edge["reserve_range_cells"]
                     ),
