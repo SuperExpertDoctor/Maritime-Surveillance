@@ -737,7 +737,8 @@ def test_length_retries_increase_only_request_budget(length_provider, initial, e
     attempts = gateway.call_log[-1]['attempts']
     assert [a['max_tokens'] for a in attempts] == expected
     assert all('output_truncated' in a['errors'][0] for a in attempts[:2])
-    assert all(c['messages'] == length_provider.calls[0]['messages'] for c in length_provider.calls)
+    assert all(c['messages'][:2] == length_provider.calls[0]['messages'] for c in length_provider.calls)
+    assert all(len(c['messages']) == 3 for c in length_provider.calls[1:])
     assert gateway.call_log[-1]['validation_errors'] == []
     assert gateway.call_log[-1]['raw_attempts'] == ['{"answer": 7}']
     assert gateway.resolve_binding('decision_maker')['max_tokens'] == 4096
@@ -801,3 +802,68 @@ def test_length_respects_configured_retry_limit(tmp_path, length_provider, retri
     result = _request_json(LLMGateway(path))
     assert result.failure_category == 'output_truncated'
     assert len(length_provider.calls) == expected_calls
+
+
+def test_truncation_retains_numeric_diagnostics_and_requests_compact_retry(length_provider):
+    length_provider.responses = [('length', 'private partial text'), ('stop', '{"answer": 7}')]
+    gateway = LLMGateway()
+    assert _request_json(gateway).success
+    first, second = gateway.call_log[-1]['attempts']
+    assert first['finish_reason'] == 'length'
+    assert first['usage']['completion_tokens'] == 4096
+    assert first['elapsed_seconds'] >= 0
+    assert first['timeout_seconds'] == 120.0
+    assert first['raw_output'] is None
+    assert second['finish_reason'] == 'stop'
+    assert 'private partial text' not in json.dumps(gateway.call_log)
+    assert 'compact' in length_provider.calls[1]['messages'][-1]['content'].lower()
+
+
+def test_provider_timeout_is_configurable_and_respects_decision_deadline(tmp_path, length_provider, monkeypatch):
+    path = _write_llm_config(tmp_path, lambda d: d['providers'][0].update(timeout_seconds=180))
+    gateway = LLMGateway(path)
+    length_provider.responses = [('stop', '{"answer": 7}')] * 2
+    assert _request_json(gateway).success
+    assert length_provider.calls[-1]['timeout_seconds'] == 180
+    monkeypatch.setattr('src.mission.llm_gateway.time.perf_counter', lambda: 100.)
+    assert gateway.request_json(role='decision_maker', snapshot_id='bounded',
+        system_prompt='test', user_payload={}, validate=_validate_answer,
+        deadline_monotonic=110.).success
+    assert length_provider.calls[-1]['timeout_seconds'] == 10
+
+
+@pytest.mark.parametrize('value', [0, -1, True, '120', float('inf'), float('nan')])
+def test_invalid_provider_timeout_is_rejected(tmp_path, value):
+    path = _write_llm_config(tmp_path, lambda d: d['providers'][0].update(timeout_seconds=value))
+    with pytest.raises((LLMConfigurationError, ValueError), match='timeout_seconds'):
+        LLMGateway(path)
+
+
+def test_timeout_retries_wait_briefly_and_remain_bounded(scripted_transport, monkeypatch):
+    waits = []
+    monkeypatch.setattr('src.mission.llm_gateway.time.sleep', waits.append)
+    transport = scripted_transport({'red_commander': [TimeoutError('slow')] * 3})
+    gateway = LLMGateway(transport=transport)
+    result = _request_json(gateway, role='red_commander')
+    assert result.failure_category == 'timeout'
+    assert len(transport.calls) == 3
+    assert waits == [1.0, 2.0]
+    assert all(a['elapsed_seconds'] >= 0 for a in gateway.call_log[-1]['attempts'])
+
+
+def test_timeout_backoff_does_not_exceed_shared_deadline(scripted_transport, monkeypatch):
+    now = [100.0]
+    waits = []
+    monkeypatch.setattr('src.mission.llm_gateway.time.perf_counter', lambda: now[0])
+    def sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+    monkeypatch.setattr('src.mission.llm_gateway.time.sleep', sleep)
+    transport = scripted_transport({'red_commander': [TimeoutError('slow')]})
+    result = LLMGateway(transport=transport).request_json(
+        role='red_commander', snapshot_id='bounded', system_prompt='test',
+        user_payload={}, validate=_validate_answer, deadline_monotonic=100.5,
+    )
+    assert result.failure_category == 'timeout'
+    assert waits == [0.5]
+    assert len(transport.calls) == 1

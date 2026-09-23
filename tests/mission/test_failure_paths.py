@@ -41,6 +41,8 @@ def test_red_failure_does_not_advance_clock_or_move_vessels(monkeypatch):
     assert target.float_position == before[1]
     assert engine.runtime_status == "paused_model"
     assert engine.blocked_role == "red_commander"
+    assert engine.last_result["action"] == "waiting_manual_retry"
+    assert engine.last_result["blocked_reason"] == "offline"
 
 
 def test_run_stops_after_publishing_one_terminal_model_block_frame():

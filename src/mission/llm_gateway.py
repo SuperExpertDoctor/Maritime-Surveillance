@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -34,8 +35,9 @@ class LLMConfigurationError(RuntimeError):
 class LLMOutputTruncated(RuntimeError):
     """The provider exhausted its output budget; no response content is retained."""
 
-    def __init__(self):
+    def __init__(self, metadata=None):
         super().__init__("output_truncated: finish_reason=length")
+        self.metadata = metadata or {}
 
 
 @dataclass(frozen=True)
@@ -51,9 +53,10 @@ class ModelResult:
 class ProviderOutput(str):
     """Text plus explicit external API output channels (never prompt-derived)."""
 
-    def __new__(cls, content, channels=()):
+    def __new__(cls, content, channels=(), metadata=None):
         instance = super().__new__(cls, content)
         instance.channels = list(channels)
+        instance.metadata = metadata or {}
         return instance
 
 
@@ -101,8 +104,15 @@ class OpenAICompatibleTransport:
         try:
             response = client.chat.completions.create(**kwargs)
             choice = response.choices[0]
+            usage = getattr(response, "usage", None)
+            metadata = {
+                "finish_reason": getattr(choice, "finish_reason", None),
+                "usage": {name: getattr(usage, name) for name in
+                          ("prompt_tokens", "completion_tokens", "total_tokens")
+                          if isinstance(getattr(usage, name, None), int)},
+            }
             if getattr(choice, "finish_reason", None) == "length":
-                raise LLMOutputTruncated()
+                raise LLMOutputTruncated(metadata)
             channels = []
             for name, kind in (("reasoning_content", "external_provider_reasoning"),
                                ("thinking", "external_provider_reasoning"),
@@ -112,7 +122,7 @@ class OpenAICompatibleTransport:
                     channels.append({"kind": kind, "source": f"choices[0].message.{name}",
                                      "content": value, "model": model,
                                      "provenance": "external_api_response"})
-            return ProviderOutput(choice.message.content or "", channels)
+            return ProviderOutput(choice.message.content or "", channels, metadata)
         finally:
             client.close()
 
@@ -158,6 +168,12 @@ class LLMGateway:
         self._providers = {
             provider["name"]: provider for provider in params.get("providers", [])
         }
+        self._request_timeout_seconds = self._providers.get("longcat", {}).get("timeout_seconds", 120.0)
+        if (isinstance(self._request_timeout_seconds, bool)
+                or not isinstance(self._request_timeout_seconds, (int, float))
+                or not math.isfinite(self._request_timeout_seconds)
+                or self._request_timeout_seconds <= 0):
+            raise LLMConfigurationError("provider timeout_seconds must be a positive finite number")
         self._models = {model["id"]: model for model in params.get("models", [])}
         self._bindings = params.get("bindings", {})
         configured_retries = params.get("cycles", {}).get("max_retries", 2)
@@ -447,7 +463,7 @@ class LLMGateway:
                 failure_category = "timeout"
                 break
             transport_timeout = self._transport_timeout(
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=self._request_timeout_seconds if timeout_seconds is None else timeout_seconds,
                 deadline_monotonic=deadline_monotonic,
                 transport_deadline_monotonic=transport_deadline_monotonic,
             )
@@ -456,6 +472,8 @@ class LLMGateway:
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
                 break
+            attempt["timeout_seconds"] = transport_timeout
+            transport_started = time.perf_counter()
             try:
                 raw = self.transport.complete(
                     role=role,
@@ -470,9 +488,11 @@ class LLMGateway:
                     supports_json_mode=binding["supports_json_mode"],
                     timeout_seconds=transport_timeout,
                 )
+                attempt.update(getattr(raw, "metadata", {}))
             except AssertionError:
                 raise
-            except LLMOutputTruncated:
+            except LLMOutputTruncated as exc:
+                attempt.update(exc.metadata)
                 last_errors = ("output_truncated: finish_reason=length",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "output_truncated"
@@ -484,6 +504,15 @@ class LLMGateway:
                     failure_category = "timeout"
                     break
                 attempt_max_tokens = min(attempt_max_tokens * 2, retry_token_limit)
+                # Do not repeat an overlong answer verbatim or send partial
+                # output back to the model. Keep a single compact retry hint.
+                hint = {"role": "user", "content": (
+                    "The previous response exceeded the output limit. Return a compact "
+                    + ("JSON object matching the required schema. " if validate is not None else "response. ")
+                    + "Omit commentary and keep optional notes empty; retain all required fields."
+                )}
+                if hint not in messages:
+                    messages.append(hint)
                 continue
             except Exception as exc:
                 error = self._redact(str(exc)) or type(exc).__name__
@@ -499,7 +528,28 @@ class LLMGateway:
                 failure_category = (
                     "timeout" if self._is_timeout(exc) else "transport"
                 )
+                if failure_category == "timeout" and attempt_number < total_attempts:
+                    # Avoid immediate repeated requests to a congested service;
+                    # backoff consumes the same decision deadline, never extends it.
+                    pause = self._transport_timeout(
+                        timeout_seconds=float(attempt_number),
+                        deadline_monotonic=deadline_monotonic,
+                        transport_deadline_monotonic=transport_deadline_monotonic,
+                    )
+                    attempt["retry_delay_seconds"] = pause
+                    attempt["request_elapsed_seconds"] = max(0.0, time.perf_counter() - transport_started)
+                    if pause > 0:
+                        time.sleep(pause)
                 continue
+            finally:
+                attempt["elapsed_seconds"] = max(0.0, time.perf_counter() - transport_started)
+                if attempt["errors"]:
+                    logging.getLogger(__name__).warning(
+                        "Model request failed: role=%s attempt=%s/%s max_tokens=%s "
+                        "timeout=%.1fs elapsed=%.1fs errors=%s",
+                        role, attempt_number, total_attempts, attempt["max_tokens"],
+                        transport_timeout, attempt["elapsed_seconds"], "; ".join(attempt["errors"]),
+                    )
 
             if self._transport_deadline_expired(
                 transport_deadline_monotonic, deadline_monotonic

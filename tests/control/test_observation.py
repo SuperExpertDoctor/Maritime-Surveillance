@@ -267,3 +267,13 @@ def test_released_passive_position_reaches_probe_controller_without_visual_sampl
         engine, current_time=engine.config.mission.contact.stale_after_min + 1,
     )
     assert not any(c.contact_id == cid for c in stale.contacts)
+
+
+def test_observation_publishes_storm_planning_margin(engine):
+    from src.env.obstacle import Thunderstorm
+
+    storm = Thunderstorm(center=(12., 12.), size=2., move_vector=(.03, -.05))
+    engine.allocator.sm.obstacles = [storm]
+    observation = build_observation(engine)
+    assert len(observation.hazards) == 1
+    assert observation.hazards[0].safety_margin_cells == engine.config.environment.storm_safety_margin_cells

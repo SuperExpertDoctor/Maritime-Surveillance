@@ -1416,12 +1416,13 @@ class SimulationEngine:
             return self.last_result
         try:
             self._prepare_red_decision(self.clock.time)
-        except RedDecisionBlocked:
+        except RedDecisionBlocked as exc:
             self._publish_runtime_state()
             self.last_result = {
                 "trigger_type": "model_blocked",
-                "action": None,
+                "action": "waiting_manual_retry",
                 "blocked_role": self.blocked_role,
+                "blocked_reason": str(exc),
             }
             return self.last_result
         t = self.clock.tick()

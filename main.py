@@ -191,9 +191,14 @@ def main(
         frame_publisher.push_snapshot(current_engine, result, steps)
 
         if result["trigger_type"] != "none":
+            detail = (
+                f" | role={result.get('blocked_role')} reason={result.get('blocked_reason')}"
+                " | 仿真已暂停，请在右侧模型暂停面板点击重试"
+                if result["trigger_type"] == "model_blocked" else ""
+            )
             print(
                 f"[t={sm.current_time:.0f}min] Trigger: {result['trigger_type']} "
-                f"- {result.get('action')}"
+                f"- {result.get('action')}{detail}"
             )
         if int(sm.current_time) % 60 == 0:
             summary = current_engine.summary()

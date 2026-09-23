@@ -6,6 +6,7 @@ providers:
     api_base: https://api.longcat.chat/openai/v1
     api_key_env: LONGCAT_API_KEY
     supports_json_mode: false
+    timeout_seconds: 120  # Per request; decision deadlines can shorten this.
 
 models:
   - id: LongCat-2.0

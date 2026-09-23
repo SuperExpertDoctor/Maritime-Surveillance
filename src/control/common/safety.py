@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 from enum import Enum
 import math
 
+import numpy as np
+
 from src.control.common.contracts import (
     ActionSpec,
     ControlCommand,
@@ -13,7 +15,6 @@ from src.control.common.contracts import (
     OperationMode,
     SensorMode,
 )
-
 
 SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN = math.radians(2.0)
 
@@ -101,17 +102,16 @@ class SafetyEnvelope:
             interventions.append(SafetyIntervention("speed_clipped"))
 
         applied = replace(command, turn_rate_rad_min=turn_rate, speed_cells_min=speed)
-        if self._motion_blocked(applied, observation, dt_min):
-            applied = self._safe_candidate(command, turn_rate, observation, dt_min)
+        forecasts = self._forecast_masks(observation, dt_min)
+        if not self._can_escape_after(applied, observation, dt_min, forecasts):
+            applied = self._safe_candidate(
+                command, turn_rate, observation, dt_min, forecasts
+            )
             interventions.append(SafetyIntervention("motion_corrected"))
 
-        if (
-            applied.sensor_mode is SensorMode.SAR
-            and (
-                command.operation_mode is not OperationMode.COVERAGE
-                or abs(applied.turn_rate_rad_min)
-                > SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN
-            )
+        if applied.sensor_mode is SensorMode.SAR and (
+            command.operation_mode is not OperationMode.COVERAGE
+            or abs(applied.turn_rate_rad_min) > SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN
         ):
             applied = replace(
                 applied,
@@ -175,6 +175,7 @@ class SafetyEnvelope:
         requested_turn: float,
         observation: ControlObservation,
         dt_min: float,
+        forecasts: list[np.ndarray],
     ) -> ControlCommand:
         candidate_turns = (
             requested_turn,
@@ -182,7 +183,14 @@ class SafetyEnvelope:
             self._action_spec.min_turn_rate_rad_min,
             0.0,
         )
-        for turn_rate in candidate_turns:
+        for turn_rate, candidate_speed in (
+            (turn, speed)
+            for speed in (
+                self._action_spec.min_speed_cells_min,
+                self._action_spec.max_speed_cells_min,
+            )
+            for turn in candidate_turns
+        ):
             legal_turn = self._clip(
                 turn_rate,
                 self._action_spec.min_turn_rate_rad_min,
@@ -191,11 +199,170 @@ class SafetyEnvelope:
             candidate = replace(
                 command,
                 turn_rate_rad_min=legal_turn,
-                speed_cells_min=self._action_spec.min_speed_cells_min,
+                speed_cells_min=candidate_speed,
             )
-            if not self._motion_blocked(candidate, observation, dt_min):
+            if self._can_escape_after(candidate, observation, dt_min, forecasts):
                 return candidate
         raise UnsafeControlState("no collision-free legal control candidate")
+
+    def _forecast_masks(
+        self, observation: ControlObservation, dt_min: float
+    ) -> list[np.ndarray]:
+        """Keep present exclusions and forecast moving storms over an escape turn."""
+        turns = [
+            abs(turn)
+            for turn in (
+                self._action_spec.min_turn_rate_rad_min,
+                self._action_spec.max_turn_rate_rad_min,
+            )
+            if turn
+        ]
+        steps = 1 + max(
+            (2 * math.ceil(math.pi / (turn * dt_min)) for turn in turns), default=0
+        )
+        mask = observation.planning_obstacle_mask
+        moving = [
+            hazard
+            for hazard in observation.hazards
+            if hazard.hazard_type == "thunderstorm" and any(hazard.velocity_cells_min)
+        ]
+        if not moving:
+            return [mask] * (steps + 1)
+        cols, rows = mask.shape
+        x, y = np.indices(mask.shape) + 0.5
+        forecasts = [mask]
+        for _ in range(steps):
+            future = np.array(mask, copy=True)
+            next_hazards = []
+            for hazard in moving:
+                # Match Thunderstorm.step(), including boundary reflection.
+                cx, cy = hazard.center
+                vx, vy = hazard.velocity_cells_min
+                cx, cy = cx + vx * dt_min, cy + vy * dt_min
+                h = hazard.half_extent_cells
+                if cx - h < 0 or cx + h > cols:
+                    vx, cx = -vx, min(max(cx, h), cols - h)
+                if cy - h < 0 or cy + h > rows:
+                    vy, cy = -vy, min(max(cy, h), rows - h)
+                extent = h + hazard.safety_margin_cells
+                future |= (np.abs(x - cx) <= extent) & (np.abs(y - cy) <= extent)
+                next_hazards.append(
+                    replace(hazard, center=(cx, cy), velocity_cells_min=(vx, vy))
+                )
+            moving = next_hazards
+            forecasts.append(future)
+        return forecasts
+
+    def _can_escape_after(
+        self,
+        command: ControlCommand,
+        observation: ControlObservation,
+        dt_min: float,
+        forecasts: list[np.ndarray],
+    ) -> bool:
+        """A clear next segment must leave a feasible bounded escape manoeuvre.
+
+        Checking only the next endpoint can fly an aircraft into a pose from
+        which every subsequent command hits a boundary. Roll out the same
+        midpoint dynamics as the executor, including the next storm update.
+        """
+
+        def advance(pose, speed, turn, index):
+            col, row, heading = pose
+            mid = heading + turn * dt_min / 2
+            end = (
+                col + speed * dt_min * math.cos(mid),
+                row + speed * dt_min * math.sin(mid),
+                heading + turn * dt_min,
+            )
+            if any(
+                self._cell_blocked(c, r, forecasts[index])
+                for c, r in self._traversed_cells(col, row, *end[:2])
+            ):
+                return None
+            if self._point_blocked(*end[:2], forecasts[index + 1]):
+                return None
+            return end
+
+        state = observation.self_state
+        first = advance(
+            (*state.position, state.heading_rad),
+            command.speed_cells_min,
+            command.turn_rate_rad_min,
+            0,
+        )
+        if first is None:
+            return False
+        # Try straight departure, quarter/half turns, and an orbit. Fast
+        # departure matters when a drifting storm overtakes a slow turn.
+        for turn in (
+            self._action_spec.max_turn_rate_rad_min,
+            self._action_spec.min_turn_rate_rad_min,
+        ):
+            if not turn:
+                continue
+            turn_steps = math.ceil(math.pi / (abs(turn) * dt_min))
+            for escape_speed in (
+                self._action_spec.min_speed_cells_min,
+                self._action_spec.max_speed_cells_min,
+            ):
+                for duration in (
+                    0,
+                    math.ceil(turn_steps / 2),
+                    turn_steps,
+                    2 * turn_steps,
+                ):
+                    pose = first
+                    for index in range(1, len(forecasts) - 1):
+                        pose = advance(
+                            pose,
+                            escape_speed,
+                            turn if index <= duration else 0.0,
+                            index,
+                        )
+                        if pose is None:
+                            break
+                    else:
+                        if any(
+                            self._has_boundary_turn_clearance(
+                                pose, backup, dt_min, forecasts[-1]
+                            )
+                            for backup in (
+                                self._action_spec.min_turn_rate_rad_min,
+                                self._action_spec.max_turn_rate_rad_min,
+                            )
+                            if backup
+                        ):
+                            return True
+        return False
+
+    def _has_boundary_turn_clearance(
+        self,
+        pose: tuple[float, float, float],
+        turn: float,
+        dt_min: float,
+        mask: np.ndarray,
+    ) -> bool:
+        """Check circle extrema too: sampled chords alone can miss an edge."""
+        radius = (
+            self._action_spec.min_speed_cells_min
+            * dt_min
+            / (2 * math.sin(abs(turn) * dt_min / 2))
+        )
+        col, row, heading = pose
+        sign = 1 if turn > 0 else -1
+        cx, cy = col - sign * radius * math.sin(
+            heading
+        ), row + sign * radius * math.cos(heading)
+        cols, rows = mask.shape
+        if (
+            cx - radius < 0
+            or cy - radius < 0
+            or cx + radius >= cols
+            or cy + radius >= rows
+        ):
+            return False
+        return True
 
     @staticmethod
     def _clip(value: float, lower: float, upper: float) -> float:

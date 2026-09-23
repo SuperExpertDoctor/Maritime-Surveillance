@@ -117,7 +117,7 @@ def test_safety_clips_turn_and_speed_to_action_spec(setup):
 
 def test_safety_preserves_task_intent_while_avoiding_blocked_boundary_step(setup):
     envelope, _ = setup
-    observation = make_observation(position=(4.9, 2.5))
+    observation = make_observation(position=(4.4, 2.5))
     requested = ControlCommand(
         turn_rate_rad_min=10.0,
         speed_cells_min=10.0,
@@ -425,3 +425,155 @@ def test_safety_raises_when_no_legal_collision_free_candidate_exists(setup):
 
     with pytest.raises(UnsafeControlState):
         envelope.apply(command, observation, dt_min=1.0)
+
+
+def _replay_aircraft(position, heading):
+    from src.env.uav_entity import UAVEntity
+    from src.schedule.datatypes import GridCoord
+
+    uav = UAVEntity("replay", GridCoord(0, 0), endurance_h=8.0, cruise_speed_kmh=160.0)
+    uav._col, uav._row = position
+    uav.heading_rad = math.radians(heading)
+    return uav
+
+
+@pytest.mark.parametrize(
+    "position,heading,target",
+    [
+        ((0.8870955716, 13.6736357057), 181.887336, 225.0),
+        ((6.9875285876, 0.7574690928), 251.997988, 270.0),
+        ((0.6537893655, 24.8952793555), 176.242190, 180.0),
+    ],
+)
+def test_live_edge_approaches_keep_room_to_turn(position, heading, target):
+    from dataclasses import replace
+
+    spec = ActionSpec(-0.32, 0.32, 0.16, 0.32)
+    envelope = SafetyEnvelope(spec)
+    observation = make_observation(
+        position=position,
+        heading_rad=math.radians(heading),
+        obstacle_mask=np.zeros((30, 30), dtype=bool),
+    )
+    uav = _replay_aircraft(position, heading)
+    corrected = 0
+    for _ in range(60):
+        state = observation.self_state
+        error = (math.radians(target) - state.heading_rad + math.pi) % (
+            2 * math.pi
+        ) - math.pi
+        command = ControlCommand(
+            error, 0.2666666667, SensorMode.OFF, OperationMode.TRANSIT
+        )
+        result = envelope.apply(command, observation, 1.0)
+        corrected += any(i.kind == "motion_corrected" for i in result.interventions)
+        applied = result.applied_command
+        uav.apply_motion(applied.turn_rate_rad_min, applied.speed_cells_min, 1.0)
+        xy = uav.float_position
+        assert all(0 <= value < 30 for value in xy)
+        observation = replace(
+            observation,
+            self_state=replace(state, position=xy, heading_rad=uav.heading_rad),
+        )
+    assert corrected > 0
+
+
+@pytest.mark.parametrize(
+    "position,heading,center",
+    [
+        ((12.2, 13.3262032811), 270.0, (10.3306720092, 13.1754973621)),
+        ((14.2593773053, 8.2), 180.0, (11.8468812469, 10.7573412845)),
+    ],
+)
+def test_live_drifting_storm_approaches_do_not_strand_aircraft(
+    position, heading, center
+):
+    from dataclasses import replace
+    from src.control.common.contracts import HazardObservation
+    from src.env.obstacle import Thunderstorm, obstacle_grid_mask
+
+    storm = Thunderstorm(
+        center=center, size=2, move_vector=(0.0309430457, -0.049350124)
+    )
+    envelope = SafetyEnvelope(ActionSpec(-0.32, 0.32, 0.16, 0.32))
+    observation = make_observation(
+        position=position,
+        heading_rad=math.radians(heading),
+        obstacle_mask=obstacle_grid_mask([storm], (30, 30), 1.0),
+    )
+    uav = _replay_aircraft(position, heading)
+    corrected = 0
+    for _ in range(40):
+        hazard = HazardObservation(
+            storm.id,
+            "thunderstorm",
+            storm.center,
+            storm.half_extent,
+            storm.move_vector,
+            storm.intensity,
+            safety_margin_cells=1.0,
+        )
+        observation = replace(
+            observation,
+            planning_obstacle_mask=obstacle_grid_mask([storm], (30, 30), 1.0),
+            hazards=(hazard,),
+        )
+        state = observation.self_state
+        error = (math.radians(heading) - state.heading_rad + math.pi) % (
+            2 * math.pi
+        ) - math.pi
+        result = envelope.apply(
+            ControlCommand(error, 0.2666666667, SensorMode.OFF, OperationMode.TRANSIT),
+            observation,
+            1.0,
+        )
+        corrected += any(i.kind == "motion_corrected" for i in result.interventions)
+        command = result.applied_command
+        uav.apply_motion(command.turn_rate_rad_min, command.speed_cells_min, 1.0)
+        xy = uav.float_position
+        storm.step(1.0)
+        mask = obstacle_grid_mask([storm], (30, 30), 1.0)
+        assert not SafetyEnvelope._point_blocked(*xy, mask)
+        observation = replace(
+            observation,
+            self_state=replace(state, position=xy, heading_rad=uav.heading_rad),
+        )
+    assert corrected > 0
+
+
+def test_safety_rejects_boundary_pose_without_room_to_turn(setup):
+    envelope, _ = setup
+    observation = make_observation(position=(4.9, 2.5))
+    command = ControlCommand(0.0, 0.1, SensorMode.OFF, OperationMode.TRANSIT)
+    with pytest.raises(UnsafeControlState):
+        envelope.apply(command, observation, 1.0)
+
+
+def test_storm_forecast_matches_raster_margin_and_boundary_reflection():
+    from dataclasses import replace
+    from src.control.common.contracts import HazardObservation
+    from src.env.obstacle import Thunderstorm, obstacle_grid_mask
+
+    storm = Thunderstorm(center=(28.9, 1.1), size=2.0, move_vector=(0.2, -0.3))
+    current = obstacle_grid_mask([storm], (30, 30), 1.0)
+    observation = replace(
+        make_observation(obstacle_mask=current),
+        hazards=(
+            HazardObservation(
+                storm.id,
+                "thunderstorm",
+                storm.center,
+                storm.half_extent,
+                storm.move_vector,
+                storm.intensity,
+                safety_margin_cells=1.0,
+            ),
+        ),
+    )
+    envelope = SafetyEnvelope(ActionSpec(-0.32, 0.32, 0.16, 0.32))
+    forecasts = envelope._forecast_masks(observation, 1.0)
+    for forecast in forecasts[1:]:
+        storm.step(1.0, (30, 30))
+        expected = current | obstacle_grid_mask([storm], (30, 30), 1.0)
+        np.testing.assert_array_equal(forecast, expected)
+    np.testing.assert_array_equal(observation.planning_obstacle_mask, current)

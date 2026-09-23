@@ -196,6 +196,9 @@ test('model pause explains bounded retries and requires an explicit manual retry
   let retries = 0;
   await installFrameSocket(page, frameFixture('live', {
     runtime_status: 'paused_model', blocked_role: 'red_commander',
+    model_calls: [{ role: 'red_commander', success: false, failure_category: 'timeout',
+      attempts: [{ errors: ['output_truncated: finish_reason=length'] },
+        { errors: ['Request timed out.'] }, { errors: ['Request timed out.'] }] }],
   }));
   await page.route('**/api/runtime/retry', route => {
     retries += 1;
@@ -208,6 +211,8 @@ test('model pause explains bounded retries and requires an explicit manual retry
   const panel = page.locator('.runtime-blocked');
   await expect(panel).toContainText('不会自动恢复');
   await expect(panel).toContainText('有限次自动重试');
+  await expect(panel).toContainText('已尝试 3 次');
+  await expect(panel).toContainText('Request timed out.');
   expect(retries).toBe(0);
   await page.getByRole('button', { name: '重试', exact: true }).click();
   await expect(panel).toContainText('本轮重试仍失败');

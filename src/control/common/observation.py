@@ -205,8 +205,7 @@ class ObservationProvider:
                 contacts.append(replace(canonical[cid], contact_id=alias, group_id=cid))
         return tuple(sorted(contacts, key=lambda contact: contact.contact_id))
 
-    @staticmethod
-    def _hazards(obstacles: Iterable[object]) -> tuple[HazardObservation, ...]:
+    def _hazards(self, obstacles: Iterable[object]) -> tuple[HazardObservation, ...]:
         snapshots = []
         for obstacle in obstacles:
             if isinstance(obstacle, Island):
@@ -229,6 +228,7 @@ class ObservationProvider:
                         half_extent_cells=obstacle.half_extent,
                         velocity_cells_min=obstacle.move_vector,
                         intensity=obstacle.intensity,
+                        safety_margin_cells=self._config.environment.storm_safety_margin_cells,
                     )
                 )
         return tuple(sorted(snapshots, key=lambda hazard: hazard.hazard_id))

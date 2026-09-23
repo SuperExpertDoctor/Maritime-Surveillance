@@ -217,6 +217,11 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
 
   const intents = frame?.intents || [];
   const runtimeBlocked = frame?.runtime_status === "paused_model";
+  const blockedCall = runtimeBlocked
+    ? [...(frame?.model_calls || [])].reverse().find(call => call.role === frame.blocked_role)
+    : null;
+  const failedAttempts = blockedCall?.attempts || [];
+  const blockedErrors = failedAttempts.at(-1)?.errors || [];
 
   return (
     <section className="sidebar-section mission-panel intent-panel" aria-label="人工重点区">
@@ -229,6 +234,10 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
         <div className="runtime-blocked" role="alert">
           <div className="runtime-blocked-title"><AlertTriangle size={14} /><strong>模型暂停</strong><span>{frame.blocked_role || "unknown"}</span></div>
           <p>模型决策失败，当前进度已保留，仿真时钟暂停；单纯等待不会自动恢复。</p>
+          {blockedCall?.success === false && <p>
+            已尝试 {failedAttempts.length} 次 · {blockedCall.failure_category || "请求未完成"}
+            {blockedErrors.length > 0 && `：${blockedErrors.join("；")}`}
+          </p>}
           <p>点击“重试”发起新一轮有限次自动重试，成功后从当前位置继续，无需重启回合。</p>
           {runtimeBusy && <p role="status">运行命令处理中，请等待结果。</p>}
           {!runtimeBusy && runtimeCommand?.error_code === "model_blocked" && (

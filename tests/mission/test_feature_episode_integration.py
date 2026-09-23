@@ -399,3 +399,22 @@ def test_learning_provider_runs_factory_observation_action_safety_and_executor()
     assert tick.safety.applied_command.operation_mode is OperationMode.TRANSIT
     assert tick.execution is not None
     assert uav.float_position != before
+
+
+def test_pending_search_without_selectable_candidates_does_not_call_model(monkeypatch):
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    pending = SimpleNamespace(kind='search', status='approved', assigned_uav_id=None)
+    snapshot = replace(_coverage_capacity_satisfied_snapshot(candidates=()),
+                       active_tasks=(pending,), available_uav_ids=(), feasible_edges=())
+    allocator.reviewer = _ReviewerDouble()
+    allocator.trigger_manager.check = lambda _time: TriggerDecision('heavy', reason='pending search')
+    monkeypatch.setattr(allocator, 'build_mission_snapshot', lambda *a, **kw: snapshot)
+    monkeypatch.setattr(allocator.mission_scheduler, 'decide',
+                        lambda *a, **kw: pytest.fail('pending search uses deterministic reassignment'))
+    result, batch = allocator.mission_step(10.0)
+    assert result['action'] == 'mission_selection_skipped'
+    assert result['skip_reason'] == 'pending_search_reassignment'
+    assert batch is None
+    assert pending.status == 'approved'
+    probe = SimpleNamespace(kind='probe', status='approved', assigned_uav_id=None)
+    assert allocator._model_selection_skip_reason(replace(snapshot, active_tasks=(probe,))) is None

@@ -227,6 +227,7 @@ class HazardObservation:
     half_extent_cells: float
     velocity_cells_min: tuple[float, float]
     intensity: float
+    safety_margin_cells: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "center", tuple(self.center))

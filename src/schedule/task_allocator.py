@@ -552,6 +552,11 @@ class TaskAllocator:
         )
         if not snapshot.candidates and not unassigned_approved:
             return "no_model_candidates"
+        if not snapshot.candidates and all(task.kind == "search" for task in unassigned_approved):
+            # Approved searches are reassigned deterministically before model
+            # selection. An empty candidate set gives the model nothing it can
+            # select, even when a search is still waiting for an aircraft.
+            return "pending_search_reassignment"
 
         constraint = snapshot.coverage_constraint
         if constraint is None or constraint.required_new_search_count != 0:
