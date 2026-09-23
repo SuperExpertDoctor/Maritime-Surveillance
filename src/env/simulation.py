@@ -3709,7 +3709,8 @@ class SimulationEngine:
             candidate = Thunderstorm(
                 center=center,
                 size=size,
-                move_vector=(self.rng.uniform(-0.05, 0.05), self.rng.uniform(-0.05, 0.05)),
+                # Match initial storms: slow drift relative to ships and UAVs.
+                move_vector=(self.rng.uniform(-0.01, 0.01), self.rng.uniform(-0.01, 0.01)),
                 lifetime=self.rng.choice((-1.0, self.rng.uniform(90.0, 240.0))),
                 intensity=self.rng.uniform(0.3, 1.0),
                 id=f"storm-{self._next_storm_id}",

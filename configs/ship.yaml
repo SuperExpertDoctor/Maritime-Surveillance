@@ -13,7 +13,8 @@ opponent_population:
   max_active_type_ii: 3
   type_i_probability: 0.5
 type_ii_ais_on_probability: 0.5
-speed_kn: 18.0
+# 22.2 km/h cruise, clearly below the UAV's 160 km/h.
+speed_kn: 12.0
 ais_update_interval_min: 1.0
 ais_position_noise_cells: 0.05
 max_turn_rate_deg_min: 12
@@ -27,7 +28,7 @@ clear_hold_min: 5.0
 red_decision_cycle_min: 3.0
 red_plan_valid_min: 3.0
 speed_min_kn: 10.0
-speed_max_kn: 24.0
+speed_max_kn: 18.0  # 33.3 km/h even during evasive acceleration.
 heading_offset_max_deg: 90.0
 zigzag_heading_max_deg: 35.0
 zigzag_period_min_min: 4.0
