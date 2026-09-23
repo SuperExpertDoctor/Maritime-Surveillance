@@ -141,9 +141,11 @@ def test_return_capture_snaps_final_approach_before_boundary_fault():
 
     engine._step_controlled_uav(uav, 1.0)
 
-    assert uav.status == "refueling"
+    assert uav.status == "idle"
     assert uav.position == base.position
-    assert base.is_refueling(uav.id)
+    assert uav.fuel_remaining_pct == 1.0
+    assert not base.is_refueling(uav.id)
+    assert uav.id in {item.id for item in engine.allocator.sm.get_available_uavs()}
     assert uav.id not in engine._emergency_failures
 
 

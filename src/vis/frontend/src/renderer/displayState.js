@@ -6,8 +6,8 @@ export function informationCategory(value, grid = {}) {
 
 const TASK_PHASES = {
   coverage: {
-    transit: { label: "转场搜索", tone: "transit", phase: "coverage_transit" },
-    transit_astar: { label: "转场搜索", tone: "transit", phase: "coverage_transit" },
+    transit: { label: "飞往搜索区", tone: "transit", phase: "coverage_transit" },
+    transit_astar: { label: "飞往搜索区", tone: "transit", phase: "coverage_transit" },
     align_scan: { label: "搜索扫描", tone: "search", phase: "coverage_scan" },
     scanning: { label: "搜索扫描", tone: "search", phase: "coverage_scan" },
     completed: { label: "待命", tone: "idle", phase: "idle" },
@@ -36,7 +36,7 @@ const TASK_PHASES = {
 
 const LEGACY_STATUS = {
   idle: { label: "待命", tone: "idle", phase: "idle" },
-  transit: { label: "转场搜索", tone: "transit", phase: "coverage_transit" },
+  transit: { label: "飞往搜索区", tone: "transit", phase: "coverage_transit" },
   searching: { label: "搜索扫描", tone: "search", phase: "coverage_scan" },
   tracking: { label: "持续跟踪", tone: "track", phase: "track_active" },
   returning: { label: "返航", tone: "return", phase: "return" },

@@ -387,6 +387,7 @@ def test_frame_exposes_search_tasks_as_colored_grid_cell_sets():
 
 def test_base_capacity_sends_fourth_arrival_to_holding_then_refuels():
     config = ConfigLoader.load()
+    config.uav.refuel_time_min = 3
     config.environment.base_count = 1
     engine = SimulationEngine(config, seed=11)
     base = engine.base

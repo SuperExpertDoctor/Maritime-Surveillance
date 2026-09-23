@@ -2871,6 +2871,8 @@ class SimulationEngine:
     def _land_for_refuelling(self, uav: UAVEntity) -> None:
         base = self._return_base_by_uav.get(uav.id)
         if base is not None and base.land_uav(uav.id):
+            if base.refuel_time_min <= 0:
+                self._finish_base_service(base, self.clock.time, 0.0)
             return
         if base is not None:
             self._holding_base_by_uav[uav.id] = base
@@ -5149,6 +5151,48 @@ class SimulationEngine:
             or navigable_home > usable_remaining_range
         )
 
+    def _finish_base_service(
+        self, base: BaseStation, current_time: float, dt_min: float
+    ) -> None:
+        ready = base.step(dt_min)
+        for uav_id in ready:
+            uav = next(item for item in self.uavs if item.id == uav_id)
+            uav.position = base.position
+            uav.base_position = base.position
+            uav.refuel()
+            self._return_base_by_uav.pop(uav.id, None)
+            if self.control_coordinator.has_controller(uav.id):
+                self.control_coordinator.reset_after_refuel(
+                    uav.id,
+                    current_time=current_time,
+                )
+                self._next_sortie_number[uav.id] += 1
+                if (
+                    self.control_coordinator.configured_mode(uav.id)
+                    is not ControlMode.HEURISTIC
+                ):
+                    self.control_coordinator.start_work(
+                        uav.id,
+                        sortie_number=self._next_sortie_number[uav.id],
+                        current_time=current_time,
+                        dt_min=self.clock.dt_min,
+                    )
+                self._coordinator_tasks.pop(uav.id, None)
+            if self._sortie_searched[uav.id]:
+                self.lifecycle_cycles[uav.id] += 1
+            self._sortie_searched[uav.id] = False
+            self.allocator.sm.clear_uav_assignment(uav.id)
+            self.allocator.trigger_manager.notify_event(
+                "uav_refueled", time=current_time, uav_id=uav.id,
+            )
+            self.allocator.sm.add_event("uav_refueled", {
+                "uav_id": uav.id,
+                "base_id": base.id,
+                "base_position": base.position,
+            })
+        if ready:
+            self._sync_state_from_entities()
+
     def _process_refuelling(self, current_time: float) -> None:
         for uav in self.uavs:
             if uav.status != "refueling":
@@ -5173,42 +5217,10 @@ class SimulationEngine:
                     uav_id=uav.id,
                     base_id=base.id,
                 )
+            elif base.refuel_time_min <= 0:
+                self._finish_base_service(base, current_time, 0.0)
         for base in self.bases:
-            for uav_id in base.step(self.clock.dt_min):
-                uav = next(item for item in self.uavs if item.id == uav_id)
-                uav.position = base.position
-                uav.base_position = base.position
-                uav.refuel()
-                self._return_base_by_uav.pop(uav.id, None)
-                if self.control_coordinator.has_controller(uav.id):
-                    self.control_coordinator.reset_after_refuel(
-                        uav.id,
-                        current_time=current_time,
-                    )
-                    self._next_sortie_number[uav.id] += 1
-                    if (
-                        self.control_coordinator.configured_mode(uav.id)
-                        is not ControlMode.HEURISTIC
-                    ):
-                        self.control_coordinator.start_work(
-                            uav.id,
-                            sortie_number=self._next_sortie_number[uav.id],
-                            current_time=current_time,
-                            dt_min=self.clock.dt_min,
-                        )
-                    self._coordinator_tasks.pop(uav.id, None)
-                if self._sortie_searched[uav.id]:
-                    self.lifecycle_cycles[uav.id] += 1
-                self._sortie_searched[uav.id] = False
-                self.allocator.sm.clear_uav_assignment(uav.id)
-                self.allocator.trigger_manager.notify_event(
-                    "uav_refueled", time=current_time, uav_id=uav.id,
-                )
-                self.allocator.sm.add_event("uav_refueled", {
-                    "uav_id": uav.id,
-                    "base_id": base.id,
-                    "base_position": base.position,
-                })
+            self._finish_base_service(base, current_time, self.clock.dt_min)
         for uav in self.uavs:
             if uav.status != "holding":
                 continue
@@ -5225,6 +5237,8 @@ class SimulationEngine:
                     "uav_id": uav.id,
                     "base_id": base.id,
                 })
+                if base.refuel_time_min <= 0:
+                    self._finish_base_service(base, current_time, 0.0)
         if (
             self._lifecycle_mode
             and min(self.lifecycle_cycles.values(), default=0)

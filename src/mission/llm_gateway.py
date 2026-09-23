@@ -377,7 +377,10 @@ class LLMGateway:
         return self._request(
             role=role, snapshot_id=snapshot_id, system_prompt=system_prompt,
             user_payload=None, user_content=user_prompt, validate=None,
-            attempt_limit=1, max_tokens=8, timeout_seconds=timeout_seconds,
+            # Connectivity only needs a complete short acknowledgement. Do
+            # not inherit the decision role's deliberation mode for this probe.
+            attempt_limit=1, max_tokens=32, timeout_seconds=timeout_seconds,
+            thinking_override="disabled",
         )
 
     def _request(
@@ -392,6 +395,7 @@ class LLMGateway:
         user_content: str | None = None,
         attempt_limit: int | None = None,
         max_tokens: int | None = None,
+        thinking_override: str | None = None,
         timeout_seconds: float | None = None,
         deadline_monotonic: float | None = None,
         transport_deadline_monotonic: float | None = None,
@@ -420,6 +424,10 @@ class LLMGateway:
             {"role": "user", "content": user_content},
         ]
         binding = self._binding(role)
+        # _binding returns a request-local dictionary; role configuration and
+        # subsequent mission requests retain their configured thinking mode.
+        if thinking_override is not None:
+            binding["thinking"] = thinking_override
         attempt_max_tokens = max_tokens if max_tokens is not None else binding["max_tokens"]
         retry_token_limit = min(attempt_max_tokens * 4, 16384)
         call = {

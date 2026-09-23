@@ -134,7 +134,7 @@ def _recovery_engine() -> SimulationEngine:
             thunderstorm_count_min=0,
             thunderstorm_count_max=0,
         ),
-        uav=replace(config.uav, count_max=2),
+        uav=replace(config.uav, count_max=2, refuel_time_min=3),
     )
     return SimulationEngine(
         config,

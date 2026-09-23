@@ -334,7 +334,8 @@ TriggerManager.check():
 
 - 基地数量：1–3 个（`configs/environment.yaml` 可配）
 - 初始化时随机生成于陆地/岸线位置，基地间距 $\geq 5$ cells
-- 每个基地容量上限：**3 架 UAV 同时加油维护**
+- UAV 抵达基地后立即补满燃料并恢复可用（`configs/uav.yaml` 的 `refuel_time_min: 0`），有可行任务即可重新派遣。
+- 每个基地容量上限：**3 架 UAV 同时加油维护**；配置正数加油时间时启用等待队列。
 - UAV 返航时自动选择最近的可用基地；满容时 UAV 进入 `holding` 状态盘旋等待
 
 ### 5.2 岛屿与雷云

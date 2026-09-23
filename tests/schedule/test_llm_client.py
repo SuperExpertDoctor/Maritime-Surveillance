@@ -55,7 +55,7 @@ def test_probe_uses_a_short_bounded_longcat_request(monkeypatch):
 
     assert result == "OK"
     assert len(transport.calls) == 1
-    assert transport.calls[0]["max_tokens"] == 8
+    assert transport.calls[0]["max_tokens"] == 32
     assert transport.calls[0]["timeout_seconds"] == 7.5
     assert transport.calls[0]["json_mode"] is False
     assert transport.calls[0]["messages"] == [
@@ -364,3 +364,21 @@ def test_decide_accepts_priority_and_reason_declared_in_existing_prompt():
 def test_legacy_optional_fields_are_validated_before_geometry(field, value):
     payload = {"search_regions": [{"id": "S1", "bbox": [8, 8, 12, 13], field: value}]}
     assert LLMClient._schema_errors(payload)
+
+
+def test_probe_disables_thinking_without_changing_later_decisions(monkeypatch):
+    monkeypatch.setenv('LONGCAT_API_KEY', 'offline-probe-key')
+    transport = ScriptedTransport({'decision_maker': ['OK', '{"answer": 1}']})
+    client = LLMClient(ConfigLoader.load(), transport=transport)
+    assert client.resolve_binding('decision_maker')['thinking'] == 'enabled'
+    assert client.probe() == 'OK'
+    assert transport.calls[0]['thinking'] == 'disabled'
+    assert client.gateway.call_log[0]['thinking_mode'] == 'disabled'
+    decision = client.gateway.request_json(
+        role='decision_maker', snapshot_id='after-probe', system_prompt='Decide.',
+        user_payload={}, validate=lambda payload: (),
+    )
+    assert decision.success
+    assert transport.calls[1]['thinking'] == 'enabled'
+    assert transport.calls[1]['max_tokens'] == 4096
+    assert client.gateway.call_log[1]['thinking_mode'] == 'enabled'
