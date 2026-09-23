@@ -325,3 +325,34 @@ def test_mapped_global_event_is_rejected_before_any_state_mutation(
     assert ownership.current("UAV-1") is lease
     assert controllers["UAV-1"] is controller
     assert pending_tasks["UAV-1"] is coverage_task
+
+
+@pytest.mark.parametrize("region_state", ["reassigned", "completed", "missing"])
+def test_tracking_exit_does_not_restore_unavailable_saved_search(factory, coverage_task, region_state):
+    from types import SimpleNamespace
+    from src.schedule.datatypes import Region
+
+    ownership = ControlOwnership(["UAV-1"])
+    lease = ownership.acquire("UAV-1", ControlOwner.HEURISTIC, "tracking:C1", 0.0)
+    task = ControlTask("track:C1", OperationMode.TRACK, target_contact_id="C1")
+    controller = factory.create_heuristic("UAV-1", task)
+    region = Region(
+        coverage_task.task_id, coverage_task.region_bbox, "search",
+        status="completed" if region_state == "completed" else "active",
+        assigned_uav_id="UAV-2" if region_state == "reassigned" else None,
+    )
+    state = SimpleNamespace(
+        get_search_regions=lambda: [] if region_state == "missing" else [region],
+    )
+    flow = HeuristicTaskFlow(
+        ownership, factory, {"UAV-1": controller}, {"UAV-1": task},
+        state_manager=state,
+    )
+    flow.save_coverage_task("UAV-1", coverage_task, generation=1)
+
+    transition = flow.handle(_event("target_lost"), lease)
+
+    assert transition.task.task_type is OperationMode.HOLDING
+    assert transition.request_assignment
+    assert "UAV-1" not in flow._saved_coverage_tasks
+    assert region.assigned_uav_id == ("UAV-2" if region_state == "reassigned" else None)

@@ -69,6 +69,9 @@ export default function CoveragePanel({ frame, connectionStatus = "connected", r
   if (frame?.runtime_status === "paused_model") {
     statusMessages.push(`模型暂停 · 指标停留在${simulationTimeText(metrics?.as_of_min)}`);
   }
+  if (frame?.runtime_status === "paused_safety") {
+    statusMessages.push(`任务状态异常暂停 · 指标停留在${simulationTimeText(metrics?.as_of_min)}`);
+  }
   if (readOnly) {
     statusMessages.push("回放数据");
   } else {

@@ -349,3 +349,34 @@ def test_search_preemption_keeps_region_and_completion_for_reassignment():
     assert region.assigned_uav_id is None
     assert region.completion_pct == 37.5
     assert_owned_records(engine)
+
+
+def test_restored_search_tick_rebinds_task_region_and_sar_generation():
+    engine, uav, task = _coverage_task_fixture()
+    old_generation = engine.control_coordinator.current_lease(uav.id).generation
+    service = engine.allocator.sm.coverage_service
+    progress = service.progress(task.task_id, old_generation)
+    service.record(task.task_id, old_generation, progress.required_cells[:1], at_min=0.5)
+    engine._close_mission_task(
+        uav.id, task, status="approved", reason="preempted",
+        current_time=1.0, preserve_search=True,
+    )
+    # An interrupting contact task saves coverage; losing it restores the
+    # controller under a new lease, without a new scheduler assignment.
+    tracking = ControlTask("track:lost", OperationMode.TRACK, target_contact_id="lost")
+    engine.control_coordinator.assign_task(uav.id, tracking, current_time=1.0)
+    engine.control_coordinator.queue_event(
+        ControlEvent(1, 2.0, "target_lost", "test", uav.id, {"contact_id": "lost"})
+    )
+    tick = engine.control_coordinator.step_uav(uav, current_time=2.0)
+    engine._record_control_tick(uav, tick)
+
+    record = engine._mission_task_records[task.task_id]
+    assert record.status == "executing"
+    assert record.assigned_uav_id == uav.id
+    assert engine.allocator.sm.get_search_regions()[0].assigned_uav_id == uav.id
+    assert engine.allocator.sm.get_uav(uav.id).assigned_region_id == task.task_id
+    restored = service.progress(task.task_id, tick.lease.generation)
+    assert restored is not None
+    assert restored.scanned_cells == progress.required_cells[:1]
+    assert engine._validate_mission_state_invariants(strict=True) == ()

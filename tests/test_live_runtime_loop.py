@@ -387,3 +387,38 @@ def test_run_report_preserves_pause_and_filters_request_payloads(harness, monkey
     assert 'messages' not in report['model_calls'][0]
     with pytest.raises(FileExistsError):
         cli.main(probe_llm=False, run_report_dir=str(report_dir))
+
+
+@pytest.mark.parametrize("budget", [None, 0.3])
+@pytest.mark.parametrize("pause_during_step", [False, True])
+def test_safety_pause_keeps_live_commands_responsive(monkeypatch, budget, pause_during_step):
+    engine = StubEngine()
+    if pause_during_step:
+        original_step = engine.step
+
+        def safety_step():
+            result = original_step()
+            engine.runtime_status = "paused_safety"
+            return result
+
+        engine.step = safety_step
+    else:
+        engine.runtime_status = "paused_safety"
+    clock = [0.0]
+    waits = []
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+        assert engine.clock.time == 0
+        assert engine.step_calls == int(pause_during_step)
+        if budget is None:
+            engine.pending["runtime"].append("abort")
+
+    monkeypatch.setattr(cli.time, "sleep", wait)
+    cli._run_runtime_loop(
+        engine, 100, lambda *args: None, start_server=True, wall_seconds=budget,
+    )
+    assert waits
+    assert engine.runtime_status == ("finished" if budget is None else "paused_safety")

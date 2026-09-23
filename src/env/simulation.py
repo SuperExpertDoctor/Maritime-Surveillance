@@ -2302,7 +2302,34 @@ class SimulationEngine:
         if active_task is not None:
             self._coordinator_tasks[uav.id] = active_task
             record = self._mission_task_records.get(active_task.task_id)
-            if record is not None and record.status == "approved":
+            if (
+                record is not None
+                and record.kind == "search"
+                and record.status == "approved"
+                and record.assigned_uav_id in (None, uav.id)
+                and active_task.task_type is OperationMode.COVERAGE
+            ):
+                self._set_search_task_projection(
+                    active_task.task_id,
+                    state="executing",
+                    uav_id=uav.id,
+                    current_time=tick.observation.timestamp_min,
+                    reason=None,
+                )
+                self.allocator.sm.update_uav_status(
+                    uav.id, uav.status, uav.position,
+                    assigned_region_id=active_task.task_id,
+                    fuel_remaining_pct=uav.fuel_remaining_pct,
+                )
+                self._start_coverage_service_task(
+                    uav, active_task, tick.observation.timestamp_min,
+                    generation=tick.lease.generation,
+                )
+            elif (
+                record is not None
+                and record.status == "approved"
+                and record.assigned_uav_id == uav.id
+            ):
                 self._mission_task_records[active_task.task_id] = replace(
                     record,
                     status="executing",

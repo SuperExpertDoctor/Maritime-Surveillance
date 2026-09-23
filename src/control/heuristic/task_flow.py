@@ -196,6 +196,21 @@ class HeuristicTaskFlow:
         saved_coverage = None
         if event.event_type in {"target_lost", "target_departed"}:
             saved_coverage = self._saved_coverage_value(lease.uav_id)
+            if saved_coverage is not None and self._state_manager is not None:
+                region = next(
+                    (region for region in self._state_manager.get_search_regions()
+                     if region.id == saved_coverage.task.task_id),
+                    None,
+                )
+                # A saved controller is not a reservation: the scheduler may
+                # have reassigned or retired this search during the interruption.
+                if (
+                    region is None
+                    or region.status != "active"
+                    or region.assigned_uav_id not in (None, lease.uav_id)
+                ):
+                    self.clear_saved_coverage(lease.uav_id)
+                    saved_coverage = None
         if saved_coverage is not None:
             replacement_task, request_assignment = saved_coverage.task, False
         else:

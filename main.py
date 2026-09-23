@@ -40,12 +40,13 @@ def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_se
 
     started = time.monotonic()
     completed = 0
-    while completed < steps or engine.runtime_status == "paused_model":
+    paused_states = {"paused_model", "paused_safety"}
+    while completed < steps or engine.runtime_status in paused_states:
         if wall_seconds is not None and time.monotonic() - started >= wall_seconds:
             break
         if engine.runtime_status == "finished":
             break
-        if engine.runtime_status == "paused_model":
+        if engine.runtime_status in paused_states:
             if not start_server:
                 break
             # These boundaries consume commands on the simulation thread and
@@ -62,7 +63,7 @@ def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_se
                     else {"trigger_type": "none", "action": None}
                 )
                 on_step(engine, result)
-            if engine.runtime_status == "paused_model":
+            if engine.runtime_status in paused_states:
                 time.sleep(0.1)
             continue
 
@@ -71,7 +72,7 @@ def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_se
         if engine.clock.time != previous_time:
             completed += 1
         on_step(engine, result)
-        if engine.clock.time == previous_time and engine.runtime_status != "paused_model":
+        if engine.clock.time == previous_time and engine.runtime_status not in paused_states:
             break
     return engine.summary()
 
@@ -220,7 +221,7 @@ def main(
         # Capture that before marking normal CLI completion as read-only.
         aborted = engine.runtime_status == "finished"
         if start_server and (engine.runtime_status == "running" or
-                             (wall_seconds is not None and engine.runtime_status == "paused_model")):
+                             (wall_seconds is not None and engine.runtime_status in {"paused_model", "paused_safety"})):
             engine._set_runtime_state("finished")
             # Reject commands queued during the last step/publication instead
             # of leaving their receipts pending forever. New writes are gated
@@ -254,6 +255,8 @@ def main(
             encoding="utf-8")
     if runtime_before_finalize == "paused_model":
         print(f"仿真提前暂停：完成 {summary['steps']}/{steps} 步，模型决策失败；详见 JSONL 日志。")
+    elif runtime_before_finalize == "paused_safety":
+        print(f"仿真安全暂停：完成 {summary['steps']}/{steps} 步，任务状态不一致；详见 JSONL 日志中的 mission_state_invariant_failed。")
     else:
         print(f"仿真运行结束：完成 {summary['steps']}/{steps} 步。")
     print(json.dumps(summary, ensure_ascii=False, indent=2))

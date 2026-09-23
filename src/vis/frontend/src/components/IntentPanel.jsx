@@ -216,6 +216,9 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
   };
 
   const intents = frame?.intents || [];
+  const safetyBlocked = frame?.runtime_status === "paused_safety";
+  const safetyViolations = [...(frame?.events || [])].reverse()
+    .find(event => event.type === "mission_state_invariant_failed")?.data?.violations || [];
   const runtimeBlocked = frame?.runtime_status === "paused_model";
   const blockedCall = runtimeBlocked
     ? [...(frame?.model_calls || [])].reverse().find(call => call.role === frame.blocked_role)
@@ -229,6 +232,19 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
         <span><Focus size={15} />人工重点区</span>
         <small>{readOnly ? "回放只读" : `${intents.filter((intent) => intent.lifecycle === "active").length} ACTIVE`}</small>
       </div>
+
+      {safetyBlocked && (
+        <div className="runtime-blocked" role="alert">
+          <div className="runtime-blocked-title"><AlertTriangle size={14} /><strong>任务状态异常，已暂停</strong></div>
+          <p>当前进度已保留。任务分配状态不一致，需要修复后继续；模型重试无法解除此暂停。</p>
+          {safetyViolations.map(violation => <p key={violation}>{violation}</p>)}
+          {!readOnly && (
+            <div className="runtime-actions">
+              <button type="button" disabled={!canWrite || runtimeBusy} className="danger-action" onClick={() => sendRuntimeCommand("abort")}><X size={13} />结束回合</button>
+            </div>
+          )}
+        </div>
+      )}
 
       {runtimeBlocked && (
         <div className="runtime-blocked" role="alert">
