@@ -775,6 +775,11 @@ class TaskAllocator:
         selection_timing = dict(self.mission_scheduler.last_selection_timing)
         selection_timing.setdefault("prompt_seconds", 0.0)
         selection_timing.setdefault("prompt_bytes", 0)
+        selection_timing.setdefault("system_prompt_bytes", 0)
+        selection_timing.setdefault("user_prompt_bytes", 0)
+        selection_timing.setdefault("input_text_bytes", 0)
+        selection_timing.setdefault("prompt_format_version", None)
+        selection_timing.setdefault("configured_max_tokens", None)
         selection_timing.setdefault("llm_seconds", 0.0)
         selection_timing.setdefault("validation_seconds", 0.0)
         selection_timing.setdefault("matching_seconds", 0.0)
@@ -788,6 +793,11 @@ class TaskAllocator:
             "elapsed_before_snapshot_seconds": snapshot_frozen_wall - wall_started,
             "prompt_seconds": selection_timing["prompt_seconds"],
             "prompt_bytes": selection_timing["prompt_bytes"],
+            "system_prompt_bytes": selection_timing["system_prompt_bytes"],
+            "user_prompt_bytes": selection_timing["user_prompt_bytes"],
+            "input_text_bytes": selection_timing["input_text_bytes"],
+            "prompt_format_version": selection_timing["prompt_format_version"],
+            "configured_max_tokens": selection_timing["configured_max_tokens"],
             "llm_seconds": selection_timing["llm_seconds"],
             "validation_seconds": selection_timing["validation_seconds"],
             "matching_seconds": selection_timing["matching_seconds"],
@@ -820,6 +830,11 @@ class TaskAllocator:
                 "snapshot_seconds": self.last_decision_timing["snapshot_seconds"],
                 "prompt_seconds": self.last_decision_timing["prompt_seconds"],
                 "prompt_bytes": self.last_decision_timing["prompt_bytes"],
+                "system_prompt_bytes": self.last_decision_timing["system_prompt_bytes"],
+                "user_prompt_bytes": self.last_decision_timing["user_prompt_bytes"],
+                "input_text_bytes": self.last_decision_timing["input_text_bytes"],
+                "prompt_format_version": self.last_decision_timing["prompt_format_version"],
+                "configured_max_tokens": self.last_decision_timing["configured_max_tokens"],
                 "elapsed_before_snapshot_seconds": self.last_decision_timing[
                     "elapsed_before_snapshot_seconds"
                 ],

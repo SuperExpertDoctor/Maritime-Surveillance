@@ -912,6 +912,49 @@ def test_live_scheduler_corrects_infeasible_simultaneous_selection():
     assert 'infeasible_assignment' in correction['errors']
 
 
+def test_scheduler_sends_compact_wire_payload_once():
+    snapshot = _snapshot(
+        [_task("Q1")], [_resource("U1")], [_edge("Q1", "U1", 1.0)],
+    )
+    transport = ScriptedTransport({
+        "decision_maker": [json.dumps(_selection(snapshot, ["Q1"]))],
+    })
+    gateway = LLMGateway(transport=transport)
+    scheduler = MissionScheduler(gateway=gateway)
+
+    assert scheduler.decide(snapshot) is not None
+
+    messages = transport.calls[0]["messages"]
+    wire = json.loads(messages[1]["content"])
+    assert wire["prompt_format_version"] == "mission-prompt/v2"
+    assert "instructions" not in wire
+    assert messages[0]["content"] == scheduler.system_prompt
+    for term in (
+        "uav_option_columns",
+        "simultaneous",
+        "required_new_search_count",
+        "pending_intent_reviews",
+        "ordinary_search_admission_limit",
+    ):
+        assert term in messages[0]["content"]
+    assert messages[1]["content"] == json.dumps(
+        wire, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+    )
+    assert scheduler.last_selection_payload["instructions"] == scheduler.system_prompt
+    assert (
+        scheduler.last_selection_payload["snapshot"]["feasible_edges"][0]
+        ["uav_options"][0]["uav_id"]
+        == "U1"
+    )
+    assert scheduler.selection_interaction()["user_prompt"] == messages[1]["content"]
+
+
+def test_selection_interaction_before_any_payload_has_empty_user_payload():
+    interaction = MissionScheduler().selection_interaction()
+
+    assert interaction["user_prompt"] == "{}"
+
+
 @pytest.mark.parametrize("explicit_window", [False, True])
 def test_prompt_removes_illegal_search_preemption_edges(explicit_window):
     snapshot = _snapshot(

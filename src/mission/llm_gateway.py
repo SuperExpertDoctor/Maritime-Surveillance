@@ -251,7 +251,13 @@ class LLMGateway:
                 )
             if binding["model"] != "LongCat-2.0":
                 raise LLMConfigurationError(f"{role} must use LongCat-2.0")
-            if binding["max_tokens"] != expected_tokens:
+            tokens = binding["max_tokens"]
+            if role == "decision_maker":
+                if type(tokens) is not int or not 1 <= tokens <= 16384:
+                    raise LLMConfigurationError(
+                        "decision_maker max_tokens must be an integer from 1 to 16384"
+                    )
+            elif tokens != expected_tokens:
                 raise LLMConfigurationError(
                     f"{role} max_tokens must be {expected_tokens}"
                 )
@@ -438,6 +444,7 @@ class LLMGateway:
                 user_payload,
                 ensure_ascii=False,
                 allow_nan=False,
+                separators=(",", ":") if role == "decision_maker" else (", ", ": "),
             )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -460,6 +467,13 @@ class LLMGateway:
             "model": self._redact(binding["model"]),
             "provider": binding["provider"],
             "thinking_mode": binding["thinking"],
+            "system_prompt_bytes": len(system_prompt.encode("utf-8")),
+            "user_prompt_bytes": len(user_content.encode("utf-8")),
+            "input_text_bytes": sum(
+                len(message["content"].encode("utf-8")) for message in messages
+            ),
+            "prompt_format_version": (user_payload or {}).get("prompt_format_version"),
+            "configured_max_tokens": binding["max_tokens"],
             "attempts": [],
             "raw_attempts": [],
             "validation_errors": [],
@@ -494,10 +508,14 @@ class LLMGateway:
                     })
                     last_errors = ("decision_deadline_exceeded",)
                     failure_category = "timeout"
+                    call.setdefault("initial_failure_category", failure_category)
                     break
             attempt = {
                 "attempt": attempt_number,
                 "max_tokens": attempt_max_tokens,
+                "input_text_bytes": sum(
+                    len(message["content"].encode("utf-8")) for message in messages
+                ),
                 "messages": self.redact_log(messages),
                 "raw_output": None,
                 "errors": [],
@@ -507,6 +525,7 @@ class LLMGateway:
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
+                call.setdefault("initial_failure_category", failure_category)
                 break
             transport_timeout = self._transport_timeout(
                 timeout_seconds=request_timeout,
@@ -517,6 +536,7 @@ class LLMGateway:
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
+                call.setdefault("initial_failure_category", failure_category)
                 break
             attempt["timeout_seconds"] = transport_timeout
             transport_started = time.perf_counter()
@@ -545,6 +565,7 @@ class LLMGateway:
                 last_errors = ("output_truncated: finish_reason=length",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "output_truncated"
+                call.setdefault("initial_failure_category", failure_category)
                 if self._transport_deadline_expired(
                     effective_transport_deadline_monotonic,
                     effective_deadline_monotonic,
@@ -570,14 +591,17 @@ class LLMGateway:
                 attempt["errors"] = list(last_errors)
                 if isinstance(exc, LLMConfigurationError):
                     failure_category = "configuration"
+                    call.setdefault("initial_failure_category", failure_category)
                     break
                 status_code = self._status_code(exc)
                 if status_code in {400, 401, 402, 403}:
                     failure_category = f"http_{status_code}"
+                    call.setdefault("initial_failure_category", failure_category)
                     break
                 failure_category = (
                     "timeout" if self._is_timeout(exc) else "transport"
                 )
+                call.setdefault("initial_failure_category", failure_category)
                 if failure_category == "timeout" and attempt_number < total_attempts:
                     # Avoid immediate repeated requests to a congested service;
                     # backoff consumes the same decision deadline, never extends it.
@@ -609,6 +633,7 @@ class LLMGateway:
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
+                call.setdefault("initial_failure_category", failure_category)
                 break
             if isinstance(raw, ProviderOutput):
                 attempt["provider_channels"] = self.redact_log(raw.channels)
@@ -643,10 +668,13 @@ class LLMGateway:
                         call["validation_seconds"] += (
                             time.perf_counter() - validation_started
                         )
+            if last_errors:
+                call.setdefault("initial_failure_category", "validation")
             if self._deadline_expired(effective_deadline_monotonic):
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
+                call.setdefault("initial_failure_category", failure_category)
                 break
             if not last_errors:
                 call["success"] = True

@@ -75,6 +75,42 @@ def _request_json(gateway, role="decision_maker", marker="blue"):
     )
 
 
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        ("decision_maker", '{"marker":"blue"}'),
+        ("reviewer", '{"marker": "blue"}'),
+    ],
+)
+def test_request_json_serializes_only_decision_maker_payload_compactly(
+    scripted_transport, role, expected,
+):
+    transport = scripted_transport({role: ['{"answer": 7}']})
+    gateway = LLMGateway(transport=transport)
+
+    assert _request_json(gateway, role=role).success
+
+    assert transport.calls[0]["messages"][1]["content"] == expected
+
+
+def test_call_records_transmitted_utf8_byte_diagnostics(scripted_transport):
+    transport = scripted_transport({"decision_maker": ['{"answer": 7}']})
+    gateway = LLMGateway(transport=transport)
+
+    assert _request_json(gateway, marker="utf8-测试").success
+
+    messages = transport.calls[0]["messages"]
+    call = gateway.call_log[-1]
+    assert call["system_prompt_bytes"] == len(messages[0]["content"].encode("utf-8"))
+    assert call["user_prompt_bytes"] == len(messages[1]["content"].encode("utf-8"))
+    assert call["input_text_bytes"] == sum(
+        len(message["content"].encode("utf-8")) for message in messages
+    )
+    assert call["attempts"][0]["input_text_bytes"] == call["input_text_bytes"]
+    assert call["prompt_format_version"] is None
+    assert call["configured_max_tokens"] == 4096
+
+
 def test_invalid_json_is_corrected_with_exact_assistant_output(scripted_transport):
     raw = "  {bad}\n"
     transport = scripted_transport({
@@ -283,6 +319,26 @@ def test_truncation_stops_before_retry_with_less_than_useful_budget(monkeypatch)
     assert call["retry_minimum_seconds"] == 5.0
 
 
+def test_validation_cause_survives_deadline_expiry_during_validation(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
+    transport = _FakeClockTransport(now, ['{"answer": "wrong"}'], elapsed_seconds=0.0)
+    gateway = LLMGateway(transport=transport)
+
+    def slow_invalid(payload):
+        now[0] = 151.0
+        return _validate_answer(payload)
+
+    result = gateway.request_json(
+        role="decision_maker", snapshot_id="validation-deadline", system_prompt="system",
+        user_payload={}, validate=slow_invalid, deadline_monotonic=150.0,
+    )
+
+    assert not result.success
+    assert result.failure_category == "timeout"
+    assert gateway.call_log[-1]["initial_failure_category"] == "validation"
+
+
 def test_truncation_retries_when_useful_total_budget_remains(monkeypatch):
     now = [100.0]
     monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
@@ -379,7 +435,7 @@ def test_role_requests_do_not_share_conversation_messages(scripted_transport):
     assert blue.success and red.success
     assert transport.calls[0]["messages"] == [
         {"role": "system", "content": "system-blue"},
-        {"role": "user", "content": '{"marker": "blue"}'},
+        {"role": "user", "content": '{"marker":"blue"}'},
     ]
     assert transport.calls[1]["messages"] == [
         {"role": "system", "content": "system-red"},
@@ -447,22 +503,53 @@ def test_each_required_role_binding_is_validated(tmp_path, scripted_transport, r
         LLMGateway(llm_params_path=path, transport=scripted_transport({}))
 
 
+@pytest.mark.parametrize("max_tokens", [1, 4096, 8192, 16384])
+def test_decision_maker_accepts_configurable_output_budget(
+    tmp_path, scripted_transport, max_tokens
+):
+    def mutate(data):
+        data["bindings"]["decision_maker"]["max_tokens"] = max_tokens
+
+    path = _write_llm_config(tmp_path, mutate)
+
+    gateway = LLMGateway(llm_params_path=path, transport=scripted_transport({}))
+
+    assert gateway.resolve_binding("decision_maker")["max_tokens"] == max_tokens
+
+
+@pytest.mark.parametrize("max_tokens", [0, -1, 16385, True, 1.5, "8192"])
+def test_decision_maker_rejects_invalid_output_budget(
+    tmp_path, scripted_transport, max_tokens
+):
+    path = _write_llm_config(
+        tmp_path,
+        lambda data: data["bindings"]["decision_maker"].update(
+            max_tokens=max_tokens
+        ),
+    )
+
+    with pytest.raises(
+        LLMConfigurationError,
+        match="decision_maker max_tokens must be an integer from 1 to 16384",
+    ):
+        LLMGateway(llm_params_path=path, transport=scripted_transport({}))
+
+
 @pytest.mark.parametrize(
     ("role", "wrong_max_tokens"),
     [
-        ("decision_maker", 2048),
         ("contact_assessor", 4096),
         ("red_commander", 2048),
         ("reviewer", 4096),
     ],
 )
-def test_each_required_role_token_budget_is_validated(
+def test_other_required_role_token_budget_is_validated(
     tmp_path, scripted_transport, role, wrong_max_tokens
 ):
-    def mutate(data):
-        data["bindings"][role]["max_tokens"] = wrong_max_tokens
-
-    path = _write_llm_config(tmp_path, mutate)
+    path = _write_llm_config(
+        tmp_path,
+        lambda data: data["bindings"][role].update(max_tokens=wrong_max_tokens),
+    )
 
     with pytest.raises(LLMConfigurationError, match=role):
         LLMGateway(llm_params_path=path, transport=scripted_transport({}))
@@ -879,6 +966,7 @@ def test_transport_rejects_length_even_with_parseable_json(length_provider, cont
     (None, [4096, 8192, 16384]),
     (1000, [1000, 2000, 4000]),
     (6000, [6000, 12000, 16384]),
+    (8192, [8192, 16384, 16384]),
 ])
 def test_length_retries_increase_only_request_budget(length_provider, initial, expected):
     length_provider.responses = [('length', '')] * 2 + [('stop', '{"answer": 7}')]
@@ -949,6 +1037,38 @@ def test_length_retries_stop_when_transport_deadline_has_no_useful_budget(monkey
     assert len(length_provider.calls) == 1
     assert [c['timeout_seconds'] for c in length_provider.calls] == [5.0]
     assert 'output_truncated' in gateway.call_log[-1]['attempts'][0]['errors'][0]
+    assert gateway.call_log[-1]['initial_failure_category'] == 'output_truncated'
+
+
+def test_initial_failure_category_survives_successful_truncation_correction(length_provider):
+    length_provider.responses = [('length', ''), ('stop', '{"answer": 7}')]
+    gateway = LLMGateway()
+
+    result = _request_json(gateway)
+
+    assert result.success
+    assert result.failure_category is None
+    assert gateway.call_log[-1]['initial_failure_category'] == 'output_truncated'
+
+
+def test_initial_failure_category_records_typed_transport_timeout(scripted_transport):
+    gateway = LLMGateway(transport=scripted_transport({
+        'decision_maker': [TimeoutError('slow'), '{"answer": 7}'],
+    }))
+
+    assert _request_json(gateway).success
+
+    assert gateway.call_log[-1]['initial_failure_category'] == 'timeout'
+
+
+def test_initial_failure_category_records_validation(scripted_transport):
+    gateway = LLMGateway(transport=scripted_transport({
+        'decision_maker': ['{bad}', '{"answer": 7}'],
+    }))
+
+    assert _request_json(gateway).success
+
+    assert gateway.call_log[-1]['initial_failure_category'] == 'validation'
 
 
 @pytest.mark.parametrize('retries,expected_calls', [(0, 1), (1, 2), (20, 3)])

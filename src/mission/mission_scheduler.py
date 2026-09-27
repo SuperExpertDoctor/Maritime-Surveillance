@@ -24,6 +24,7 @@ from src.mission.contracts import (
 from src.mission.strategy_memory import StrategyMemoryStore
 from src.mission.trajectory_features import select_keypoints
 from src.mission.prompt_window import PromptWindow
+from src.mission.prompt_payload import encode_selection_payload
 
 
 SELECTION_SCHEMA = "mission-selection/v1"
@@ -1311,7 +1312,7 @@ class MissionScheduler:
                 role="decision_maker",
                 snapshot_id=snapshot.snapshot_id,
                 system_prompt=self.system_prompt,
-                user_payload=payload,
+                user_payload=encode_selection_payload(payload),
                 # Correct infeasible selections within the gateway's existing
                 # retry limit and shared planning deadline; never relax rules.
                 validate=lambda candidate: (
@@ -1329,9 +1330,6 @@ class MissionScheduler:
                 transport_deadline_monotonic=(
                     deadline_monotonic - self.postprocess_reserve_seconds
                 ),
-                # Leave room for the soft 1024-token thinking target and a
-                # complete JSON selection; never truncate reasoning ourselves.
-                max_tokens=4096,
             )
             call_id = result.call_id
             success = result.success
@@ -1348,6 +1346,15 @@ class MissionScheduler:
             0.0, gateway_elapsed - gateway_validation,
         )
         self.last_selection_timing["validation_seconds"] += gateway_validation
+        if self.gateway is not None and self.selection_provider is None:
+            for candidate in reversed(getattr(self.gateway, "call_log", ())):
+                if candidate.get("call_id") == call_id:
+                    for key in (
+                        "system_prompt_bytes", "user_prompt_bytes", "input_text_bytes",
+                        "prompt_format_version", "configured_max_tokens",
+                    ):
+                        self.last_selection_timing[key] = candidate.get(key)
+                    break
         self.last_selection_call_id = call_id
         self.last_selection_response = response
         self.last_selection_success = bool(success)
@@ -1483,8 +1490,15 @@ class MissionScheduler:
             attempts.append(attempt)
 
         system_prompt = self.system_prompt
+        wire_payload = (
+            encode_selection_payload(self.last_selection_payload)
+            if self.last_selection_payload is not None else {}
+        )
         user_prompt = json.dumps(
-            self.last_selection_payload or {}, ensure_ascii=False, allow_nan=False,
+            wire_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
         )
         if attempts:
             messages = attempts[0].get("messages") or []
@@ -1530,7 +1544,11 @@ class MissionScheduler:
             "failure_stage": self.last_selection_failure_stage,
             "timing": dict(self.last_selection_timing),
         }
-        for key in ("episode_id", "snapshot_id", "sim_time_min", "memory_version"):
+        for key in (
+            "episode_id", "snapshot_id", "sim_time_min", "memory_version",
+            "system_prompt_bytes", "user_prompt_bytes", "input_text_bytes",
+            "prompt_format_version", "configured_max_tokens", "initial_failure_category",
+        ):
             if key in call:
                 interaction[key] = call[key]
         return interaction

@@ -18,7 +18,7 @@ bindings:
   decision_maker:
     model: LongCat-2.0
     temperature: 0.3
-    max_tokens: 4096
+    max_tokens: 4096  # Configurable integer range: 1-16384; default: 4096.
     thinking: enabled  # Soft reasoning target: 1024 tokens in mission_scheduler.txt.
   contact_assessor:
     model: LongCat-2.0

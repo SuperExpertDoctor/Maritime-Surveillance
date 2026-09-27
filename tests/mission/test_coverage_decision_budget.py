@@ -1,5 +1,10 @@
 import json
+from copy import deepcopy
+from pathlib import Path
 
+import yaml
+
+from src.mission import mission_scheduler as mission_scheduler_module
 from src.mission.contracts import (
     ContactSnapshot,
     FeasibleEdge,
@@ -8,8 +13,12 @@ from src.mission.contracts import (
     TaskCandidate,
     UavResource,
 )
-from src.mission.llm_gateway import ModelResult
+from src.mission.llm_gateway import LLMGateway, ModelResult
 from src.mission.mission_scheduler import MissionScheduler, SELECTION_SCHEMA
+from src.mission.prompt_payload import decode_selection_payload
+from src.env.simulation import SimulationEngine
+from src.schedule.config_loader import ConfigLoader
+from tests.mission.conftest import ScriptedTransport
 
 
 def _task(task_id: str) -> TaskCandidate:
@@ -118,24 +127,44 @@ def test_prompt_serialization_is_bounded_without_mutating_snapshot():
     json.dumps(scheduler.last_selection_payload, ensure_ascii=False, allow_nan=False)
 
 
-def test_decision_maker_override_is_explicitly_limited():
+def _write_llm_config(tmp_path, mutate):
+    data = yaml.safe_load(Path("configs/llm_params.yaml").read_text(encoding="utf-8"))
+    mutate(data)
+    path = tmp_path / "llm_params.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return str(path)
+
+
+def test_scheduler_uses_configured_decision_maker_output_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.mission.mission_scheduler.time.perf_counter", lambda: 100.0)
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: 100.0)
     snapshot = _snapshot(candidate_count=1)
-
-    class Gateway:
-        def __init__(self):
-            self.kwargs = None
-
-        def request_json(self, **kwargs):
-            self.kwargs = kwargs
-            return ModelResult(
-                "budget-call", True, _selection(snapshot), (), None,
-            )
-
-    gateway = Gateway()
-    scheduler = MissionScheduler(gateway=gateway)
+    path = _write_llm_config(
+        tmp_path,
+        lambda data: data["bindings"]["decision_maker"].update(max_tokens=8192),
+    )
+    transport = ScriptedTransport({"decision_maker": [json.dumps(_selection(snapshot))]})
+    scheduler = MissionScheduler(
+        gateway=LLMGateway(path, transport=transport),
+        planning_deadline_seconds=60.0,
+        postprocess_reserve_seconds=1.0,
+    )
 
     assert scheduler.decide(snapshot) is not None
-    assert gateway.kwargs["max_tokens"] == 4096
+
+    call = transport.calls[0]
+    assert call["max_tokens"] == 8192
+    assert call["thinking"] == "enabled"
+    assert call["timeout_seconds"] == 59.0
+
+
+def test_scheduler_default_decision_maker_output_budget_reaches_transport():
+    snapshot = _snapshot(candidate_count=1)
+    transport = ScriptedTransport({"decision_maker": [json.dumps(_selection(snapshot))]})
+    scheduler = MissionScheduler(gateway=LLMGateway(transport=transport))
+
+    assert scheduler.decide(snapshot) is not None
+    assert transport.calls[0]["max_tokens"] == 4096
 
 
 def test_prompt_budget_failure_names_the_largest_field():
@@ -148,3 +177,56 @@ def test_prompt_budget_failure_names_the_largest_field():
     assert scheduler.last_selection_errors[0].startswith("prompt_budget_exceeded:")
     assert scheduler.last_selection_failure_stage == "prompt"
 
+
+class _RecordingOfflineGateway:
+    """Capture decision requests while keeping the simulation fully offline."""
+
+    def __init__(self):
+        self.requests = []
+
+    def request_json(self, **kwargs):
+        if kwargs["role"] == "decision_maker":
+            self.requests.append({
+                "snapshot_id": kwargs["snapshot_id"],
+                "system_prompt": kwargs["system_prompt"],
+                "wire_payload": deepcopy(kwargs["user_payload"]),
+            })
+        return ModelResult(
+            "offline", False, None, ("decision_deadline_exceeded",), "timeout",
+        )
+
+
+def test_seed_42_initial_scenario_wire_payload_is_lossless_and_under_30_kib(monkeypatch):
+    gateway = _RecordingOfflineGateway()
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=gateway)
+    canonical_payloads = {}
+    original_encode = mission_scheduler_module.encode_selection_payload
+
+    def record_encode(payload):
+        before = deepcopy(payload)
+        wire = original_encode(payload)
+        assert payload == before
+        canonical_payloads.setdefault(before["snapshot"]["snapshot_id"], before)
+        return wire
+
+    monkeypatch.setattr(mission_scheduler_module, "encode_selection_payload", record_encode)
+
+    for _ in range(3):
+        engine.step()
+
+    assert len(gateway.requests) == 3
+    for request in gateway.requests:
+        canonical = canonical_payloads[request["snapshot_id"]]
+        wire = request["wire_payload"]
+        decoded = decode_selection_payload(wire)
+
+        assert "instructions" not in wire
+        assert decoded["snapshot"] == canonical["snapshot"]
+        assert [item["task_id"] for item in decoded["snapshot"]["candidates"]] == [
+            item["task_id"] for item in canonical["snapshot"]["candidates"]
+        ]
+        system_bytes = len(request["system_prompt"].encode("utf-8"))
+        user_bytes = len(json.dumps(
+            wire, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        ).encode("utf-8"))
+        assert system_bytes + user_bytes < 30 * 1024
