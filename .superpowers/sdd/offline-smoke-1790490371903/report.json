@@ -1,0 +1,1258 @@
+{
+  "mode": "offline-fixture-real-main-ui",
+  "episode": "episode-24c7a3d181c84a20a17399a003d51ed2",
+  "operations": [
+    {
+      "kind": "create",
+      "name": "I 类船舶",
+      "startedAt": 1790490372867,
+      "confirmedAt": 1790490381612,
+      "command_id": "bb50ab08-1c00-426e-b9ce-f57672b96277",
+      "status": "applied",
+      "vessel_id": "scenario-vessel-1",
+      "revision": 1,
+      "error_code": null
+    },
+    {
+      "kind": "create",
+      "name": "II 类船舶",
+      "startedAt": 1790490381612,
+      "confirmedAt": 1790490392040,
+      "command_id": "be6c5cdd-370b-4e60-92de-3970723b0b9f",
+      "status": "applied",
+      "vessel_id": "scenario-vessel-2",
+      "revision": 1,
+      "error_code": null
+    },
+    {
+      "kind": "ais",
+      "startedAt": 1790490392147,
+      "confirmedAt": 1790490402334,
+      "command_id": "0331a92e-f08c-4f71-8bda-c4c6ad3c4dd6",
+      "status": "applied",
+      "vessel_id": "scenario-vessel-2",
+      "revision": 2,
+      "error_code": null
+    },
+    {
+      "kind": "delete",
+      "startedAt": 1790490402350,
+      "confirmedAt": 1790490412787,
+      "command_id": "4389ab91-3562-43b1-ad2f-6ec8bfe0abc0",
+      "status": "applied",
+      "vessel_id": "scenario-vessel-2",
+      "revision": 3,
+      "error_code": null
+    },
+    {
+      "kind": "delete",
+      "startedAt": 1790490412862,
+      "confirmedAt": 1790490421061,
+      "command_id": "34d70273-dc60-41d8-81fe-84302bbac81f",
+      "status": "applied",
+      "vessel_id": "scenario-vessel-1",
+      "revision": 2,
+      "error_code": null
+    },
+    {
+      "kind": "focus",
+      "bbox": [
+        6,
+        0,
+        11,
+        5
+      ],
+      "startedAt": 1790490421232,
+      "confirmedAt": 1790490430776,
+      "command_id": "create-07f6512a-45b9-4517-9db9-c6361c54d5b2",
+      "status": "applied",
+      "intent": {
+        "intent_id": "I0001",
+        "revision": 1,
+        "label": "offline-smoke-5x5",
+        "bbox": [
+          6,
+          0,
+          11,
+          5
+        ],
+        "mode": "search_priority",
+        "priority": "high",
+        "weight": 0.5,
+        "created_at_min": 9,
+        "expires_at_min": 129,
+        "revisit_interval_min": null,
+        "lifecycle": "active"
+      },
+      "error_code": null
+    }
+  ],
+  "pixels": {
+    "width": 1136,
+    "height": 952,
+    "sampledColors": 381
+  },
+  "modelReview": {
+    "episode_id": "episode-24c7a3d181c84a20a17399a003d51ed2",
+    "memory_version": "baseline",
+    "sim_time_min": 10,
+    "role": "decision_maker",
+    "user_payload": {
+      "schema_version": "mission-selection/v1",
+      "instructions": "You are the rolling whole-domain coverage planner for a mixed maritime surveillance mission.\n\nReturn exactly one JSON object with this schema:\n{\n  \"schema_version\": \"mission-selection/v1\",\n  \"snapshot_id\": \"the supplied snapshot id\",\n  \"selected_task_ids\": [\"task ids in priority order\"],\n  \"preempt_uav_ids\": [\"ordinary-search UAV ids actually being preempted\"],\n  \"defer_reason\": null,\n  \"notes\": \"\"\n}\n\nSelect only supplied candidate task IDs. Search candidates already contain a\nlegal rectangle; never invent a bbox. Probe and track tasks reference the\nsupplied contact ID through the task record and have no search geometry.\npending_search_task_ids are retained work, not new model candidates.\nReview each pending_intent_reviews revision against its active_tasks owners and\nremaining candidate work. Preserve existing ownership and prioritize the owner's\nremaining focus scans. When no new assignment is legal, acknowledge that review\nwith an empty selected_task_ids and a concise notes or defer_reason explanation.\nDo not select an executing owner again or invent a duplicate focus reservation.\ndo not select or recreate pending search regions; deterministic reassignment\nhandles them before this decision.\nselected ordinary searches are additions only and must not overlap retained\nor executing search regions.\nNever select two supplied search candidates whose rectangles overlap.\nRespect feasible_edges, remaining range, UAV generations, active tasks, map\nversion, contact state, intent status, and reviewer summary. For large snapshots\nfeasible_edges may be a compact per-task summary with per-UAV transit and total\nrange options; the server retains and checks the complete legal edge graph after\nyour selection. Existing approved\nor executing tasks remain in force unless an explicitly legal ordinary search\nUAV is preempted for a new probe or track. Returning, refueling, safety, active\nprobe, and valid tracking work must not be preempted.\nWhen coverage_summary is present, use its per-zone unseen, overdue, and in-flight\nwork to spread search across the whole domain. In-flight coverage reduces the\neffective zone gap; it is not an actual SAR observation and does not make cells fresh.\nWhen coverage_constraint is present, select AT LEAST required_new_search_count\nnew ordinary search tasks (kind=search with a bbox), including every global\nmust_service_task_ids entry, unless global infeasible_reason is present. This is\na minimum coverage floor, not a fleet utilization ceiling. Even when\nrequired_new_search_count is zero, select additional legal non-overlapping work\nfor every available UAV that can be matched. Do not keep ready aircraft idle at\nbase merely because the coverage floor is already satisfied.\nrequired_new_search_count is the residual addition count after active searches\nand matchable pending searches; it is not the total search-region count.\nInvestigation and direction_search do not count toward this coverage floor.\nPreemption must preserve the existing SAR floor: active_search_count plus\nmatchable_pending_count plus new ordinary searches minus preempted searches\nmust remain at least min(desired_search_count, active_search_count plus\nmatchable_pending_count), even when infeasible_reason is present. A zero\nrequired_new_search_count does not authorize removing the searches satisfying it.\nFor every feasible zone_requirements entry, meet required_search_count from its\nrepresentative_task_ids and include all its must_service_task_ids. These feasible\nzone obligations remain binding even when the global budget is infeasible.\nzone_infeasible records excluded zones; do not invent work for them.\nordinary_search_admission_limit, when non-null, is a hard ceiling for new\nordinary-search admission while executable probe demand exists. Retain existing\nvalidated tasks until an explicit legal preemption; do not add searches above\nthat limit. With ten healthy aircraft the limit is eight; with one it is zero.\nWithout executable probe demand full ordinary-search utilization remains legal.\nAs coverage improves, the server reduces the search budget and other work may use\nremaining resources. Task completion and periodic decisions refresh the summary.\nDo not invent tasks or append hidden representatives. Prefer notes=\"\" to conserve\noutput tokens; if needed, keep notes to at most 80 Unicode characters (code points,\nnot words). The validator counts the decoded string, including spaces and\npunctuation, and rejects notes longer than 160 characters (Unicode code points). This hard limit\nmust not be exceeded.\n\nThe optional strategy_memories in the snapshot are advisory evidence from\nvalidated earlier episodes. Use them only to prioritize the supplied tasks.\nThey never change sensor ranges, identity thresholds, navigation safety,\nresource limits, or the legal feasible graph. Do not infer identities or quote\nsupporting episode details as current observations. An empty memory list means\nbaseline scheduling.\n\nThe complete snapshot follows in the user message. The resources, feasible\nedge costs, active task records, contacts, intents, intent statuses, map\nversion, and reviewer summary are authoritative. A defer_reason documents why\nwork is deferred; it does not override a legal feasible task that can use an\notherwise idle UAV when the snapshot requires that work. Select additional legal\nvisible work only when it does not require an additional preemption. Do not add\nunnecessary preemptions merely to increase utilization. Fill idle capacity with\nsupplied feasible work while respecting coverage, priority, intent and safety\nconstraints; never invent tasks or unsafe routes.\n\nselected_task_ids are simultaneous assignments, NOT a sequential task queue.\nEach selected task needs a distinct eligible UAV. Never count one UAV twice\nor describe future sequential work in notes as justification for overbooking.\nBusy search UAVs require explicit preemption; ordinary search and investigation\ncannot preempt them unless the supplied policy explicitly permits it.\n\n\nPlanning objectives, in priority order:\n1. Preserve safe executing assignments and their region boundaries. Repartition\n   only the remaining unreserved searchable domain when UAV availability changes.\n2. Match simultaneous search subregions to available search aircraft, aiming to\n   cover as much of the whole task domain as route and range limits permit.\n   Prefer supplied partition:* candidates: these are larger, contiguous,\n   non-overlapping fleet-sized partitions. Small search:* candidates are fallbacks\n   for weather, geometry, or energy limitations, not the default sparse layout.\n3. Minimize task switching, boundary churn, uncovered gaps, and redundant scans.\n4. Among safe feasible assignments, minimize transit plus search plus recovery\n   range cost. Use the supplied edge costs; do not claim an unverified global\n   energy optimum. The deterministic matcher assigns distinct UAVs afterward.\n\nSoft thinking budget: aim for approximately 1024 tokens in the provider's\ninternal thinking/think block. This is a target, NOT an exact token count or\nhard cutoff. Finish the necessary checks and emit one complete valid JSON\nobject. Keep reasoning in the provider reasoning channel; do not put think\nmarkup, partial thoughts, or commentary in the final JSON response.\n",
+      "snapshot": {
+        "snapshot_id": "mission:10:15",
+        "sim_time_min": 10,
+        "candidates": [
+          {
+            "task_id": "Q0002",
+            "kind": "probe",
+            "bbox": null,
+            "contact_id": "C0002",
+            "intent_ids": [],
+            "feasible_uav_ids": [
+              "UAV-1",
+              "UAV-10",
+              "UAV-2",
+              "UAV-3",
+              "UAV-4",
+              "UAV-5",
+              "UAV-6",
+              "UAV-7",
+              "UAV-8"
+            ],
+            "eligible_since_min": 5,
+            "priority": "high",
+            "estimated_duration_min": 9,
+            "utility": 1.1666666666666667,
+            "expected_information_gain": 1,
+            "information_version": 0
+          },
+          {
+            "task_id": "Q0003",
+            "kind": "probe",
+            "bbox": null,
+            "contact_id": "C0003",
+            "intent_ids": [],
+            "feasible_uav_ids": [
+              "UAV-1",
+              "UAV-10",
+              "UAV-2",
+              "UAV-3",
+              "UAV-4",
+              "UAV-5",
+              "UAV-6",
+              "UAV-7",
+              "UAV-8"
+            ],
+            "eligible_since_min": 6,
+            "priority": "high",
+            "estimated_duration_min": 9,
+            "utility": 1.1333333333333333,
+            "expected_information_gain": 1,
+            "information_version": 0
+          }
+        ],
+        "candidate_count": 672,
+        "candidates_truncated": true,
+        "available_uav_ids": [],
+        "preemptible_uav_ids": [
+          "UAV-1",
+          "UAV-10",
+          "UAV-2",
+          "UAV-3",
+          "UAV-4",
+          "UAV-5",
+          "UAV-6",
+          "UAV-7",
+          "UAV-8"
+        ],
+        "uav_generations": [
+          [
+            "UAV-1",
+            1
+          ],
+          [
+            "UAV-10",
+            1
+          ],
+          [
+            "UAV-2",
+            1
+          ],
+          [
+            "UAV-3",
+            1
+          ],
+          [
+            "UAV-4",
+            1
+          ],
+          [
+            "UAV-5",
+            1
+          ],
+          [
+            "UAV-6",
+            1
+          ],
+          [
+            "UAV-7",
+            1
+          ],
+          [
+            "UAV-8",
+            1
+          ],
+          [
+            "UAV-9",
+            1
+          ]
+        ],
+        "resources": [
+          {
+            "uav_id": "UAV-1",
+            "position_cells": [
+              3,
+              10
+            ],
+            "heading_rad": 5.541638375322354,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:6:0:10:5",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-10",
+            "position_cells": [
+              3,
+              23
+            ],
+            "heading_rad": 5.2289832881552325,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:0:10:4:18",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-2",
+            "position_cells": [
+              2,
+              23
+            ],
+            "heading_rad": 4.116576609197984,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:6:21:10:29",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-3",
+            "position_cells": [
+              3,
+              10
+            ],
+            "heading_rad": 5.824731374556555,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:11:6:19:10",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-4",
+            "position_cells": [
+              3,
+              25
+            ],
+            "heading_rad": 5.686404021712595,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:12:10:18:18",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-5",
+            "position_cells": [
+              3,
+              11
+            ],
+            "heading_rad": 0,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:20:10:26:18",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-6",
+            "position_cells": [
+              3,
+              24
+            ],
+            "heading_rad": 5.7711658886655455,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:10:21:16:29",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-7",
+            "position_cells": [
+              3,
+              10
+            ],
+            "heading_rad": 5.541565304291696,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "transit",
+            "current_task_id": "search:0:0:6:8",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-8",
+            "position_cells": [
+              3,
+              25
+            ],
+            "heading_rad": 6.175001590074622,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.86666666666667,
+            "operation": "transit",
+            "current_task_id": "search:20:20:26:28",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          },
+          {
+            "uav_id": "UAV-9",
+            "position_cells": [
+              3,
+              10
+            ],
+            "heading_rad": 0.28367313729829213,
+            "speed_cells_min": 0.26666666666666666,
+            "remaining_range_cells": 125.60000000000001,
+            "operation": "probe",
+            "current_task_id": "Q0001",
+            "generation": 1,
+            "last_reassigned_at_min": 0
+          }
+        ],
+        "feasible_edges": [
+          {
+            "task_id": "Q0002",
+            "uav_options": [
+              {
+                "uav_id": "UAV-1",
+                "transit_time_min": 28.53878144863278,
+                "total_range_cells": 23.67718131971712
+              },
+              {
+                "uav_id": "UAV-10",
+                "transit_time_min": 73.00737595614534,
+                "total_range_cells": 35.751970641943885
+              },
+              {
+                "uav_id": "UAV-2",
+                "transit_time_min": 74.54818196318152,
+                "total_range_cells": 36.12278175976567
+              },
+              {
+                "uav_id": "UAV-3",
+                "transit_time_min": 28.59805797394945,
+                "total_range_cells": 23.692988393134897
+              },
+              {
+                "uav_id": "UAV-4",
+                "transit_time_min": 80.4824297002676,
+                "total_range_cells": 37.76741644768552
+              },
+              {
+                "uav_id": "UAV-5",
+                "transit_time_min": 32.191872429253536,
+                "total_range_cells": 24.665935296749673
+              },
+              {
+                "uav_id": "UAV-6",
+                "transit_time_min": 76.93250847693919,
+                "total_range_cells": 36.81008499555284
+              },
+              {
+                "uav_id": "UAV-7",
+                "transit_time_min": 28.538778119276067,
+                "total_range_cells": 23.677180431888665
+              },
+              {
+                "uav_id": "UAV-8",
+                "transit_time_min": 81.32038313590137,
+                "total_range_cells": 37.99087069718786
+              }
+            ]
+          },
+          {
+            "task_id": "Q0003",
+            "uav_options": [
+              {
+                "uav_id": "UAV-1",
+                "transit_time_min": 84.85573378780312,
+                "total_range_cells": 50.351247146380786
+              },
+              {
+                "uav_id": "UAV-10",
+                "transit_time_min": 71.13334817921586,
+                "total_range_cells": 46.29745058558849
+              },
+              {
+                "uav_id": "UAV-2",
+                "transit_time_min": 79.3277059648561,
+                "total_range_cells": 48.48279727076891
+              },
+              {
+                "uav_id": "UAV-3",
+                "transit_time_min": 84.20574996693223,
+                "total_range_cells": 50.17791812748188
+              },
+              {
+                "uav_id": "UAV-4",
+                "transit_time_min": 71.07054204828205,
+                "total_range_cells": 46.27358298990761
+              },
+              {
+                "uav_id": "UAV-5",
+                "transit_time_min": 81.77995690707955,
+                "total_range_cells": 49.48962233140062
+              },
+              {
+                "uav_id": "UAV-6",
+                "transit_time_min": 70.69647654189582,
+                "total_range_cells": 46.175102762205086
+              },
+              {
+                "uav_id": "UAV-7",
+                "transit_time_min": 84.85593896033453,
+                "total_range_cells": 50.35130185905582
+              },
+              {
+                "uav_id": "UAV-8",
+                "transit_time_min": 71.00433216583625,
+                "total_range_cells": 46.25592702125539
+              }
+            ]
+          }
+        ],
+        "feasible_edges_compacted": true,
+        "active_tasks": [
+          {
+            "task_id": "search:6:0:10:5",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              6,
+              0,
+              10,
+              5
+            ],
+            "contact_id": null,
+            "intent_ids": [
+              "I0001"
+            ],
+            "assigned_uav_id": "UAV-1",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:0:10:4:18",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              0,
+              10,
+              4,
+              18
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-10",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:6:21:10:29",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              6,
+              21,
+              10,
+              29
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-2",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:11:6:19:10",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              11,
+              6,
+              19,
+              10
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-3",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:12:10:18:18",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              12,
+              10,
+              18,
+              18
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-4",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:10:21:16:29",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              10,
+              21,
+              16,
+              29
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-6",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:20:10:26:18",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              20,
+              10,
+              26,
+              18
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-5",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:0:0:6:8",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              0,
+              0,
+              6,
+              8
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-7",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 1,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "Q0001",
+            "kind": "probe",
+            "status": "executing",
+            "bbox": null,
+            "contact_id": "C0001",
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-9",
+            "approved_call_id": "fixture-00000001",
+            "created_at_min": 0,
+            "started_at_min": 2,
+            "finished_at_min": null,
+            "release_reason": null
+          },
+          {
+            "task_id": "search:20:20:26:28",
+            "kind": "search",
+            "status": "executing",
+            "bbox": [
+              20,
+              20,
+              26,
+              28
+            ],
+            "contact_id": null,
+            "intent_ids": [],
+            "assigned_uav_id": "UAV-8",
+            "approved_call_id": "fixture-00000002",
+            "created_at_min": 0,
+            "started_at_min": 2,
+            "finished_at_min": null,
+            "release_reason": null
+          }
+        ],
+        "contacts": [
+          {
+            "contact_id": "C0001",
+            "revision": 11,
+            "state": "approaching",
+            "vessel_class": "unknown",
+            "ais_mmsi": "100000002",
+            "first_seen_min": 0,
+            "last_seen_min": 10,
+            "estimated_position_cells": [
+              18.292756611974365,
+              5.167751290340674
+            ],
+            "estimated_velocity_cells_min": [
+              0.006448320142535726,
+              0.03203404386063535
+            ],
+            "uncertainty_cells": 0.05,
+            "assigned_uav_id": "UAV-9",
+            "active_probe_id": "P0001",
+            "last_assessment": null,
+            "cleared_at_min": null,
+            "next_probe_not_before_min": 0,
+            "class_confidence": 0,
+            "class_evidence_ids": [],
+            "activity": "unknown",
+            "activity_confidence": 0,
+            "activity_evidence_ids": [],
+            "samples": [
+              {
+                "sample_id": "AIS:100000002:0x0.0p+0",
+                "observed_at_min": 0,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.049971102783925,
+                  5.001699672485597
+                ],
+                "velocity_cells_min": [
+                  0.03624038981211014,
+                  -0.007654785840655736
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.0000000000000p+0",
+                "observed_at_min": 1,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.085048253048488,
+                  5.000129529046797
+                ],
+                "velocity_cells_min": [
+                  0.03505356590282815,
+                  -0.006066500209494233
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.0000000000000p+1",
+                "observed_at_min": 2,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.118710832376983,
+                  5.0010270030769455
+                ],
+                "velocity_cells_min": [
+                  0.03448813429264786,
+                  -0.0026834987968016085
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.8000000000000p+1",
+                "observed_at_min": 3,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.15125234718436,
+                  5.005768348172975
+                ],
+                "velocity_cells_min": [
+                  0.033884093254638065,
+                  0.0018387641024943922
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.0000000000000p+2",
+                "observed_at_min": 4,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.182391374108946,
+                  5.015189176096151
+                ],
+                "velocity_cells_min": [
+                  0.03274519848657453,
+                  0.007036017131976228
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.4000000000000p+2",
+                "observed_at_min": 5,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.211445925266943,
+                  5.029699613646818
+                ],
+                "velocity_cells_min": [
+                  0.030751239020721202,
+                  0.012505388048898539
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.8000000000000p+2",
+                "observed_at_min": 6,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.237501255366517,
+                  5.049324598458008
+                ],
+                "velocity_cells_min": [
+                  0.027740163420078755,
+                  0.01787118531024969
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.c000000000000p+2",
+                "observed_at_min": 7,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.25955566911466,
+                  5.073730929704828
+                ],
+                "velocity_cells_min": [
+                  0.023683771212957276,
+                  0.022786384527555284
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.0000000000000p+3",
+                "observed_at_min": 8,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.2766413146641,
+                  5.102262155404219
+                ],
+                "velocity_cells_min": [
+                  0.018662599142219172,
+                  0.026944358759319956
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.2000000000000p+3",
+                "observed_at_min": 9,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.28792017732996,
+                  5.133985787869148
+                ],
+                "velocity_cells_min": [
+                  0.012841747163301068,
+                  0.03009100559399922
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100000002:0x1.4000000000000p+3",
+                "observed_at_min": 10,
+                "source": "ais",
+                "source_id": "100000002",
+                "position_cells": [
+                  18.292756611974365,
+                  5.167751290340674
+                ],
+                "velocity_cells_min": [
+                  0.006448320142535726,
+                  0.03203404386063535
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              }
+            ]
+          },
+          {
+            "contact_id": "C0002",
+            "revision": 4,
+            "state": "pending",
+            "vessel_class": "unknown",
+            "ais_mmsi": "100014006",
+            "first_seen_min": 5,
+            "last_seen_min": 8,
+            "estimated_position_cells": [
+              8.696944393292863,
+              2.5109582375887034
+            ],
+            "estimated_velocity_cells_min": [
+              0.037040000000000003,
+              0
+            ],
+            "uncertainty_cells": 0.05,
+            "assigned_uav_id": null,
+            "active_probe_id": null,
+            "last_assessment": null,
+            "cleared_at_min": null,
+            "next_probe_not_before_min": 5,
+            "class_confidence": 0,
+            "class_evidence_ids": [],
+            "activity": "unknown",
+            "activity_confidence": 0,
+            "activity_evidence_ids": [],
+            "samples": [
+              {
+                "sample_id": "AIS:100014006:0x1.4000000000000p+2",
+                "observed_at_min": 5,
+                "source": "ais",
+                "source_id": "100014006",
+                "position_cells": [
+                  8.58674304225248,
+                  2.4945587142283436
+                ],
+                "velocity_cells_min": [
+                  0.037040000000000003,
+                  0
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100014006:0x1.8000000000000p+2",
+                "observed_at_min": 6,
+                "source": "ais",
+                "source_id": "100014006",
+                "position_cells": [
+                  8.624079977040244,
+                  2.5000479163514515
+                ],
+                "velocity_cells_min": [
+                  0.037040000000000003,
+                  0
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100014006:0x1.c000000000000p+2",
+                "observed_at_min": 7,
+                "source": "ais",
+                "source_id": "100014006",
+                "position_cells": [
+                  8.660812521901208,
+                  2.5055365392710915
+                ],
+                "velocity_cells_min": [
+                  0.037040000000000003,
+                  0
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              },
+              {
+                "sample_id": "AIS:100014006:0x1.0000000000000p+3",
+                "observed_at_min": 8,
+                "source": "ais",
+                "source_id": "100014006",
+                "position_cells": [
+                  8.696944393292863,
+                  2.5109582375887034
+                ],
+                "velocity_cells_min": [
+                  0.037040000000000003,
+                  0
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              }
+            ]
+          },
+          {
+            "contact_id": "C0003",
+            "revision": 1,
+            "state": "pending",
+            "vessel_class": "unknown",
+            "ais_mmsi": "100014023",
+            "first_seen_min": 6,
+            "last_seen_min": 6,
+            "estimated_position_cells": [
+              23.584952789555864,
+              22.514295614606397
+            ],
+            "estimated_velocity_cells_min": [
+              0.037040000000000003,
+              0
+            ],
+            "uncertainty_cells": 0.05,
+            "assigned_uav_id": null,
+            "active_probe_id": null,
+            "last_assessment": null,
+            "cleared_at_min": null,
+            "next_probe_not_before_min": 6,
+            "class_confidence": 0,
+            "class_evidence_ids": [],
+            "activity": "unknown",
+            "activity_confidence": 0,
+            "activity_evidence_ids": [],
+            "samples": [
+              {
+                "sample_id": "AIS:100014023:0x1.8000000000000p+2",
+                "observed_at_min": 6,
+                "source": "ais",
+                "source_id": "100014023",
+                "position_cells": [
+                  23.584952789555864,
+                  22.514295614606397
+                ],
+                "velocity_cells_min": [
+                  0.037040000000000003,
+                  0
+                ],
+                "measured_range_cells": null,
+                "navigation_context": "unknown"
+              }
+            ]
+          }
+        ],
+        "intents": [
+          {
+            "intent_id": "I0001",
+            "revision": 1,
+            "label": "offline-smoke-5x5",
+            "bbox": [
+              6,
+              0,
+              11,
+              5
+            ],
+            "mode": "search_priority",
+            "priority": "high",
+            "weight": 0.5,
+            "created_at_min": 9,
+            "expires_at_min": 129,
+            "revisit_interval_min": null,
+            "lifecycle": "active"
+          }
+        ],
+        "pending_intent_reviews": [
+          {
+            "intent_id": "I0001",
+            "revision": 1,
+            "label": "offline-smoke-5x5",
+            "bbox": [
+              6,
+              0,
+              11,
+              5
+            ],
+            "mode": "search_priority",
+            "priority": "high",
+            "weight": 0.5,
+            "created_at_min": 9,
+            "expires_at_min": 129,
+            "revisit_interval_min": null,
+            "lifecycle": "active"
+          }
+        ],
+        "intent_statuses": [
+          {
+            "intent_id": "I0001",
+            "revision": 1,
+            "evaluated_at_min": 10,
+            "searchable_cells": 25,
+            "scanned_cells": 0,
+            "unseen_cells": 25,
+            "fresh_cells": 0,
+            "coverage_ratio": 0,
+            "freshness_ratio": 0,
+            "max_scan_age_min": null,
+            "assigned_task_ids": [
+              "search:6:0:10:5"
+            ],
+            "unmet_reason": "coverage_below_target"
+          }
+        ],
+        "memory_version": "baseline",
+        "planning_map_version": 1,
+        "reviewer_summary": "",
+        "information_version": 0,
+        "prompt_sources": {
+          "Q0002": "urgent",
+          "Q0003": "urgent"
+        },
+        "prompt_skip_cycles": {},
+        "prompt_fairness_bound_cycles": 84,
+        "prompt_geometry_filtered": false,
+        "pending_search_task_ids": [],
+        "ordinary_search_admission_limit": 8,
+        "coverage_constraint": {
+          "desired_search_count": 8,
+          "active_search_count": 9,
+          "required_new_search_count": 0,
+          "representative_task_ids": [
+            "search:0:21:6:29",
+            "search:16:20:20:28",
+            "search:26:10:30:18",
+            "search:26:20:30:28"
+          ],
+          "must_service_task_ids": [],
+          "infeasible_reason": null,
+          "reserved_search_count": 9,
+          "matchable_pending_count": 0
+        },
+        "coverage_summary": {
+          "schema_version": "zone-coverage-summary/v1",
+          "as_of_min": 10,
+          "zone_cols": 3,
+          "zone_rows": 3,
+          "gap_pct": 100,
+          "unseen_pct": 100,
+          "overdue_pct": 0,
+          "zones": [
+            {
+              "zone_id": "zone:0:0",
+              "bbox": [
+                0,
+                0,
+                10,
+                10
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 99,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.32,
+              "in_flight_search_tasks": 2,
+              "in_flight_cells": 68
+            },
+            {
+              "zone_id": "zone:0:1",
+              "bbox": [
+                0,
+                10,
+                10,
+                20
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 84,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.68,
+              "in_flight_search_tasks": 1,
+              "in_flight_cells": 32
+            },
+            {
+              "zone_id": "zone:0:2",
+              "bbox": [
+                0,
+                20,
+                10,
+                30
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 100,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.68,
+              "in_flight_search_tasks": 1,
+              "in_flight_cells": 32
+            },
+            {
+              "zone_id": "zone:1:0",
+              "bbox": [
+                10,
+                0,
+                20,
+                10
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 91,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.68,
+              "in_flight_search_tasks": 1,
+              "in_flight_cells": 32
+            },
+            {
+              "zone_id": "zone:1:1",
+              "bbox": [
+                10,
+                10,
+                20,
+                20
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 100,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.52,
+              "in_flight_search_tasks": 1,
+              "in_flight_cells": 48
+            },
+            {
+              "zone_id": "zone:1:2",
+              "bbox": [
+                10,
+                20,
+                20,
+                30
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 100,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.52,
+              "in_flight_search_tasks": 1,
+              "in_flight_cells": 48
+            },
+            {
+              "zone_id": "zone:2:0",
+              "bbox": [
+                20,
+                0,
+                30,
+                10
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 100,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 1,
+              "in_flight_search_tasks": 0,
+              "in_flight_cells": 0
+            },
+            {
+              "zone_id": "zone:2:1",
+              "bbox": [
+                20,
+                10,
+                30,
+                20
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 100,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.52,
+              "in_flight_search_tasks": 1,
+              "in_flight_cells": 48
+            },
+            {
+              "zone_id": "zone:2:2",
+              "bbox": [
+                20,
+                20,
+                30,
+                30
+              ],
+              "fixed_cells": 100,
+              "searchable_cells": 100,
+              "unseen_cells": 100,
+              "overdue_cells": 0,
+              "gap_fraction": 1,
+              "effective_gap_fraction": 0.52,
+              "in_flight_search_tasks": 1,
+              "in_flight_cells": 48
+            }
+          ]
+        },
+        "strategy_memory_context": {
+          "ais_contact_load": "low",
+          "available_uav_fraction": "low",
+          "has_active_intent": "yes",
+          "weather_disruption": "low"
+        },
+        "strategy_memories": []
+      }
+    },
+    "call_id": "fixture-00000005",
+    "success": true
+  },
+  "frameCount": 14,
+  "errors": []
+}

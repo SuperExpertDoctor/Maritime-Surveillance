@@ -118,3 +118,13 @@ behavioral change is intentional for callers without a deadline: their
 configured provider timeout is now total across retries rather than a fresh
 timeout per retry. Role identities remain `LongCat-2.0`; no fallback decision
 or non-model decision path was introduced.
+
+## Parent Independent Verification
+
+Fresh execution on d71bb97, using the complete mandated invocation:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q -p no:cacheprovider -o 'markers=timeout: legacy timeout marker' tests/mission/test_llm_gateway.py tests/mission/test_coverage_decision_budget.py tests/mission/test_contact_assessor.py tests/schedule/test_llm_client.py
+```
+
+Result: `216 passed in 20.28s`, exit0, no warnings. Parent session97061 finished. No credentials or provider calls used.

@@ -31,12 +31,12 @@ Replay: `outputs/simulation_20260926_170835.jsonl` in the original checkout. It 
 
 **Interfaces:** Consume `ControlObservation.planning_obstacle_mask`, map version, observed contacts, frozen probe session and controller events. Keep `ControlTask`/`ControlDecision` unchanged. Optional checked-route parameters must preserve existing tracker callers and test doubles.
 
-- [ ] Add failing real-geometry tests proving orbit entry poses and connecting segments remain within the map and outside obstacles, including a contact near the east boundary. If no legal entry exists, return an explicit recoverable failure instead of installing an invalid route.
-- [ ] Add failing tests for a moving contact during orbit entry, changed planning map, and a stalled entry/safety intervention. Verify bounded replanning and route revisions rather than permanent `_orbit_entry_active` suppression.
-- [ ] Add a controller/engine integration test proving baseline evidence acquisition and progression for a reachable target, with actual post-move EO samples. Preserve the range band and evidence duration. A route endpoint alone is not acceptance.
-- [ ] Implement legal candidate filtering in orbit planning and bounded recovery using existing observable state. Avoid permanent failure on transient geometry. Correct pre-/post-move EO gating and guidance radius where demonstrated by the regression. Do not relax evidence requirements.
-- [ ] Run focused regression tests red, then green; run `tests/control/heuristic/test_probe.py tests/mission/test_probe_navigation_integration.py tests/mission/test_probe_session.py` and related tracking/navigation tests.
-- [ ] Commit and report RED/GREEN output, files, remaining physical limitations, and changed public interfaces.
+- [x] Add failing real-geometry tests proving orbit entry poses and connecting segments remain within the map and outside obstacles, including a contact near the east boundary. If no legal entry exists, return an explicit recoverable failure instead of installing an invalid route.
+- [x] Add failing tests for a moving contact during orbit entry, changed planning map, and a stalled entry/safety intervention. Verify bounded replanning and route revisions rather than permanent `_orbit_entry_active` suppression.
+- [x] Add a controller/engine integration test proving baseline evidence acquisition and progression for a reachable target, with actual post-move EO samples. Preserve the range band and evidence duration. A route endpoint alone is not acceptance.
+- [x] Implement legal candidate filtering in orbit planning and bounded recovery using existing observable state. Avoid permanent failure on transient geometry. Correct pre-/post-move EO gating and guidance radius where demonstrated by the regression. Do not relax evidence requirements.
+- [x] Run focused regression tests red, then green; run `tests/control/heuristic/test_probe.py tests/mission/test_probe_navigation_integration.py tests/mission/test_probe_session.py` and related tracking/navigation tests.
+- [x] Commit and report RED/GREEN output, files, remaining physical limitations, and changed public interfaces.
 
 ### Task 2: Lifecycle, Manual Population and EO Evaluation
 
@@ -44,12 +44,12 @@ Replay: `outputs/simulation_20260926_170835.jsonl` in the original checkout. It 
 
 **Interfaces:** Existing runtime vessel queue and receipts, `_holding_base_by_uav`, real EO ingestion return values, `_evaluation_contact_links`, episode reset.
 
-- [ ] Reproduce vessel removal followed by `_process_refuelling`: an airborne holding aircraft far from a base must neither teleport nor refuel. Test valid landing queue release and arrival remains functional.
-- [ ] Require a registered landing queue/base and physical arrival before refuelling. Keep ordinary airborne HOLDING separate from landing HOLDING and clean stale queue entries through existing lifecycle paths.
-- [ ] Reproduce automatic population undoing successful manual count edits. Distinguish manual and automatic command provenance using existing fields where possible; pause automatic population on successful manual create/delete only. Reset the pause per episode; expose/log the state through existing event/serialization patterns.
-- [ ] Reproduce a true EO-only observation with no preceding SAR: the real engine ingestion must create an evaluator-only physical-vessel/contact association. Verify observed/identified accounting and incorrect associations still count correctly without exposing truth to the model.
-- [ ] Run focused failures then the four test files above plus affected refuelling/evaluation tests, all passing.
-- [ ] Commit and report RED/GREEN evidence and any new observable state or command provenance interface needed by Task 5.
+- [x] Reproduce vessel removal followed by `_process_refuelling`: an airborne holding aircraft far from a base must neither teleport nor refuel. Test valid landing queue release and arrival remains functional.
+- [x] Require a registered landing queue/base and physical arrival before refuelling. Keep ordinary airborne HOLDING separate from landing HOLDING and clean stale queue entries through existing lifecycle paths.
+- [x] Reproduce automatic population undoing successful manual count edits. Distinguish manual and automatic command provenance using existing fields where possible; pause automatic population on successful manual create/delete only. Reset the pause per episode; expose/log the state through existing event/serialization patterns.
+- [x] Reproduce a true EO-only observation with no preceding SAR: the real engine ingestion must create an evaluator-only physical-vessel/contact association. Verify observed/identified accounting and incorrect associations still count correctly without exposing truth to the model.
+- [x] Run focused failures then the four test files above plus affected refuelling/evaluation tests, all passing.
+- [x] Commit and report RED/GREEN evidence and any new observable state or command provenance interface needed by Task 5.
 
 ### Task 3: Focus Ownership, Scheduling Priority and Actionable Work
 
@@ -57,16 +57,16 @@ Replay: `outputs/simulation_20260926_170835.jsonl` in the original checkout. It 
 
 **Interfaces:** Production `extract_pool` -> task catalog -> mission snapshot -> scheduler prompt. Existing immutable task records, controller route updates and intent serialization.
 
-- [ ] Reproduce focus fully and partially overlapping unfinished search reservations through the production snapshot path. Preserve single ownership: attach focus to existing owners and prioritize/replan their scan route; uncovered focus portions remain eligible candidates.
-- [ ] Preserve submission to the LLM: a new focus must reach a meaningful model review, even with an existing owner. Owner reprioritization is actionable; do not replace the human-to-LLM workflow with local-only bookkeeping or repeat empty calls after acknowledgement. Prefer existing strict selection contracts; report a required new schema before introducing it.
-- [ ] Reproduce equal SAR freshness with higher focus utility losing prompt admission. Preserve human priority in candidate/partition selection, without discarding coverage data or duplicating reservations.
-- [ ] Reproduce ten healthy aircraft occupied by search with an executable probe. Cap ordinary search at 80% while demand exists, allowing legal preemption; without executable probe demand retain existing full search utilization. Exercise infeasible/blocked probe demand so it does not reserve unusable capacity.
-- [ ] Cover small-fleet rounding and new ordinary-search admission, not merely a lower floor. Preserve existing valid tasks while making legal probe preemptions available; never abort searches due to model failure.
-- [ ] Reproduce candidates with no usable assignment edges still causing an LLM call. Share actionable-candidate filtering with prompt construction, skipping truly empty decisions before calling the gateway, and retaining calls for legal probe/focus work.
-- [ ] Correct intent statuses using actual ownership/candidate/resource evidence: distinguish no legal candidate, resource blocked, and waiting assignment. An overlapping active owner must not report no candidate.
-- [ ] Run focused failures then the named scheduler/intent suites and coverage progress tests, all passing.
-- [ ] Diagnose the pre-existing V07 first-step missing probe in `tests/mission/test_feature_control_integration.py::test_v07_real_eo_samples_classify_then_handoff_and_eo_lock`. Inspect the real snapshot and fixture selection, repair an in-scope defect or stale fixture, and preserve classification/handoff assertions.
-- [ ] Commit and document route update/status contracts for the UI integration task.
+- [x] Reproduce focus fully and partially overlapping unfinished search reservations through the production snapshot path. Preserve single ownership: attach focus to existing owners and prioritize/replan their scan route; uncovered focus portions remain eligible candidates.
+- [x] Preserve submission to the LLM: a new focus must reach a meaningful model review, even with an existing owner. Owner reprioritization is actionable; do not replace the human-to-LLM workflow with local-only bookkeeping or repeat empty calls after acknowledgement. Prefer existing strict selection contracts; report a required new schema before introducing it.
+- [x] Reproduce equal SAR freshness with higher focus utility losing prompt admission. Preserve human priority in candidate/partition selection, without discarding coverage data or duplicating reservations.
+- [x] Reproduce ten healthy aircraft occupied by search with an executable probe. Cap ordinary search at 80% while demand exists, allowing legal preemption; without executable probe demand retain existing full search utilization. Exercise infeasible/blocked probe demand so it does not reserve unusable capacity.
+- [x] Cover small-fleet rounding and new ordinary-search admission, not merely a lower floor. Preserve existing valid tasks while making legal probe preemptions available; never abort searches due to model failure.
+- [x] Reproduce candidates with no usable assignment edges still causing an LLM call. Share actionable-candidate filtering with prompt construction, skipping truly empty decisions before calling the gateway, and retaining calls for legal probe/focus work.
+- [x] Correct intent statuses using actual ownership/candidate/resource evidence: distinguish no legal candidate, resource blocked, and waiting assignment. An overlapping active owner must not report no candidate.
+- [x] Run focused failures then the named scheduler/intent suites and coverage progress tests, all passing.
+- [x] Diagnose the pre-existing V07 first-step missing probe in `tests/mission/test_feature_control_integration.py::test_v07_real_eo_samples_classify_then_handoff_and_eo_lock`. Inspect the real snapshot and fixture selection, repair an in-scope defect or stale fixture, and preserve classification/handoff assertions.
+- [x] Commit and document route update/status contracts for the UI integration task.
 
 ### Task 4: Uniform LLM Deadlines and Useful Retry Budgets
 
@@ -74,11 +74,11 @@ Replay: `outputs/simulation_20260926_170835.jsonl` in the original checkout. It 
 
 **Interfaces:** `request_json` caller-provided deadline, gateway role bindings and transport timeout. Preserve model identity, strict JSON validation, failure logging, and validated-task preservation.
 
-- [ ] Add fake-clock transport tests proving red commander, contact assessor and reviewer calls without explicit caller deadlines still have one finite total budget including all retries. Explicit shorter deadlines always win.
-- [ ] Reproduce truncated output followed by a retry with less than a useful response budget. Stop before a hopeless retry, report exhaustion, and never exceed the original total deadline. Keep meaningful retries possible when sufficient time remains.
-- [ ] Keep connectivity probes bounded and independent. Avoid unbounded provider defaults and hidden per-attempt multiplication. Use existing timeout/config conventions with a documented total default.
-- [ ] Run focused failures then gateway, decision-budget and role-client suites, all passing; verify no external calls were made.
-- [ ] Commit and report exact default budgets and backward compatibility notes.
+- [x] Add fake-clock transport tests proving red commander, contact assessor and reviewer calls without explicit caller deadlines still have one finite total budget including all retries. Explicit shorter deadlines always win.
+- [x] Reproduce truncated output followed by a retry with less than a useful response budget. Stop before a hopeless retry, report exhaustion, and never exceed the original total deadline. Keep meaningful retries possible when sufficient time remains.
+- [x] Keep connectivity probes bounded and independent. Avoid unbounded provider defaults and hidden per-attempt multiplication. Use existing timeout/config conventions with a documented total default.
+- [x] Run focused failures then gateway, decision-budget and role-client suites, all passing; verify no external calls were made.
+- [x] Commit and report exact default budgets and backward compatibility notes.
 
 ### Task 5: Immediate Mutation Frames and UI Confirmation
 
@@ -86,16 +86,16 @@ Replay: `outputs/simulation_20260926_170835.jsonl` in the original checkout. It 
 
 **Interfaces:** Existing command queues, receipts, authoritative frame revisions and runtime phases. Consume manual population and intent status behavior from Tasks 2/3.
 
-- [ ] Add a runtime test which queues a vessel/focus mutation then blocks the following model call. The applied mutation and receipt must already be published in an authoritative frame, not delayed until the step completes.
-- [ ] Publish a coherent command-boundary frame before subsequent model work, without an extra simulation tick or step-delay sleep, while preserving paused/reset/retry behavior and event/recorder semantics.
-- [ ] Browser regression: create, delete and AIS commands remain busy until an authoritative frame confirms the requested result. Deletion must retain the vessel identity and wait for confirmed absence; stale receipts/frames cannot unblock a later episode's command.
-- [ ] Browser regression for focus submission through the existing 5x5 map interaction and owner/status display. Do not redesign the UI.
-- [ ] Run focused Python failures then green and related runtime/frame suites. Install frontend dependencies using the lockfile; run relevant Playwright tests and production build. Check desktop/mobile for interaction regressions if the existing test harness supports them.
-- [ ] Commit and report test outputs, UI screenshots/artifacts, and how to run the repaired app.
+- [x] Add a runtime test which queues a vessel/focus mutation then blocks the following model call. The applied mutation and receipt must already be published in an authoritative frame, not delayed until the step completes.
+- [x] Publish a coherent command-boundary frame before subsequent model work, without an extra simulation tick or step-delay sleep, while preserving paused/reset/retry behavior and event/recorder semantics.
+- [x] Browser regression: create, delete and AIS commands remain busy until an authoritative frame confirms the requested result. Deletion must retain the vessel identity and wait for confirmed absence; stale receipts/frames cannot unblock a later episode's command.
+- [x] Browser regression for focus submission through the existing 5x5 map interaction and owner/status display. Do not redesign the UI.
+- [x] Run focused Python failures then green and related runtime/frame suites. Install frontend dependencies using the lockfile; run relevant Playwright tests and production build. Check desktop/mobile for interaction regressions if the existing test harness supports them.
+- [x] Commit and report test outputs, UI screenshots/artifacts, and how to run the repaired app.
 
 ## Final Verification
 
-- [ ] Run the full Python suite and frontend build/browser suites, recording pre-existing environmental skips separately from failures.
-- [ ] Request an independent whole-branch review against this plan; fix all Critical/Important findings and re-run covering tests.
-- [ ] Write a validation report mapping each audit finding to code/tests and distinguish accelerated/offline verification from a new real-time five-hour provider-backed acceptance run.
-- [ ] Preserve the worktree and repair branch for user review; do not merge or push without request.
+- [x] Attempt the full Python suite and record its existing credential-dependent failure separately: 284 passed, 1 failed (fail-fast). Final affected offline suite: 751 passed, 50 deselected. Frontend build and 48 browser tests passed. Full-repository green is not claimed.
+- [x] Request an independent whole-branch review against this plan; fix all Critical/Important findings and re-run covering tests. All Minor coverage suggestions also addressed; final production commit 27a96be independently approved.
+- [x] Write a validation report mapping each audit finding to code/tests and distinguish accelerated/offline verification from a new real-time five-hour provider-backed acceptance run. See docs/validation/2026-09-27-live5h-repair.md.
+- [x] Preserve the worktree and repair branch for user review; do not merge or push without request.
