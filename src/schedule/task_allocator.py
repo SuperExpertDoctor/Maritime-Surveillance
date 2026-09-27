@@ -40,8 +40,11 @@ from src.mission.coverage_policy import (
 from src.mission.coverage_zones import (
     ZonePartition, build_zone_coverage_summary, build_zone_quota_inputs,
 )
-from src.mission.mission_scheduler import MissionScheduler, match_task_ids
+from src.mission.mission_scheduler import (
+    MissionScheduler, match_task_ids, actionable_edges, probe_search_limit,
+)
 from src.mission.task_catalog import TaskCatalog
+from src.mission.intent_store import attach_intent_owners
 from src.mission.strategy_memory import StrategyMemoryStore
 
 
@@ -173,7 +176,7 @@ class TaskAllocator:
         available = tuple(sorted(uav.id for uav in self.sm.get_available_uavs()))
         active_records = tuple(
             record
-            for record in active_tasks
+            for record in attach_intent_owners(active_tasks, published_intents)
             if record.status in {"approved", "executing"}
             if record.assigned_uav_id is None
             or self.sm.is_uav_operational(record.assigned_uav_id)
@@ -219,12 +222,6 @@ class TaskAllocator:
                 edge_candidates, resources, published_contacts, planning_map_version,
                 active_tasks=active_records,
             )
-        pending_matching = self._match_pending_search_edges(
-            pending_search_task_ids,
-            resources,
-            available,
-            edges,
-        )
         prompt_task_ids = (
             tuple(task.task_id for task in prompt_window.tasks)
             if prompt_window is not None else ()
@@ -253,6 +250,18 @@ class TaskAllocator:
             )
         coverage_constraint = None
         coverage_summary = None
+        demand_snapshot = MissionSnapshot(
+            "demand", now, candidates, available, preemptible, (), resources,
+            edges, active_records, published_contacts, published_intents, (),
+            selected_memory_version, planning_map_version, "",
+        )
+        search_limit = probe_search_limit(
+            demand_snapshot,
+            reassignment_cooldown_min=self.mission_scheduler.reassignment_cooldown_min,
+            allow_probe_preempt_search=self.mission_scheduler.allow_probe_preempt_search,
+            allow_intent_preempt_search=self.mission_scheduler.allow_intent_preempt_search,
+        )
+        pending_matching = self._pending_search_matching(demand_snapshot)
         if prompt_window is not None and getattr(self.sm, "coverage_metrics", None) is not None:
             coverage_config = getattr(self.config.mission, "coverage", None)
             metrics = self.sm.coverage_metrics
@@ -282,6 +291,8 @@ class TaskAllocator:
             reserved_search_count = len(unfinished_regions)
             matchable_pending_count = len(pending_matching)
             desired_search_count = math.ceil(healthy_count * fraction)
+            if search_limit is not None:
+                desired_search_count = min(desired_search_count, search_limit)
             residual_new_slots = max(
                 0,
                 desired_search_count
@@ -303,6 +314,7 @@ class TaskAllocator:
                 representatives=representative_task_ids,
                 edges=edges,
                 fraction=fraction,
+                search_limit=search_limit,
                 zone_requirements_input=quota_inputs,
             )
             if active_search_count + matchable_pending_count <= desired_search_count:
@@ -396,13 +408,38 @@ class TaskAllocator:
         self,
         snapshot: MissionSnapshot,
     ) -> dict[str, FeasibleEdge]:
-        """Return a read-only maximum-cardinality pending-region matching."""
-        return self._match_pending_search_edges(
+        """Match retained searches without consuming executable probe capacity."""
+        policy = {
+            "reassignment_cooldown_min": self.mission_scheduler.reassignment_cooldown_min,
+            "allow_probe_preempt_search": self.mission_scheduler.allow_probe_preempt_search,
+            "allow_intent_preempt_search": self.mission_scheduler.allow_intent_preempt_search,
+        }
+        limit = probe_search_limit(snapshot, **policy)
+        available = snapshot.available_uav_ids
+        budget = None
+        if limit is not None:
+            active_count = sum(task.kind == "search" and task.assigned_uav_id is not None
+                               for task in snapshot.active_tasks)
+            budget = max(0, limit - active_count)
+            if not budget:
+                return {}
+            probe_ids = {task.task_id for task in snapshot.candidates if task.kind == "probe"}
+            probe_edges = [edge for edge in actionable_edges(snapshot, **policy)
+                           if edge.task_id in probe_ids and edge.uav_id in available]
+            if probe_edges:
+                # A numerical reserve is insufficient if the only aircraft
+                # that can reach the probe is consumed by retained search.
+                reserved = min(probe_edges, key=lambda edge: (edge.transit_time_min, edge.uav_id))
+                available = tuple(uav_id for uav_id in available if uav_id != reserved.uav_id)
+        matching = self._match_pending_search_edges(
             self._pending_search_ids(snapshot.active_tasks),
             snapshot.resources,
-            snapshot.available_uav_ids,
+            available,
             snapshot.feasible_edges,
         )
+        if budget is not None:
+            matching = {task_id: matching[task_id] for task_id in sorted(matching)[:budget]}
+        return matching
 
     def build_pending_search_batch(
         self,
@@ -526,7 +563,14 @@ class TaskAllocator:
             (task for task in ranked_search if task.task_id not in partition_ids),
             key=lambda task: -((task.bbox[2] - task.bbox[0]) * (task.bbox[3] - task.bbox[1])),
         )
-        ranked = (*urgent, *partitioned, *fallback)
+        focus = tuple(sorted(
+            (task for task in ranked_search if task.intent_ids),
+            key=lambda task: (-int(task.priority == "high"), -task.utility),
+        ))
+        focus_ids = {task.task_id for task in focus}
+        ranked = (*urgent, *focus,
+                  *(task for task in partitioned if task.task_id not in focus_ids),
+                  *(task for task in fallback if task.task_id not in focus_ids))
         zones = ZonePartition(metrics.fixed_mask, coverage_config.zone_cols, coverage_config.zone_rows)
         return policy.select_window(
             ranked,
@@ -570,8 +614,7 @@ class TaskAllocator:
             for edge in snapshot.feasible_edges
         )
 
-    @staticmethod
-    def _model_selection_skip_reason(snapshot: MissionSnapshot) -> str | None:
+    def _model_selection_skip_reason(self, snapshot: MissionSnapshot) -> str | None:
         """Return a no-model reason only when the frozen snapshot has no work.
 
         The coverage constraint is the authoritative residual-search budget.
@@ -579,6 +622,8 @@ class TaskAllocator:
         legal candidate edges must still be dispatched. Urgent, intent-backed,
         and approved non-search work also remains on the model path.
         """
+        if self.mission_scheduler.pending_intent_reviews(snapshot):
+            return None
         unassigned_approved = tuple(
             task
             for task in snapshot.active_tasks
@@ -592,19 +637,12 @@ class TaskAllocator:
             # select, even when a search is still waiting for an aircraft.
             return "pending_search_reassignment"
 
-        if TaskAllocator._has_idle_candidate_work(snapshot):
-            return None
-        constraint = snapshot.coverage_constraint
-        if constraint is None or constraint.required_new_search_count != 0:
-            return None
-        if constraint.must_service_task_ids:
-            return None
-        if any(
-            zone.required_search_count > 0 and zone.infeasible_reason is None
-            for zone in constraint.zone_requirements
+        if actionable_edges(
+            snapshot,
+            reassignment_cooldown_min=self.mission_scheduler.reassignment_cooldown_min,
+            allow_probe_preempt_search=self.mission_scheduler.allow_probe_preempt_search,
+            allow_intent_preempt_search=self.mission_scheduler.allow_intent_preempt_search,
         ):
-            return None
-        if any(task.kind != "search" for task in unassigned_approved):
             return None
         if snapshot.candidates and all(
             task.kind == "search"
@@ -613,7 +651,7 @@ class TaskAllocator:
             for task in snapshot.candidates
         ):
             return "ordinary_search_capacity_satisfied"
-        return None
+        return "no_actionable_candidates"
 
     def decide_mission(self, now_min: float | None = None, **kwargs):
         """Run T11 selection on a fresh snapshot; T12 owns application."""
@@ -872,8 +910,23 @@ class TaskAllocator:
             for task in snapshot.active_tasks
             if task.status == "approved" and task.assigned_uav_id is None
         )
-        assignments = self.mission_scheduler.pair_approved_tasks(
+        pairing_snapshot = snapshot
+        if probe_search_limit(
             snapshot,
+            reassignment_cooldown_min=self.mission_scheduler.reassignment_cooldown_min,
+            allow_probe_preempt_search=self.mission_scheduler.allow_probe_preempt_search,
+            allow_intent_preempt_search=self.mission_scheduler.allow_intent_preempt_search,
+        ) is not None:
+            pending_matching = self._pending_search_matching(snapshot)
+            search_ids = {task.task_id for task in snapshot.active_tasks if task.kind == "search"}
+            approved_ids = tuple(task_id for task_id in approved_ids
+                                 if task_id not in search_ids or task_id in pending_matching)
+            pairing_snapshot = replace(snapshot, feasible_edges=tuple(
+                edge for edge in snapshot.feasible_edges
+                if edge.task_id not in search_ids or pending_matching.get(edge.task_id) == edge
+            ))
+        assignments = self.mission_scheduler.pair_approved_tasks(
+            pairing_snapshot,
             task_ids=approved_ids,
         )
         decision_finished_wall = time.perf_counter()

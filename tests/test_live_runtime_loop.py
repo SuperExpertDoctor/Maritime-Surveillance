@@ -1,10 +1,79 @@
 """Entry-point regressions: no network, server threads, or real model calls."""
 from types import SimpleNamespace
+import threading
 
 import pytest
 
 import main as cli
 from src.env.simulation import SimulationEngine
+
+
+@pytest.mark.parametrize("start_server", [False, True])
+def test_command_boundary_published_before_blocking_model(monkeypatch, tmp_path, start_server):
+    from scripts.evaluate_mixed_maritime import _FixtureGateway
+    from src.mission.contracts import IntentCommand, VesselCommand
+    from src.schedule.config_loader import ConfigLoader
+    from src.vis.backend.frame_logger import FrameLogger
+    from src.vis.backend.frame_publisher import FramePublisher
+
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=_FixtureGateway())
+    engine.last_result = {"trigger_type": "heavy", "llm_cycle": {"stale": True}}
+    engine.vessel_commands.enqueue(VesselCommand(
+        "boundary-vessel", engine.episode_id, "create",
+        vessel_class="type_ii", position_cells=(12.5, 8.5),
+    ))
+    engine.intent_commands.enqueue(IntentCommand(
+        "boundary-focus", engine.episode_id, "create", None, None,
+        {"label": "focus", "bbox": [10, 10, 15, 15], "mode": "search_priority",
+         "priority": "high", "weight": 1, "valid_duration_min": 120},
+    ))
+    entered, release = threading.Event(), threading.Event()
+    errors, publications = [], []
+    publisher = FramePublisher(FrameLogger(str(tmp_path)))
+
+    def block_model(_time):
+        entered.set()
+        assert release.wait(5)
+        raise RuntimeError("stop offline model gate")
+
+    monkeypatch.setattr(engine, "_prepare_red_decision", block_model)
+
+    def publish(current, result):
+        publications.append((current.clock.time, dict(result)))
+        publisher.push_snapshot(current, result, 1)
+
+    def run():
+        try:
+            cli._run_runtime_loop(engine, 1, publish, start_server=start_server)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        assert engine.vessel_commands.get("boundary-vessel").status == "applied"
+        assert engine.intent_commands.get("boundary-focus").status == "applied"
+        assert publications, "applied commands must publish before the model returns"
+        assert publications == [(0, {"trigger_type": "none", "action": None, "command_boundary": True})]
+        assert publisher.flush(5)
+        import json
+        frames = [json.loads(line) for line in open(publisher.logger.path, encoding="utf-8")]
+        assert len(frames) == 1
+        frame = frames[0]
+        assert frame["sim_time_min"] == 0 and engine.clock.time == 0
+        assert frame["llm_cycle"] is None
+        assert frame["actual_vessel_count"] == len(engine.ships)
+        assert any(v["scenario_entity_id"] == engine.vessel_commands.get("boundary-vessel").vessel_id
+                   for v in frame["scenario_vessels"])
+        assert frame["intents"][0]["bbox"] == [10, 10, 15, 15]
+        assert any(event["data"].get("command_id") == "boundary-focus" for event in frame["events"])
+    finally:
+        release.set()
+        thread.join(5)
+        publisher.close()
+    assert not thread.is_alive()
+    assert errors == ["stop offline model gate"]
 
 
 class StubEngine:
@@ -32,7 +101,10 @@ class StubEngine:
     def _set_runtime_state(self, status):
         self.runtime_status = status
 
-    def step(self):
+    def _publish_runtime_state(self):
+        pass
+
+    def step(self, *, on_command_boundary=None):
         self.step_calls += 1
         self.apply_pending_runtime_commands()
         self.apply_pending_intent_commands()
@@ -396,8 +468,8 @@ def test_safety_pause_keeps_live_commands_responsive(monkeypatch, budget, pause_
     if pause_during_step:
         original_step = engine.step
 
-        def safety_step():
-            result = original_step()
+        def safety_step(**kwargs):
+            result = original_step(**kwargs)
             engine.runtime_status = "paused_safety"
             return result
 
@@ -422,3 +494,66 @@ def test_safety_pause_keeps_live_commands_responsive(monkeypatch, budget, pause_
     )
     assert waits
     assert engine.runtime_status == ("finished" if budget is None else "paused_safety")
+
+
+def test_command_boundary_does_not_sleep_through_step_delay(harness, monkeypatch):
+    engine, publisher = harness
+    delays = []
+    monkeypatch.setattr(cli.time, "sleep", delays.append)
+
+    def step(*, on_command_boundary=None):
+        assert on_command_boundary is not None
+        on_command_boundary(engine, {"trigger_type": "none", "action": None, "command_boundary": True})
+        assert len(publisher.frames) == 1
+        assert delays == [], "command snapshots must not incur the simulation pacing delay"
+        engine.clock.time = 1
+        engine.allocator.sm.current_time = 1
+        return {"trigger_type": "none", "action": None}
+
+    engine.step = step
+    cli.main(steps=1, step_delay=0.5, probe_llm=False)
+    assert delays == [0.5, 0.5]
+
+
+def test_paused_command_boundary_refreshes_inventory_before_publish(monkeypatch):
+    from scripts.evaluate_mixed_maritime import _FixtureGateway
+    from src.mission.contracts import VesselCommand
+    from src.schedule.config_loader import ConfigLoader
+    from src.vis.backend.frame_builder import build_frame
+
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=_FixtureGateway())
+    engine._set_runtime_state("paused_model")
+    engine.vessel_commands.enqueue(VesselCommand(
+        "paused-vessel", engine.episode_id, "create",
+        vessel_class="type_ii", position_cells=(12.5, 8.5),
+    ))
+    frames = []
+
+    def publish(current, result):
+        frames.append(build_frame(current.allocator.sm, 0, current.config))
+        current._set_runtime_state("finished")
+
+    monkeypatch.setattr(cli.time, "sleep", lambda _: pytest.fail("unnecessary delay"))
+    cli._run_runtime_loop(engine, 1, publish, start_server=True)
+    assert len(frames) == 1
+    frame = frames[0]
+    assert frame["sim_time_min"] == 0
+    assert frame["actual_vessel_count"] == len(engine.ships)
+    assert any(v["scenario_entity_id"] == engine.vessel_commands.get("paused-vessel").vessel_id
+               for v in frame["scenario_vessels"])
+
+
+def test_running_abort_does_not_republish_previous_heavy_decision():
+    from scripts.evaluate_mixed_maritime import _FixtureGateway
+    from src.mission.contracts import RuntimeCommand
+    from src.schedule.config_loader import ConfigLoader
+
+    engine = SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=_FixtureGateway())
+    engine.last_result = {"trigger_type": "heavy", "llm_cycle": {"stale": True}}
+    engine.runtime_commands.enqueue(RuntimeCommand("abort-boundary", engine.episode_id, "abort"))
+    results = []
+    cli._run_runtime_loop(engine, 1, lambda _, result: results.append(result), start_server=True)
+    assert results
+    assert all(result["trigger_type"] == "none" and "llm_cycle" not in result for result in results)
+    assert engine.clock.time == 0
+    assert engine.runtime_status == "finished"

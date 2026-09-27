@@ -112,6 +112,7 @@ class LGVFTracker:
         R_d: float,
         sample_count: int = 36,
         step_size: float = 0.2,
+        route_is_legal: Callable[[Sequence[Pose]], bool] | None = None,
     ):
         """Choose the shortest Dubins connection to a tangent orbit pose."""
         candidates = []
@@ -121,7 +122,10 @@ class LGVFTracker:
             point = (tx + R_d * math.cos(phase), ty + R_d * math.sin(phase))
             tangent_heading = phase + math.pi / 2.0
             path = DubinsPath.compute(uav_pose, (*point, tangent_heading), self.R_min, step_size)
-            candidates.append(path)
+            if route_is_legal is None or route_is_legal(path.waypoints):
+                candidates.append(path)
+        if not candidates:
+            raise ValueError("no legal orbit entry candidate")
         return min(candidates, key=lambda path: path.total_length)
 
 

@@ -151,11 +151,14 @@ def test_rejected_command_can_retry_without_success_event():
 
 @pytest.mark.parametrize("probability,kind", [(0, "type_ii"), (1, "type_i")])
 def test_real_engine_applies_existing_create_lifecycle(probability, kind):
+    from scripts.evaluate_mixed_maritime import _FixtureGateway
     from src.env.simulation import SimulationEngine
     from src.schedule.config_loader import ConfigLoader
 
-    e = SimulationEngine(ConfigLoader.load(), seed=42, episode_id="opponent-test")
+    e = SimulationEngine(ConfigLoader.load(), seed=42, episode_id="opponent-test",
+                         llm_gateway=_FixtureGateway())
     p = population(type_i_probability=probability)
+    e.opponent_population = p
     original_count = len(e.ships)
     rng_state = e.rng.getstate()
     e.clock.time = 2
@@ -257,13 +260,13 @@ def test_apply_rechecks_automatic_capacity_after_interleaved_manual_create(
     manual, automatic = e.apply_pending_vessel_commands()
     assert manual.status == "applied"
     assert automatic.command_id == queued.command_id
-    assert automatic.status == ("applied" if depart_before_apply else "rejected")
-    assert automatic.error_code == (None if depart_before_apply else "opponent_capacity_reached")
-    assert sum(not ship.departed for ship in e.ships) == limit
+    assert automatic.status == "rejected"
+    assert automatic.error_code == "opponent_population_paused"
+    assert sum(not ship.departed for ship in e.ships) == limit - depart_before_apply
     assert e.vessel_commands.get(queued.command_id) == automatic
     created = [event for event in e.allocator.sm.get_recent_events(0)
                if event["type"] == "vessel_created"]
-    assert len(created) == 1 + depart_before_apply
+    assert len(created) == 1
 
     # A release-like command ID cannot bypass the shared manual/automatic cap.
     monkeypatch.setattr(p, "_position", original_position)
@@ -274,8 +277,9 @@ def test_apply_rechecks_automatic_capacity_after_interleaved_manual_create(
     ))
     override, = e.apply_pending_vessel_commands()
     assert override.status == "rejected"
-    assert override.error_code == "opponent_capacity_reached"
-    assert sum(not ship.departed for ship in e.ships) == limit
+    assert override.error_code == (
+        "opponent_type_i_capacity_reached" if depart_before_apply else "opponent_capacity_reached")
+    assert sum(not ship.departed for ship in e.ships) == limit - depart_before_apply
 
 
 def test_automatic_release_uses_other_class_when_preferred_class_is_full():

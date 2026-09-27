@@ -80,6 +80,7 @@ def test_full_alternate_retains_holding_fallback(monkeypatch):
     engine, uav, _ = _returning_engine(monkeypatch)
     assert engine.bases[1].land_uav('other')
     assert engine._divert_blocked_return(uav, 1.)
+    uav.position = engine._return_base_by_uav[uav.id].position
     engine._land_for_refuelling(uav)
     assert uav.status == 'holding'
     assert engine.bases[1].occupancy == 1

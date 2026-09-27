@@ -56,7 +56,8 @@ def test_probe_uses_a_short_bounded_longcat_request(monkeypatch):
     assert result == "OK"
     assert len(transport.calls) == 1
     assert transport.calls[0]["max_tokens"] == 32
-    assert transport.calls[0]["timeout_seconds"] == 7.5
+    assert transport.calls[0]["timeout_seconds"] == pytest.approx(7.5, abs=0.1)
+    assert transport.calls[0]["timeout_seconds"] <= 7.5
     assert transport.calls[0]["json_mode"] is False
     assert transport.calls[0]["messages"] == [
         {

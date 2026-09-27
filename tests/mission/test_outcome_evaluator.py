@@ -13,6 +13,111 @@ from src.mission.outcome_evaluator import (
 )
 
 
+@pytest.mark.parametrize("prediction", ["type_i", "type_ii"])
+def test_engine_eo_only_observation_counts_actual_physical_vessel(scenario_factory, prediction):
+    from src.schedule.datatypes import GridCoord
+
+    engine = scenario_factory.engine("silent-type-ii", seed=42)
+    ship = next(s for s in engine.ships if s.vessel_class == "type_ii")
+    engine.ships = [ship]
+    uav = engine.uavs[0]
+    ship.position = GridCoord(15, 15)
+    uav.position = GridCoord(14, 15)
+    uav.heading_rad = 0.
+    uav.status, uav.sensor_mode = "tracking", "eo"
+    uav.target_group_id = "unassociated-estimate"
+    engine.obstacles = []
+    engine._process_ais_tracking(uav, ship.float_position, 1.)
+    contacts = [contact for contact in engine.allocator.sm.contacts.list_snapshots()
+                if any(sample.source == "eo" for sample in contact.samples)]
+    assert len(contacts) == 1
+    contact = contacts[0]
+    assert all(sample.source == "eo" for sample in contact.samples)
+    assert engine._evaluation_contact_links == {contact.contact_id: ship.id}
+    uav.target_group_id = contact.contact_id
+    store = engine.allocator.sm.contacts
+    store.reserve(contact.contact_id, uav.id, "eo-probe")
+    contact = store.snapshot(contact.contact_id)
+    store.apply_assessment(Assessment("eo-assessment", contact.contact_id, "eo-probe",
+        contact.revision, 1., prediction, .99,
+        tuple(sample.sample_id for sample in contact.samples), (), (), "fixture"))
+    engine._observe_evaluation(1.)
+    outcome = engine._outcome_evaluator.snapshot()
+    assert outcome.observed_vessels == 1
+    assert outcome.terminal_classified_vessels == 1
+    assert outcome.classification_accuracy == (1. if prediction == "type_ii" else 0.)
+    assert all(ship.id not in sample.sample_id and sample.source_id == uav.id
+               for sample in contact.samples)
+    engine.reset()
+    assert engine._evaluation_contact_links == {}
+    assert engine._evaluation_eo_returns == set()
+    assert engine._evaluation_eo_time is None
+
+
+def test_engine_eo_requires_current_visible_return(scenario_factory):
+    from src.schedule.datatypes import GridCoord
+
+    engine = scenario_factory.engine("silent-type-ii", seed=42)
+    ship = next(s for s in engine.ships if s.vessel_class == "type_ii")
+    engine.ships = [ship]
+    uav = engine.uavs[0]
+    ship.position, uav.position = GridCoord(15, 15), GridCoord(14, 15)
+    uav.heading_rad = 0.
+    uav.status, uav.sensor_mode = "tracking", "eo"
+    uav.target_group_id = "estimate"
+    engine.obstacles = []
+    engine._process_ais_tracking(uav, ship.float_position, 1.)
+    contact = next(c for c in engine.allocator.sm.contacts.list_snapshots()
+                   if any(s.source == "eo" for s in c.samples))
+    uav.target_group_id = contact.contact_id
+    engine._process_ais_tracking(uav, (13., 15.), 2.)
+    engine._observe_evaluation(2.)
+    assert engine._outcome_evaluator.snapshot().observed_vessels == 0
+
+
+def test_eo_actual_return_does_not_rewrite_old_alias_truth(scenario_factory):
+    from src.schedule.datatypes import GridCoord
+
+    engine = scenario_factory.engine("mixed-ais", seed=42)
+    actual, old = engine.ships
+    actual.position = GridCoord(15, 15)
+    old.position = GridCoord(25, 25)
+    uav = engine.uavs[0]
+    uav.position, uav.heading_rad = GridCoord(14, 15), 0.
+    uav.status, uav.sensor_mode = "tracking", "eo"
+    uav.target_group_id = "estimate"
+    engine.obstacles = []
+    engine._process_ais_tracking(uav, actual.float_position, 1.)
+    cid = next(cid for uid, cid, physical in engine._evaluation_eo_returns
+               if physical == actual.id)
+    engine._evaluation_contact_links[cid] = old.id
+    uav.target_group_id = cid
+    engine._process_ais_tracking(uav, actual.float_position, 2.)
+    assert engine._evaluation_contact_links[cid] == old.id
+    engine._observe_evaluation(2.)
+    assert engine._outcome_evaluator._observed_vessels == {actual.id}
+
+
+def test_simultaneous_eo_returns_sharing_contact_retain_both_physical_vessels(scenario_factory):
+    from src.schedule.datatypes import GridCoord
+
+    engine = scenario_factory.engine("mixed-ais", seed=42)
+    for ship in engine.ships:
+        ship.position = GridCoord(15, 15)
+    uav = engine.uavs[0]
+    uav.position, uav.heading_rad = GridCoord(14, 15), 0.
+    uav.status, uav.sensor_mode = "tracking", "eo"
+    uav.target_group_id = "estimate"
+    engine.obstacles = []
+    engine._process_ais_tracking(uav, (15., 15.), 1.)
+    returns = engine._evaluation_eo_returns
+    assert len(returns) == 2
+    assert len({cid for _, cid, _ in returns}) == 1
+    uav.target_group_id = next(iter(returns))[1]
+    engine._observe_evaluation(1.)
+    assert engine._outcome_evaluator._observed_vessels == {ship.id for ship in engine.ships}
+
+
 def _contact(contact_id, *, vessel_class="unknown", state="pending", assessment=None):
     return ContactSnapshot(
         contact_id,

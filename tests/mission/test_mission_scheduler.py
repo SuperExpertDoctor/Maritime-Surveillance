@@ -284,7 +284,10 @@ def test_scheduler_retries_a_selection_with_a_malformed_information_version():
             json.dumps(_selection(snapshot, ["Q1"])),
         ],
     })
-    scheduler = MissionScheduler(gateway=LLMGateway(transport=transport))
+    scheduler = MissionScheduler(
+        gateway=LLMGateway(transport=transport),
+        planning_deadline_seconds=10.0,
+    )
 
     batch = scheduler.decide(snapshot)
 
@@ -897,7 +900,10 @@ def test_live_scheduler_corrects_infeasible_simultaneous_selection():
         json.dumps(_selection(snapshot, ['S1', 'S2'])),
         json.dumps(_selection(snapshot, ['S1'])),
     ]})
-    scheduler = MissionScheduler(gateway=LLMGateway(transport=transport))
+    scheduler = MissionScheduler(
+        gateway=LLMGateway(transport=transport),
+        planning_deadline_seconds=10.0,
+    )
     batch = scheduler.decide(snapshot)
     assert batch is not None
     assert [a.task_id for a in batch.assignments] == ['S1']

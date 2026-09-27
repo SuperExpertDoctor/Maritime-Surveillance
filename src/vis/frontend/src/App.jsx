@@ -37,13 +37,21 @@ export default function App() {
   const frame = mode === "live" ? live.frame : replay.frame;
   const readOnly = mode === "replay";
   const editingAllowed = mode === "live" && live.status === "connected" && Boolean(frame?.episode_id && frame?.vessel_mutation_allowed);
-  const contextKey = `${mode}|${frame?.episode_id || ""}`;
+  const contextKey = `${mode}|${frame?.episode_id || ""}|${frame?.reset_generation ?? 0}`;
   commandContext.current = contextKey;
+  const confirmedVessel = (frame?.scenario_vessels || []).find((vessel) =>
+    vessel.scenario_entity_id === vesselCommandStatus?.vesselId);
+  const frameConfirmsCommand = vesselCommandStatus?.context === contextKey
+    && Array.isArray(frame?.scenario_vessels)
+    && Boolean(vesselCommandStatus?.vesselId)
+    && vesselCommandStatus.revision != null
+    && (!vesselCommandStatus.requestedVesselId || vesselCommandStatus.requestedVesselId === vesselCommandStatus.vesselId)
+    && (vesselCommandStatus.method === "DELETE"
+      ? !confirmedVessel
+      : confirmedVessel?.revision >= vesselCommandStatus.revision
+        && (vesselCommandStatus.method !== "PATCH" || confirmedVessel.ais_enabled === vesselCommandStatus.aisEnabled));
   const waitingForFrame = vesselCommandStatus?.status === "applied"
-    && vesselCommandStatus.vesselId && vesselCommandStatus.revision != null
-    && !(frame?.scenario_vessels || []).some((vessel) =>
-      vessel.scenario_entity_id === vesselCommandStatus.vesselId
-      && vessel.revision >= vesselCommandStatus.revision);
+    && !vesselCommandStatus.confirmed && !frameConfirmsCommand;
   const vesselCommandBusy = ["queued", "unknown"].includes(vesselCommandStatus?.status) || Boolean(waitingForFrame);
 
   useEffect(() => {
@@ -61,10 +69,11 @@ export default function App() {
   }, [contextKey]);
 
   useEffect(() => {
-    if (vesselCommandStatus?.vesselId && !waitingForFrame) {
-      setVesselCommandStatus((current) => current?.vesselId ? { ...current, vesselId: null } : current);
+    if (vesselCommandStatus?.status === "applied" && !vesselCommandStatus.confirmed && frameConfirmsCommand) {
+      vesselCommandStatus.onConfirmed?.();
+      setVesselCommandStatus((current) => current === vesselCommandStatus ? { ...current, confirmed: true, onConfirmed: null } : current);
     }
-  }, [waitingForFrame, vesselCommandStatus?.vesselId]);
+  }, [frameConfirmsCommand, vesselCommandStatus]);
 
   useEffect(() => {
     if (!editingAllowed) {
@@ -167,7 +176,7 @@ export default function App() {
     return null;
   };
 
-  const submitVesselCommand = async ({ url, method, body }, successMessage, onApplied) => {
+  const submitVesselCommand = async ({ url, method, body, vesselId }, successMessage, onConfirmed) => {
     if (activeCommand.current) return;
     const id = body.command_id;
     const context = commandContext.current;
@@ -209,10 +218,15 @@ export default function App() {
         message: applied.status === "applied" ? successMessage : "船舶命令被拒绝",
         commandId: applied.command_id || id,
         errorCode: applied.error_code,
-        vesselId: method === "DELETE" ? null : applied.vessel_id,
+        vesselId: applied.vessel_id,
         revision: applied.revision,
+        requestedVesselId: vesselId,
+        context,
+        method,
+        aisEnabled: body.ais_enabled,
+        onConfirmed,
+        confirmed: false,
       });
-      if (applied.status === "applied") onApplied?.(applied);
     } finally {
       if (isCurrent()) activeCommand.current = null;
     }
@@ -243,6 +257,7 @@ export default function App() {
     await submitVesselCommand({
       url: `/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}`,
       method: "DELETE",
+      vesselId: vessel.scenario_entity_id,
       body: {
         episode_id: frame.episode_id,
         command_id: id,
@@ -261,6 +276,7 @@ export default function App() {
     await submitVesselCommand({
       url: `/api/vessels/${encodeURIComponent(vessel.scenario_entity_id)}/ais`,
       method: "PATCH",
+      vesselId: vessel.scenario_entity_id,
       body: {
         episode_id: frame.episode_id,
         command_id: id,

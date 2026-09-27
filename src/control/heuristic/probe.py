@@ -18,7 +18,7 @@ from src.control.heuristic.base import (
     next_route_index,
 )
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
-from src.control.heuristic.tracking import plan_contact_orbit_entry
+from src.control.heuristic.tracking import TrackingRouteError, plan_contact_orbit_entry
 from src.mission.config import ContactConfig
 from src.utils.track_orbit import LGVFTracker
 
@@ -52,6 +52,9 @@ class ProbeController(HeuristicControllerBase):
         self._timeout_reported = False
         self._orbit_entry_active = False
         self._guidance_phase: str | None = None
+        self._last_plan_at = -math.inf
+        self._progress_at = -math.inf
+        self._progress_index = -1
 
     @property
     def observation_spec(self) -> ObservationSpec:
@@ -83,6 +86,9 @@ class ProbeController(HeuristicControllerBase):
         self._timeout_reported = False
         self._orbit_entry_active = False
         self._guidance_phase = None
+        self._last_plan_at = -math.inf
+        self._progress_at = observation.timestamp_min
+        self._progress_index = -1
         contact = self._contact(observation.contacts)
         if contact is None:
             self._route_status = "unavailable"
@@ -116,20 +122,38 @@ class ProbeController(HeuristicControllerBase):
         if probe.phase == "awaiting_assessment":
             self._route_phase = probe.phase
             self._route_status = "guidance_only"
-            return ControlDecision(self._awaiting_assessment_command(observation))
-        if self._blocked:
+            return ControlDecision(self._waiting_command(observation))
+        if self._blocked and observation.timestamp_min - self._last_plan_at < 2.0:
             self._route_status = "unavailable"
-            return ControlDecision(self._holding_command(observation))
+            return ControlDecision(self._waiting_command(observation))
+        self._blocked = False
 
         phase, standoff = self._phase_and_standoff(probe.phase)
         contact_key = self._contact_key(observation, contact)
+        stalled = (
+            self._guidance_phase is None
+            and observation.timestamp_min - self._progress_at >= 5.0
+        )
         try:
             if (
-                self._route_phase != probe.phase
+                self._route_phase != phase
                 or self._route is None
+                or self._planning_map_version != observation.planning_map_version
                 or (
-                    self._route_contact_key != contact_key
+                    self._route.is_complete
                     and not self._orbit_entry_active
+                    and self._guidance_phase is None
+                    and not self._at_standoff(observation, contact, standoff)
+                )
+                or stalled
+                or (
+                    observation.self_state.safety_intervened
+                    and observation.timestamp_min - self._last_plan_at >= 2.0
+                )
+                or (
+                    self._guidance_phase is None
+                    and self._route_contact_key != contact_key
+                    and observation.timestamp_min - self._last_plan_at >= 2.0
                     and self._route_contact_key is not None
                     and math.dist(
                         self._route_contact_key[0], contact_key[0]
@@ -141,28 +165,34 @@ class ProbeController(HeuristicControllerBase):
                     )
                 )
             ):
+                self._last_plan_at = observation.timestamp_min
                 self._set_route(
                     self._plan_route(observation, contact, standoff),
                     observation.planning_map_version,
                 )
-                self._route_phase = probe.phase
+                self._route_phase = phase
                 self._route_contact_key = contact_key
                 self._orbit_entry_active = False
                 self._guidance_phase = None
+                self._progress_at = observation.timestamp_min
+                self._progress_index = self._route.index
             if self._guidance_phase == phase:
                 command = self._guidance_command(observation, contact, standoff)
                 events = self._phase_event(phase)
                 return ControlDecision(command, events)
-            if self._at_standoff(observation, contact, standoff):
+            if self._orbit_entry_active or self._at_standoff(observation, contact, standoff):
                 if not self._orbit_entry_active:
                     target_position = self._predicted_contact_position(observation, contact)
                     entry = plan_contact_orbit_entry(
-                        self.tracker, self._pose(observation), target_position, standoff
+                        self.tracker, self._pose(observation), target_position, standoff,
+                        planning_obstacle_mask=observation.planning_obstacle_mask,
                     )
                     self._set_route(entry, observation.planning_map_version)
-                    self._route_phase = probe.phase
+                    self._route_phase = phase
                     self._route_contact_key = contact_key
                     self._orbit_entry_active = True
+                    self._last_plan_at = observation.timestamp_min
+                    self._progress_at = observation.timestamp_min
                 command = self._route.next_command(
                     observation, self.action_spec, SensorMode.EO, OperationMode.PROBE
                 )
@@ -175,11 +205,15 @@ class ProbeController(HeuristicControllerBase):
                     observation, self.action_spec, SensorMode.OFF, OperationMode.PROBE
                 )
                 events = ()
-        except (PathNotFoundError, ValueError) as exc:
+        except (PathNotFoundError, TrackingRouteError, ValueError) as exc:
             self._blocked = True
+            self._last_plan_at = observation.timestamp_min
             self._route = None
             self._route_status = "unavailable"
             return self._blocked_decision(observation, str(exc))
+        if self._route is not None and self._route.index != self._progress_index:
+            self._progress_index = self._route.index
+            self._progress_at = observation.timestamp_min
         targeted = ControlCommand(
             command.turn_rate_rad_min, command.speed_cells_min, command.sensor_mode,
             OperationMode.PROBE, self.task.target_contact_id,
@@ -197,13 +231,23 @@ class ProbeController(HeuristicControllerBase):
         # Aim inside the near evidence band so target motion and fixed-wing
         # turn-rate quantisation do not push otherwise valid samples outside
         # the strict evidence gate.
-        guidance_standoff = max(self.r_min, standoff - 0.1)
+        guidance_standoff = max(
+            self.r_min,
+            standoff if observation.probe.phase == "baseline" else standoff - 0.1,
+        )
         speed = max(
             self.action_spec.min_speed_cells_min,
             min(observation.self_state.speed_cells_min, self.action_spec.max_speed_cells_min),
         )
         turn_rate, speed = self.tracker.compute_guidance(
             self._pose(observation), target_position, guidance_standoff, speed,
+        )
+        # A tangent heading rotates continuously. Feed forward its angular
+        # velocity instead of relying on a persistent heading error to turn.
+        turn_rate += speed / guidance_standoff
+        turn_rate = max(
+            max(self.action_spec.min_turn_rate_rad_min, -speed / self.r_min),
+            min(turn_rate, self.action_spec.max_turn_rate_rad_min, speed / self.r_min),
         )
         self._route_status = "guidance_only"
         command = ControlCommand(
@@ -281,7 +325,7 @@ class ProbeController(HeuristicControllerBase):
         if "blocked" not in self._reported_phases:
             self._reported_phases.add("blocked")
             events = (ControllerEventRequest("probe_blocked", {"task_id": self.task.task_id, "reason": reason}),)
-        return ControlDecision(self._holding_command(observation), events)
+        return ControlDecision(self._waiting_command(observation), events)
 
     def _finished_decision(self, observation: ControlObservation, reason: str | None) -> ControlDecision:
         events: tuple[ControllerEventRequest, ...] = ()
@@ -304,7 +348,7 @@ class ProbeController(HeuristicControllerBase):
         self._validate(command, observation)
         return command
 
-    def _awaiting_assessment_command(
+    def _waiting_command(
         self, observation: ControlObservation
     ) -> ControlCommand:
         command = ControlCommand(

@@ -571,6 +571,15 @@ button {
   color: var(--text-soft);
 }
 
+.intent-owner-tasks span,
+.intent-owner-tasks span:last-child {
+  flex: 1 1 auto;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .intent-row-actions {
   position: absolute;
   top: 4px;

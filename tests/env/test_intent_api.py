@@ -5,6 +5,7 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 
 from src.env.simulation import SimulationEngine
+from src.mission.contracts import TaskRecord
 from src.mission.llm_gateway import ModelResult
 from src.schedule.config_loader import ConfigLoader
 from src.vis.backend.server import create_app
@@ -41,6 +42,62 @@ def _payload(engine: SimulationEngine, command_id: str = "cmd-1", **changes):
     }
     payload.update(changes)
     return payload
+
+
+def test_public_intent_read_does_not_attach_owners_or_queue_control_events():
+    engine = _engine()
+    payload = _payload(engine)
+    intent = engine.intents.create(
+        {key: payload[key] for key in (
+            "label", "bbox", "mode", "priority", "weight",
+            "valid_duration_min", "revisit_interval_min",
+        )},
+        0.0,
+    )
+    record = TaskRecord(
+        "retained-focus", "search", "executing", (6, 6, 12, 12), None,
+        (), engine.uavs[0].id, "validated", 0.0, 0.0, None, None,
+    )
+    engine._mission_task_records[record.task_id] = record
+    engine.allocator.sm.publish_intent_snapshot((intent,), ())
+    before_records = dict(engine._mission_task_records)
+    before_cache = dict(engine._intent_owner_revisions)
+    before_sequence = engine._control_event_sequence
+    app = create_app(engine.config, engine.allocator.sm, engine=engine)
+
+    with TestClient(app) as client:
+        response = client.get("/api/intents")
+
+    assert response.status_code == 200
+    assert engine._mission_task_records == before_records
+    assert engine._intent_owner_revisions == before_cache
+    assert engine._control_event_sequence == before_sequence
+
+
+def test_reassigned_retained_focus_is_delivered_to_replacement_owner():
+    engine = _engine()
+    payload = _payload(engine)
+    intent = engine.intents.create(
+        {key: payload[key] for key in (
+            "label", "bbox", "mode", "priority", "weight",
+            "valid_duration_min", "revisit_interval_min",
+        )},
+        0.0,
+    )
+    record = TaskRecord(
+        "retained-focus", "search", "executing", (6, 6, 12, 12), None,
+        (), engine.uavs[0].id, "validated", 0.0, 0.0, None, None,
+    )
+    engine._mission_task_records[record.task_id] = record
+    engine._evaluate_intent_statuses(0.0)
+    delivered = engine._control_event_sequence
+
+    engine._mission_task_records[record.task_id] = replace(
+        engine._mission_task_records[record.task_id], assigned_uav_id=engine.uavs[1].id,
+    )
+    engine._evaluate_intent_statuses(1.0)
+
+    assert engine._control_event_sequence == delivered + 1
 
 
 def test_http_request_is_queued_before_simulation_thread_applies_it():

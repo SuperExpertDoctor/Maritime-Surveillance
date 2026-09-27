@@ -294,7 +294,8 @@ test("operator places a type-II vessel by click and deletes the selected scenari
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ command_id: route.request().url().split("/").at(-1), status: "applied", error_code: null }),
+      body: JSON.stringify({ command_id: route.request().url().split("/").at(-1), status: "applied", error_code: null,
+        vessel_id: deleted.length ? "scenario-vessel-9" : "scenario-created", revision: deleted.length ? 5 : 1 }),
     });
   });
   await page.goto("/");
@@ -317,6 +318,12 @@ test("operator places a type-II vessel by click and deletes the selected scenari
   await expect.poll(() => posted).toHaveLength(1);
   expect(posted[0].vessel_class).toBe("type_ii");
   expect(posted[0].position_cells).toEqual([12.5, 8.5]);
+  await page.evaluate(f => window.__pushFrame(f), {
+    ...fixture, scenario_vessels: [...fixture.scenario_vessels, {
+      ...fixture.scenario_vessels[0], scenario_entity_id: "scenario-created", revision: 1,
+    }],
+  });
+  await expect(page.getByRole("button", { name: "II 类船舶" })).toBeEnabled();
 
   await page.getByRole("button", { name: /scenario-vessel-9/ }).click();
   await page.getByRole("button", { name: "删除选中船舶" }).click();
@@ -356,7 +363,8 @@ test("type-II AIS control sends the current revision and waits for an authoritat
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ command_id: "ais-command", status: "applied", error_code: null }),
+      body: JSON.stringify({ command_id: "ais-command", status: "applied", error_code: null,
+        vessel_id: "scenario-vessel-ii", revision: 5 }),
     });
   });
   await page.goto("/");

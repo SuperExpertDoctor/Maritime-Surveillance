@@ -115,16 +115,32 @@ def plan_contact_orbit_entry(
     uav_pose: Pose,
     target_position: Sequence[float],
     standoff_cells: float,
+    *,
+    planning_obstacle_mask=None,
 ) -> tuple[Pose, ...]:
     """Plan a checked orbit entry from an observed contact estimate only."""
     if not math.isfinite(standoff_cells) or standoff_cells <= 0.0:
         raise ValueError("standoff_cells must be finite and positive")
-    entry = tracker.plan_entry(uav_pose, target_position, standoff_cells)
+
+    def legal(route):
+        return not TrackingController._route_blocked(route, planning_obstacle_mask)
+
+    try:
+        if planning_obstacle_mask is not None and isinstance(tracker, LGVFTracker):
+            entry = tracker.plan_entry(
+                uav_pose, target_position, standoff_cells, route_is_legal=legal,
+            )
+        else:
+            entry = tracker.plan_entry(uav_pose, target_position, standoff_cells)
+    except ValueError as exc:
+        raise TrackingRouteError(str(exc)) from exc
     route = tuple(tuple(map(float, pose)) for pose in entry.waypoints)
     if not route or any(len(pose) != 3 for pose in route):
         raise ValueError("orbit entry must contain pose triples")
     if not all(math.isfinite(value) for pose in route for value in pose):
         raise ValueError("orbit entry contains non-finite values")
+    if planning_obstacle_mask is not None and not legal(route):
+        raise TrackingRouteError("no legal orbit entry candidate")
     return route
 
 
@@ -305,6 +321,7 @@ class TrackingController(HeuristicControllerBase):
             self._current_pose(observation),
             self.target_position,
             self.standoff_radius_cells,
+            planning_obstacle_mask=observation.planning_obstacle_mask,
         )
         self._set_route(entry, observation, "LGVF orbit entry")
         self.phase = TrackingPhase.ORBIT_ENTRY

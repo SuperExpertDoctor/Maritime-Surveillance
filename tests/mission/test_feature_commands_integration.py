@@ -94,7 +94,7 @@ def test_intent_commands_apply_at_boundary_update_expire_and_publish_candidates(
         "create",
         None,
         None,
-        _payload("land", bbox=(1, 1, 2, 2)),
+        _payload("outside task domain", bbox=(-1, 1, 2, 2)),
     )
     engine.intent_commands.enqueue(invalid)
     invalid_result = engine.apply_pending_intent_commands()[0]
