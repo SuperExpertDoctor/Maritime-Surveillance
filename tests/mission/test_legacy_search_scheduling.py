@@ -386,6 +386,11 @@ def test_pending_reassignment_route_failure_keeps_pending_state(monkeypatch):
     engine, task_id, _old_uav_id, _bbox = pending_search_fixture()
     before_record = engine._mission_task_records[task_id]
     before_regions = tuple(engine.allocator.sm.get_search_regions())
+    before_controls = {
+        uav.id: (engine.control_coordinator.active_task(uav.id),
+                 engine.control_coordinator.current_lease(uav.id))
+        for uav in engine.uavs
+    }
 
     def fail_route(*_args, **_kwargs):
         raise RuntimeError("forced pending route failure")
@@ -395,17 +400,22 @@ def test_pending_reassignment_route_failure_keeps_pending_state(monkeypatch):
     assert engine._apply_pending_search_reassignments(1.0) == 0
     assert engine._mission_task_records[task_id] == before_record
     assert engine.allocator.sm.get_search_regions() == list(before_regions)
-    assert all(
-        engine.control_coordinator.active_task(uav.id) is None
+    assert before_controls == {
+        uav.id: (engine.control_coordinator.active_task(uav.id),
+                 engine.control_coordinator.current_lease(uav.id))
         for uav in engine.uavs
-        if uav.id in {"UAV-1", "UAV-2"}
-    )
+    }
 
 
 def test_pending_reassignment_coordinator_failure_keeps_pending_state(monkeypatch):
     engine, task_id, _old_uav_id, _bbox = pending_search_fixture()
     before_record = engine._mission_task_records[task_id]
     before_regions = tuple(engine.allocator.sm.get_search_regions())
+    before_controls = {
+        uav.id: (engine.control_coordinator.active_task(uav.id),
+                 engine.control_coordinator.current_lease(uav.id))
+        for uav in engine.uavs
+    }
 
     def fail_commit(*_args, **_kwargs):
         raise RuntimeError("forced pending coordinator failure")
@@ -419,8 +429,8 @@ def test_pending_reassignment_coordinator_failure_keeps_pending_state(monkeypatc
     assert engine._apply_pending_search_reassignments(1.0) == 0
     assert engine._mission_task_records[task_id] == before_record
     assert engine.allocator.sm.get_search_regions() == list(before_regions)
-    assert all(
-        engine.control_coordinator.active_task(uav.id) is None
+    assert before_controls == {
+        uav.id: (engine.control_coordinator.active_task(uav.id),
+                 engine.control_coordinator.current_lease(uav.id))
         for uav in engine.uavs
-        if uav.id in {"UAV-1", "UAV-2"}
-    )
+    }

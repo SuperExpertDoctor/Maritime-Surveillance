@@ -222,12 +222,6 @@ class TaskAllocator:
                 edge_candidates, resources, published_contacts, planning_map_version,
                 active_tasks=active_records,
             )
-        pending_matching = self._match_pending_search_edges(
-            pending_search_task_ids,
-            resources,
-            available,
-            edges,
-        )
         prompt_task_ids = (
             tuple(task.task_id for task in prompt_window.tasks)
             if prompt_window is not None else ()
@@ -267,6 +261,7 @@ class TaskAllocator:
             allow_probe_preempt_search=self.mission_scheduler.allow_probe_preempt_search,
             allow_intent_preempt_search=self.mission_scheduler.allow_intent_preempt_search,
         )
+        pending_matching = self._pending_search_matching(demand_snapshot)
         if prompt_window is not None and getattr(self.sm, "coverage_metrics", None) is not None:
             coverage_config = getattr(self.config.mission, "coverage", None)
             metrics = self.sm.coverage_metrics
@@ -413,13 +408,38 @@ class TaskAllocator:
         self,
         snapshot: MissionSnapshot,
     ) -> dict[str, FeasibleEdge]:
-        """Return a read-only maximum-cardinality pending-region matching."""
-        return self._match_pending_search_edges(
+        """Match retained searches without consuming executable probe capacity."""
+        policy = {
+            "reassignment_cooldown_min": self.mission_scheduler.reassignment_cooldown_min,
+            "allow_probe_preempt_search": self.mission_scheduler.allow_probe_preempt_search,
+            "allow_intent_preempt_search": self.mission_scheduler.allow_intent_preempt_search,
+        }
+        limit = probe_search_limit(snapshot, **policy)
+        available = snapshot.available_uav_ids
+        budget = None
+        if limit is not None:
+            active_count = sum(task.kind == "search" and task.assigned_uav_id is not None
+                               for task in snapshot.active_tasks)
+            budget = max(0, limit - active_count)
+            if not budget:
+                return {}
+            probe_ids = {task.task_id for task in snapshot.candidates if task.kind == "probe"}
+            probe_edges = [edge for edge in actionable_edges(snapshot, **policy)
+                           if edge.task_id in probe_ids and edge.uav_id in available]
+            if probe_edges:
+                # A numerical reserve is insufficient if the only aircraft
+                # that can reach the probe is consumed by retained search.
+                reserved = min(probe_edges, key=lambda edge: (edge.transit_time_min, edge.uav_id))
+                available = tuple(uav_id for uav_id in available if uav_id != reserved.uav_id)
+        matching = self._match_pending_search_edges(
             self._pending_search_ids(snapshot.active_tasks),
             snapshot.resources,
-            snapshot.available_uav_ids,
+            available,
             snapshot.feasible_edges,
         )
+        if budget is not None:
+            matching = {task_id: matching[task_id] for task_id in sorted(matching)[:budget]}
+        return matching
 
     def build_pending_search_batch(
         self,
@@ -890,8 +910,23 @@ class TaskAllocator:
             for task in snapshot.active_tasks
             if task.status == "approved" and task.assigned_uav_id is None
         )
-        assignments = self.mission_scheduler.pair_approved_tasks(
+        pairing_snapshot = snapshot
+        if probe_search_limit(
             snapshot,
+            reassignment_cooldown_min=self.mission_scheduler.reassignment_cooldown_min,
+            allow_probe_preempt_search=self.mission_scheduler.allow_probe_preempt_search,
+            allow_intent_preempt_search=self.mission_scheduler.allow_intent_preempt_search,
+        ) is not None:
+            pending_matching = self._pending_search_matching(snapshot)
+            search_ids = {task.task_id for task in snapshot.active_tasks if task.kind == "search"}
+            approved_ids = tuple(task_id for task_id in approved_ids
+                                 if task_id not in search_ids or task_id in pending_matching)
+            pairing_snapshot = replace(snapshot, feasible_edges=tuple(
+                edge for edge in snapshot.feasible_edges
+                if edge.task_id not in search_ids or pending_matching.get(edge.task_id) == edge
+            ))
+        assignments = self.mission_scheduler.pair_approved_tasks(
+            pairing_snapshot,
             task_ids=approved_ids,
         )
         decision_finished_wall = time.perf_counter()

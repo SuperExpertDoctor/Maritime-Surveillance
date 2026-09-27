@@ -769,8 +769,10 @@ def _validate_selection(
         retained = sum(t.kind == "search" and t.assigned_uav_id is not None
                        and t.assigned_uav_id not in preempt_uav_ids
                        for t in snapshot.active_tasks)
-        additions = sum(t.kind == "search" and t.task_id not in active for t in selected_tasks)
-        # Existing validated work survives; only new admissions consume slots.
+        additions = sum(t.kind == "search" and getattr(t, "assigned_uav_id", None) is None
+                        for t in selected_tasks)
+        # Existing owners survive; assigning an approved unowned search still
+        # consumes a new aircraft admission, even though its record is retained.
         if additions and retained + additions > search_limit:
             errors.append(f"probe_search_admission_limit:{search_limit}:{retained + additions}")
     if coverage_constraint is not None:

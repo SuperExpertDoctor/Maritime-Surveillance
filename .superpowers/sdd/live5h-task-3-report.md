@@ -55,3 +55,33 @@ Fixture/test: `scripts/evaluate_mixed_maritime.py`, `tests/mission/test_live5h_s
 Self-review caught a second empty-call source: pending retained edges were still actionable even though they were absent from the prompt. Added RED coverage and excluded them in the shared graph. Reviewed all changes against task boundaries; no Task1/Task2 behavior was reverted. Existing large allocator/engine/controller files were kept in place without unrelated restructuring.
 
 This is offline bounded verification, not a new live-provider five-hour acceptance replay. Route reprioritization is conservative: if no safe connector exists at the current pose, existing execution remains in force. It does not weaken observation thresholds or claim coverage from planned waypoints.
+
+## Review Follow-Up: Pending Search Admission
+
+Independent review identified that deterministic pending-search reassignment could consume the probe reserve even though new model-selected searches were capped. Approved but currently unassigned search records also escaped the validator's addition count.
+
+Changes:
+
+- `_pending_search_matching` now uses the existing `probe_search_limit` policy, subtracts executing search owners, and bounds retained-search dispatch by the residual budget. When an idle aircraft can execute the probe, one actual usable probe edge's aircraft is excluded from pending-search matching. This preserves executable capacity rather than leaving only unrelated idle aircraft.
+- Both production snapshot `matchable_pending_count` and `build_pending_search_batch` use that shared matching. Deferred task records, region geometry, completion percentage and reservations are preserved; no abort or fake progress is emitted.
+- The light-trigger approved-task path applies the same capped pending matching and restricts search edges to that result. It cannot consume the reserve after deterministic reassignment.
+- Validation counts assigning an approved unowned search as a new aircraft admission. Existing assigned search owners still remain intact on failure.
+- Added a real two-aircraft engine test that commits the first retained-search batch through `apply_assignment_batch`, rebuilds the snapshot, and verifies both a second pending batch and a subsequent light-trigger batch are deferred. One search remains executing and one approved reservation remains with its previous 37.5% completion.
+
+Every follow-up pytest command uses the original mandated prefix plus `-o 'markers=timeout: legacy timeout marker'`; outputs are warning-free and no real providers are called.
+
+RED evidence:
+
+- `tests/mission/test_live5h_scheduling.py -k 'pending_search_reassignment_respects or approved_unassigned_search'`: **3 failed, 2 passed, 23 deselected** in 0.89s. Production pending dispatch assigned 1 search when the one-aircraft cap was 0 and 10 when the ten-aircraft cap was 8; the validator returned no errors for an approved/unassigned search at cap 0. Infeasible-probe controls passed.
+- `tests/mission/test_live5h_scheduling.py::test_light_trigger_preserves_probe_reserve_for_pending_search`: **1 failed** in 0.41s; the light trigger independently assigned the sole aircraft to pending search.
+
+GREEN evidence:
+
+- Initial pending subset after its fix: **5 passed, 23 deselected** in 0.80s.
+- Pending/validator/light subset after the shared light-path fix: **6 passed, 23 deselected** in 0.79s.
+- Actual committed-batch follow-up guard: **1 passed** in 7.37s.
+- Requested `test_live5h_scheduling.py test_mission_scheduler.py test_legacy_search_scheduling.py test_idle_fleet_dispatch.py` run: **91 passed, 2 failed** in 277.10s. The two failures were the exact previously baselined route/coordinator failure tests, not pending-admission regressions. Both already preserved the rejected assignment, task record and region. Only their assertion that UAV-1/UAV-2 had no controller was stale: diagnostic inspection showed UAV-1 already had its old coverage ControlTask before the attempted reassignment and had that identical task afterward. Their final assertions now compare the entire fleet's before/after active tasks and leases, including generations, while retaining all pending-state and rejection assertions.
+- Final post-light-path suite `test_live5h_scheduling.py test_mission_scheduler.py test_idle_fleet_dispatch.py test_feature_episode_integration.py`: **97 passed** in 62.97s, clean output.
+- Final corrected failure-path and scheduler rerun: the two `test_legacy_search_scheduling.py::test_pending_reassignment_{route,coordinator}_failure_keeps_pending_state` nodes, the four one/ten-aircraft pending controls, approved-unassigned validator regression, light-trigger regression, actual committed-batch regression, and all of `test_mission_scheduler.py`: **57 passed** in 41.41s, clean output.
+
+Additional files touched by this review follow-up: `tests/mission/test_legacy_search_scheduling.py` (two stale absence assertions strengthened to identity/lease preservation). No controller, sensor, lifecycle, UI, action-schema or provider behavior changed in this follow-up.

@@ -263,3 +263,105 @@ def test_focus_priority_survives_zone_containment_preference():
     window = CoveragePolicy(fixed).select_window((focus, ordinary), ordinary_reserve=1,
         capacity=1, now_min=0., zones=ZonePartition(fixed, 3, 3))
     assert window.tasks == (focus,)
+
+
+@pytest.mark.parametrize("count,blocked", [(1, False), (10, False), (1, True), (10, True)])
+def test_pending_search_reassignment_respects_probe_admission_and_preserves_reservations(count, blocked):
+    from src.schedule.config_loader import ConfigLoader
+    from src.schedule.datatypes import BBox, Region
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    resources = allocator._mission_resources()[:count]
+    available = {resource.uav_id for resource in resources}
+    idle = tuple(uav for uav in allocator.sm.get_available_uavs() if uav.id in available)
+    allocator._mission_resources = lambda: resources
+    allocator.sm.get_available_uavs = lambda: idle
+    allocator.sm.configure_coverage_metrics(np.ones(allocator.config.grid.resolution, dtype=bool), "pending")
+    records = tuple(TaskRecord(f"pending:{i}", "search", "approved", (i * 3, 0, i * 3 + 2, 2),
+                               None, (), None, "validated", 0., None, None, None)
+                    for i in range(count))
+    regions = [Region(record.task_id, BBox(*record.bbox), "search", completion_pct=37.5)
+               for record in records]
+    allocator.sm.set_search_regions(regions)
+    probe = replace(_task("Q", kind="probe", contact_id="C1"),
+                    feasible_uav_ids=(resources[0].uav_id,))
+    allocator.task_catalog.build = lambda *_a: (probe,)
+    edges = tuple(_edge(record.task_id, resource.uav_id, 1.)
+                  for record in records for resource in resources)
+    if not blocked:
+        edges += (_edge("Q", resources[0].uav_id, 1.),)
+    allocator._mission_edges = lambda *_a, **_kw: edges
+
+    batch = allocator.build_pending_search_batch(20., active_tasks=records)
+
+    assignments = () if batch is None else batch.assignments
+    expected = count if blocked else int(count * .8)
+    assert len(assignments) == expected
+    assert allocator.last_mission_snapshot.coverage_constraint.matchable_pending_count == expected
+    assert allocator.pending_search_match_count(20., active_tasks=records) == expected
+    if not blocked:
+        assert resources[0].uav_id not in {item.uav_id for item in assignments}
+    assert all(record.status == "approved" and record.assigned_uav_id is None for record in records)
+    assert allocator.sm.get_search_regions() == regions
+    assert all(region.status == "active" and region.assigned_uav_id is None
+               and region.completion_pct == 37.5 for region in regions)
+
+
+def test_approved_unassigned_search_cannot_bypass_selection_admission_limit():
+    pending = TaskRecord("S1", "search", "approved", (1, 1, 5, 6), None,
+                         (), None, "validated", 0., None, None, None)
+    snapshot = _snapshot([_task("Q", kind="probe", contact_id="C1")], [_resource("U1")],
+                         [_edge("Q", "U1", 1.), _edge("S1", "U1", 1.)], active_tasks=(pending,))
+    errors = validate_selection(_selection(snapshot, ["S1"]), snapshot)
+    assert "probe_search_admission_limit:0:1" in errors
+
+
+def test_light_trigger_preserves_probe_reserve_for_pending_search():
+    from src.schedule.config_loader import ConfigLoader
+    from src.schedule.datatypes import BBox, Region
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    pending = TaskRecord("S1", "search", "approved", (1, 1, 5, 6), None,
+                         (), None, "validated", 0., None, None, None)
+    allocator.sm.set_search_regions([Region("S1", BBox(*pending.bbox), "search", completion_pct=37.5)])
+    snapshot = _snapshot([_task("Q", kind="probe", contact_id="C1")], [_resource("U1")],
+                         [_edge("Q", "U1", 1.), _edge("S1", "U1", 1.)], active_tasks=(pending,))
+    allocator.build_mission_snapshot = lambda *_a, **_kw: snapshot
+
+    result, batch = allocator._handle_light_mission_trigger(10., None, (pending,))
+
+    assert batch is None
+    assert result["action"] == "approved_tasks_deferred"
+    assert pending.status == "approved" and pending.assigned_uav_id is None
+    assert allocator.sm.get_pending_search_regions()[0].completion_pct == 37.5
+
+
+def test_committed_pending_batch_cannot_be_followed_by_a_second_cap_bypass():
+    from src.env.simulation import SimulationEngine
+    from src.schedule.config_loader import ConfigLoader
+    from src.schedule.datatypes import BBox, Region
+    from tests.mission.test_coverage_model_failure import OfflineGateway
+    config = ConfigLoader.load()
+    config = replace(config, uav=replace(config.uav, count_max=2), environment=replace(
+        config.environment, island_count_min=0, island_count_max=0,
+        thunderstorm_count_min=0, thunderstorm_count_max=0))
+    engine = SimulationEngine(config, seed=42, llm_gateway=OfflineGateway())
+    records = tuple(TaskRecord(f"retained:{i}", "search", "approved", bbox, None,
+                               (), None, "validated", 0., None, None, None)
+                    for i, bbox in enumerate(((8, 8, 13, 13), (16, 8, 21, 13))))
+    engine._mission_task_records.update((record.task_id, record) for record in records)
+    engine.allocator.sm.set_search_regions([
+        Region(record.task_id, BBox(*record.bbox), "search", completion_pct=37.5) for record in records])
+
+    first = engine.allocator.build_pending_search_batch(0., active_tasks=records)
+    assert first is not None and len(first.assignments) == 1
+    assert engine.apply_assignment_batch(first)
+    current = tuple(engine._mission_task_records.values())
+    assert sum(record.status == "executing" for record in current) == 1
+
+    second = engine.allocator.build_pending_search_batch(0., active_tasks=current)
+    assert second is None
+    _result, light = engine.allocator._handle_light_mission_trigger(0., None, current)
+    assert light is None
+    assert engine._mission_task_records == {record.task_id: record for record in current}
+    assert len(engine.allocator.sm.get_pending_search_regions()) == 1
+    assert len(engine.allocator.sm.get_unfinished_search_regions()) == 2
+    assert engine.allocator.sm.get_pending_search_regions()[0].completion_pct == 37.5
