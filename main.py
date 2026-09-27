@@ -55,6 +55,7 @@ def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_se
             intent_results = engine.apply_pending_intent_commands()
             vessel_results = engine.apply_pending_vessel_commands()
             if runtime_results or intent_results or vessel_results:
+                engine._publish_runtime_state()
                 # Preserve a successful retry's decision payload, but never
                 # repeat an old heavy decision for an unrelated edit/abort.
                 result = (
@@ -62,13 +63,13 @@ def _run_runtime_loop(engine: SimulationEngine, steps: int, on_step, *, start_se
                     if runtime_results and engine.runtime_status == "running"
                     else {"trigger_type": "none", "action": None}
                 )
-                on_step(engine, result)
+                on_step(engine, {**result, "command_boundary": True})
             if engine.runtime_status in paused_states:
                 time.sleep(0.1)
             continue
 
         previous_time = engine.clock.time
-        result = engine.step()
+        result = engine.step(on_command_boundary=on_step)
         if engine.clock.time != previous_time:
             completed += 1
         on_step(engine, result)
@@ -190,6 +191,8 @@ def main(
             if llm_cycle is not None:
                 app.state.llm_cycle = llm_cycle
         frame_publisher.push_snapshot(current_engine, result, steps)
+        if result.get("command_boundary"):
+            return
 
         if result["trigger_type"] != "none":
             detail = (

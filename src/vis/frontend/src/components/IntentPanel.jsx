@@ -17,6 +17,14 @@ const LIFECYCLE_LABELS = {
   cancelled: "已取消",
 };
 
+const INTENT_STATUS_LABELS = {
+  awaiting_planning: "等待规划",
+  resource_blocked: "资源受限",
+  waiting_assignment: "等待分配",
+  coverage_below_target: "覆盖未达标",
+  freshness_below_target: "新鲜度未达标",
+};
+
 const COMMAND_LABELS = {
   queued: "待应用",
   applied: "已应用",
@@ -303,7 +311,8 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
             <div className={`intent-row ${expired ? "expired" : ""}`} key={`${intent.intent_id}-${intent.revision}`}>
               <div className="intent-row-main"><span className={`intent-dot ${intent.priority || "medium"}`} /><strong>{intent.label || intent.intent_id}</strong><span className="intent-lifecycle">{LIFECYCLE_LABELS[intent.lifecycle] || intent.lifecycle}</span></div>
               <div className="intent-row-meta"><span className="mono">{intent.intent_id} · [{intent.bbox?.join(", ")}]</span><span>{status ? `${Math.round((status.coverage_ratio || 0) * 100)}% / ${Math.round((status.freshness_ratio || 0) * 100)}%` : "-"}</span></div>
-              <div className="intent-row-meta"><span>{intent.mode === "maintain_freshness" ? "保持新鲜" : "优先搜索"} · 到期 {formatMinutes(intent.expires_at_min)}</span><span>{status?.unmet_reason || "满足"}</span></div>
+              <div className="intent-row-meta"><span>{intent.mode === "maintain_freshness" ? "保持新鲜" : "优先搜索"} · 到期 {formatMinutes(intent.expires_at_min)}</span><span>{INTENT_STATUS_LABELS[status?.unmet_reason] || status?.unmet_reason || (status ? "满足" : "等待状态")}</span></div>
+              <div className="intent-row-meta"><span>{status?.assigned_task_ids?.length ? `执行任务：${status.assigned_task_ids.join(", ")}` : "暂无执行任务"}</span></div>
               {!readOnly && intent.lifecycle === "active" && (
                 <div className="intent-row-actions"><button type="button" disabled={!canWrite || intentBusy} className="icon-btn compact-icon" onClick={() => beginEdit(intent)} aria-label={`编辑 ${intent.label || intent.intent_id}`} title="编辑"><Pencil size={13} /></button><button type="button" disabled={!canWrite || intentBusy} className="icon-btn compact-icon danger-icon" onClick={() => cancelIntent(intent)} aria-label={`取消 ${intent.label || intent.intent_id}`} title="取消"><Trash2 size={13} /></button></div>
               )}

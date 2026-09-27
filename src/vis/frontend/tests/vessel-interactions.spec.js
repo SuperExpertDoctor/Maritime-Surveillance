@@ -17,6 +17,200 @@ test.beforeEach(async ({ page }) => {
 
 const vessel = { scenario_entity_id: 'vessel-ii', revision: 4, position: [12, 8], vessel_class: 'type_ii', ais_enabled: true, ais_controllable: true };
 
+test('delete receipt retains identity and locks writes until authoritative absence', async ({ page }) => {
+  const fixture = frameFixture('live', { scenario_vessels: [vessel] });
+  await installFrameSocket(page, fixture);
+  await page.route('**/api/vessels/vessel-ii', route => route.fulfill({ json: {
+    command_id: route.request().postDataJSON().command_id, status: 'applied',
+    vessel_id: vessel.scenario_entity_id, revision: 5,
+  } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: /vessel-ii/ }).click();
+  await page.getByRole('button', { name: '删除选中船舶' }).click();
+  await expect(page.locator('.vessel-command-status')).toContainText('船舶已删除');
+  await expect(page.getByRole('button', { name: /vessel-ii/ })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
+  await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 2, scenario_vessels: [{ ...vessel, revision: 5 }] });
+  await expect(page.getByLabel('选中船舶详情')).toContainText('REV 5');
+  await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
+  await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 3, scenario_vessels: [] });
+  await expect(page.getByRole('button', { name: /vessel-ii/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
+});
+
+test('AIS confirmation requires requested state as well as entity and revision', async ({ page }) => {
+  const fixture = frameFixture('live', { scenario_vessels: [vessel] });
+  await installFrameSocket(page, fixture);
+  await page.route('**/api/vessels/*/ais', route => route.fulfill({ json: {
+    command_id: route.request().postDataJSON().command_id, status: 'applied',
+    vessel_id: vessel.scenario_entity_id, revision: 5,
+  } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: /vessel-ii/ }).click();
+  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  await expect(page.locator('.vessel-command-status')).toContainText('AIS 已关闭');
+  await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 2, scenario_vessels: [{ ...vessel, revision: 5 }] });
+  await expect(page.getByLabel('选中船舶详情')).toContainText('REV 5');
+  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+  await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 3, scenario_vessels: [{ ...vessel, revision: 5, ais_enabled: false }] });
+  await expect(page.getByRole('button', { name: '开启 AIS' })).toBeEnabled();
+});
+
+test('create receipt stays locked through wrong identity and stale revision frames', async ({ page }) => {
+  const fixture = frameFixture('live', { scenario_vessels: [] });
+  await installFrameSocket(page, fixture);
+  await page.route('**/api/vessels', route => route.fulfill({ json: {
+    command_id: route.request().postDataJSON().command_id, status: 'applied',
+    vessel_id: 'created-vessel', revision: 1,
+  } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'II 类船舶', exact: true }).click();
+  const point = await page.evaluate(async () => {
+    const { computeLayout } = await import('/src/renderer/geometry.js');
+    const rect = document.querySelector('.canvas-area canvas').getBoundingClientRect();
+    const layout = computeLayout(rect.width, rect.height);
+    return { x: rect.x + layout.offsetX + 12.5 * layout.cellSize, y: rect.y + layout.offsetY + 8.5 * layout.cellSize };
+  });
+  await page.mouse.click(point.x, point.y);
+  await expect(page.locator('.vessel-command-status')).toContainText('船舶已加入场景');
+  for (const candidate of [vessel, { ...vessel, scenario_entity_id: 'created-vessel', revision: 0 }]) {
+    await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: [candidate] });
+    await expect(page.getByRole('button', { name: new RegExp(candidate.scenario_entity_id) })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
+  }
+  await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: [{ ...vessel, scenario_entity_id: 'created-vessel', revision: 1 }] });
+  await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
+});
+
+test('reset generation cancels old poll and stale receipt cannot unlock new command', async ({ page }) => {
+  const fixture = frameFixture('live', { reset_generation: 0, scenario_vessels: [vessel] });
+  await installFrameSocket(page, fixture);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let posts = 0;
+  await page.route('**/api/vessels/*/ais', route => route.fulfill({ json: { status: 'queued', command_id: ++posts === 1 ? 'old-reset' : 'new-reset' } }));
+  await page.route('**/api/vessel-commands/old-reset', async route => {
+    await gate;
+    await route.fulfill({ json: { status: 'applied', command_id: 'old-reset', vessel_id: vessel.scenario_entity_id, revision: 5 } });
+  });
+  await page.route('**/api/vessel-commands/new-reset', route => route.fulfill({ json: { status: 'queued', command_id: 'new-reset' } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: /vessel-ii/ }).click();
+  const poll = page.waitForRequest('**/api/vessel-commands/old-reset');
+  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  await poll;
+  await page.evaluate(f => window.__pushFrame(f), { ...fixture, reset_generation: 1 });
+  await expect(page.locator('.vessel-command-status')).toHaveCount(0);
+  await page.getByRole('button', { name: /vessel-ii/ }).click();
+  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  release();
+  await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: [{ ...vessel, revision: 5, ais_enabled: false }] });
+  await expect(page.locator('.vessel-command-status')).toContainText('排队');
+  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+});
+
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 375, height: 812 }]) {
+  test(`5x5 canvas focus exposes authoritative status and owner at ${viewport.width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    const fixture = frameFixture();
+    await installFrameSocket(page, fixture);
+    let submitted;
+    await page.route('**/api/intents', route => {
+      submitted = route.request().postDataJSON();
+      return route.fulfill({ json: { command_id: submitted.command_id, status: 'queued' } });
+    });
+    await page.route('**/api/intent-commands/*', route => route.fulfill({ json: {
+      command_id: submitted.command_id, status: 'applied', intent: null, error_code: null,
+    } }));
+    await page.goto('/');
+    await expect(page.locator('.connection-state')).toHaveClass(/connected/);
+    await page.getByRole('button', { name: '框选重点区', exact: true }).click();
+    const geometry = await page.evaluate(async () => {
+      const { computeLayout } = await import('/src/renderer/geometry.js');
+      const rect = document.querySelector('.canvas-area canvas').getBoundingClientRect();
+      return { rect, layout: computeLayout(rect.width, rect.height) };
+    });
+    const { rect, layout } = geometry;
+    await page.mouse.move(rect.x + layout.offsetX + 10.25 * layout.cellSize, rect.y + layout.offsetY + 10.25 * layout.cellSize);
+    await page.mouse.down();
+    await page.mouse.move(rect.x + layout.offsetX + 14.75 * layout.cellSize, rect.y + layout.offsetY + 14.75 * layout.cellSize);
+    await page.mouse.up();
+    await expect(page.locator('.selection-summary')).toContainText('[10, 10, 15, 15]');
+    await page.getByPlaceholder('例如：东南航道').fill('5x5 focus');
+    await page.getByRole('button', { name: '提交重点区' }).click();
+    await expect(page.locator('.command-status')).toContainText('已应用');
+    expect(submitted.bbox).toEqual([10, 10, 15, 15]);
+    const intent = { ...submitted, intent_id: 'focus-5x5', revision: 1, lifecycle: 'active', expires_at_min: 121 };
+    const status = { intent_id: intent.intent_id, coverage_ratio: 0, freshness_ratio: 0, assigned_task_ids: [] };
+    for (const [reason, label] of [['awaiting_planning', '等待规划'], ['resource_blocked', '资源受限'], ['waiting_assignment', '等待分配']]) {
+      await page.evaluate(f => window.__pushFrame(f), { ...fixture, intents: [intent], intent_statuses: [{ ...status, unmet_reason: reason }] });
+      await expect(page.locator('.intent-row')).toContainText(label);
+      await expect(page.locator('.intent-row')).toContainText('暂无执行任务');
+    }
+    await page.evaluate(f => window.__pushFrame(f), { ...fixture, intents: [intent], intent_statuses: [{
+      ...status, unmet_reason: 'coverage_below_target', assigned_task_ids: ['search-focus-5x5'], coverage_ratio: 0.2,
+    }] });
+    const row = page.locator('.intent-row');
+    await expect(row).toContainText('覆盖未达标');
+    await expect(row).toContainText('search-focus-5x5');
+    await row.scrollIntoViewIfNeeded();
+    const layoutCheck = await row.evaluate(node => {
+      const box = node.getBoundingClientRect();
+      const labels = [...node.querySelectorAll('.intent-row-meta > span')].map(item => item.getBoundingClientRect());
+      return {
+        fits: node.scrollWidth <= node.clientWidth + 1,
+        withinViewport: box.left >= 0 && box.right <= innerWidth,
+        overlaps: labels.some((a, i) => labels.slice(i + 1).some(b => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom)),
+      };
+    });
+    expect(layoutCheck).toEqual({ fits: true, withinViewport: true, overlaps: false });
+    await page.screenshot({ path: testInfo.outputPath(`offline-focus-${viewport.width}.png`), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath(`offline-focus-${viewport.width}-viewport.png`) });
+  });
+}
+
+for (const operation of ['create', 'delete', 'ais']) {
+  test(`${operation} frame arriving before its receipt does not unlock queued writes`, async ({ page }) => {
+    const fixture = frameFixture('live', { scenario_vessels: operation === 'create' ? [] : [vessel] });
+    await installFrameSocket(page, fixture);
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const endpoint = operation === 'create' ? '**/api/vessels' : operation === 'ais' ? '**/api/vessels/*/ais' : '**/api/vessels/vessel-ii';
+    await page.route(endpoint, async route => {
+      await gate;
+      await route.fulfill({ json: {
+        command_id: route.request().postDataJSON().command_id, status: 'applied',
+        vessel_id: vessel.scenario_entity_id, revision: operation === 'create' ? 1 : 5,
+      } });
+    });
+    await page.goto('/');
+    const request = page.waitForRequest(endpoint);
+    if (operation === 'create') {
+      await page.getByRole('button', { name: 'II 类船舶', exact: true }).click();
+      const point = await page.evaluate(async () => {
+        const { computeLayout } = await import('/src/renderer/geometry.js');
+        const rect = document.querySelector('.canvas-area canvas').getBoundingClientRect();
+        const layout = computeLayout(rect.width, rect.height);
+        return { x: rect.x + layout.offsetX + 12.5 * layout.cellSize, y: rect.y + layout.offsetY + 8.5 * layout.cellSize };
+      });
+      await page.mouse.click(point.x, point.y);
+    } else {
+      await page.getByRole('button', { name: /vessel-ii/ }).click();
+      await page.getByRole('button', { name: operation === 'ais' ? '关闭 AIS' : '删除选中船舶' }).click();
+    }
+    await request;
+    await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: operation === 'delete' ? [] : [{
+      ...vessel, revision: operation === 'create' ? 1 : 5, ais_enabled: operation !== 'ais',
+    }] });
+    await expect(page.getByRole('button', { name: /vessel-ii/ })).toHaveCount(operation === 'delete' ? 0 : 1);
+    if (operation === 'ais') await expect(page.getByRole('button', { name: '关闭 AIS' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
+    await expect(page.locator('.vessel-command-status')).toContainText('排队');
+    release();
+    await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
+  });
+}
+
 test('disconnect disables vessel writes despite a retained editable frame', async ({ page }) => {
   await installFrameSocket(page, frameFixture());
   await page.goto('/');
@@ -120,7 +314,7 @@ test('palette drop sends spawn coordinates and selection mode cannot swallow pla
   const commands = [];
   await page.route('**/api/vessels', route => {
     commands.push(route.request().postDataJSON());
-    return route.fulfill({ json: { status: 'applied', command_id: commands.at(-1).command_id } });
+    return route.fulfill({ json: { status: 'applied', command_id: commands.at(-1).command_id, vessel_id: 'dropped-vessel', revision: 1 } });
   });
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
@@ -138,6 +332,10 @@ test('palette drop sends spawn coordinates and selection mode cannot swallow pla
   await expect.poll(() => commands.length).toBe(1);
   expect(commands[0]).toMatchObject({ episode_id: 'episode-browser', vessel_class: 'type_ii', position_cells: [12.5, 8.5] });
   await expect(page.locator('.vessel-command-status')).toContainText('船舶已加入场景');
+  await page.evaluate(() => window.__pushFrame({ ...window.__lastFixture, scenario_vessels: [{
+    scenario_entity_id: 'dropped-vessel', revision: 1, position: [12.5, 8.5],
+    vessel_class: 'type_ii', ais_enabled: true, ais_controllable: true,
+  }] }));
   await page.getByRole('button', { name: '框选重点区', exact: true }).click();
   await page.getByRole('button', { name: 'II 类船舶', exact: true }).click();
   await expect(page.getByRole('button', { name: '框选重点区', exact: true })).toHaveAttribute('aria-pressed', 'false');

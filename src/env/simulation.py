@@ -1449,14 +1449,22 @@ class SimulationEngine:
             results.append(result)
         return tuple(results)
 
-    def step(self) -> dict:
-        self.apply_pending_runtime_commands()
-        self.apply_pending_intent_commands()
+    def step(self, *, on_command_boundary=None) -> dict:
+        runtime_results = self.apply_pending_runtime_commands()
+        intent_results = self.apply_pending_intent_commands()
         if self.runtime_status == "running":
             self.opponent_population.tick(self)
-        self.apply_pending_vessel_commands()
+        vessel_results = self.apply_pending_vessel_commands()
+        if on_command_boundary is not None and (runtime_results or intent_results or vessel_results):
+            # Capture coherent same-time mutations before either model can block.
+            self._publish_runtime_state()
+            on_command_boundary(self, {
+                "trigger_type": "none", "action": None, "command_boundary": True,
+            })
         self._editing_allowed = False
         if self.runtime_status != "running":
+            if self.runtime_status == "finished":
+                return {"trigger_type": "none", "action": None}
             return self.last_result
         try:
             self._prepare_red_decision(self.clock.time)
@@ -3601,7 +3609,7 @@ class SimulationEngine:
     def run(self, steps: int = 480, on_step=None) -> dict:
         for _ in range(steps):
             previous_time = self.clock.time
-            result = self.step()
+            result = self.step(on_command_boundary=on_step)
             if on_step is not None:
                 on_step(self, result)
             if self.clock.time == previous_time or self.runtime_status != "running":

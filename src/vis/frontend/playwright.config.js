@@ -8,7 +8,8 @@ const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH
   || (process.platform === "win32" && existsSync(defaultChromePath)
     ? defaultChromePath
     : undefined);
-const baseURL = process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5180";
+const frontendPort = process.env.PLAYWRIGHT_FRONTEND_PORT || "5180";
+const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${frontendPort}`;
 const frontendDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(frontendDir, "../../..");
 const backendPort = process.env.PLAYWRIGHT_BACKEND_PORT || "18766";
@@ -39,7 +40,7 @@ export default defineConfig({
       timeout: 900_000,
     },
     {
-      command: `${quote(npmExecutable)} run dev -- --host 127.0.0.1 --port 5180`,
+      command: `${quote(npmExecutable)} run dev -- --host 127.0.0.1 --port ${new URL(baseURL).port} --strictPort`,
       cwd: frontendDir,
       env: { ...process.env, VITE_BACKEND_PORT: backendPort },
       url: baseURL,

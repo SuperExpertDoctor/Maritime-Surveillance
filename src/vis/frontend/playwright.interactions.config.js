@@ -7,6 +7,6 @@ export default defineConfig({
   testMatch: ['tests/vessel-interactions.spec.js', 'tests/mixed-maritime.spec.js', 'tests/drawer-state.spec.js', 'tests/telemetry-consistency.spec.js', 'tests/coverage-metrics.spec.js'],
   webServer: {
     ...config.webServer[1],
-    command: 'npm run dev -- --host 127.0.0.1 --port 5180',
+    command: `npm run dev -- --host 127.0.0.1 --port ${new URL(config.use.baseURL).port} --strictPort`,
   },
 });
