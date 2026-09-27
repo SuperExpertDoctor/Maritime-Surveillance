@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -280,3 +281,72 @@ def test_probe_predicts_observable_motion_and_replans_on_fresh_estimate():
 
     assert len(navigator.targets) == 2
     assert navigator.targets[-1] == (16.0, 10.0)
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_checked_orbit_entry_filters_boundary_and_obstacle_segments(blocked):
+    from src.control.heuristic.tracking import plan_contact_orbit_entry, TrackingController
+    from src.utils.track_orbit import LGVFTracker
+
+    mask = np.zeros((24, 24), dtype=bool)
+    if blocked:
+        mask[22:24, 11:13] = True
+    pose = (21.0, 10.0, math.pi / 2.0)
+    unchecked = LGVFTracker().plan_entry(pose, (23.0, 12.0), 1.8)
+    assert unchecked.waypoints[-1][0] >= mask.shape[0]
+    assert TrackingController._route_blocked(unchecked.waypoints, mask)
+    route = plan_contact_orbit_entry(
+        LGVFTracker(), pose, (23.0, 12.0), 1.8,
+        planning_obstacle_mask=mask,
+    )
+    assert not TrackingController._route_blocked(route, mask)
+
+
+def test_checked_orbit_entry_reports_no_legal_candidate():
+    from src.control.heuristic.tracking import plan_contact_orbit_entry, TrackingRouteError
+    from src.utils.track_orbit import LGVFTracker
+
+    with pytest.raises(TrackingRouteError, match="legal"):
+        plan_contact_orbit_entry(
+            LGVFTracker(), (10.0, 10.0, 0.0), (12.0, 10.0), 1.8,
+            planning_obstacle_mask=np.ones((24, 24), dtype=bool),
+        )
+
+
+@pytest.mark.parametrize("change", ["motion", "map", "stall", "safety"])
+def test_probe_entry_recovers_with_bounded_route_revisions(change):
+    from src.utils.track_orbit import LGVFTracker
+
+    controller = _controller(NavigatorSpy())
+    controller.tracker = LGVFTracker()
+    observation = _observation(probe=_probe(), position=(10.2, 10.0))
+    _start(controller, observation)
+    controller.act(observation)
+    revision = controller.route_snapshot().route_revision
+    assert controller._orbit_entry_active
+    if change == "motion":
+        observation = replace(observation, timestamp_min=3.0, contacts=(
+            replace(_contact(), estimated_position=(15.0, 10.0)),))
+    elif change == "map":
+        observation = replace(observation, timestamp_min=3.0, planning_map_version=4)
+    elif change == "safety":
+        observation = replace(observation, timestamp_min=3.0,
+                              self_state=replace(observation.self_state, safety_intervened=True))
+    else:
+        observation = replace(observation, timestamp_min=10.0)
+    controller.act(observation)
+    assert controller.route_snapshot().route_revision > revision
+    revision = controller.route_snapshot().route_revision
+    controller.act(observation)
+    assert controller.route_snapshot().route_revision == revision
+
+
+def test_probe_retries_transient_block_after_bounded_delay():
+    navigator = NavigatorSpy(blocked=True)
+    controller = _controller(navigator)
+    observation = _observation(probe=_probe())
+    _start(controller, observation)
+    controller.act(observation)
+    navigator.blocked = False
+    controller.act(replace(observation, timestamp_min=10.0))
+    assert controller.route_snapshot().status == "ready"
