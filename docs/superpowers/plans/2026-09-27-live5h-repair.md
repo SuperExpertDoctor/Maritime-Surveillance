@@ -58,11 +58,14 @@ Replay: `outputs/simulation_20260926_170835.jsonl` in the original checkout. It 
 **Interfaces:** Production `extract_pool` -> task catalog -> mission snapshot -> scheduler prompt. Existing immutable task records, controller route updates and intent serialization.
 
 - [ ] Reproduce focus fully and partially overlapping unfinished search reservations through the production snapshot path. Preserve single ownership: attach focus to existing owners and prioritize/replan their scan route; uncovered focus portions remain eligible candidates.
+- [ ] Preserve submission to the LLM: a new focus must reach a meaningful model review, even with an existing owner. Owner reprioritization is actionable; do not replace the human-to-LLM workflow with local-only bookkeeping or repeat empty calls after acknowledgement. Prefer existing strict selection contracts; report a required new schema before introducing it.
 - [ ] Reproduce equal SAR freshness with higher focus utility losing prompt admission. Preserve human priority in candidate/partition selection, without discarding coverage data or duplicating reservations.
 - [ ] Reproduce ten healthy aircraft occupied by search with an executable probe. Cap ordinary search at 80% while demand exists, allowing legal preemption; without executable probe demand retain existing full search utilization. Exercise infeasible/blocked probe demand so it does not reserve unusable capacity.
+- [ ] Cover small-fleet rounding and new ordinary-search admission, not merely a lower floor. Preserve existing valid tasks while making legal probe preemptions available; never abort searches due to model failure.
 - [ ] Reproduce candidates with no usable assignment edges still causing an LLM call. Share actionable-candidate filtering with prompt construction, skipping truly empty decisions before calling the gateway, and retaining calls for legal probe/focus work.
 - [ ] Correct intent statuses using actual ownership/candidate/resource evidence: distinguish no legal candidate, resource blocked, and waiting assignment. An overlapping active owner must not report no candidate.
 - [ ] Run focused failures then the named scheduler/intent suites and coverage progress tests, all passing.
+- [ ] Diagnose the pre-existing V07 first-step missing probe in `tests/mission/test_feature_control_integration.py::test_v07_real_eo_samples_classify_then_handoff_and_eo_lock`. Inspect the real snapshot and fixture selection, repair an in-scope defect or stale fixture, and preserve classification/handoff assertions.
 - [ ] Commit and document route update/status contracts for the UI integration task.
 
 ### Task 4: Uniform LLM Deadlines and Useful Retry Budgets
