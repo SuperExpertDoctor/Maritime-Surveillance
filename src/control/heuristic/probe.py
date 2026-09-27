@@ -122,10 +122,10 @@ class ProbeController(HeuristicControllerBase):
         if probe.phase == "awaiting_assessment":
             self._route_phase = probe.phase
             self._route_status = "guidance_only"
-            return ControlDecision(self._awaiting_assessment_command(observation))
+            return ControlDecision(self._waiting_command(observation))
         if self._blocked and observation.timestamp_min - self._last_plan_at < 2.0:
             self._route_status = "unavailable"
-            return ControlDecision(self._holding_command(observation))
+            return ControlDecision(self._waiting_command(observation))
         self._blocked = False
 
         phase, standoff = self._phase_and_standoff(probe.phase)
@@ -318,7 +318,7 @@ class ProbeController(HeuristicControllerBase):
         if "blocked" not in self._reported_phases:
             self._reported_phases.add("blocked")
             events = (ControllerEventRequest("probe_blocked", {"task_id": self.task.task_id, "reason": reason}),)
-        return ControlDecision(self._holding_command(observation), events)
+        return ControlDecision(self._waiting_command(observation), events)
 
     def _finished_decision(self, observation: ControlObservation, reason: str | None) -> ControlDecision:
         events: tuple[ControllerEventRequest, ...] = ()
@@ -341,7 +341,7 @@ class ProbeController(HeuristicControllerBase):
         self._validate(command, observation)
         return command
 
-    def _awaiting_assessment_command(
+    def _waiting_command(
         self, observation: ControlObservation
     ) -> ControlCommand:
         command = ControlCommand(

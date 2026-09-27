@@ -190,6 +190,26 @@ def test_delete_releases_probe_track_handoff_and_preserves_evidence(scenario_fac
     assert engine.handoff_manager.evidence(handoff.handoff_id) == evidence
 
 
+def test_removed_target_holding_does_not_teleport_or_refuel(scenario_factory):
+    from src.schedule.datatypes import GridCoord
+
+    engine = scenario_factory.engine("mixed-ais", seed=42)
+    ship, uav = engine.ships[0], engine.uavs[0]
+    uav.position = GridCoord(15, 15)
+    uav.fuel_remaining_pct = 0.4
+    uav.target_group_id = ship.id
+    command = VesselCommand("remove-holding", engine.episode_id, "delete",
+                            vessel_id=ship.id, expected_revision=1)
+    engine.vessel_commands.enqueue(command)
+    assert engine.apply_pending_vessel_commands()[0].status == "applied"
+    uav.status = "holding"
+    before = uav.float_position
+    engine._process_refuelling(0.0)
+    assert uav.float_position == before
+    assert uav.fuel_remaining_pct == 0.4
+    assert all(not base.is_refueling(uav.id) for base in engine.bases)
+
+
 @pytest.mark.parametrize("seed", range(50))
 def test_runtime_vessel_motion_stays_in_bounds_across_seeds(scenario_factory, seed):
     engine = scenario_factory.engine("mixed-ais", seed=seed)

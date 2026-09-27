@@ -240,3 +240,41 @@ def test_engine_probe_acquires_real_post_move_eo_baseline():
     assert len(retained) >= engine.config.mission.contact.min_valid_samples_per_phase
     assert all(packet.source == "eo" and packet.source_id == uav.id for packet in retained)
     assert retained[-1].observed_at_min - retained[0].observed_at_min >= engine.config.mission.contact.baseline_duration_min
+
+
+def test_engine_transient_probe_route_failure_retains_lease_and_retries(monkeypatch):
+    from tests.mission.test_mission_task_lifecycle import _engine
+    from tests.mission.replay_restoration_helpers import probe_batch
+
+    engine = _engine()
+    batch = probe_batch(engine, count=1)
+    assert engine.apply_assignment_batch(batch)
+    uav_id = batch.assignments[0].uav_id
+    uav = next(item for item in engine.uavs if item.id == uav_id)
+    coordinator = engine.control_coordinator
+    task = coordinator.active_task(uav_id)
+    lease = coordinator.current_lease(uav_id)
+    controller = coordinator.controller(uav_id)
+    assert isinstance(controller, ProbeController)
+    original = controller._plan_route
+    calls = []
+
+    def temporarily_blocked(*args):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise ValueError("temporary route obstruction")
+        return original(*args)
+
+    monkeypatch.setattr(controller, "_plan_route", temporarily_blocked)
+    controller._route = None
+    for now in (1., 2., 3.):
+        tick = coordinator.step_uav(uav, current_time=now, dt_min=.1)
+        engine._record_control_tick(uav, tick)
+        assert coordinator.current_lease(uav_id) == lease
+        assert coordinator.active_task(uav_id) == task
+        assert uav.target_group_id == task.target_contact_id
+        assert engine.allocator.sm.get_probe_session(task.probe_id) is not None
+        assert engine._mission_task_records[task.task_id].finished_at_min is None
+        if now < 3.:
+            assert tick.execution.applied_command.sensor_mode is SensorMode.OFF
+    assert len(calls) == 3

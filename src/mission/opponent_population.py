@@ -38,6 +38,7 @@ class OpponentPopulation:
         self._next_release = start_time + self._interval()
         self._sequence = 0
         self._inflight: str | None = None
+        self.paused_by_manual_edit = False
 
     def _interval(self) -> float:
         return self._rng.uniform(self.config.interval_min_min,
@@ -62,7 +63,7 @@ class OpponentPopulation:
     def tick(self, engine) -> VesselCommandResult | None:
         """Enqueue a due create and return its queued result, or return None."""
         now = engine.clock.time
-        if not self.config.enabled or now < self._next_release:
+        if self.paused_by_manual_edit or not self.config.enabled or now < self._next_release:
             return None
         self._next_release = now + self._interval()
         if self._inflight is not None:

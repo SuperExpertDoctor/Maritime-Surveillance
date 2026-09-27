@@ -245,6 +245,8 @@ class SimulationEngine:
             config.mission.intent.mutation_queue_limit,
         )
         self._evaluation_contact_links: dict[str, str] = {}
+        self._evaluation_eo_time: float | None = None
+        self._evaluation_eo_returns: set[tuple[str, str, str]] = set()
         self._outcome_evaluator = OutcomeEvaluator(self.episode_id)
         self.handoff_manager = HandoffManager()
         self.allocator.sm.handoff_manager = self.handoff_manager
@@ -486,7 +488,11 @@ class SimulationEngine:
     def apply_pending_vessel_commands(self) -> tuple[VesselCommandResult, ...]:
         """Apply queued scenario edits on the simulation thread only."""
         results: list[VesselCommandResult] = []
-        for command in self.vessel_commands.drain():
+        # Operator count edits take precedence over a same-boundary release.
+        commands = sorted(self.vessel_commands.drain(),
+                          key=lambda command: self.opponent_population.owns_command(command.command_id))
+        for command in commands:
+            automatic = self.opponent_population.owns_command(command.command_id)
             if command.episode_id != self.episode_id:
                 result = VesselCommandResult(
                     command.command_id, "rejected", command.vessel_id, None,
@@ -500,6 +506,8 @@ class SimulationEngine:
             else:
                 try:
                     if command.operation == "create":
+                        if automatic and self.opponent_population.paused_by_manual_edit:
+                            raise ValueError("opponent_population_paused")
                         capacity_error = self.opponent_population.capacity_error(
                             self.ships, command.vessel_class,
                         )
@@ -543,6 +551,15 @@ class SimulationEngine:
                         command.command_id, "rejected", command.vessel_id,
                         current_revision, code,
                     )
+            if (result.status == "applied" and command.operation in {"create", "delete"}
+                    and not automatic and not self.opponent_population.paused_by_manual_edit):
+                self.opponent_population.paused_by_manual_edit = True
+                self.allocator.sm.add_event("opponent_population_paused", {
+                    "command_id": command.command_id,
+                    "episode_id": self.episode_id,
+                    "reason": "manual_count_edit",
+                    "time": self.clock.time,
+                })
             self.vessel_commands.complete(result)
             results.append(result)
         return tuple(results)
@@ -2897,6 +2914,8 @@ class SimulationEngine:
 
     def _land_for_refuelling(self, uav: UAVEntity) -> None:
         base = self._return_base_by_uav.get(uav.id)
+        if base is None or math.dist(uav.float_position, base.position) > 1e-6:
+            return
         if base is not None and base.land_uav(uav.id):
             if base.refuel_time_min <= 0:
                 self._finish_base_service(base, self.clock.time, 0.0)
@@ -3575,6 +3594,7 @@ class SimulationEngine:
             ),
             "detected_ships": sum(ship.detected for ship in self.ships),
             "ship_count": len(self.ships),
+            "opponent_population_paused_by_manual_edit": self.opponent_population.paused_by_manual_edit,
             "region_changes": len(self.region_signatures),
             "track_creations": self.track_creations,
             "storm_avoidance_events": self.storm_avoidance_events,
@@ -4533,6 +4553,9 @@ class SimulationEngine:
         """
         if uav.target_group_id is None:
             return
+        if self._evaluation_eo_time != current_time:
+            self._evaluation_eo_time = current_time
+            self._evaluation_eo_returns.clear()
         storms = [item for item in self.obstacles if isinstance(item, Thunderstorm)]
         pointing = math.atan2(target_position[1] - uav.float_position[1],
                               target_position[0] - uav.float_position[0])
@@ -4549,10 +4572,12 @@ class SimulationEngine:
             estimate = (
                 uav.float_position[0] + measurement.distance_cells * math.cos(bearing),
                 uav.float_position[1] + measurement.distance_cells * math.sin(bearing))
-            self.allocator.sm.contacts.ingest_visual(
+            observed_contact_id = self.allocator.sm.contacts.ingest_visual(
                 self._visual_detection(uav, estimate, current_time, "eo"),
                 association_contact_id=uav.target_group_id,
             )
+            self._evaluation_contact_links.setdefault(observed_contact_id, ship.id)
+            self._evaluation_eo_returns.add((uav.id, observed_contact_id, ship.id))
             self._publish_information_delta(
                 self.allocator.sm.scan_cell(
                     GridCoord(*(int(round(v)) for v in estimate)),
@@ -4710,23 +4735,21 @@ class SimulationEngine:
         """Publish an evaluator-only tick after all current-step effects settle."""
         sm = self.allocator.sm
         contacts = tuple(sm.contacts.list_snapshots())
-        canonical_links = {
-            sm.resolve_contact_id(contact_id): physical_id
-            for contact_id, physical_id in self._evaluation_contact_links.items()
-        }
         contact_by_id = {contact.contact_id: contact for contact in contacts}
         links = []
-        for uav in self.uavs:
+        current_returns = (self._evaluation_eo_returns
+                           if self._evaluation_eo_time == current_time else ())
+        for uav_id, observed_id, physical_id in sorted(current_returns):
+            uav = next((item for item in self.uavs if item.id == uav_id), None)
             if (
-                uav.status != "tracking"
+                uav is None or uav.status != "tracking"
                 or uav.sensor_mode != "eo"
                 or not uav.target_group_id
             ):
                 continue
-            contact_id = sm.resolve_contact_id(uav.target_group_id)
-            physical_id = canonical_links.get(contact_id)
+            contact_id = sm.resolve_contact_id(observed_id)
             contact = contact_by_id.get(contact_id)
-            if physical_id is None or contact is None:
+            if contact is None:
                 continue
             try:
                 physical = next(
@@ -4734,9 +4757,7 @@ class SimulationEngine:
                 )
             except StopIteration:
                 continue
-            if physical.departed or not uav.eo_sensor.is_target_visible(
-                uav.float_position, physical.float_position,
-            ):
+            if physical.departed:
                 continue
             links.append((uav.id, contact_id, physical_id))
 
@@ -4998,6 +5019,7 @@ class SimulationEngine:
         if best_path is not None:
             _, _, base, path = best_path
             self._return_base_by_uav[uav.id] = base
+            self._holding_base_by_uav.pop(uav.id, None)
             uav.plan_return(path)
             return
         raise RuntimeError(
@@ -5189,6 +5211,7 @@ class SimulationEngine:
             uav.base_position = base.position
             uav.refuel()
             self._return_base_by_uav.pop(uav.id, None)
+            self._holding_base_by_uav.pop(uav.id, None)
             if self.control_coordinator.has_controller(uav.id):
                 self.control_coordinator.reset_after_refuel(
                     uav.id,
@@ -5221,15 +5244,72 @@ class SimulationEngine:
         if ready:
             self._sync_state_from_entities()
 
+    def _resume_queued_landing(self, uav: UAVEntity, current_time: float) -> None:
+        """Install a checked return before releasing an airborne landing queue."""
+        bases = tuple(
+            BaseObservation(
+                base.id, tuple(map(float, base.position)), base.capacity,
+                self._base_maintenance_load(base, exclude_uav_id=uav.id),
+            ) for base in self.bases
+        )
+        try:
+            candidates = RecoveryPlanner().evaluate(
+                uav.pose, uav.remaining_range_cells, bases,
+                self.allocator.sm.obstacle_mask, self.allocator.sm.obstacle_version,
+                uav.R_min, self.config.control.safety.reserve_range_cells,
+            )
+            if not candidates:
+                raise NoSafeRecoveryPath(
+                    "none", self.allocator.sm.obstacle_version,
+                    "no queued return has a safe route within fuel reserve",
+                )
+        except (RuntimeError, ValueError) as exc:
+            error = exc if isinstance(exc, NoSafeRecoveryPath) else NoSafeRecoveryPath(
+                "none", self.allocator.sm.obstacle_version, str(exc),
+            )
+            self._emit_no_safe_recovery_path(uav, current_time, error)
+            self._enter_emergency_failure(uav, "no_safe_recovery_path", error)
+            return
+
+        candidate = candidates[0]
+        base = next(base for base in self.bases if base.id == candidate.base.base_id)
+        reservation_id = f"{uav.id}:return:{self._return_reservation_sequence}"
+        plan = RecoveryPlan(
+            base.id, candidate.base.position, reservation_id, candidate.path,
+            candidate.path_length_cells, candidate.reserve_cells,
+            candidate.planning_map_version,
+        )
+        task = ControlTask(reservation_id, OperationMode.RETURN, recovery_plan=plan)
+        previous = self._return_base_by_uav.get(uav.id)
+        self._return_base_by_uav[uav.id] = base
+        try:
+            if self.control_coordinator.has_controller(uav.id):
+                self.control_coordinator.assign_system_task(
+                    uav.id, task, current_time=current_time,
+                )
+                self._coordinator_tasks[uav.id] = task
+        except Exception as exc:
+            if previous is None:
+                self._return_base_by_uav.pop(uav.id, None)
+            else:
+                self._return_base_by_uav[uav.id] = previous
+            self._enter_emergency_failure(uav, "controller_fault", exc)
+            return
+        self._return_reservation_sequence += 1
+        self._holding_base_by_uav.pop(uav.id, None)
+        uav.plan_return(plan.path)
+        self.allocator.sm.add_event("holding_released", {
+            "uav_id": uav.id, "base_id": base.id,
+        })
+
     def _process_refuelling(self, current_time: float) -> None:
         for uav in self.uavs:
             if uav.status != "refueling":
                 continue
+            base = self._return_base_by_uav.get(uav.id)
+            if base is None or math.dist(uav.float_position, base.position) > 1e-6:
+                continue
             self._promote_work_controller_to_holding(uav, current_time)
-            base = self._return_base_by_uav.get(
-                uav.id,
-                self._nearest_base(uav.float_position),
-            )
             if not base.is_refueling(uav.id) and not base.land_uav(uav.id):
                 self._holding_base_by_uav[uav.id] = base
                 uav.start_holding(base.position)
@@ -5252,8 +5332,11 @@ class SimulationEngine:
         for uav in self.uavs:
             if uav.status != "holding":
                 continue
-            base = self._holding_base_by_uav.get(uav.id, self._nearest_base(uav.float_position))
-            if not base.can_accept():
+            base = self._holding_base_by_uav.get(uav.id)
+            if base is None or not base.can_accept():
+                continue
+            if math.dist(uav.float_position, base.position) > 1e-6:
+                self._resume_queued_landing(uav, current_time)
                 continue
             if base.land_uav(uav.id):
                 uav.position = base.position
