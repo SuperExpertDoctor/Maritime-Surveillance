@@ -75,6 +75,25 @@ def test_owned_focus_is_reviewed_once_and_failed_review_stays_pending():
     assert engine.allocator._model_selection_skip_reason(revised) is None
 
 
+def test_retained_focus_is_redelivered_when_same_uav_gets_new_controller_generation():
+    engine, task, uav_id = _owned_focus_engine()
+    intent = engine.intents.create(_payload(bbox=task.bbox), 0.0)
+    engine._evaluate_intent_statuses(0.0)
+    coordinator = engine.control_coordinator
+    original = coordinator.current_lease(uav_id)
+    before = engine._control_event_sequence
+    record = engine._mission_task_records[task.task_id]
+    lease = coordinator.assign_task(uav_id, coordinator.active_task(uav_id), current_time=1.0)
+    assert lease.generation > original.generation
+    engine._evaluate_intent_statuses(1.0)
+    assert engine._control_event_sequence == before + 1
+    assert engine._mission_task_records[task.task_id] == record
+    assert engine._intent_owner_revisions[(task.task_id, intent.intent_id, uav_id,
+                                          lease.generation)] == intent.revision
+    engine._evaluate_intent_statuses(1.0)
+    assert engine._control_event_sequence == before + 1
+
+
 def test_focus_event_reorders_safe_remaining_swaths_without_changing_owner():
     rig = make_coverage_rig(bbox=(8, 8, 18, 18), start_pose=(5, 10, 0))
     controller = rig.controller

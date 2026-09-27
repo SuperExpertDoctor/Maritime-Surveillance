@@ -4,6 +4,7 @@ import math
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from src.control.common.contracts import (
     ActionMask,
@@ -128,40 +129,53 @@ def test_probe_real_navigator_and_executor_reach_a_non_horizontal_contact():
     assert max(abs(heading - headings[0]) for heading in headings[1:]) > 0.05
 
 
-def test_probe_post_move_eo_evidence_completes_baseline_without_relaxed_gates():
+@pytest.mark.parametrize("target_speed_kn", [0.0, 12.0, 18.0])
+def test_probe_post_move_eo_evidence_completes_baseline_without_relaxed_gates(target_speed_kn):
     from src.mission.trajectory_features import advance_probe
     from tests.mission.test_trajectory_features import sample
 
-    config = ConfigLoader.load().mission.contact
+    settings = ConfigLoader.load()
+    config = settings.mission.contact
+    target_speed = target_speed_kn * 1.852 / settings.grid.cell_size_km / 60.0
+    speed = settings.uav.cruise_speed_kmh / settings.grid.cell_size_km / 60.0
+    min_speed = speed * settings.control.safety.min_speed_fraction
+    max_speed = speed * settings.control.safety.max_speed_fraction
     uav = UAVEntity("UAV-1", GridCoord(10, 10), endurance_h=8.0,
                     cruise_speed_kmh=160.0, cell_size_km=10.0)
     contact = ContactObservation(
-        "C-INTEGRATION", "G-INTEGRATION", (12.0, 10.0), (0.0, 0.0),
+        "C-INTEGRATION", "G-INTEGRATION", (12.0, 10.0), (target_speed, 0.0),
         "UAV-reporting", 0.0, 0.0, 1.0,
     )
     controller = ProbeController(
         observation_spec=ObservationSpec("control-observation/v2", 11),
-        action_spec=ActionSpec(-2.0, 2.0, 0.5, 1.0), contact_config=config,
+        action_spec=ActionSpec(-max_speed, max_speed, min_speed, max_speed), contact_config=config,
     )
+    def observed(tick, probe):
+        current = replace(contact, estimated_position=(12.0 + target_speed * tick, 10.0),
+                          observed_at_min=float(tick))
+        observation = _observation(uav, current)
+        return replace(observation, timestamp_min=float(tick), dt_min=1.0, probe=probe,
+                       self_state=replace(observation.self_state, speed_cells_min=speed))
+
     controller.start_task(ControlTask(
         "probe:C-INTEGRATION", OperationMode.PROBE,
         target_contact_id=contact.contact_id, probe_id="P-INTEGRATION",
-    ), _observation(uav, contact))
+    ), observed(0, _probe()))
     executor = UAVDynamicsExecutor()
     probe = _probe()
     samples = {}
-    for tick in range(160):
-        observation = replace(_observation(uav, contact), timestamp_min=tick * 0.5,
-                              probe=probe)
+    for tick in range(80):
+        observation = observed(tick, probe)
         decision = controller.act(observation)
         executor.execute(uav, decision.command, observation.dt_min)
-        now = (tick + 1) * 0.5
+        now = float(tick + 1)
+        target_position = (12.0 + target_speed * now, 10.0)
         evidence = ()
-        distance = math.dist(uav.float_position, contact.estimated_position)
+        distance = math.dist(uav.float_position, target_position)
         if decision.command.sensor_mode is SensorMode.EO and distance <= 2.5:
             packet = sample(now, distance=distance, source_id="UAV-1",
                             contact_id=contact.contact_id,
-                            position_cells=contact.estimated_position,
+                            position_cells=target_position, speed=target_speed,
                             observer_position_cells=uav.float_position)
             samples[packet.sample_id] = packet
             evidence = (packet,)

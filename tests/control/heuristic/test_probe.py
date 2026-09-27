@@ -328,7 +328,12 @@ def test_probe_entry_recovers_with_bounded_route_revisions(change):
         observation = replace(observation, timestamp_min=3.0, contacts=(
             replace(_contact(), estimated_position=(15.0, 10.0)),))
     elif change == "map":
-        observation = replace(observation, timestamp_min=3.0, planning_map_version=4)
+        mask = observation.planning_obstacle_mask.copy()
+        mask[11:15, 8:13] = True
+        from src.control.heuristic.tracking import TrackingController
+        assert TrackingController._route_blocked(controller.route_snapshot().route, mask)
+        observation = replace(observation, timestamp_min=3.0, planning_map_version=4,
+                              planning_obstacle_mask=mask)
     elif change == "safety":
         observation = replace(observation, timestamp_min=3.0,
                               self_state=replace(observation.self_state, safety_intervened=True))
@@ -336,6 +341,12 @@ def test_probe_entry_recovers_with_bounded_route_revisions(change):
         observation = replace(observation, timestamp_min=10.0)
     controller.act(observation)
     assert controller.route_snapshot().route_revision > revision
+    if change == "map":
+        snapshot = controller.route_snapshot()
+        assert (snapshot.status == "unavailable" and snapshot.route == ()) or (
+            snapshot.status == "ready"
+            and not TrackingController._route_blocked(snapshot.route, mask)
+        )
     revision = controller.route_snapshot().route_revision
     controller.act(observation)
     assert controller.route_snapshot().route_revision == revision
@@ -354,3 +365,32 @@ def test_probe_retries_transient_block_after_bounded_delay():
     controller.act(replace(observation, timestamp_min=2.0))
     assert len(navigator.calls) == 3
     assert controller.route_snapshot().status == "ready"
+
+
+def test_completed_standoff_route_replans_before_stall_when_contact_has_moved():
+    navigator = NavigatorSpy()
+    controller = _controller(navigator)
+    observation = _observation(probe=_probe(), position=(10.0, 10.0))
+    _start(controller, observation)
+    controller.act(observation)
+    assert controller._route.is_complete
+    assert not controller._orbit_entry_active
+    assert len(navigator.calls) == 1
+    controller.act(replace(observation, timestamp_min=2.0))
+    assert len(navigator.calls) == 2
+
+
+def test_moving_contact_does_not_restart_active_orbit_guidance():
+    navigator = NavigatorSpy()
+    controller = _controller(navigator)
+    observation = _observation(probe=_probe(), position=(10.2, 10.0))
+    _start(controller, observation)
+    controller.act(observation)
+    assert controller._guidance_phase == "baseline"
+    revision = controller.route_snapshot().route_revision
+    observation = replace(observation, timestamp_min=4.0, contacts=(
+        replace(_contact(), estimated_position=(15.0, 10.0)),))
+    decision = controller.act(observation)
+    assert controller._guidance_phase == "baseline"
+    assert controller.route_snapshot().route_revision == revision
+    assert decision.command.sensor_mode is SensorMode.EO

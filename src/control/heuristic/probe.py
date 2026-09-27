@@ -139,13 +139,20 @@ class ProbeController(HeuristicControllerBase):
                 self._route_phase != phase
                 or self._route is None
                 or self._planning_map_version != observation.planning_map_version
+                or (
+                    self._route.is_complete
+                    and not self._orbit_entry_active
+                    and self._guidance_phase is None
+                    and not self._at_standoff(observation, contact, standoff)
+                )
                 or stalled
                 or (
                     observation.self_state.safety_intervened
                     and observation.timestamp_min - self._last_plan_at >= 2.0
                 )
                 or (
-                    self._route_contact_key != contact_key
+                    self._guidance_phase is None
+                    and self._route_contact_key != contact_key
                     and observation.timestamp_min - self._last_plan_at >= 2.0
                     and self._route_contact_key is not None
                     and math.dist(

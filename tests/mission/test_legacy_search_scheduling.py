@@ -6,7 +6,7 @@ from src.schedule.datatypes import BBox, Region
 from tests.mission.test_mission_task_lifecycle import _engine
 
 
-def pending_search_fixture():
+def pending_search_fixture(*, with_focus=False):
     """Create one partially completed ordinary search in the pending state."""
     engine = _engine()
     snapshot = engine.allocator.build_mission_snapshot(0.0)
@@ -32,6 +32,10 @@ def pending_search_fixture():
         "fixture-search-preemption",
     )
     assert engine.apply_assignment_batch(batch)
+    if with_focus:
+        from tests.mission.test_feature_commands_integration import _payload
+        engine.intents.create(_payload(bbox=tuple(candidate.bbox)), 0.0)
+        engine._evaluate_intent_statuses(0.0)
     region = next(
         region
         for region in engine.allocator.sm.get_search_regions()
@@ -337,7 +341,7 @@ def test_unmatchable_pending_geometry_remains_pending():
 
 
 def test_pending_reassignment_preserves_region_and_sar_progress():
-    engine, task_id, old_uav_id, bbox = pending_search_fixture()
+    engine, task_id, old_uav_id, bbox = pending_search_fixture(with_focus=True)
     old_generation = engine.allocator.sm.coverage_task_generation(task_id)
     assert old_generation is not None
     progress = engine.allocator.sm.coverage_service.progress(task_id, old_generation)
@@ -380,6 +384,14 @@ def test_pending_reassignment_preserves_region_and_sar_progress():
         item for item in engine.allocator.sm.get_search_regions()
         if item.id == task_id
     ]) == 1
+    before_delivery = engine._control_event_sequence
+    engine._evaluate_intent_statuses(1.0)
+    assert engine._control_event_sequence == before_delivery + 1
+    intent = engine.intents.active()[0]
+    assert engine._intent_owner_revisions[(task_id, intent.intent_id,
+                                          record.assigned_uav_id, new_generation)] == intent.revision
+    engine._evaluate_intent_statuses(1.0)
+    assert engine._control_event_sequence == before_delivery + 1
 
 
 def test_pending_reassignment_route_failure_keeps_pending_state(monkeypatch):
