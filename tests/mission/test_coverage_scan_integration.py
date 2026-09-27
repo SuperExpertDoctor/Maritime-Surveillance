@@ -7,6 +7,7 @@ from scripts.evaluate_mixed_maritime import _FixtureGateway
 from src.control.common.contracts import ControlTask, OperationMode
 from src.env.simulation import SimulationEngine
 from src.mission.contracts import VisualDetection
+from src.mission.prompt_payload import encode_selection_payload
 from src.schedule.config_loader import ConfigLoader
 from src.schedule.datatypes import BBox, GridCoord
 from src.schedule.state_manager import StateManager
@@ -418,7 +419,8 @@ def test_coverage_fixture_skips_ordinary_work_when_search_budget_is_zero():
     assert result.payload["selected_task_ids"] == []
 
 
-def test_coverage_fixture_prefers_shortest_search_transit_at_positive_floor():
+@pytest.mark.parametrize("wire_format", [False, True])
+def test_coverage_fixture_prefers_shortest_search_transit_at_positive_floor(wire_format):
     from scripts.persistent_coverage_scenarios import CoverageFixtureGateway
 
     candidates = [
@@ -444,13 +446,21 @@ def test_coverage_fixture_prefers_shortest_search_transit_at_positive_floor():
             {
                 "task_id": "search-far",
                 "uav_options": [
-                    {"uav_id": "UAV-1", "transit_time_min": 12.0},
+                    {
+                        "uav_id": "UAV-1",
+                        "transit_time_min": 12.0,
+                        "total_range_cells": 24.0,
+                    },
                 ],
             },
             {
                 "task_id": "search-near",
                 "uav_options": [
-                    {"uav_id": "UAV-1", "transit_time_min": 1.0},
+                    {
+                        "uav_id": "UAV-1",
+                        "transit_time_min": 1.0,
+                        "total_range_cells": 2.0,
+                    },
                 ],
             },
         ],
@@ -464,7 +474,10 @@ def test_coverage_fixture_prefers_shortest_search_transit_at_positive_floor():
     result = CoverageFixtureGateway().request_json(
         role="decision_maker",
         snapshot_id=snapshot["snapshot_id"],
-        user_payload={"snapshot": snapshot},
+        user_payload=(
+            encode_selection_payload({"snapshot": snapshot})
+            if wire_format else {"snapshot": snapshot}
+        ),
         validate=lambda _payload: (),
     )
 

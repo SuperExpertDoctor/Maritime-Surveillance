@@ -438,6 +438,7 @@ class LLMGateway:
                 user_payload,
                 ensure_ascii=False,
                 allow_nan=False,
+                separators=(",", ":") if role == "decision_maker" else (", ", ": "),
             )
         messages = [
             {"role": "system", "content": system_prompt},

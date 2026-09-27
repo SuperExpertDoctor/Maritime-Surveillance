@@ -24,6 +24,7 @@ from src.mission.contracts import (
 from src.mission.strategy_memory import StrategyMemoryStore
 from src.mission.trajectory_features import select_keypoints
 from src.mission.prompt_window import PromptWindow
+from src.mission.prompt_payload import encode_selection_payload
 
 
 SELECTION_SCHEMA = "mission-selection/v1"
@@ -1311,7 +1312,7 @@ class MissionScheduler:
                 role="decision_maker",
                 snapshot_id=snapshot.snapshot_id,
                 system_prompt=self.system_prompt,
-                user_payload=payload,
+                user_payload=encode_selection_payload(payload),
                 # Correct infeasible selections within the gateway's existing
                 # retry limit and shared planning deadline; never relax rules.
                 validate=lambda candidate: (
@@ -1483,8 +1484,15 @@ class MissionScheduler:
             attempts.append(attempt)
 
         system_prompt = self.system_prompt
+        wire_payload = (
+            encode_selection_payload(self.last_selection_payload)
+            if self.last_selection_payload is not None else {}
+        )
         user_prompt = json.dumps(
-            self.last_selection_payload or {}, ensure_ascii=False, allow_nan=False,
+            wire_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
         )
         if attempts:
             messages = attempts[0].get("messages") or []

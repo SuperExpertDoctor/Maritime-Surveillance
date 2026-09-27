@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.mission.llm_gateway import ModelResult  # noqa: E402
+from src.mission.prompt_payload import decode_selection_payload  # noqa: E402
 
 SCENARIOS = (
     "mixed-ais",
@@ -511,7 +512,7 @@ class _FixtureGateway:
     def request_json(self, *, role: str, snapshot_id: str, user_payload: dict,
                      validate, **_kwargs) -> ModelResult:
         if role == "decision_maker":
-            snapshot = user_payload.get("snapshot", {})
+            snapshot = decode_selection_payload(user_payload).get("snapshot", {})
             selection_validator = _kwargs.get("post_validate") or validate
             payload, errors = self._build_decision_selection(
                 snapshot, selection_validator,

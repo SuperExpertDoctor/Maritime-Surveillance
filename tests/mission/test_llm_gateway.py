@@ -75,6 +75,24 @@ def _request_json(gateway, role="decision_maker", marker="blue"):
     )
 
 
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        ("decision_maker", '{"marker":"blue"}'),
+        ("reviewer", '{"marker": "blue"}'),
+    ],
+)
+def test_request_json_serializes_only_decision_maker_payload_compactly(
+    scripted_transport, role, expected,
+):
+    transport = scripted_transport({role: ['{"answer": 7}']})
+    gateway = LLMGateway(transport=transport)
+
+    assert _request_json(gateway, role=role).success
+
+    assert transport.calls[0]["messages"][1]["content"] == expected
+
+
 def test_invalid_json_is_corrected_with_exact_assistant_output(scripted_transport):
     raw = "  {bad}\n"
     transport = scripted_transport({
@@ -379,7 +397,7 @@ def test_role_requests_do_not_share_conversation_messages(scripted_transport):
     assert blue.success and red.success
     assert transport.calls[0]["messages"] == [
         {"role": "system", "content": "system-blue"},
-        {"role": "user", "content": '{"marker": "blue"}'},
+        {"role": "user", "content": '{"marker":"blue"}'},
     ]
     assert transport.calls[1]["messages"] == [
         {"role": "system", "content": "system-red"},

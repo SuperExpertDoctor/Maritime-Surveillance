@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+from src.mission.prompt_payload import encode_selection_payload
+
 
 def _run(script, *args):
     return subprocess.run(
@@ -80,7 +82,8 @@ def test_fixture_gateway_supports_reviewer_interaction_logging():
     assert gateway.call_log[-1]["role"] == "reviewer"
 
 
-def test_fixture_gateway_expands_selection_until_validator_accepts():
+@pytest.mark.parametrize("wire_format", [False, True])
+def test_fixture_gateway_expands_selection_until_validator_accepts(wire_format):
     from scripts.evaluate_mixed_maritime import _FixtureGateway
 
     gateway = _FixtureGateway()
@@ -92,8 +95,14 @@ def test_fixture_gateway_expands_selection_until_validator_accepts():
             {"task_id": "S2", "kind": "search", "priority": "medium"},
         ],
         "feasible_edges": [
-            {"task_id": "S1", "uav_options": [{"uav_id": "U1"}]},
-            {"task_id": "S2", "uav_options": [{"uav_id": "U2"}]},
+            {"task_id": "S1", "uav_options": [{
+                "uav_id": "U1", "transit_time_min": 1.0,
+                "total_range_cells": 2.0,
+            }]},
+            {"task_id": "S2", "uav_options": [{
+                "uav_id": "U2", "transit_time_min": 1.0,
+                "total_range_cells": 2.0,
+            }]},
         ],
     }
     payloads = []
@@ -109,7 +118,10 @@ def test_fixture_gateway_expands_selection_until_validator_accepts():
     result = gateway.request_json(
         role="decision_maker",
         snapshot_id="fixture-snapshot",
-        user_payload={"snapshot": snapshot},
+        user_payload=(
+            encode_selection_payload({"snapshot": snapshot})
+            if wire_format else {"snapshot": snapshot}
+        ),
         validate=validate,
     )
 
