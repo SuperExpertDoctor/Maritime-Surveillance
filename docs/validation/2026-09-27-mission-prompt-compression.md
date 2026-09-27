@@ -158,7 +158,16 @@ unchanged decision-maker configuration being enabled. Root reproduced that
 failure on unmodified main; its assertion now matches the actual preserved
 configuration.
 
-Final whole-branch review and post-merge verification are pending.
+Final read-only whole-branch review of `4be5e9a..490ffa4` approved the scoped
+implementation with no Critical, Important, or Minor findings. The reviewer
+independently checked the JUnit result and the remaining live-acceptance limits.
+Root also verified that all saved live summaries total 7 logical calls / 10
+physical requests, contain no private report fields, and that neither changed
+tracked files nor live summaries contain the configured credential.
+
+The local post-merge check covers payload, gateway, scheduler-budget, public
+detail, and runtime/report regressions. Its evidence artifact target is
+`outputs/prompt_compression_20260927/merged-tests.xml` in the primary checkout.
 
 ## Limits
 

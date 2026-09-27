@@ -18,8 +18,8 @@ rerun below remain future acceptance steps, not completed work.
 
 - Design approved by the user on 2026-09-27.
 - Implementation evidence is recorded in `docs/validation/2026-09-27-mission-prompt-compression.md`; this plan alone is not evidence of mission success.
-- Tasks 1-6 have been implemented and independently reviewed; the complete affected suite passed 370 tests. Final whole-branch review and local merge remain pending.
-- The authorized isolated worktree is `.worktrees/mission-prompt-compression`, branch `fix/mission-prompt-compression`, based on `4be5e9a`.
+- Tasks 1-6 have been implemented and independently reviewed; the complete affected suite passed 370 tests. Final whole-branch review approved the scoped implementation with no findings. Ten-UAV mission acceptance remains unsuccessful.
+- Implementation used the authorized isolated worktree `.worktrees/mission-prompt-compression`, branch `fix/mission-prompt-compression`, based on `4be5e9a`; local merge into `main` was explicitly authorized.
 - The bounded real-provider batch used 7 logical calls and 10 physical requests. Single-UAV dispatch succeeded; ten-UAV dispatch still failed. No five-hour rerun or push was performed.
 - Live experiments beyond the initial bounded batch and a five-hour rerun require a separately confirmed call budget.
 
