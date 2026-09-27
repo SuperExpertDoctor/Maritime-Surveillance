@@ -305,7 +305,7 @@ class SimulationEngine:
         self._return_reservation_sequence = 1
         self._coordinator_tasks: dict[str, ControlTask] = {}
         self._mission_task_records: dict[str, TaskRecord] = {}
-        self._intent_owner_revisions: dict[tuple[str, str], int] = {}
+        self._intent_owner_revisions: dict[tuple[str, str, str, int], int] = {}
         self._coverage_assignment_generations: dict[tuple[str, str], int] = {}
         self._pending_coverage_completions: list[dict[str, object]] = []
         self._next_probe_number = 1
@@ -1280,12 +1280,11 @@ class SimulationEngine:
         return dict(self._retired_command_results)
 
     def published_intent_snapshot(self) -> dict:
-        """Return the read model used by the operator API and later frames."""
-        now = float(self.clock.time)
-        statuses = self._evaluate_intent_statuses(now)
+        """Return the immutable read model last published by the simulation thread."""
+        intents, statuses = self.allocator.sm.get_published_intent_snapshot()
         return {
             "episode_id": self.episode_id,
-            "intents": self.intents.intents(),
+            "intents": intents,
             "statuses": statuses,
             "pending_commands": self.intent_commands.pending(),
             "intent_events": self.allocator.sm.get_intent_events(),
@@ -1299,7 +1298,13 @@ class SimulationEngine:
             if record.status not in {"approved", "executing"} or record.assigned_uav_id is None:
                 continue
             for intent in self.intents.active():
-                key = (record.task_id, intent.intent_id)
+                lease = self.control_coordinator.current_lease(record.assigned_uav_id)
+                key = (
+                    record.task_id,
+                    intent.intent_id,
+                    record.assigned_uav_id,
+                    lease.generation,
+                )
                 if intent.intent_id not in record.intent_ids or self._intent_owner_revisions.get(key) == intent.revision:
                     continue
                 self._queue_control_event("intent_focus", record.assigned_uav_id, now_min,

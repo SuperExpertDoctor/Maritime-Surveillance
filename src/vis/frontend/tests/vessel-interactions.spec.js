@@ -148,11 +148,14 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 375, height: 812
       await expect(page.locator('.intent-row')).toContainText('暂无执行任务');
     }
     await page.evaluate(f => window.__pushFrame(f), { ...fixture, intents: [intent], intent_statuses: [{
-      ...status, unmet_reason: 'coverage_below_target', assigned_task_ids: ['search-focus-5x5'], coverage_ratio: 0.2,
+      ...status, unmet_reason: 'coverage_below_target', assigned_task_ids: [
+        'search:focus:sector-alpha-001', 'search:focus:sector-bravo-002',
+        'search:focus:sector-charlie-003', 'search:focus:sector-delta-004',
+      ], coverage_ratio: 0.2,
     }] });
     const row = page.locator('.intent-row');
     await expect(row).toContainText('覆盖未达标');
-    await expect(row).toContainText('search-focus-5x5');
+    await expect(row).toContainText('search:focus:sector-delta-004');
     await row.scrollIntoViewIfNeeded();
     const layoutCheck = await row.evaluate(node => {
       const box = node.getBoundingClientRect();
