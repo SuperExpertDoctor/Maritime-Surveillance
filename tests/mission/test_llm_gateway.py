@@ -465,22 +465,53 @@ def test_each_required_role_binding_is_validated(tmp_path, scripted_transport, r
         LLMGateway(llm_params_path=path, transport=scripted_transport({}))
 
 
+@pytest.mark.parametrize("max_tokens", [1, 4096, 8192, 16384])
+def test_decision_maker_accepts_configurable_output_budget(
+    tmp_path, scripted_transport, max_tokens
+):
+    def mutate(data):
+        data["bindings"]["decision_maker"]["max_tokens"] = max_tokens
+
+    path = _write_llm_config(tmp_path, mutate)
+
+    gateway = LLMGateway(llm_params_path=path, transport=scripted_transport({}))
+
+    assert gateway.resolve_binding("decision_maker")["max_tokens"] == max_tokens
+
+
+@pytest.mark.parametrize("max_tokens", [0, -1, 16385, True, 1.5, "8192"])
+def test_decision_maker_rejects_invalid_output_budget(
+    tmp_path, scripted_transport, max_tokens
+):
+    path = _write_llm_config(
+        tmp_path,
+        lambda data: data["bindings"]["decision_maker"].update(
+            max_tokens=max_tokens
+        ),
+    )
+
+    with pytest.raises(
+        LLMConfigurationError,
+        match="decision_maker max_tokens must be an integer from 1 to 16384",
+    ):
+        LLMGateway(llm_params_path=path, transport=scripted_transport({}))
+
+
 @pytest.mark.parametrize(
     ("role", "wrong_max_tokens"),
     [
-        ("decision_maker", 2048),
         ("contact_assessor", 4096),
         ("red_commander", 2048),
         ("reviewer", 4096),
     ],
 )
-def test_each_required_role_token_budget_is_validated(
+def test_other_required_role_token_budget_is_validated(
     tmp_path, scripted_transport, role, wrong_max_tokens
 ):
-    def mutate(data):
-        data["bindings"][role]["max_tokens"] = wrong_max_tokens
-
-    path = _write_llm_config(tmp_path, mutate)
+    path = _write_llm_config(
+        tmp_path,
+        lambda data: data["bindings"][role].update(max_tokens=wrong_max_tokens),
+    )
 
     with pytest.raises(LLMConfigurationError, match=role):
         LLMGateway(llm_params_path=path, transport=scripted_transport({}))
@@ -897,6 +928,7 @@ def test_transport_rejects_length_even_with_parseable_json(length_provider, cont
     (None, [4096, 8192, 16384]),
     (1000, [1000, 2000, 4000]),
     (6000, [6000, 12000, 16384]),
+    (8192, [8192, 16384, 16384]),
 ])
 def test_length_retries_increase_only_request_budget(length_provider, initial, expected):
     length_provider.responses = [('length', '')] * 2 + [('stop', '{"answer": 7}')]

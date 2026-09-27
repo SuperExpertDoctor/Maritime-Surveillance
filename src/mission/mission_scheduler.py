@@ -1330,9 +1330,6 @@ class MissionScheduler:
                 transport_deadline_monotonic=(
                     deadline_monotonic - self.postprocess_reserve_seconds
                 ),
-                # Leave room for the soft 1024-token thinking target and a
-                # complete JSON selection; never truncate reasoning ourselves.
-                max_tokens=4096,
             )
             call_id = result.call_id
             success = result.success

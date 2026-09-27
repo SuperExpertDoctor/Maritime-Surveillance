@@ -251,7 +251,13 @@ class LLMGateway:
                 )
             if binding["model"] != "LongCat-2.0":
                 raise LLMConfigurationError(f"{role} must use LongCat-2.0")
-            if binding["max_tokens"] != expected_tokens:
+            tokens = binding["max_tokens"]
+            if role == "decision_maker":
+                if type(tokens) is not int or not 1 <= tokens <= 16384:
+                    raise LLMConfigurationError(
+                        "decision_maker max_tokens must be an integer from 1 to 16384"
+                    )
+            elif tokens != expected_tokens:
                 raise LLMConfigurationError(
                     f"{role} max_tokens must be {expected_tokens}"
                 )

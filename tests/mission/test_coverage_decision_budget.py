@@ -1,4 +1,7 @@
 import json
+from pathlib import Path
+
+import yaml
 
 from src.mission.contracts import (
     ContactSnapshot,
@@ -8,8 +11,9 @@ from src.mission.contracts import (
     TaskCandidate,
     UavResource,
 )
-from src.mission.llm_gateway import ModelResult
+from src.mission.llm_gateway import LLMGateway, ModelResult
 from src.mission.mission_scheduler import MissionScheduler, SELECTION_SCHEMA
+from tests.mission.conftest import ScriptedTransport
 
 
 def _task(task_id: str) -> TaskCandidate:
@@ -118,24 +122,44 @@ def test_prompt_serialization_is_bounded_without_mutating_snapshot():
     json.dumps(scheduler.last_selection_payload, ensure_ascii=False, allow_nan=False)
 
 
-def test_decision_maker_override_is_explicitly_limited():
+def _write_llm_config(tmp_path, mutate):
+    data = yaml.safe_load(Path("configs/llm_params.yaml").read_text(encoding="utf-8"))
+    mutate(data)
+    path = tmp_path / "llm_params.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return str(path)
+
+
+def test_scheduler_uses_configured_decision_maker_output_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.mission.mission_scheduler.time.perf_counter", lambda: 100.0)
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: 100.0)
     snapshot = _snapshot(candidate_count=1)
-
-    class Gateway:
-        def __init__(self):
-            self.kwargs = None
-
-        def request_json(self, **kwargs):
-            self.kwargs = kwargs
-            return ModelResult(
-                "budget-call", True, _selection(snapshot), (), None,
-            )
-
-    gateway = Gateway()
-    scheduler = MissionScheduler(gateway=gateway)
+    path = _write_llm_config(
+        tmp_path,
+        lambda data: data["bindings"]["decision_maker"].update(max_tokens=8192),
+    )
+    transport = ScriptedTransport({"decision_maker": [json.dumps(_selection(snapshot))]})
+    scheduler = MissionScheduler(
+        gateway=LLMGateway(path, transport=transport),
+        planning_deadline_seconds=60.0,
+        postprocess_reserve_seconds=1.0,
+    )
 
     assert scheduler.decide(snapshot) is not None
-    assert gateway.kwargs["max_tokens"] == 4096
+
+    call = transport.calls[0]
+    assert call["max_tokens"] == 8192
+    assert call["thinking"] == "enabled"
+    assert call["timeout_seconds"] == 59.0
+
+
+def test_scheduler_default_decision_maker_output_budget_reaches_transport():
+    snapshot = _snapshot(candidate_count=1)
+    transport = ScriptedTransport({"decision_maker": [json.dumps(_selection(snapshot))]})
+    scheduler = MissionScheduler(gateway=LLMGateway(transport=transport))
+
+    assert scheduler.decide(snapshot) is not None
+    assert transport.calls[0]["max_tokens"] == 4096
 
 
 def test_prompt_budget_failure_names_the_largest_field():
@@ -147,4 +171,3 @@ def test_prompt_budget_failure_names_the_largest_field():
     assert scheduler.decide(snapshot) is None
     assert scheduler.last_selection_errors[0].startswith("prompt_budget_exceeded:")
     assert scheduler.last_selection_failure_stage == "prompt"
-
