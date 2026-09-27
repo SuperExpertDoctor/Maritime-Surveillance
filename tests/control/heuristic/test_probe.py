@@ -344,9 +344,13 @@ def test_probe_entry_recovers_with_bounded_route_revisions(change):
 def test_probe_retries_transient_block_after_bounded_delay():
     navigator = NavigatorSpy(blocked=True)
     controller = _controller(navigator)
-    observation = _observation(probe=_probe())
+    observation = replace(_observation(probe=_probe()), timestamp_min=0.0)
     _start(controller, observation)
     controller.act(observation)
+    assert len(navigator.calls) == 2
     navigator.blocked = False
-    controller.act(replace(observation, timestamp_min=10.0))
+    controller.act(replace(observation, timestamp_min=1.99))
+    assert len(navigator.calls) == 2
+    controller.act(replace(observation, timestamp_min=2.0))
+    assert len(navigator.calls) == 3
     assert controller.route_snapshot().status == "ready"
