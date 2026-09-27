@@ -10,12 +10,18 @@
 
 ## Status And Authorization
 
+Execution update: the user authorized the isolated worktree and merging the
+verified feature branch into `main`. The user subsequently requested real LLM
+validation. The initial live batch is bounded to 10 logical task calls, with
+physical retries separately counted. The larger paired experiment and five-hour
+rerun below remain future acceptance steps, not completed work.
+
 - Design approved by the user on 2026-09-27.
-- This document is the implementation handoff, not evidence that implementation is complete.
-- Current checkout is a clean ordinary `main` checkout at plan preparation time.
-- `.worktrees/` exists and is ignored. Obtain consent before creating `.worktrees/mission-prompt-compression` on `fix/mission-prompt-compression`.
-- No source implementation, branch switch, merge, push, or provider-backed experiment has been performed for this plan.
-- Paid experiments and a five-hour rerun require a separately confirmed call budget.
+- Implementation evidence is recorded in `docs/validation/2026-09-27-mission-prompt-compression.md`; this plan alone is not evidence of mission success.
+- Tasks 1-6 have been implemented and independently reviewed; the complete affected suite passed 370 tests. Final whole-branch review and local merge remain pending.
+- The authorized isolated worktree is `.worktrees/mission-prompt-compression`, branch `fix/mission-prompt-compression`, based on `4be5e9a`.
+- The bounded real-provider batch used 7 logical calls and 10 physical requests. Single-UAV dispatch succeeded; ten-UAV dispatch still failed. No five-hour rerun or push was performed.
+- Live experiments beyond the initial bounded batch and a five-hour rerun require a separately confirmed call budget.
 
 ## Global Constraints
 
@@ -68,7 +74,7 @@ All four historical mission requests first reached `finish_reason=length` at 409
 
 **Interfaces:** `encode_selection_payload(payload: dict) -> dict` accepts the canonical scheduler payload. `decode_selection_payload(payload: dict) -> dict` returns a detached semantic payload for offline fixtures, accepting historical unversioned input. New format is `mission-prompt/v2`; response schema remains unchanged.
 
-- [ ] Add `tests/mission/test_prompt_payload.py` with the following primary regression. Add independent cases for empty options, two tasks sharing a UAV, exact float preservation, mismatched candidate/edge eligibility, malformed row width, unsupported format version, and untouched legacy payloads.
+- [x] Add `tests/mission/test_prompt_payload.py` with the following primary regression. Add independent cases for empty options, two tasks sharing a UAV, exact float preservation, mismatched candidate/edge eligibility, malformed row width, unsupported format version, and untouched legacy payloads.
 
 ```python
 from copy import deepcopy
@@ -109,8 +115,8 @@ def test_wire_payload_preserves_facts_without_mutating_source():
     assert canonical == before
 ```
 
-- [ ] Run the new file and observe an import failure for the not-yet-created module. After module creation, rerun every behavior-specific regression rather than treating import failure as proof of all cases.
-- [ ] Implement `src/mission/prompt_payload.py` with these exact public interfaces and encoding rules. Use `deepcopy`; preserve all unknown snapshot fields. Only candidate eligibility duplicated exactly by the edge table may be omitted.
+- [x] Run the new file and observe an import failure for the not-yet-created module. After module creation, rerun every behavior-specific regression rather than treating import failure as proof of all cases.
+- [x] Implement `src/mission/prompt_payload.py` with these exact public interfaces and encoding rules. Use `deepcopy`; preserve all unknown snapshot fields. Only candidate eligibility duplicated exactly by the edge table may be omitted.
 
 ```python
 from copy import deepcopy
@@ -169,7 +175,7 @@ def decode_selection_payload(payload: dict) -> dict:
 
 The encoder accepts the canonical scheduler contract, where all visible candidates have eligibility lists and edges have exactly the three named option fields. A mismatching eligibility list is retained rather than silently discarded. The decoder does not restore removed prose, so equality assertions compare semantic snapshots, not `instructions`.
 
-- [ ] Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q -p no:cacheprovider tests/mission/test_prompt_payload.py`. Expected: all new tests pass; malformed/unknown formats raise explicit errors.
+- [x] Run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q -p no:cacheprovider tests/mission/test_prompt_payload.py`. Expected: all new tests pass; malformed/unknown formats raise explicit errors.
 
 ## Task 2: Integrate The Wire Boundary And Preserve Fixtures
 
@@ -177,7 +183,7 @@ The encoder accepts the canonical scheduler contract, where all visible candidat
 
 **Consumes:** Task 1 encoder/decoder. **Produces:** Actual transport messages contain the v2 payload; canonical diagnostic APIs and offline selectors retain their existing semantic structures.
 
-- [ ] Add an integration test using existing `_task`, `_resource`, `_edge`, `_snapshot`, and `_selection` helpers and `ScriptedTransport`. Exercise the real `LLMGateway` and scheduler rather than replacing the encoder with a mock.
+- [x] Add an integration test using existing `_task`, `_resource`, `_edge`, `_snapshot`, and `_selection` helpers and `ScriptedTransport`. Exercise the real `LLMGateway` and scheduler rather than replacing the encoder with a mock.
 
 ```python
 def test_scheduler_sends_compact_wire_payload_once():
@@ -201,10 +207,10 @@ def test_scheduler_sends_compact_wire_payload_once():
     assert scheduler.selection_interaction()["user_prompt"] == messages[1]["content"]
 ```
 
-- [ ] Parameterize existing fixture selection tests with legacy and v2 inputs. In the v2 case, provide complete three-column options, call the encoder, and assert the same selected task IDs and validation outcome. Repeat for `CoverageFixtureGateway`'s near-versus-far task-order test.
-- [ ] Run those tests before integration; expect missing wire version or row-reading failures.
-- [ ] In `MissionScheduler.decide`, retain `payload` for visible task IDs and validation, and replace only `user_payload=payload` with `user_payload=encode_selection_payload(payload)` at the gateway call.
-- [ ] In `selection_interaction`, make the fallback user prompt represent the encoded payload. Actual audited gateway messages still take precedence. Guard the no-payload case with `{}` rather than invoking the encoder without a snapshot.
+- [x] Parameterize existing fixture selection tests with legacy and v2 inputs. In the v2 case, provide complete three-column options, call the encoder, and assert the same selected task IDs and validation outcome. Repeat for `CoverageFixtureGateway`'s near-versus-far task-order test.
+- [x] Run those tests before integration; expect missing wire version or row-reading failures.
+- [x] In `MissionScheduler.decide`, retain `payload` for visible task IDs and validation, and replace only `user_payload=payload` with `user_payload=encode_selection_payload(payload)` at the gateway call.
+- [x] In `selection_interaction`, make the fallback user prompt represent the encoded payload. Actual audited gateway messages still take precedence. Guard the no-payload case with `{}` rather than invoking the encoder without a snapshot.
 
 ```python
 wire_payload = (
@@ -216,15 +222,15 @@ user_prompt = json.dumps(
 )
 ```
 
-- [ ] In the gateway's JSON user-content serialization, use `separators=(",", ":")` for `role == "decision_maker"` and retain default `(", ", ": ")` for other roles. Keep strict JSON handling intact.
-- [ ] In `_FixtureGateway.request_json`, decode only the decision-maker payload before calling `_build_decision_selection`. This inherited entry point also covers `CoverageFixtureGateway`, so its task-ranking algorithm need not change.
+- [x] In the gateway's JSON user-content serialization, use `separators=(",", ":")` for `role == "decision_maker"` and retain default `(", ", ": ")` for other roles. Keep strict JSON handling intact.
+- [x] In `_FixtureGateway.request_json`, decode only the decision-maker payload before calling `_build_decision_selection`. This inherited entry point also covers `CoverageFixtureGateway`, so its task-ranking algorithm need not change.
 
 ```python
 if role == "decision_maker":
     snapshot = decode_selection_payload(user_payload).get("snapshot", {})
 ```
 
-- [ ] Run scheduler, payload, gateway, evaluation CLI, legacy scheduling, and coverage scan tests. Canonical `_prompt_payload()` tests should continue to see the old structure; update only tests explicitly examining transmitted messages.
+- [x] Run scheduler, payload, gateway, evaluation CLI, legacy scheduling, and coverage scan tests. Canonical `_prompt_payload()` tests should continue to see the old structure; update only tests explicitly examining transmitted messages.
 
 ## Task 3: Shorten Rules Without Changing Policy
 
@@ -232,8 +238,8 @@ if role == "decision_maker":
 
 **Produces:** One system rule set explaining v2 rows, while retaining the same hard constraints and response schema.
 
-- [ ] Add a prompt-format regression to the payload integration test: the system prompt must explain `uav_option_columns`, `simultaneous`, `required_new_search_count`, `pending_intent_reviews`, and `ordinary_search_admission_limit`. Run it and observe the missing column explanation before editing.
-- [ ] Replace the prompt with the following text. Keep the listed legacy phrases to avoid turning tests that check retained-work rules into weaker assertions.
+- [x] Add a prompt-format regression to the payload integration test: the system prompt must explain `uav_option_columns`, `simultaneous`, `required_new_search_count`, `pending_intent_reviews`, and `ordinary_search_admission_limit`. Run it and observe the missing column explanation before editing.
+- [x] Replace the prompt with the following text. Keep the listed legacy phrases to avoid turning tests that check retained-work rules into weaker assertions.
 
 ```text
 You select simultaneous tasks for mixed maritime surveillance. The server
@@ -316,9 +322,9 @@ hard cutoff. Finish necessary checks and emit one complete valid JSON object.
 Keep any provider reasoning outside the final JSON; never emit think markup.
 ```
 
-- [ ] Audit the following rule mapping against existing behavioral tests: retained work, non-overlap, distinct UAVs, protected operations, residual/global coverage floor, zone obligations under global infeasibility, preemption floor, probe admission ceiling, revision-specific intent acknowledgement, idle-capacity utilization, partition preference, advisory memories, and notes limit.
-- [ ] Run legacy scheduling, mission scheduler, prompt-window, coverage policy, fleet partition, and intent candidate tests. Text-presence tests supplement behavioral tests; they do not prove semantic equivalence of model behavior.
-- [ ] Record before/after system bytes. Do not claim model quality equivalence until the separately authorized paired live experiment.
+- [x] Audit the following rule mapping against existing behavioral tests: retained work, non-overlap, distinct UAVs, protected operations, residual/global coverage floor, zone obligations under global infeasibility, preemption floor, probe admission ceiling, revision-specific intent acknowledgement, idle-capacity utilization, partition preference, advisory memories, and notes limit.
+- [x] Run legacy scheduling, mission scheduler, prompt-window, coverage policy, fleet partition, and intent candidate tests. Text-presence tests supplement behavioral tests; they do not prove semantic equivalence of model behavior.
+- [x] Record before/after system bytes. Do not claim model quality equivalence until the separately authorized paired live experiment.
 
 ## Task 4: Configurable Decision-Maker Output Budget
 
@@ -326,10 +332,10 @@ Keep any provider reasoning outside the final JSON; never emit think markup.
 
 **Produces:** Decision-maker configuration accepts integer values 1 through 16384; default remains 4096. Other role limits remain unchanged. The existing output-retry ceiling remains 16384.
 
-- [ ] Use `_write_llm_config` and `ScriptedTransport` to add a test that changes only decision-maker `max_tokens` to 8192 and executes a scheduler decision. Assert the transport receives 8192, the same thinking mode, and the existing transport deadline/reserve.
-- [ ] Add boundary configuration cases: accept 1/4096/8192/16384; reject 0/-1/16385/True/1.5/"8192". Keep rejection tests for changing other role limits.
-- [ ] Run the tests before modification; expect the current exact-4096 validation to reject 8192.
-- [ ] Replace only the decision-maker branch of `_validate_required_bindings` with the following rule; retain the current exact-value rule for all other roles.
+- [x] Use `_write_llm_config` and `ScriptedTransport` to add a test that changes only decision-maker `max_tokens` to 8192 and executes a scheduler decision. Assert the transport receives 8192, the same thinking mode, and the existing transport deadline/reserve.
+- [x] Add boundary configuration cases: accept 1/4096/8192/16384; reject 0/-1/16385/True/1.5/"8192". Keep rejection tests for changing other role limits.
+- [x] Run the tests before modification; expect the current exact-4096 validation to reject 8192.
+- [x] Replace only the decision-maker branch of `_validate_required_bindings` with the following rule; retain the current exact-value rule for all other roles.
 
 ```python
 tokens = binding["max_tokens"]
@@ -342,10 +348,10 @@ elif tokens != expected_tokens:
     raise LLMConfigurationError(f"{role} max_tokens must be {expected_tokens}")
 ```
 
-- [ ] Remove `max_tokens=4096` from the mission scheduler gateway call and its obsolete hardcoded-allowance comment. The gateway already resolves an omitted override from the role binding. Preserve the probe's independent 32-token override.
-- [ ] Replace `test_decision_maker_override_is_explicitly_limited` with a test asserting the scheduler does not override role configuration, and retain an integration assertion that the default transport still receives 4096.
-- [ ] Document the decision-maker range and default in YAML comments without changing its value, thinking mode, temperature, or any timeout.
-- [ ] Run gateway, scheduler-budget, role-client, and runtime-configuration tests. Verify 8192 retries cap at 16384 and deadlines remain shared, not multiplied by retry count.
+- [x] Remove `max_tokens=4096` from the mission scheduler gateway call and its obsolete hardcoded-allowance comment. The gateway already resolves an omitted override from the role binding. Preserve the probe's independent 32-token override.
+- [x] Replace `test_decision_maker_override_is_explicitly_limited` with a test asserting the scheduler does not override role configuration, and retain an integration assertion that the default transport still receives 4096.
+- [x] Document the decision-maker range and default in YAML comments without changing its value, thinking mode, temperature, or any timeout.
+- [x] Run gateway, scheduler-budget, role-client, and runtime-configuration tests. Verify 8192 retries cap at 16384 and deadlines remain shared, not multiplied by retry count.
 
 ## Task 5: Diagnostic Evidence And Report Visibility
 
@@ -353,8 +359,8 @@ elif tokens != expected_tokens:
 
 **Produces:** Canonical versus transmitted size is explicit; initiating truncation is not hidden by terminal timeout. Historical report fields retain their meaning.
 
-- [ ] Add tests using the existing fake-clock truncation fixture, asserting final `timeout` alongside `initial_failure_category == "output_truncated"`. Also cover truncation followed by success, initial transport timeout, and an initial validation error.
-- [ ] Add a real-gateway/scripted-transport assertion for exact byte counts:
+- [x] Add tests using the existing fake-clock truncation fixture, asserting final `timeout` alongside `initial_failure_category == "output_truncated"`. Also cover truncation followed by success, initial transport timeout, and an initial validation error.
+- [x] Add a real-gateway/scripted-transport assertion for exact byte counts:
 
 ```python
 messages = transport.calls[0]["messages"]
@@ -367,9 +373,9 @@ assert call["input_text_bytes"] == sum(
 assert call["attempts"][0]["input_text_bytes"] == call["input_text_bytes"]
 ```
 
-- [ ] Add report/public-detail tests asserting these numeric fields survive export, while `messages`, `system_prompt`, `user_prompt`, credentials, and partial truncated output remain absent.
-- [ ] Run the new tests and observe absent numeric/root-cause fields.
-- [ ] At gateway call construction record `system_prompt_bytes`, `user_prompt_bytes`, their sum as `input_text_bytes`, `prompt_format_version`, and `configured_max_tokens`. At each attempt record the sum of current message-content bytes, including any compact correction hint, plus the existing `max_tokens` and timeout fields.
+- [x] Add report/public-detail tests asserting these numeric fields survive export, while `messages`, `system_prompt`, `user_prompt`, credentials, and partial truncated output remain absent.
+- [x] Run the new tests and observe absent numeric/root-cause fields.
+- [x] At gateway call construction record `system_prompt_bytes`, `user_prompt_bytes`, their sum as `input_text_bytes`, `prompt_format_version`, and `configured_max_tokens`. At each attempt record the sum of current message-content bytes, including any compact correction hint, plus the existing `max_tokens` and timeout fields.
 
 ```python
 call.update({
@@ -381,31 +387,33 @@ call.update({
 })
 ```
 
-- [ ] In every failure path, record the first failure with `call.setdefault("initial_failure_category", category)` before later budget checks can replace the terminal category. In particular, do this immediately inside `except LLMOutputTruncated` with `"output_truncated"`; use the existing typed/status classification for transport errors and `"validation"` for invalid responses. Never derive transport type from arbitrary error-message text.
-- [ ] Keep `failure_category` unchanged as the final outcome category. Successful correction may therefore have `success=True`, terminal category null, and a non-null initial failure category.
-- [ ] Preserve existing scheduler `prompt_bytes` as canonical user-payload bytes for compatibility. Add explicitly named wire/system byte fields; forward these through the allocator timing/interaction dictionary instead of silently redefining historical metrics.
-- [ ] Extend `main.py`'s report allowlist with the new scalar diagnostic fields and existing bounded attempt records. Before export, remove each attempt's `messages`, `raw_output`, `response`, and `provider_channels`; keep only attempt number, token limit, byte count, timeout, elapsed time, finish reason, numeric usage, and redacted errors. Keep call-level private prompt/reasoning content excluded.
-- [ ] Run gateway, public-detail/visibility, runtime-loop, and report tests. Confirm a truncation-then-budget-exhaustion report clearly contains both causes and does not leak request bodies.
+- [x] In every failure path, record the first failure with `call.setdefault("initial_failure_category", category)` before later budget checks can replace the terminal category. In particular, do this immediately inside `except LLMOutputTruncated` with `"output_truncated"`; use the existing typed/status classification for transport errors and `"validation"` for invalid responses. Never derive transport type from arbitrary error-message text.
+- [x] Keep `failure_category` unchanged as the final outcome category. Successful correction may therefore have `success=True`, terminal category null, and a non-null initial failure category.
+- [x] Preserve existing scheduler `prompt_bytes` as canonical user-payload bytes for compatibility. Add explicitly named wire/system byte fields; forward these through the allocator timing/interaction dictionary instead of silently redefining historical metrics.
+- [x] Extend `main.py`'s report allowlist with the new scalar diagnostic fields and existing bounded attempt records. Before export, remove each attempt's `messages`, `raw_output`, `response`, and `provider_channels`; keep only attempt number, token limit, byte count, timeout, elapsed time, finish reason, numeric usage, and redacted errors. Keep call-level private prompt/reasoning content excluded.
+- [x] Run gateway, public-detail/visibility, runtime-loop, and report tests. Confirm a truncation-then-budget-exhaustion report clearly contains both causes and does not leak request bodies.
 
 ## Task 6: Offline Measurement And Regression Gate
 
 **Files:** New validation document; new or existing tests in `test_coverage_decision_budget.py` and `test_prompt_payload.py`.
 
-- [ ] Add an offline initial-episode size test. Inject a gateway that records requests and returns `ModelResult("offline", False, None, ("decision_deadline_exceeded",), "timeout")`; use `SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=gateway)` and step three times. Do not construct a real transport.
-- [ ] For each request assert `instructions` is absent, every encoded edge decodes to the canonical values, candidate IDs/order are unchanged, and the original snapshot/constraints remain unchanged. Measure compact user text plus the actual system text. Assert the historical initial scenario fits `30 * 1024` bytes; do not impose this threshold on every valid future large mission.
-- [ ] Measure first-round canonical bytes, system bytes, transmitted bytes, and field contributions. Record that local byte measurements do not reproduce the provider tokenizer or prove latency improvement.
-- [ ] Run the following affected offline suite without credentials or network calls:
+- [x] Add an offline initial-episode size test. Inject a gateway that records requests and returns `ModelResult("offline", False, None, ("decision_deadline_exceeded",), "timeout")`; use `SimulationEngine(ConfigLoader.load(), seed=42, llm_gateway=gateway)` and step three times. Do not construct a real transport.
+- [x] For each request assert `instructions` is absent, every encoded edge decodes to the canonical values, candidate IDs/order are unchanged, and the original snapshot/constraints remain unchanged. Measure compact user text plus the actual system text. Assert the historical initial scenario fits `30 * 1024` bytes; do not impose this threshold on every valid future large mission.
+- [x] Measure first-round canonical bytes, system bytes, transmitted bytes, and field contributions. Record that local byte measurements do not reproduce the provider tokenizer or prove latency improvement.
+- [x] Run the following affected offline suite without credentials or network calls:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q -p no:cacheprovider -o 'markers=timeout: legacy timeout marker' tests/mission/test_prompt_payload.py tests/mission/test_llm_gateway.py tests/mission/test_mission_scheduler.py tests/mission/test_coverage_decision_budget.py tests/mission/test_coverage_model_failure.py tests/mission/test_coverage_prompt_window.py tests/mission/test_coverage_policy.py tests/mission/test_fleet_partition.py tests/mission/test_intent_candidates.py tests/mission/test_legacy_search_scheduling.py tests/mission/test_coverage_scan_integration.py tests/mission/test_evaluation_cli.py tests/mission/test_visibility.py tests/vis/test_decision_details.py tests/schedule/test_llm_client.py tests/test_live_runtime_loop.py tests/test_runtime_configuration.py
 ```
 
-- [ ] Review the diff for accidental changes to deterministic matching, safety, candidate generation, classification criteria, role defaults, or timeout configuration. Review tests for weakened assertions rather than legitimate boundary-format updates.
-- [ ] Record actual counts, elapsed time, failures, byte measurements, and residual limitations in `docs/validation/2026-09-27-mission-prompt-compression.md`. No claim of effective real-model reconnaissance is permitted from offline results alone.
+- [x] Review the diff for accidental changes to deterministic matching, safety, candidate generation, classification criteria, role defaults, or timeout configuration. Review tests for weakened assertions rather than legitimate boundary-format updates.
+- [x] Record actual counts, elapsed time, failures, byte measurements, and residual limitations in `docs/validation/2026-09-27-mission-prompt-compression.md`. No claim of effective real-model reconnaissance is permitted from offline results alone.
 
 ## Task 7: Separately Authorized Live Acceptance
 
-This is a future acceptance gate, not permission to spend API budget now.
+The full paired and five-hour acceptance gates below remain future work. The
+subsequently authorized bounded live batch is recorded in the validation
+document; it does not satisfy the full acceptance criteria below.
 
 - [ ] Obtain a budget for 30 logical decisions: five representative snapshots, two prompt variants, three repetitions each. Count and report physical retry requests separately; configured retries can make physical request count larger than 30.
 - [ ] Use initial dispatch, newly observed contact, edited focus intent, constrained resources, and retained/executing work snapshots. Use the exact same snapshot within each pair. Start with the original and compressed prompts at 4096 tokens, thinking enabled, and 60 seconds; alternate order to reduce time-of-day confounding.
@@ -417,7 +425,7 @@ This is a future acceptance gate, not permission to spend API budget now.
 ## Delivery And Rollback
 
 - Implement tasks 1-6 in individually reviewable stages: encoding, integration, prompt rules, output configuration, diagnostics, and evidence.
-- Before implementation, obtain the workspace choice. Creating a new worktree does not authorize merging it into `main`.
+- The user authorized this worktree and local merge into `main`; merge only after the affected offline regression and final code-review gates pass. Real ten-UAV acceptance remains a separately reported limitation.
 - Leave defaults at 4096/60 seconds until live evidence supports a separately approved change.
 - If the compact format causes a regression, revert the encoding integration and prompt-format explanation together; do not run row data against a legacy-only system prompt. Keep the independent diagnostic improvements if their tests pass.
 - Do not rewrite old logs or mutate the original five-hour episode to make its outcome look successful.

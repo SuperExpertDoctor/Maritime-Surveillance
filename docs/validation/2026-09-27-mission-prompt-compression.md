@@ -135,8 +135,15 @@ that the inherited environment had no API key while the configured local key
 matched the supplied credential fingerprint; no key, fingerprint, prompt body,
 or provider reasoning is recorded here.
 
-Final affected-suite verification is pending root's run; the offline scenario
-measurement and focused regressions above are complete.
+Final affected-suite verification passed: **370 passed in 332.67s**. Root ran
+the Task 6 suite listed in the implementation plan, plus
+`tests/mission/test_zone_rolling_acceptance.py::test_prompt_preserves_geometry_safety_and_coverage_floor_policy`,
+with bytecode, external pytest plugin auto-loading, and pytest cache disabled.
+No source or test files changed during the run. The production/test revision was
+`fd90eda`; subsequent documentation-only updates do not change tested code.
+The JUnit artifact is `outputs/prompt_compression_20260927/offline-tests.xml`
+in the primary checkout. This is an affected-suite result, not a claim that
+every test in the repository was run successfully.
 The pre-change focused baseline was 155 passed in 32.08s.
 
 One existing fleet test also failed on unmodified `main`: it expected ten
@@ -146,6 +153,12 @@ asserts no initial contacts, and retains all original ten-UAV/ten-region and
 large-area assertions. Shared fixture defaults and production policy are
 unchanged. Updated prompt assertions check equivalent rules in the shortened
 text and the actual provider-facing system message.
+An existing visibility test also expected thinking disabled despite the
+unchanged decision-maker configuration being enabled. Root reproduced that
+failure on unmodified main; its assertion now matches the actual preserved
+configuration.
+
+Final whole-branch review and post-merge verification are pending.
 
 ## Limits
 
