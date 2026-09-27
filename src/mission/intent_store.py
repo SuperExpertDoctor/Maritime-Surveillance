@@ -19,6 +19,21 @@ _UPDATE_FIELDS = _CREATE_FIELDS
 _PRIORITY_MULTIPLIERS = {"high": 3.0, "medium": 2.0, "low": 1.0}
 
 
+def attach_intent_owners(tasks, intents):
+    """Annotate retained search owners without changing reservation identity."""
+    active = tuple(intent for intent in intents if intent.lifecycle == "active")
+    result = []
+    for task in tasks:
+        if task.kind == "search" and task.bbox and task.status in {"approved", "executing"}:
+            c0, r0, c1, r1 = task.bbox
+            ids = tuple(intent.intent_id for intent in active
+                        if c0 < intent.bbox[2] and intent.bbox[0] < c1
+                        and r0 < intent.bbox[3] and intent.bbox[1] < r1)
+            task = replace(task, intent_ids=ids)
+        result.append(task)
+    return tuple(result)
+
+
 class IntentStore:
     """Own mutable intent lifecycle state while exposing frozen snapshots."""
 
@@ -125,6 +140,9 @@ class IntentStore:
         searchable_mask: np.ndarray,
         tasks: Iterable[Any],
         now_min: float,
+        *,
+        candidates: Iterable[Any] | None = (),
+        actionable_task_ids: Iterable[str] = (),
     ) -> tuple[IntentStatus, ...]:
         now = _finite_nonnegative(now_min, "now_min")
         info_array, scans = _metric_inputs(
@@ -134,6 +152,8 @@ class IntentStore:
             self._shape,
         )
         task_list = tuple(tasks)
+        candidate_list = None if candidates is None else tuple(candidates)
+        actionable = set(actionable_task_ids)
         statuses = []
         for intent in self.intents():
             c0, r0, c1, r1 = intent.bbox
@@ -177,7 +197,8 @@ class IntentStore:
                 freshness_ratio=freshness,
                 max_scan_age_min=max_age,
                 assigned_task_ids=_assigned_task_ids(intent.intent_id, task_list),
-                unmet_reason=_unmet_reason(intent, coverage, freshness, task_list),
+                unmet_reason=_unmet_reason(intent, coverage, freshness, task_list,
+                                          candidate_list, actionable),
             ))
         return tuple(statuses)
 
@@ -293,7 +314,7 @@ def _assigned_task_ids(intent_id: str, tasks: tuple[Any, ...]) -> tuple[str, ...
     for task in tasks:
         getter = task.get if isinstance(task, dict) else lambda name, default=None: getattr(task, name, default)
         intent_ids = getter("intent_ids", ())
-        if intent_id in intent_ids:
+        if intent_id in intent_ids and getter("status", "candidate") in {"approved", "executing"}:
             task_id = getter("task_id", getter("id", None))
             if isinstance(task_id, str):
                 task_ids.append(task_id)
@@ -305,6 +326,8 @@ def _unmet_reason(
     coverage: float,
     freshness: float,
     tasks: tuple[Any, ...],
+    candidates: tuple[Any, ...] | None = (),
+    actionable_task_ids: set[str] = frozenset(),
 ) -> str | None:
     if intent.lifecycle != "active":
         return intent.lifecycle
@@ -316,7 +339,14 @@ def _unmet_reason(
     if not unmet:
         return None
     if not any(_is_legal_intent_candidate(intent.intent_id, task) for task in tasks):
-        return "no_legal_candidate"
+        if candidates is None:
+            return "awaiting_planning"
+        legal = tuple(task for task in candidates if _is_legal_intent_candidate(intent.intent_id, task))
+        if not legal:
+            return "no_legal_candidate"
+        if not any(task.task_id in actionable_task_ids for task in legal):
+            return "resource_blocked"
+        return "waiting_assignment"
     if intent.mode == "search_priority":
         return "coverage_below_target"
     if intent.mode == "maintain_freshness":

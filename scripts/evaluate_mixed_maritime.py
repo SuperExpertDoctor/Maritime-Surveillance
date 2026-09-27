@@ -434,11 +434,6 @@ class _FixtureGateway:
                             and sum(candidates[s].get("kind") != "search" for s in selected)
                             >= max(0, len(snapshot.get("available_uav_ids", ())) - required)):
                         continue
-                    if (not coverage.get("infeasible_reason")
-                            and candidates[task_id].get("kind") == "search"
-                            and sum(candidates[s].get("kind") == "search" for s in selected)
-                            >= required):
-                        continue
                     proposed = [*selected, task_id]
                     payload = self._selection_payload(snapshot, proposed)
                     errors = tuple(validate(payload)) if validate else ()

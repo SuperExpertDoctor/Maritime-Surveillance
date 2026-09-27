@@ -243,6 +243,7 @@ class CoverageController(HeuristicControllerBase):
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.task is None or self.follower is None:
             raise RuntimeError("start_task must be called before act")
+        self._refresh_focus_route(observation)
         self._refresh_conflict_route(observation)
         self._refresh_invalidated_route(observation)
         guidance = self.follower.update(
@@ -589,6 +590,37 @@ class CoverageController(HeuristicControllerBase):
             self.r_min,
             observation.planning_map_version,
         )
+
+    def _refresh_focus_route(self, observation: ControlObservation) -> None:
+        """Reorder remaining swaths, installing only a fully checked route."""
+        boxes = [event.payload.get("bbox") for event in observation.events
+                 if event.event_type == "intent_focus"
+                 and event.payload.get("task_id") == self.task.task_id]
+        if not boxes:
+            return
+        remaining = [swath for (_start, end), swath in zip(self.scan_ranges, self.scan_swaths)
+                     if end > self.follower.index]
+        def focused(swath):
+            return any(c0 <= cell.col < c1 and r0 <= cell.row < r1
+                       for c0, r0, c1, r1 in boxes for cell in swath.footprint)
+        ordered = sorted(remaining, key=lambda swath: not focused(swath))
+        if not ordered or ordered == remaining:
+            return
+        entry = (*ordered[0].start, ordered[0].heading)
+        try:
+            transit = self._plan_transit_to_pose(
+                (*observation.self_state.position, observation.self_state.heading_rad), entry, observation)
+            coverage = CoveragePath(swaths=ordered, waypoints=[entry])
+            route, ranges = self._assemble_coverage_route(coverage, observation.planning_obstacle_mask)
+            offset = len(transit) - 1
+            transit[-1] = entry
+            self._set_route(tuple(transit) + route[1:],
+                tuple((offset + start, offset + end) for start, end in ranges), ordered,
+                observation.planning_obstacle_mask, observation.planning_map_version,
+                progress_offset_cells=self.follower.progress_cells)
+        except (CoverageRouteBlockedError, ValueError, RuntimeError):
+            return
+        self.phase = CoveragePhase.TRANSIT_ASTAR
 
     def _refresh_conflict_route(self, observation: ControlObservation) -> None:
         """Rebuild only the unconsumed suffix after a route conflict."""

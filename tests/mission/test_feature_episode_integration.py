@@ -417,5 +417,9 @@ def test_pending_search_without_selectable_candidates_does_not_call_model(monkey
     assert result['skip_reason'] == 'pending_search_reassignment'
     assert batch is None
     assert pending.status == 'approved'
-    probe = SimpleNamespace(kind='probe', status='approved', assigned_uav_id=None)
-    assert allocator._model_selection_skip_reason(replace(snapshot, active_tasks=(probe,))) is None
+    from src.mission.contracts import TaskRecord
+    probe = TaskRecord('Q1', 'probe', 'approved', None, 'C1', (), None,
+                       'call', 0., None, None, None)
+    assert allocator._model_selection_skip_reason(
+        replace(snapshot, active_tasks=(probe,))
+    ) == 'no_actionable_candidates'

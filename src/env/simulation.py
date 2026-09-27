@@ -95,7 +95,8 @@ from src.mission.intent_commands import (
     IntentCommandQueue,
     RuntimeCommandQueue,
 )
-from src.mission.intent_store import IntentStore
+from src.mission.intent_store import IntentStore, attach_intent_owners
+from src.mission.mission_scheduler import actionable_edges
 from src.mission.vessel_commands import VesselCommandQueue, VesselCommandResult
 from src.mission.trajectory_features import advance_probe, build_features
 from src.mission.red_commander import (
@@ -304,6 +305,7 @@ class SimulationEngine:
         self._return_reservation_sequence = 1
         self._coordinator_tasks: dict[str, ControlTask] = {}
         self._mission_task_records: dict[str, TaskRecord] = {}
+        self._intent_owner_revisions: dict[tuple[str, str], int] = {}
         self._coverage_assignment_generations: dict[tuple[str, str], int] = {}
         self._pending_coverage_completions: list[dict[str, object]] = []
         self._next_probe_number = 1
@@ -1291,12 +1293,38 @@ class SimulationEngine:
 
     def _evaluate_intent_statuses(self, now_min: float):
         sm = self.allocator.sm
+        records = attach_intent_owners(self._mission_task_records.values(), self.intents.active())
+        for record in records:
+            self._mission_task_records[record.task_id] = record
+            if record.status not in {"approved", "executing"} or record.assigned_uav_id is None:
+                continue
+            for intent in self.intents.active():
+                key = (record.task_id, intent.intent_id)
+                if intent.intent_id not in record.intent_ids or self._intent_owner_revisions.get(key) == intent.revision:
+                    continue
+                self._queue_control_event("intent_focus", record.assigned_uav_id, now_min,
+                    {"task_id": record.task_id, "intent_id": intent.intent_id,
+                     "revision": intent.revision, "bbox": intent.bbox})
+                self._intent_owner_revisions[key] = intent.revision
+        snapshot = self.allocator.last_mission_snapshot
+        current = snapshot is not None and (
+            tuple((i.intent_id, i.revision, i.lifecycle) for i in snapshot.intents)
+            == tuple((i.intent_id, i.revision, i.lifecycle) for i in self.intents.intents())
+            and snapshot.planning_map_version == sm.obstacle_version
+        )
+        scheduler = self.allocator.mission_scheduler
+        legal_ids = tuple(edge.task_id for edge in actionable_edges(snapshot,
+            reassignment_cooldown_min=scheduler.reassignment_cooldown_min,
+            allow_probe_preempt_search=scheduler.allow_probe_preempt_search,
+            allow_intent_preempt_search=scheduler.allow_intent_preempt_search)) if current else ()
         statuses = self.intents.evaluate(
             sm.get_info_matrix(),
             sm.get_last_scan_matrix(),
             sm.get_searchable_mask(),
             tuple(self._mission_task_records.values()),
             now_min,
+            candidates=snapshot.candidates if current else None,
+            actionable_task_ids=legal_ids,
         )
         sm.publish_intent_snapshot(self.intents.intents(), statuses)
         return statuses

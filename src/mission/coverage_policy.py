@@ -198,7 +198,10 @@ class CoveragePolicy:
                     if zone is not None:
                         grouped.setdefault(zone, []).append(task)
             for zone, tasks in grouped.items():
-                tasks.sort(key=lambda task: not zones.contains_bbox(zone, task.bbox))
+                tasks.sort(key=lambda task: (
+                    not bool(getattr(task, "intent_ids", ())),
+                    not zones.contains_bbox(zone, task.bbox),
+                ))
             indices = dict.fromkeys(grouped, 0)
             rotated, boxes = [], []
             while any(indices[z] < len(grouped[z]) for z in grouped):
@@ -311,6 +314,7 @@ def build_coverage_constraint(
     fraction: float,
     zone_requirements_input=(),
     healthy_count: int | None = None,
+    search_limit: int | None = None,
 ):
     """Build a healthy-fleet budget with one quota-first maximum matching.
 
@@ -366,6 +370,8 @@ def build_coverage_constraint(
     representative_ids = tuple(dict.fromkeys(representative_ids))
     healthy = len(available) if healthy_count is None else int(healthy_count)
     desired = int(math.ceil(healthy * fraction))
+    if search_limit is not None:
+        desired = min(desired, search_limit)
     residual_target = max(
         0,
         desired - int(active_search_count) - int(matchable_pending_count),

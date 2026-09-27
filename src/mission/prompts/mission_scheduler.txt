@@ -14,6 +14,11 @@ Select only supplied candidate task IDs. Search candidates already contain a
 legal rectangle; never invent a bbox. Probe and track tasks reference the
 supplied contact ID through the task record and have no search geometry.
 pending_search_task_ids are retained work, not new model candidates.
+Review each pending_intent_reviews revision against its active_tasks owners and
+remaining candidate work. Preserve existing ownership and prioritize the owner's
+remaining focus scans. When no new assignment is legal, acknowledge that review
+with an empty selected_task_ids and a concise notes or defer_reason explanation.
+Do not select an executing owner again or invent a duplicate focus reservation.
 do not select or recreate pending search regions; deterministic reassignment
 handles them before this decision.
 selected ordinary searches are additions only and must not overlap retained
@@ -49,8 +54,11 @@ For every feasible zone_requirements entry, meet required_search_count from its
 representative_task_ids and include all its must_service_task_ids. These feasible
 zone obligations remain binding even when the global budget is infeasible.
 zone_infeasible records excluded zones; do not invent work for them.
-At full gap with ten available UAVs and sufficient legal candidates, choose ten
-ordinary searches across nine zones plus one extra non-overlapping search, zero probes.
+ordinary_search_admission_limit, when non-null, is a hard ceiling for new
+ordinary-search admission while executable probe demand exists. Retain existing
+validated tasks until an explicit legal preemption; do not add searches above
+that limit. With ten healthy aircraft the limit is eight; with one it is zero.
+Without executable probe demand full ordinary-search utilization remains legal.
 As coverage improves, the server reduces the search budget and other work may use
 remaining resources. Task completion and periodic decisions refresh the summary.
 Do not invent tasks or append hidden representatives. Prefer notes="" to conserve

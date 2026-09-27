@@ -40,8 +40,11 @@ from src.mission.coverage_policy import (
 from src.mission.coverage_zones import (
     ZonePartition, build_zone_coverage_summary, build_zone_quota_inputs,
 )
-from src.mission.mission_scheduler import MissionScheduler, match_task_ids
+from src.mission.mission_scheduler import (
+    MissionScheduler, match_task_ids, actionable_edges, probe_search_limit,
+)
 from src.mission.task_catalog import TaskCatalog
+from src.mission.intent_store import attach_intent_owners
 from src.mission.strategy_memory import StrategyMemoryStore
 
 
@@ -173,7 +176,7 @@ class TaskAllocator:
         available = tuple(sorted(uav.id for uav in self.sm.get_available_uavs()))
         active_records = tuple(
             record
-            for record in active_tasks
+            for record in attach_intent_owners(active_tasks, published_intents)
             if record.status in {"approved", "executing"}
             if record.assigned_uav_id is None
             or self.sm.is_uav_operational(record.assigned_uav_id)
@@ -253,6 +256,17 @@ class TaskAllocator:
             )
         coverage_constraint = None
         coverage_summary = None
+        demand_snapshot = MissionSnapshot(
+            "demand", now, candidates, available, preemptible, (), resources,
+            edges, active_records, published_contacts, published_intents, (),
+            selected_memory_version, planning_map_version, "",
+        )
+        search_limit = probe_search_limit(
+            demand_snapshot,
+            reassignment_cooldown_min=self.mission_scheduler.reassignment_cooldown_min,
+            allow_probe_preempt_search=self.mission_scheduler.allow_probe_preempt_search,
+            allow_intent_preempt_search=self.mission_scheduler.allow_intent_preempt_search,
+        )
         if prompt_window is not None and getattr(self.sm, "coverage_metrics", None) is not None:
             coverage_config = getattr(self.config.mission, "coverage", None)
             metrics = self.sm.coverage_metrics
@@ -282,6 +296,8 @@ class TaskAllocator:
             reserved_search_count = len(unfinished_regions)
             matchable_pending_count = len(pending_matching)
             desired_search_count = math.ceil(healthy_count * fraction)
+            if search_limit is not None:
+                desired_search_count = min(desired_search_count, search_limit)
             residual_new_slots = max(
                 0,
                 desired_search_count
@@ -303,6 +319,7 @@ class TaskAllocator:
                 representatives=representative_task_ids,
                 edges=edges,
                 fraction=fraction,
+                search_limit=search_limit,
                 zone_requirements_input=quota_inputs,
             )
             if active_search_count + matchable_pending_count <= desired_search_count:
@@ -526,7 +543,14 @@ class TaskAllocator:
             (task for task in ranked_search if task.task_id not in partition_ids),
             key=lambda task: -((task.bbox[2] - task.bbox[0]) * (task.bbox[3] - task.bbox[1])),
         )
-        ranked = (*urgent, *partitioned, *fallback)
+        focus = tuple(sorted(
+            (task for task in ranked_search if task.intent_ids),
+            key=lambda task: (-int(task.priority == "high"), -task.utility),
+        ))
+        focus_ids = {task.task_id for task in focus}
+        ranked = (*urgent, *focus,
+                  *(task for task in partitioned if task.task_id not in focus_ids),
+                  *(task for task in fallback if task.task_id not in focus_ids))
         zones = ZonePartition(metrics.fixed_mask, coverage_config.zone_cols, coverage_config.zone_rows)
         return policy.select_window(
             ranked,
@@ -570,8 +594,7 @@ class TaskAllocator:
             for edge in snapshot.feasible_edges
         )
 
-    @staticmethod
-    def _model_selection_skip_reason(snapshot: MissionSnapshot) -> str | None:
+    def _model_selection_skip_reason(self, snapshot: MissionSnapshot) -> str | None:
         """Return a no-model reason only when the frozen snapshot has no work.
 
         The coverage constraint is the authoritative residual-search budget.
@@ -579,6 +602,8 @@ class TaskAllocator:
         legal candidate edges must still be dispatched. Urgent, intent-backed,
         and approved non-search work also remains on the model path.
         """
+        if self.mission_scheduler.pending_intent_reviews(snapshot):
+            return None
         unassigned_approved = tuple(
             task
             for task in snapshot.active_tasks
@@ -592,19 +617,12 @@ class TaskAllocator:
             # select, even when a search is still waiting for an aircraft.
             return "pending_search_reassignment"
 
-        if TaskAllocator._has_idle_candidate_work(snapshot):
-            return None
-        constraint = snapshot.coverage_constraint
-        if constraint is None or constraint.required_new_search_count != 0:
-            return None
-        if constraint.must_service_task_ids:
-            return None
-        if any(
-            zone.required_search_count > 0 and zone.infeasible_reason is None
-            for zone in constraint.zone_requirements
+        if actionable_edges(
+            snapshot,
+            reassignment_cooldown_min=self.mission_scheduler.reassignment_cooldown_min,
+            allow_probe_preempt_search=self.mission_scheduler.allow_probe_preempt_search,
+            allow_intent_preempt_search=self.mission_scheduler.allow_intent_preempt_search,
         ):
-            return None
-        if any(task.kind != "search" for task in unassigned_approved):
             return None
         if snapshot.candidates and all(
             task.kind == "search"
@@ -613,7 +631,7 @@ class TaskAllocator:
             for task in snapshot.candidates
         ):
             return "ordinary_search_capacity_satisfied"
-        return None
+        return "no_actionable_candidates"
 
     def decide_mission(self, now_min: float | None = None, **kwargs):
         """Run T11 selection on a fresh snapshot; T12 owns application."""

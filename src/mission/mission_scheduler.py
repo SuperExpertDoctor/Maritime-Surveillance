@@ -395,6 +395,58 @@ def _edge_usable(
     return True
 
 
+def _resource_usable_edges(
+    snapshot: MissionSnapshot,
+    *,
+    reassignment_cooldown_min: float = DEFAULT_REASSIGNMENT_COOLDOWN_MIN,
+    allow_probe_preempt_search: bool = True,
+    allow_intent_preempt_search: bool = False,
+) -> tuple[FeasibleEdge, ...]:
+    """The legal assignment graph shared by model admission and serialization."""
+    candidates, active = _task_maps(snapshot)
+    resources = _resource_maps(snapshot)
+    result = []
+    for edge in snapshot.feasible_edges:
+        selection = MissionSelection(
+            SELECTION_SCHEMA, snapshot.snapshot_id, (edge.task_id,),
+            (edge.uav_id,) if edge.uav_id in snapshot.preemptible_uav_ids else (),
+            None, "",
+        )
+        if _edge_usable(
+            edge, edge.task_id, candidates, active, resources, snapshot, selection,
+            reassignment_cooldown_min,
+            allow_probe_preempt_search=allow_probe_preempt_search,
+            allow_intent_preempt_search=allow_intent_preempt_search,
+        ):
+            result.append(edge)
+    return tuple(result)
+
+
+def actionable_edges(snapshot: MissionSnapshot, **policy) -> tuple[FeasibleEdge, ...]:
+    """Exclude retained audit edges and exhausted search admissions."""
+    visible = {task.task_id for task in snapshot.candidates} - set(snapshot.pending_search_task_ids)
+    if snapshot.prompt_task_ids:
+        visible &= set(snapshot.prompt_task_ids)
+    edges = tuple(edge for edge in _resource_usable_edges(snapshot, **policy)
+                  if edge.task_id in visible)
+    candidates, _active = _task_maps(snapshot)
+    probes = {t.task_id for t in snapshot.candidates if t.kind == "probe"}
+    retained = sum(t.kind == "search" and t.assigned_uav_id is not None
+                   for t in snapshot.active_tasks)
+    if any(e.task_id in probes for e in edges) and retained >= math.floor(len(snapshot.resources) * .8):
+        edges = tuple(e for e in edges if e.task_id not in candidates
+                      or candidates[e.task_id].kind != "search")
+    return edges
+
+
+def probe_search_limit(snapshot: MissionSnapshot, **policy) -> int | None:
+    """Reserve a rounded-down 80% search share only for executable probes."""
+    probes = {task.task_id for task in snapshot.candidates if task.kind == "probe"}
+    if probes and any(edge.task_id in probes for edge in _resource_usable_edges(snapshot, **policy)):
+        return math.floor(len(snapshot.resources) * 0.8)
+    return None
+
+
 def _edge_options(
     selection: MissionSelection,
     snapshot: MissionSnapshot,
@@ -708,6 +760,19 @@ def _validate_selection(
         if task_id in known_tasks
     ]
     coverage_constraint = snapshot.coverage_constraint
+    search_limit = probe_search_limit(
+        snapshot, reassignment_cooldown_min=reassignment_cooldown_min,
+        allow_probe_preempt_search=allow_probe_preempt_search,
+        allow_intent_preempt_search=allow_intent_preempt_search,
+    )
+    if search_limit is not None:
+        retained = sum(t.kind == "search" and t.assigned_uav_id is not None
+                       and t.assigned_uav_id not in preempt_uav_ids
+                       for t in snapshot.active_tasks)
+        additions = sum(t.kind == "search" and t.task_id not in active for t in selected_tasks)
+        # Existing validated work survives; only new admissions consume slots.
+        if additions and retained + additions > search_limit:
+            errors.append(f"probe_search_admission_limit:{search_limit}:{retained + additions}")
     if coverage_constraint is not None:
         selected_representatives = (
             set(selected_task_ids)
@@ -1075,6 +1140,20 @@ class MissionScheduler:
         self.last_selection_failure_category: str | None = None
         self.last_selection_failure_stage: str | None = None
         self.last_selection_timing: dict = {}
+        self._reviewed_intent_revisions: dict[str, int] = {}
+
+    def pending_intent_reviews(self, snapshot: MissionSnapshot):
+        return tuple(intent for intent in snapshot.intents
+                     if intent.lifecycle == "active"
+                     and self._reviewed_intent_revisions.get(intent.intent_id, 0) < intent.revision)
+
+    def _intent_review_errors(self, payload, snapshot):
+        getter = payload.get if isinstance(payload, dict) else lambda name: getattr(payload, name)
+        if (self.pending_intent_reviews(snapshot) and not getter("selected_task_ids")
+                and not str(getter("notes") or "").strip()
+                and not str(getter("defer_reason") or "").strip()):
+            return ("intent_review_requires_acknowledgement",)
+        return ()
 
     def validate_selection(
         self,
@@ -1083,7 +1162,7 @@ class MissionScheduler:
         *,
         visible_task_ids: frozenset[str] | None = None,
     ) -> tuple[str, ...]:
-        return _validate_selection(
+        errors = _validate_selection(
             payload,
             snapshot,
             reassignment_cooldown_min=self.reassignment_cooldown_min,
@@ -1091,6 +1170,7 @@ class MissionScheduler:
             allow_intent_preempt_search=self.allow_intent_preempt_search,
             visible_task_ids=visible_task_ids,
         )
+        return errors or self._intent_review_errors(payload, snapshot)
 
     @staticmethod
     def _selection_schema_errors(payload) -> tuple[str, ...]:
@@ -1297,6 +1377,11 @@ class MissionScheduler:
             )
             self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
+        review_errors = self._intent_review_errors(parsed, snapshot)
+        if review_errors:
+            self._finalize_selection(success=False, errors=review_errors,
+                                     category="validation", stage="validation")
+            return None
         matching_started = time.perf_counter()
         pairing = self.pair_selected_tasks(
             parsed,
@@ -1319,6 +1404,8 @@ class MissionScheduler:
             self.last_selection_timing["total_seconds"] = time.perf_counter() - started
             return None
         assignments = pairing.assignments
+        for intent in self.pending_intent_reviews(snapshot):
+            self._reviewed_intent_revisions[intent.intent_id] = intent.revision
         self._finalize_selection(success=True)
         self.last_selection_timing["total_seconds"] = time.perf_counter() - started
         return AssignmentBatch(
@@ -1450,22 +1537,11 @@ class MissionScheduler:
         prompt_limit = min(self.max_tasks_in_prompt, 40)
         # Route feasibility alone does not authorize taking a busy aircraft.
         # Apply the same resource and preemption rules as the final matcher.
-        candidates, active = _task_maps(snapshot)
-        resources = _resource_maps(snapshot)
-        legal_edges = []
-        for edge in snapshot.feasible_edges:
-            selection = MissionSelection(
-                SELECTION_SCHEMA, snapshot.snapshot_id, (edge.task_id,),
-                (edge.uav_id,) if edge.uav_id in snapshot.preemptible_uav_ids else (),
-                None, "",
-            )
-            if _edge_usable(
-                edge, edge.task_id, candidates, active, resources, snapshot,
-                selection, self.reassignment_cooldown_min,
-                allow_probe_preempt_search=self.allow_probe_preempt_search,
-                allow_intent_preempt_search=self.allow_intent_preempt_search,
-            ):
-                legal_edges.append(edge)
+        legal_edges = actionable_edges(
+            snapshot, reassignment_cooldown_min=self.reassignment_cooldown_min,
+            allow_probe_preempt_search=self.allow_probe_preempt_search,
+            allow_intent_preempt_search=self.allow_intent_preempt_search,
+        )
         legal_uavs = {}
         for edge in legal_edges:
             legal_uavs.setdefault(edge.task_id, set()).add(edge.uav_id)
@@ -1570,6 +1646,9 @@ class MissionScheduler:
                 for contact in snapshot.contacts[:20]
             ],
             "intents": [_jsonable(intent) for intent in snapshot.intents],
+            "pending_intent_reviews": [
+                _jsonable(intent) for intent in self.pending_intent_reviews(snapshot)
+            ],
             "intent_statuses": [
                 _jsonable(status) for status in snapshot.intent_statuses
             ],
@@ -1582,6 +1661,11 @@ class MissionScheduler:
             "prompt_fairness_bound_cycles": fairness_bound_cycles,
             "prompt_geometry_filtered": geometry_filtered,
             "pending_search_task_ids": list(snapshot.pending_search_task_ids),
+            "ordinary_search_admission_limit": probe_search_limit(
+                snapshot, reassignment_cooldown_min=self.reassignment_cooldown_min,
+                allow_probe_preempt_search=self.allow_probe_preempt_search,
+                allow_intent_preempt_search=self.allow_intent_preempt_search,
+            ),
         }
         if snapshot.coverage_constraint is not None:
             full["coverage_constraint"] = _jsonable(snapshot.coverage_constraint)
