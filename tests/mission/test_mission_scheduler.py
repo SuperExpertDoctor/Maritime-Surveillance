@@ -949,6 +949,12 @@ def test_scheduler_sends_compact_wire_payload_once():
     assert scheduler.selection_interaction()["user_prompt"] == messages[1]["content"]
 
 
+def test_selection_interaction_before_any_payload_has_empty_user_payload():
+    interaction = MissionScheduler().selection_interaction()
+
+    assert interaction["user_prompt"] == "{}"
+
+
 @pytest.mark.parametrize("explicit_window", [False, True])
 def test_prompt_removes_illegal_search_preemption_edges(explicit_window):
     snapshot = _snapshot(
