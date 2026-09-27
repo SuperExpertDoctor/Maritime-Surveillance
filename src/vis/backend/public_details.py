@@ -4,6 +4,16 @@ import re
 
 _PRIVATE = {'reasoning_content', 'think', 'thinking', 'chain_of_thought', 'reasoning'}
 _THINK = re.compile(r'<(?:think|thinking|reasoning)\b[^>]*>[\s\S]*?(?:</(?:think|thinking|reasoning)>|$)', re.I)
+_USAGE_FIELDS = {"prompt_tokens", "completion_tokens", "total_tokens"}
+
+
+def _public_usage(usage):
+    if not isinstance(usage, dict):
+        return {}
+    return {
+        key: value for key, value in usage.items()
+        if key in _USAGE_FIELDS and isinstance(value, int) and not isinstance(value, bool)
+    }
 
 
 def public_value(value):
@@ -29,17 +39,32 @@ def public_call(call):
     # Prompt snapshots dominate call-log size and are not decision telemetry.
     # Omit before recursively sanitizing to avoid traversing multi-MB messages.
     lean = {key: value for key, value in call.items()
-            if key not in {"system_prompt", "user_prompt", "raw_attempts", "messages"}}
-    lean["attempts"] = [{key: value for key, value in attempt.items() if key != "messages"}
-                        for attempt in call.get("attempts", [])]
+            if key not in {"system_prompt", "user_prompt", "raw_attempts", "messages",
+                           "raw_output", "response"}}
+    attempt_fields = {
+        "attempt", "max_tokens", "input_text_bytes", "timeout_seconds",
+        "elapsed_seconds", "request_elapsed_seconds", "finish_reason", "usage", "errors",
+    }
+    lean["attempts"] = [
+        {
+            **{key: value for key, value in attempt.items() if key in attempt_fields - {"usage"}},
+            "usage": _public_usage(attempt.get("usage")),
+        }
+        for attempt in call.get("attempts", [])[:3] if isinstance(attempt, dict)
+    ]
     result = public_value(lean)
     result.setdefault("provider_channels", [])
     result.setdefault("thinking_mode", "not provided")
     candidates = [result]
-    for attempt in reversed(result.get('attempts') or []):
+    # Raw attempt bodies remain private, but successful structured output may
+    # supply the existing derived decision summary.
+    for attempt in reversed(call.get('attempts') or []):
+        if not isinstance(attempt, dict):
+            continue
         raw = attempt.get('raw_output', attempt.get('response'))
         try:
-            candidates.append(json.loads(raw) if isinstance(raw, str) else raw)
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            candidates.append(public_value(parsed))
         except ValueError:
             pass
     for raw in (result.get('response'), result.get('parsed_output')):
@@ -47,7 +72,9 @@ def public_call(call):
             candidates.append(json.loads(raw) if isinstance(raw, str) else raw)
         except ValueError:
             pass
-    summary = None
+    summary = result.get('decision_summary')
+    if summary == 'not provided':
+        summary = None
     label = 'Decision notes / rationale'
     for candidate in candidates:
         if not isinstance(candidate, dict):

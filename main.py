@@ -247,8 +247,31 @@ def main(
     if report_dir is not None:
         gateway = engine.allocator.llm_client.gateway
         fields = ("call_id", "role", "snapshot_id", "sim_time_min", "model",
-                  "provider", "thinking_mode", "success", "failure_category", "validation_errors")
-        calls = [{key: call.get(key) for key in fields} for call in gateway.redact_log(gateway.call_log)]
+                  "provider", "thinking_mode", "success", "failure_category",
+                  "initial_failure_category", "validation_errors", "system_prompt_bytes",
+                  "user_prompt_bytes", "input_text_bytes", "prompt_format_version",
+                  "configured_max_tokens", "retry_skipped_reason",
+                  "retry_remaining_seconds", "retry_minimum_seconds")
+        attempt_fields = ("attempt", "max_tokens", "input_text_bytes", "timeout_seconds",
+                          "elapsed_seconds", "request_elapsed_seconds", "finish_reason", "errors")
+        usage_fields = ("prompt_tokens", "completion_tokens", "total_tokens")
+        calls = [
+            {
+                **{key: call.get(key) for key in fields},
+                "attempts": [
+                    {
+                        **{key: attempt.get(key) for key in attempt_fields},
+                        "usage": {
+                            key: value for key, value in (attempt.get("usage") or {}).items()
+                            if key in usage_fields and isinstance(value, int)
+                            and not isinstance(value, bool)
+                        },
+                    }
+                    for attempt in call.get("attempts", ())[:3] if isinstance(attempt, dict)
+                ],
+            }
+            for call in gateway.redact_log(gateway.call_log)
+        ]
         report = {"entrypoint": "main.py", "transport": "live",
                   "requested_wall_seconds": wall_seconds, "summary": summary,
                   "model_calls": calls,

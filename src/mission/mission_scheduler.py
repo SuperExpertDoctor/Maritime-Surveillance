@@ -1346,6 +1346,15 @@ class MissionScheduler:
             0.0, gateway_elapsed - gateway_validation,
         )
         self.last_selection_timing["validation_seconds"] += gateway_validation
+        if self.gateway is not None and self.selection_provider is None:
+            for candidate in reversed(getattr(self.gateway, "call_log", ())):
+                if candidate.get("call_id") == call_id:
+                    for key in (
+                        "system_prompt_bytes", "user_prompt_bytes", "input_text_bytes",
+                        "prompt_format_version", "configured_max_tokens",
+                    ):
+                        self.last_selection_timing[key] = candidate.get(key)
+                    break
         self.last_selection_call_id = call_id
         self.last_selection_response = response
         self.last_selection_success = bool(success)
@@ -1535,7 +1544,11 @@ class MissionScheduler:
             "failure_stage": self.last_selection_failure_stage,
             "timing": dict(self.last_selection_timing),
         }
-        for key in ("episode_id", "snapshot_id", "sim_time_min", "memory_version"):
+        for key in (
+            "episode_id", "snapshot_id", "sim_time_min", "memory_version",
+            "system_prompt_bytes", "user_prompt_bytes", "input_text_bytes",
+            "prompt_format_version", "configured_max_tokens", "initial_failure_category",
+        ):
             if key in call:
                 interaction[key] = call[key]
         return interaction

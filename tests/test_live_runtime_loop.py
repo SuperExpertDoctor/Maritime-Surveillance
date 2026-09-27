@@ -444,7 +444,18 @@ def test_run_report_preserves_pause_and_filters_request_payloads(harness, monkey
     monkeypatch.setattr(cli.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     engine.allocator.llm_client = SimpleNamespace(gateway=SimpleNamespace(
         call_log=[{'role': 'decision_maker', 'success': False, 'failure_category': 'timeout',
-                   'messages': [{'content': 'not report data'}]}],
+                   'initial_failure_category': 'output_truncated', 'input_text_bytes': 123,
+                   'system_prompt': 'report-system-secret', 'user_prompt': 'report-user-secret',
+                   'messages': [{'content': 'not report data'}], 'attempts': [{
+                       'attempt': 1, 'max_tokens': 4096, 'input_text_bytes': 123,
+                       'timeout_seconds': 120.0, 'elapsed_seconds': 1.0,
+                       'finish_reason': 'length', 'usage': {
+                           'completion_tokens': 4096, 'provider_secret': 'usage-secret',
+                       },
+                       'errors': ['output_truncated'], 'messages': [{'content': 'attempt-secret'}],
+                       'raw_output': 'partial-secret', 'response': 'response-secret',
+                       'provider_channels': [{'content': 'channel-secret'}],
+                   }]}],
         redact_log=lambda calls: calls,
     ))
     engine.allocator.sm.get_recent_events = lambda _: [{'type': 'mission_model_failure'}]
@@ -456,7 +467,15 @@ def test_run_report_preserves_pause_and_filters_request_payloads(harness, monkey
     assert report['summary']['runtime_before_finalize'] == 'paused_model'
     assert report['summary']['wall_seconds'] >= .3
     assert report['model_calls'][0]['failure_category'] == 'timeout'
+    assert report['model_calls'][0]['initial_failure_category'] == 'output_truncated'
+    assert report['model_calls'][0]['input_text_bytes'] == 123
+    assert report['model_calls'][0]['attempts'][0]['input_text_bytes'] == 123
+    assert report['model_calls'][0]['attempts'][0]['usage'] == {'completion_tokens': 4096}
     assert 'messages' not in report['model_calls'][0]
+    serialized = json.dumps(report)
+    for secret in ('report-system-secret', 'report-user-secret', 'attempt-secret',
+                   'partial-secret', 'response-secret', 'channel-secret', 'usage-secret'):
+        assert secret not in serialized
     with pytest.raises(FileExistsError):
         cli.main(probe_llm=False, run_report_dir=str(report_dir))
 

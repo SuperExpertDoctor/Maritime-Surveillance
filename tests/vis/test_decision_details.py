@@ -81,7 +81,7 @@ def test_real_sdk_explicit_provider_channels_and_redaction(monkeypatch):
     assert 'fixture-secret' not in json.dumps(call)
     assert call['provider_channels'][0]['content'] == '[REDACTED] external reasoning'
     assert call['provider_channels'][0]['source'] == 'choices[0].message.reasoning_content'
-    assert requests[0]['thinking']['type'] == 'disabled'
+    assert requests[0]['thinking']['type'] == 'enabled'
     app, _ = fixture_app()
     app.state.engine.allocator.llm_client.gateway = gateway
     with TestClient(app) as client:
@@ -118,6 +118,33 @@ def test_telemetry_excludes_large_prompt_snapshots_but_preserves_decision_and_ch
     assert public['attempts'][0]['max_tokens'] == 4096
     assert public['provider_channels'] == []
     assert public['thinking_mode'] == 'disabled'
+
+
+def test_public_details_keep_numeric_diagnostics_without_request_bodies():
+    from src.vis.backend.public_details import public_call
+    call = {
+        'system_prompt': 'SYSTEM_SECRET', 'user_prompt': 'USER_SECRET',
+        'system_prompt_bytes': 13, 'user_prompt_bytes': 11, 'input_text_bytes': 24,
+        'configured_max_tokens': 4096, 'initial_failure_category': 'output_truncated',
+        'attempts': [{
+            'attempt': 1, 'max_tokens': 4096, 'input_text_bytes': 24,
+            'timeout_seconds': 120.0, 'elapsed_seconds': 1.0, 'finish_reason': 'length',
+            'usage': {'completion_tokens': 4096, 'provider_secret': 'USAGE_SECRET'},
+            'messages': [{'content': 'REQUEST_SECRET'}], 'raw_output': 'PARTIAL_SECRET',
+            'response': 'RESPONSE_SECRET', 'provider_channels': [{'content': 'CHANNEL_SECRET'}],
+        }],
+    }
+
+    public = public_call(call)
+
+    assert public['input_text_bytes'] == 24
+    assert public['initial_failure_category'] == 'output_truncated'
+    assert public['attempts'][0]['input_text_bytes'] == 24
+    assert public['attempts'][0]['usage'] == {'completion_tokens': 4096}
+    serialized = json.dumps(public)
+    for secret in ('SYSTEM_SECRET', 'USER_SECRET', 'REQUEST_SECRET', 'PARTIAL_SECRET',
+                   'RESPONSE_SECRET', 'CHANNEL_SECRET', 'USAGE_SECRET'):
+        assert secret not in serialized
 
 
 def test_vessel_and_intent_crud_http_status_and_ws_write_through():

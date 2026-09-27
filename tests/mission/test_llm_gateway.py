@@ -93,6 +93,24 @@ def test_request_json_serializes_only_decision_maker_payload_compactly(
     assert transport.calls[0]["messages"][1]["content"] == expected
 
 
+def test_call_records_transmitted_utf8_byte_diagnostics(scripted_transport):
+    transport = scripted_transport({"decision_maker": ['{"answer": 7}']})
+    gateway = LLMGateway(transport=transport)
+
+    assert _request_json(gateway, marker="utf8-测试").success
+
+    messages = transport.calls[0]["messages"]
+    call = gateway.call_log[-1]
+    assert call["system_prompt_bytes"] == len(messages[0]["content"].encode("utf-8"))
+    assert call["user_prompt_bytes"] == len(messages[1]["content"].encode("utf-8"))
+    assert call["input_text_bytes"] == sum(
+        len(message["content"].encode("utf-8")) for message in messages
+    )
+    assert call["attempts"][0]["input_text_bytes"] == call["input_text_bytes"]
+    assert call["prompt_format_version"] is None
+    assert call["configured_max_tokens"] == 4096
+
+
 def test_invalid_json_is_corrected_with_exact_assistant_output(scripted_transport):
     raw = "  {bad}\n"
     transport = scripted_transport({
@@ -299,6 +317,26 @@ def test_truncation_stops_before_retry_with_less_than_useful_budget(monkeypatch)
     assert call["retry_skipped_reason"] == "insufficient_retry_budget"
     assert call["retry_remaining_seconds"] == 4.0
     assert call["retry_minimum_seconds"] == 5.0
+
+
+def test_validation_cause_survives_deadline_expiry_during_validation(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
+    transport = _FakeClockTransport(now, ['{"answer": "wrong"}'], elapsed_seconds=0.0)
+    gateway = LLMGateway(transport=transport)
+
+    def slow_invalid(payload):
+        now[0] = 151.0
+        return _validate_answer(payload)
+
+    result = gateway.request_json(
+        role="decision_maker", snapshot_id="validation-deadline", system_prompt="system",
+        user_payload={}, validate=slow_invalid, deadline_monotonic=150.0,
+    )
+
+    assert not result.success
+    assert result.failure_category == "timeout"
+    assert gateway.call_log[-1]["initial_failure_category"] == "validation"
 
 
 def test_truncation_retries_when_useful_total_budget_remains(monkeypatch):
@@ -999,6 +1037,38 @@ def test_length_retries_stop_when_transport_deadline_has_no_useful_budget(monkey
     assert len(length_provider.calls) == 1
     assert [c['timeout_seconds'] for c in length_provider.calls] == [5.0]
     assert 'output_truncated' in gateway.call_log[-1]['attempts'][0]['errors'][0]
+    assert gateway.call_log[-1]['initial_failure_category'] == 'output_truncated'
+
+
+def test_initial_failure_category_survives_successful_truncation_correction(length_provider):
+    length_provider.responses = [('length', ''), ('stop', '{"answer": 7}')]
+    gateway = LLMGateway()
+
+    result = _request_json(gateway)
+
+    assert result.success
+    assert result.failure_category is None
+    assert gateway.call_log[-1]['initial_failure_category'] == 'output_truncated'
+
+
+def test_initial_failure_category_records_typed_transport_timeout(scripted_transport):
+    gateway = LLMGateway(transport=scripted_transport({
+        'decision_maker': [TimeoutError('slow'), '{"answer": 7}'],
+    }))
+
+    assert _request_json(gateway).success
+
+    assert gateway.call_log[-1]['initial_failure_category'] == 'timeout'
+
+
+def test_initial_failure_category_records_validation(scripted_transport):
+    gateway = LLMGateway(transport=scripted_transport({
+        'decision_maker': ['{bad}', '{"answer": 7}'],
+    }))
+
+    assert _request_json(gateway).success
+
+    assert gateway.call_log[-1]['initial_failure_category'] == 'validation'
 
 
 @pytest.mark.parametrize('retries,expected_calls', [(0, 1), (1, 2), (20, 3)])
