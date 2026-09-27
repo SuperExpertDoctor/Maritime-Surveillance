@@ -24,7 +24,7 @@ class _FixedSar:
         return list(self.cells)
 
 
-def _engine(*, uav_count=2):
+def _engine(*, uav_count=2, ship_count=None):
     config = ConfigLoader.load()
     config = replace(
         config,
@@ -37,6 +37,15 @@ def _engine(*, uav_count=2):
         ),
         uav=replace(config.uav, count_max=uav_count),
     )
+    if ship_count is not None:
+        config = replace(
+            config,
+            ship=replace(
+                config.ship,
+                population=replace(config.ship.population, total_count=ship_count),
+                opponent_population=replace(config.ship.opponent_population, enabled=False),
+            ),
+        )
     return SimulationEngine(
         config,
         seed=42,

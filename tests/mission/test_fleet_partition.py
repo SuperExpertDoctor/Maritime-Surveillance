@@ -66,7 +66,9 @@ def test_pairing_minimizes_total_flight_range_not_only_transit():
 
 def test_real_engine_launches_every_available_aircraft_into_larger_regions():
     from tests.mission.test_coverage_scan_integration import _engine
-    engine = _engine(uav_count=10)
+    engine = _engine(uav_count=10, ship_count=0)
+    assert engine.ships == []
+    assert engine.allocator.sm.contacts.list_snapshots() == ()
     result = engine.step()
     assert result['action'] == 'mission_selection_approved'
     assert engine.runtime_status == 'running'

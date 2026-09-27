@@ -929,6 +929,14 @@ def test_scheduler_sends_compact_wire_payload_once():
     assert wire["prompt_format_version"] == "mission-prompt/v2"
     assert "instructions" not in wire
     assert messages[0]["content"] == scheduler.system_prompt
+    for term in (
+        "uav_option_columns",
+        "simultaneous",
+        "required_new_search_count",
+        "pending_intent_reviews",
+        "ordinary_search_admission_limit",
+    ):
+        assert term in messages[0]["content"]
     assert messages[1]["content"] == json.dumps(
         wire, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
     )

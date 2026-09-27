@@ -33,3 +33,11 @@ Measured as UTF-8 file bytes (the prompt is ASCII):
 - `test_coverage_policy.py` + full `test_legacy_search_scheduling.py`: 25 passed.
 
 Prompt assertions supplement behavioral tests and do not prove semantic equivalence of model behavior. No live API experiment was run; no claim of model-quality equivalence is made.
+
+## Review Follow-up
+
+- RED: `pytest -q tests/mission/test_zone_rolling_acceptance.py::test_prompt_preserves_geometry_safety_and_coverage_floor_policy` exited 1 because the legacy literal `never invent a bbox` is not in the prescribed compressed prompt.
+- Baseline: on `main` at `4be5e9a`, `pytest -q tests/mission/test_fleet_partition.py::test_real_engine_launches_every_available_aircraft_into_larger_regions` exited 1 with the same idle `UAV-8`. The shared engine fixture initializes AIS contacts from its default ship population, leaving executable probe demand that correctly limits ordinary-search admission.
+- Green: `pytest -q tests/mission/test_zone_rolling_acceptance.py::test_prompt_preserves_geometry_safety_and_coverage_floor_policy tests/mission/test_mission_scheduler.py::test_scheduler_sends_compact_wire_payload_once tests/mission/test_fleet_partition.py::test_real_engine_launches_every_available_aircraft_into_larger_regions` exited 0: `3 passed in 7.96s`.
+
+The fleet-partition test now opts into a zero-initial-ship, opponent-disabled fixture and asserts that its contact store is empty before stepping. This makes it a genuine pure-search scenario while preserving the ten-UAV, ten-region, full-availability assertions. Shared fixture defaults and production probe-admission policy are unchanged. The compact-wire scripted transport test now asserts the five required v2 format terms, and the legacy prompt assertion checks the exact equivalent geometry, coverage, utilization, and safety clauses after whitespace normalization.

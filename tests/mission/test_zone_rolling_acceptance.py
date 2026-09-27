@@ -480,18 +480,19 @@ def test_prompt_budget_guard_includes_large_zone_summary():
 
 def test_prompt_preserves_geometry_safety_and_coverage_floor_policy():
     scheduler = MissionScheduler(selection_provider=lambda *_: {})
+    prompt = " ".join(scheduler.system_prompt.split())
     for fragment in (
-        "never invent a bbox",
-        "AT LEAST required_new_search_count",
-        "required_new_search_count is zero",
-        "available UAV",
-        "minimum coverage floor, not a fleet utilization ceiling",
+        "Search candidates already contain legal rectangles",
+        "select at least required_new_search_count new ordinary searches",
+        "A zero addition requirement does not authorize removing existing coverage",
+        "full ordinary-search utilization is legal",
+        "Coverage floors are not ceilings",
         "zone_requirements",
-        "160 characters",
-        "generation",
-        "must not be preempted",
+        "160 Unicode characters",
+        "generations",
+        "Never preempt return, refuel, safety, active probe, or valid track",
     ):
-        assert fragment in scheduler.system_prompt
+        assert fragment in prompt
 
 
 def test_real_inflight_assignment_and_failed_uav_filter():
