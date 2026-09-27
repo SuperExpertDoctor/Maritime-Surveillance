@@ -10,6 +10,7 @@ import yaml
 from src.mission.llm_gateway import (
     LLMConfigurationError,
     LLMGateway,
+    LLMOutputTruncated,
     ModelResult,
     parse_object,
 )
@@ -177,6 +178,159 @@ def test_timeout_is_bounded_by_application_retry_limit(scripted_transport):
     assert result.failure_category == "timeout"
     assert result.errors == ("slow model",)
     assert len(transport.calls) == 3
+
+
+class _FakeClockTransport:
+    """Injected transport that advances a deterministic monotonic clock."""
+
+    def __init__(self, now, responses, elapsed_seconds):
+        self.now = now
+        self.responses = list(responses)
+        self.elapsed_seconds = (
+            list(elapsed_seconds)
+            if isinstance(elapsed_seconds, (list, tuple)) else elapsed_seconds
+        )
+        self.calls = []
+
+    def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        elapsed = (
+            self.elapsed_seconds.pop(0)
+            if isinstance(self.elapsed_seconds, list) else self.elapsed_seconds
+        )
+        self.now[0] += elapsed
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+@pytest.mark.parametrize(
+    ("role", "request_text"),
+    [
+        ("red_commander", False),
+        ("contact_assessor", False),
+        ("reviewer", True),
+    ],
+)
+def test_role_requests_without_caller_deadline_share_provider_total_budget(
+    monkeypatch, role, request_text,
+):
+    now = [100.0]
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
+    invalid_response = "not accepted"
+    transport = _FakeClockTransport(
+        now, [invalid_response] * 3, elapsed_seconds=40.0,
+    )
+    gateway = LLMGateway(transport=transport)
+
+    if request_text:
+        result = gateway.request_text(
+            role=role, snapshot_id="role-budget", system_prompt="system",
+            user_payload={}, validate_text=lambda _text: ("rejected",),
+        )
+    else:
+        result = gateway.request_json(
+            role=role, snapshot_id="role-budget", system_prompt="system",
+            user_payload={}, validate=_validate_answer,
+        )
+
+    assert not result.success
+    assert result.failure_category == "timeout"
+    assert result.errors == ("decision_deadline_exceeded",)
+    assert [call["timeout_seconds"] for call in transport.calls] == [120.0, 80.0, 40.0]
+    assert now[0] == 220.0
+
+
+def test_shorter_caller_deadline_wins_over_provider_total_budget(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
+    transport = _FakeClockTransport(now, ["not accepted"] * 3, elapsed_seconds=20.0)
+    gateway = LLMGateway(transport=transport)
+
+    result = gateway.request_json(
+        role="red_commander", snapshot_id="short-budget", system_prompt="system",
+        user_payload={}, validate=_validate_answer, deadline_monotonic=150.0,
+    )
+
+    assert not result.success
+    assert result.failure_category == "timeout"
+    assert [call["timeout_seconds"] for call in transport.calls] == [50.0, 30.0, 10.0]
+    assert now[0] == 160.0
+
+
+def test_truncation_stops_before_retry_with_less_than_useful_budget(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
+    transport = _FakeClockTransport(
+        now,
+        [LLMOutputTruncated({"finish_reason": "length"}), '{"answer": 7}'],
+        elapsed_seconds=116.0,
+    )
+    gateway = LLMGateway(transport=transport)
+
+    result = _request_json(gateway)
+
+    assert not result.success
+    assert result.failure_category == "timeout"
+    assert result.errors == ("decision_deadline_exceeded",)
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["timeout_seconds"] == 120.0
+    assert now[0] == 216.0
+    call = gateway.call_log[-1]
+    assert call["retry_skipped_reason"] == "insufficient_retry_budget"
+    assert call["retry_remaining_seconds"] == 4.0
+    assert call["retry_minimum_seconds"] == 5.0
+
+
+def test_truncation_retries_when_useful_total_budget_remains(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
+    transport = _FakeClockTransport(
+        now,
+        [LLMOutputTruncated({"finish_reason": "length"}), '{"answer": 7}'],
+        elapsed_seconds=[114.0, 1.0],
+    )
+    gateway = LLMGateway(transport=transport)
+
+    result = _request_json(gateway)
+
+    assert result.success
+    assert result.payload == {"answer": 7}
+    assert [call["timeout_seconds"] for call in transport.calls] == [120.0, 6.0]
+    assert now[0] == 215.0
+
+
+@pytest.mark.parametrize(
+    ("role", "request_text", "response"),
+    [
+        ("red_commander", False, '{"answer": 7}'),
+        ("contact_assessor", False, '{"answer": 7}'),
+        ("reviewer", True, "accepted"),
+    ],
+)
+def test_role_request_without_caller_deadline_rejects_late_response(
+    monkeypatch, role, request_text, response,
+):
+    now = [100.0]
+    monkeypatch.setattr("src.mission.llm_gateway.time.perf_counter", lambda: now[0])
+    transport = _FakeClockTransport(now, [response], elapsed_seconds=121.0)
+    gateway = LLMGateway(transport=transport)
+
+    if request_text:
+        result = gateway.request_text(
+            role=role, snapshot_id="late-role", system_prompt="system", user_payload={},
+        )
+    else:
+        result = gateway.request_json(
+            role=role, snapshot_id="late-role", system_prompt="system",
+            user_payload={}, validate=_validate_answer,
+        )
+
+    assert not result.success
+    assert result.failure_category == "timeout"
+    assert result.errors == ("decision_deadline_exceeded",)
+    assert transport.calls[0]["timeout_seconds"] == 120.0
 
 
 def test_absolute_deadline_rejects_late_response_without_retry():
@@ -357,12 +511,14 @@ def test_default_transport_uses_openai_compatible_api_without_sdk_retries(
     result = _request_json(gateway)
 
     assert result.success
-    assert captured["client"] == {
+    assert {
+        key: value for key, value in captured["client"].items() if key != "timeout"
+    } == {
         "api_key": "offline-test-key",
         "base_url": "https://api.longcat.chat/openai/v1",
-        "timeout": 120.0,
         "max_retries": 0,
     }
+    assert 119.9 <= captured["client"]["timeout"] <= 120.0
     assert captured["request"]["model"] == "LongCat-2.0"
     assert captured["request"]["max_tokens"] == 4096
 
@@ -774,8 +930,8 @@ def test_length_exhaustion_is_classified_without_content_leaks(length_provider, 
     assert length_provider.closed == 3
 
 
-@pytest.mark.parametrize('elapsed,expected_calls', [(2.0, 3), (6.0, 1)])
-def test_length_retries_share_original_deadline(monkeypatch, length_provider, elapsed, expected_calls):
+@pytest.mark.parametrize('elapsed', [2.0, 6.0])
+def test_length_retries_stop_when_transport_deadline_has_no_useful_budget(monkeypatch, length_provider, elapsed):
     now = [100.0]
     monkeypatch.setattr('src.mission.llm_gateway.time.perf_counter', lambda: now[0])
     def advance():
@@ -790,8 +946,8 @@ def test_length_retries_share_original_deadline(monkeypatch, length_provider, el
     )
     assert not result.success
     assert result.failure_category == 'timeout'
-    assert len(length_provider.calls) == expected_calls
-    assert [c['timeout_seconds'] for c in length_provider.calls] == [5.0 - i * elapsed for i in range(expected_calls)]
+    assert len(length_provider.calls) == 1
+    assert [c['timeout_seconds'] for c in length_provider.calls] == [5.0]
     assert 'output_truncated' in gateway.call_log[-1]['attempts'][0]['errors'][0]
 
 
@@ -812,7 +968,7 @@ def test_truncation_retains_numeric_diagnostics_and_requests_compact_retry(lengt
     assert first['finish_reason'] == 'length'
     assert first['usage']['completion_tokens'] == 4096
     assert first['elapsed_seconds'] >= 0
-    assert first['timeout_seconds'] == 120.0
+    assert first['timeout_seconds'] == pytest.approx(120.0, abs=0.1)
     assert first['raw_output'] is None
     assert second['finish_reason'] == 'stop'
     assert 'private partial text' not in json.dumps(gateway.call_log)
@@ -824,7 +980,7 @@ def test_provider_timeout_is_configurable_and_respects_decision_deadline(tmp_pat
     gateway = LLMGateway(path)
     length_provider.responses = [('stop', '{"answer": 7}')] * 2
     assert _request_json(gateway).success
-    assert length_provider.calls[-1]['timeout_seconds'] == 180
+    assert length_provider.calls[-1]['timeout_seconds'] == pytest.approx(180, abs=0.1)
     monkeypatch.setattr('src.mission.llm_gateway.time.perf_counter', lambda: 100.)
     assert gateway.request_json(role='decision_maker', snapshot_id='bounded',
         system_prompt='test', user_payload={}, validate=_validate_answer,
@@ -851,7 +1007,7 @@ def test_timeout_retries_wait_briefly_and_remain_bounded(scripted_transport, mon
     assert all(a['elapsed_seconds'] >= 0 for a in gateway.call_log[-1]['attempts'])
 
 
-def test_timeout_backoff_does_not_exceed_shared_deadline(scripted_transport, monkeypatch):
+def test_timeout_backoff_does_not_consume_useful_retry_budget(scripted_transport, monkeypatch):
     now = [100.0]
     waits = []
     monkeypatch.setattr('src.mission.llm_gateway.time.perf_counter', lambda: now[0])
@@ -865,7 +1021,7 @@ def test_timeout_backoff_does_not_exceed_shared_deadline(scripted_transport, mon
         user_payload={}, validate=_validate_answer, deadline_monotonic=100.5,
     )
     assert result.failure_category == 'timeout'
-    assert waits == [0.5]
+    assert waits == []
     assert len(transport.calls) == 1
 
 

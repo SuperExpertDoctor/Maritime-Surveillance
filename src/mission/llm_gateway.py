@@ -26,6 +26,10 @@ _ROLE_TOKEN_LIMITS = {
     "red_commander": 4096,
     "reviewer": 2048,
 }
+# A correction cannot reliably produce a useful response in less time.  The
+# first attempt may consume the entire caller budget; this applies only before
+# starting a retry so a caller's shorter initial deadline still wins.
+_MINIMUM_RETRY_TIMEOUT_SECONDS = 5.0
 
 
 class LLMConfigurationError(RuntimeError):
@@ -400,6 +404,7 @@ class LLMGateway:
         deadline_monotonic: float | None = None,
         transport_deadline_monotonic: float | None = None,
     ) -> ModelResult:
+        request_started = time.perf_counter()
         if role not in _ROLE_TOKEN_LIMITS:
             raise LLMConfigurationError(f"unsupported model role: {role}")
         self._validate_deadline(deadline_monotonic, "deadline_monotonic")
@@ -412,6 +417,21 @@ class LLMGateway:
             and transport_deadline_monotonic > deadline_monotonic
         ):
             raise ValueError("transport deadline must not exceed absolute deadline")
+        request_timeout = (
+            self._request_timeout_seconds
+            if timeout_seconds is None else timeout_seconds
+        )
+        # Provider timeout is a total request budget, including correction
+        # retries, rather than a fresh allowance for every transport attempt.
+        default_deadline_monotonic = request_started + float(request_timeout)
+        effective_deadline_monotonic = min(
+            default_deadline_monotonic,
+            deadline_monotonic,
+        ) if deadline_monotonic is not None else default_deadline_monotonic
+        effective_transport_deadline_monotonic = min(
+            effective_deadline_monotonic,
+            transport_deadline_monotonic,
+        ) if transport_deadline_monotonic is not None else effective_deadline_monotonic
         call_id = uuid4().hex
         if user_content is None:
             user_content = json.dumps(
@@ -457,6 +477,24 @@ class LLMGateway:
             else self._max_correction_retries + 1
         )
         for attempt_number in range(1, total_attempts + 1):
+            if attempt_number > 1:
+                retry_remaining = self._transport_timeout(
+                    timeout_seconds=request_timeout,
+                    deadline_monotonic=effective_deadline_monotonic,
+                    transport_deadline_monotonic=effective_transport_deadline_monotonic,
+                )
+                if (
+                    retry_remaining is not None
+                    and retry_remaining < _MINIMUM_RETRY_TIMEOUT_SECONDS
+                ):
+                    call.update({
+                        "retry_skipped_reason": "insufficient_retry_budget",
+                        "retry_remaining_seconds": retry_remaining,
+                        "retry_minimum_seconds": _MINIMUM_RETRY_TIMEOUT_SECONDS,
+                    })
+                    last_errors = ("decision_deadline_exceeded",)
+                    failure_category = "timeout"
+                    break
             attempt = {
                 "attempt": attempt_number,
                 "max_tokens": attempt_max_tokens,
@@ -465,15 +503,15 @@ class LLMGateway:
                 "errors": [],
             }
             call["attempts"].append(attempt)
-            if self._deadline_expired(deadline_monotonic):
+            if self._deadline_expired(effective_deadline_monotonic):
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
                 break
             transport_timeout = self._transport_timeout(
-                timeout_seconds=self._request_timeout_seconds if timeout_seconds is None else timeout_seconds,
-                deadline_monotonic=deadline_monotonic,
-                transport_deadline_monotonic=transport_deadline_monotonic,
+                timeout_seconds=request_timeout,
+                deadline_monotonic=effective_deadline_monotonic,
+                transport_deadline_monotonic=effective_transport_deadline_monotonic,
             )
             if transport_timeout == 0.0:
                 last_errors = ("decision_deadline_exceeded",)
@@ -483,6 +521,9 @@ class LLMGateway:
             attempt["timeout_seconds"] = transport_timeout
             transport_started = time.perf_counter()
             try:
+                # This bounds a cooperative provider transport.  A custom
+                # injected transport that ignores its timeout cannot be
+                # interrupted here; a late response is rejected below.
                 raw = self.transport.complete(
                     role=role,
                     model=binding["model"],
@@ -505,7 +546,8 @@ class LLMGateway:
                 attempt["errors"] = list(last_errors)
                 failure_category = "output_truncated"
                 if self._transport_deadline_expired(
-                    transport_deadline_monotonic, deadline_monotonic
+                    effective_transport_deadline_monotonic,
+                    effective_deadline_monotonic,
                 ):
                     last_errors = ("decision_deadline_exceeded",)
                     attempt["errors"].extend(last_errors)
@@ -539,10 +581,11 @@ class LLMGateway:
                 if failure_category == "timeout" and attempt_number < total_attempts:
                     # Avoid immediate repeated requests to a congested service;
                     # backoff consumes the same decision deadline, never extends it.
-                    pause = self._transport_timeout(
-                        timeout_seconds=float(attempt_number),
-                        deadline_monotonic=deadline_monotonic,
-                        transport_deadline_monotonic=transport_deadline_monotonic,
+                    pause = self._retry_pause(
+                        attempt_number=attempt_number,
+                        timeout_seconds=request_timeout,
+                        deadline_monotonic=effective_deadline_monotonic,
+                        transport_deadline_monotonic=effective_transport_deadline_monotonic,
                     )
                     attempt["retry_delay_seconds"] = pause
                     attempt["request_elapsed_seconds"] = max(0.0, time.perf_counter() - transport_started)
@@ -560,7 +603,8 @@ class LLMGateway:
                     )
 
             if self._transport_deadline_expired(
-                transport_deadline_monotonic, deadline_monotonic
+                effective_transport_deadline_monotonic,
+                effective_deadline_monotonic,
             ):
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
@@ -599,7 +643,7 @@ class LLMGateway:
                         call["validation_seconds"] += (
                             time.perf_counter() - validation_started
                         )
-            if self._deadline_expired(deadline_monotonic):
+            if self._deadline_expired(effective_deadline_monotonic):
                 last_errors = ("decision_deadline_exceeded",)
                 attempt["errors"] = list(last_errors)
                 failure_category = "timeout"
@@ -686,6 +730,23 @@ class LLMGateway:
         if timeout_seconds is None:
             return remaining
         return min(float(timeout_seconds), remaining)
+
+    @staticmethod
+    def _retry_pause(
+        *,
+        attempt_number: int,
+        timeout_seconds: float | None,
+        deadline_monotonic: float | None,
+        transport_deadline_monotonic: float | None,
+    ) -> float:
+        remaining = LLMGateway._transport_timeout(
+            timeout_seconds=timeout_seconds,
+            deadline_monotonic=deadline_monotonic,
+            transport_deadline_monotonic=transport_deadline_monotonic,
+        )
+        if remaining is None:
+            return float(attempt_number)
+        return max(0.0, min(float(attempt_number), remaining - _MINIMUM_RETRY_TIMEOUT_SECONDS))
 
 
 __all__ = [
