@@ -43,7 +43,7 @@
 - `chooseAisTargets(frame, rng)` returns a unique ID array containing `max(1, ceil(activeTypeIICount / 2))` current, controllable Type II vessels.
 - `auditAcceptance({ report, operatorEvents, frames })` returns `{ passed, failures, metrics }`; it requires a 21,600-second `summary.wall_seconds`, all eight groups confirmed, exactly 25 eligible cells in each focus bbox, all vessel deletes/replacements and at least one AIS toggle per round confirmed, and at least one focus-owned task or matching successful decision for every focus.
 
-- [ ] **Step 1: Write failing unit tests**
+- [x] **Step 1: Write failing unit tests**
 
 ```js
 import test from "node:test";
@@ -98,13 +98,13 @@ test("fleet targets contain one active vessel of each class", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests and verify the intended import failure**
+- [x] **Step 2: Run tests and verify the intended import failure**
 
 Run: `node --test tests/scripts/test_live_interaction_scenario.mjs`
 
 Expected: FAIL because `scripts/live_interaction_scenario.mjs` does not exist.
 
-- [ ] **Step 3: Implement pure schedule, selection, and acceptance audit functions**
+- [x] **Step 3: Implement pure schedule, selection, and acceptance audit functions**
 
 Use `seededRandom` with a recorded 32-bit seed. Build candidate boxes by enumerating top-left cells `(x, y)` from `search_domain.searchable_cells`, requiring every cell in `[x,x+5) × [y,y+5)` to be present. Shuffle legal non-overlapping candidates with the seeded generator and select the first. For AIS, shuffle active controllable Type II IDs and take `Math.max(1, Math.ceil(ids.length / 2))`. The audit reads only frame snapshots, operator ledger records, and `report.summary.wall_seconds`; it records every unsatisfied check as a failure and never infers application from enqueue.
 
@@ -129,7 +129,7 @@ export function seededRandom(seed) {
 }
 ```
 
-- [ ] **Step 4: Run the unit tests and verify they pass**
+- [x] **Step 4: Run the unit tests and verify they pass**
 
 Run: `node --test tests/scripts/test_live_interaction_scenario.mjs`
 
