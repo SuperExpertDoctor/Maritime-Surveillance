@@ -1,10 +1,10 @@
 import { defineConfig } from "@playwright/test";
 
-const port = 5193;
+const port = 5194;
 
 export default defineConfig({
   testDir: "./tests",
-  testMatch: ["decision-log.spec.js", "drawer-state.spec.js", "telemetry-consistency.spec.js"],
+  testMatch: ["decision-log.spec.js", "drawer-state.spec.js", "telemetry-consistency.spec.js", "admin-vessel-status.spec.js", "vessel-interactions.spec.js", "mixed-maritime.spec.js"],
   timeout: 45_000,
   expect: { timeout: 8_000 },
   workers: 1,

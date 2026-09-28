@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Clipboard, GripHorizontal, ListChecks, Map as MapIcon, Satellite, ScrollText, SlidersHorizontal, X } from "lucide-react";
+import VesselStatusTab from "./VesselStatusTab";
 
 const TABS = [
   { label: "决策", icon: ListChecks },
   { label: "区域", icon: MapIcon },
   { label: "日志", icon: ScrollText },
   { label: "参数", icon: SlidersHorizontal },
-  { label: "AIS", icon: Satellite },
+  { label: "船舶状态", icon: Satellite },
 ];
 const TRIGGERS = {
   event: "事件被动触发",
@@ -40,7 +41,8 @@ const LOG_STATUSES = {
   probe_timed_out: "调查超时",
 };
 
-export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions = [], logs = [], logError = "", onSelectDecision, visible, onToggle }) {
+export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions = [], logs = [], logError = "", onSelectDecision,
+  editingAllowed = false, vesselCommandBusy = false, vesselCommandStatus, onSetVesselAis, onDeleteVessel, visible, onToggle }) {
   const [activeTab, setActiveTab] = useState(0);
   const [height, setHeight] = useState(220);
   const [config, setConfig] = useState(null);
@@ -91,7 +93,9 @@ export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions
         {activeTab === 1 && <RegionTab frame={frame} />}
         {activeTab === 2 && <LogTab logs={logs} error={logError} frame={frame} llm={llmCycle} mode={mode} />}
         {activeTab === 3 && <ParamsTab config={frame?.config_snapshot || config} error={mode === "replay" && !frame?.config_snapshot ? "Historical parameters: not provided" : configError} />}
-        {activeTab === 4 && <AisTab frame={frame} />}
+        {activeTab === 4 && <VesselStatusTab vessels={frame?.scenario_vessels || []} mode={mode}
+          editingAllowed={editingAllowed} commandBusy={vesselCommandBusy}
+          commandStatus={vesselCommandStatus} onSetAis={onSetVesselAis} onDelete={onDeleteVessel} />}
       </div>
     </section>
   );
@@ -244,43 +248,6 @@ function LLMTab({ llm }) {
       <summary>{label}<button onClick={(event) => { event.preventDefault(); copy(content); }} aria-label={`复制 ${label}`}><Clipboard size={14} /></button></summary><pre>{text(content)}</pre>
     </details>)}</div>
   </div>;
-}
-
-function AisTab({ frame }) {
-  const rows = Array.isArray(frame?.contacts)
-    ? frame.contacts.map((contact) => {
-      const ais = contact.latest_ais_sample || [...(contact.samples || [])].reverse().find((sample) => sample.source === "ais");
-      return { id: contact.contact_id, mmsi: contact.ais_mmsi, aisPosition: ais?.position, position: contact.estimated_position, sampleCount: contact.sample_count ?? contact.samples?.length ?? 0, observedAt: ais?.observed_at_min, state: contact.vessel_class || "unknown", lifecycle: contact.state };
-    })
-    : (frame?.ships || []).map((ship) => ({
-      id: ship.id,
-      mmsi: ship.ais?.mmsi,
-      aisPosition: ship.ais?.reported_position,
-      position: ship.estimated_position,
-      state: "historical",
-    }));
-  if (!rows.length) return <EmptyState text="No AIS contacts in this frame" />;
-  return (
-    <div className="table-wrap">
-      <table className="region-table ais-table">
-        <thead><tr><th>接触</th><th>MMSI</th><th>AIS 位置</th><th>估计位置</th><th>样本</th><th>AIS 时间</th><th>状态</th></tr></thead>
-        <tbody>{rows.map((contact) => (
-          <tr key={contact.id}>
-            <td><b>{contact.id}</b></td>
-            <td>{contact.mmsi || "无"}</td>
-            <td className="mono">{formatPosition(contact.aisPosition)}</td>
-            <td className="mono">{formatPosition(contact.position)}</td>
-            <td>{contact.sampleCount ?? "-"}</td><td>{contact.observedAt == null ? "not provided" : `${contact.observedAt} min`}</td>
-            <td>{contact.state === "unknown" ? "待核查" : contact.state === "type_i" ? "I 类船舶" : contact.state === "type_ii" ? "II 类船舶" : contact.state === "historical" ? "历史帧" : contact.state} · {contact.lifecycle}</td>
-          </tr>
-        ))}</tbody>
-      </table>
-    </div>
-  );
-}
-
-function formatPosition(position) {
-  return Array.isArray(position) ? position.map((value) => Number(value).toFixed(1)).join(", ") : "-";
 }
 
 function ParamsTab({ config, error }) {

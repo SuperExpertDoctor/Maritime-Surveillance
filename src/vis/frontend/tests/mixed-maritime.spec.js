@@ -171,8 +171,9 @@ test("replay renders intent controls as read-only", async ({ page }) => {
   await expect(page.locator(".intent-panel .intent-form")).toHaveCount(0);
   await expect(page.locator('[aria-label="框选重点区"]')).toBeDisabled();
   await expect(page.getByRole("button", { name: "II 类船舶" })).toBeDisabled();
-  await page.getByRole("button", { name: /scenario-vessel-replay/ }).click();
-  await expect(page.getByRole("button", { name: "关闭 AIS" })).toBeDisabled();
+  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await page.getByRole("tab", { name: "船舶状态" }).click();
+  await expect(page.getByRole("switch", { name: "scenario-vessel-replay AIS" })).toBeDisabled();
 });
 
 test("replay retries a failed chunk and surfaces the recovered frame", async ({ page }) => {
@@ -325,8 +326,9 @@ test("operator places a type-II vessel by click and deletes the selected scenari
   });
   await expect(page.getByRole("button", { name: "II 类船舶" })).toBeEnabled();
 
-  await page.getByRole("button", { name: /scenario-vessel-9/ }).click();
-  await page.getByRole("button", { name: "删除选中船舶" }).click();
+  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await page.getByRole("tab", { name: "船舶状态" }).click();
+  await page.getByRole("button", { name: "删除 scenario-vessel-9" }).click();
   await expect.poll(() => deleted).toContain("scenario-vessel-9");
 });
 
@@ -369,9 +371,10 @@ test("type-II AIS control sends the current revision and waits for an authoritat
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: /scenario-vessel-ii/ }).click();
-  const disable = page.getByRole("button", { name: "关闭 AIS" });
-  await expect(disable).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await page.getByRole("tab", { name: "船舶状态" }).click();
+  const disable = page.getByRole("switch", { name: "scenario-vessel-ii AIS" });
+  await expect(disable).toBeChecked();
   await disable.click();
   await expect.poll(() => patches).toHaveLength(1);
   expect(patches[0]).toMatchObject({
@@ -379,7 +382,7 @@ test("type-II AIS control sends the current revision and waits for an authoritat
     expected_revision: 4,
     ais_enabled: false,
   });
-  await expect(disable).toHaveAttribute("aria-pressed", "false");
+  await expect(disable).toBeChecked();
 
   await page.evaluate((nextFrame) => window.__pushFrame(nextFrame), {
     ...fixture,
@@ -390,8 +393,8 @@ test("type-II AIS control sends the current revision and waits for an authoritat
       ais_enabled: false,
     }],
   });
-  await expect(page.getByRole("button", { name: "关闭 AIS" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("button", { name: "开启 AIS" })).toHaveAttribute("aria-pressed", "false");
+  await expect(disable).not.toBeChecked();
+  await expect(disable).toBeEnabled();
 });
 
 test("runtime vessel palette stays enabled and the count follows authoritative frames", async ({ page }) => {
@@ -452,10 +455,11 @@ test("AIS revision conflict is visible and does not change the selected frame st
     });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: /scenario-vessel-conflict/ }).click();
-  await page.getByRole("button", { name: "关闭 AIS" }).click();
-  await expect(page.locator(".vessel-command-status")).toContainText("revision_conflict");
-  await expect(page.getByRole("button", { name: "关闭 AIS" })).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await page.getByRole("tab", { name: "船舶状态" }).click();
+  await page.getByRole("switch", { name: "scenario-vessel-conflict AIS" }).click();
+  await expect(page.locator(".vessel-row-feedback")).toContainText("revision_conflict");
+  await expect(page.getByRole("switch", { name: "scenario-vessel-conflict AIS" })).toBeChecked();
 });
 
 test("operator sees runtime command transition from queued to applied", async ({ page }) => {

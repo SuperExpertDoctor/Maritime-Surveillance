@@ -412,6 +412,7 @@ class SimulationEngine:
         )
         self._red_snapshot_sequence = 0
         self._installed_red_plan_id = None
+        self._maneuver_provenance: dict[str, dict] = {}
         self.opponent_population = OpponentPopulation(
             config.ship.opponent_population, seed=self.seed,
             start_time=self.clock.time,
@@ -478,15 +479,26 @@ class SimulationEngine:
         return self.vessel_commands.get(command_id)
 
     def scenario_vessels(self) -> tuple[dict, ...]:
-        return tuple({
-            "scenario_entity_id": ship.id,
-            "revision": self._vessel_revisions.get(ship.id, 1),
-            "position": [float(ship.float_position[0]), float(ship.float_position[1])],
-            "vessel_class": ship.vessel_class,
-            "ais_enabled": ship.ais_enabled,
-            "ais_controllable": ship.vessel_class == "type_ii",
-            "surveillance_stage": self.surveillance_stages.snapshot(ship.id).stage,
-        } for ship in self.ships)
+        inventory = []
+        for ship in self.ships:
+            params = ship._navigation_params
+            provenance = self._maneuver_provenance.get(ship.id, {}) if params else {}
+            inventory.append({
+                "scenario_entity_id": ship.id,
+                "revision": self._vessel_revisions.get(ship.id, 1),
+                "position": [float(ship.float_position[0]), float(ship.float_position[1])],
+                "vessel_class": ship.vessel_class,
+                "ais_enabled": ship.ais_enabled,
+                "ais_controllable": ship.vessel_class == "type_ii",
+                "surveillance_stage": self.surveillance_stages.snapshot(ship.id).stage,
+                "speed_kn": float(ship.speed_kn),
+                "heading_deg": float(math.degrees(ship.heading_rad)),
+                "motion_parameters": asdict(params) if params else None,
+                "motion_reason_content": provenance.get("reason_content"),
+                "motion_plan_id": provenance.get("plan_id"),
+                "motion_decision_time_min": provenance.get("time_min"),
+            })
+        return tuple(inventory)
 
     def apply_pending_vessel_commands(self) -> tuple[VesselCommandResult, ...]:
         """Apply queued scenario edits on the simulation thread only."""
@@ -762,6 +774,7 @@ class SimulationEngine:
         self.red_commander.remove_ship(plan.vessel_id)
         self.surveillance_stages.remove(plan.vessel_id)
         self._ais_force_refresh_ids.discard(plan.vessel_id)
+        self._maneuver_provenance.pop(plan.vessel_id, None)
         self._vessel_contact_ids.pop(plan.vessel_id, None)
         self.ships[:] = [ship for ship in self.ships if ship.id != plan.vessel_id]
         self._vessel_revisions.pop(plan.vessel_id, None)
@@ -1152,16 +1165,7 @@ class SimulationEngine:
             )
 
     def _publish_vessel_inventory(self) -> None:
-        items = tuple({
-            "scenario_entity_id": ship.id,
-            "revision": self._vessel_revisions.get(ship.id, 1),
-            "position": [float(ship.float_position[0]), float(ship.float_position[1])],
-            "vessel_class": ship.vessel_class,
-            "ais_enabled": ship.ais_enabled,
-            "ais_controllable": ship.vessel_class == "type_ii",
-            "surveillance_stage": self.surveillance_stages.snapshot(ship.id).stage,
-        } for ship in self.ships)
-        self.allocator.sm.publish_vessel_inventory(items)
+        self.allocator.sm.publish_vessel_inventory(self.scenario_vessels())
 
     def _set_runtime_state(self, status: str, blocked_role: str | None = None) -> None:
         self._runtime_status = status
@@ -2274,6 +2278,9 @@ class SimulationEngine:
         commands = {} if plan is None else {command.ship_id: command for command in plan.commands}
         plan_id = None if plan is None else plan.snapshot_id
         new_plan = plan_id != self._installed_red_plan_id
+        call = next((item for item in reversed(getattr(self.red_commander.gateway, "call_log", ()))
+                     if item.get("role") == "red_commander"
+                     and item.get("snapshot_id") == plan_id and item.get("success")), None) if new_plan and plan_id else None
         for ship in self.ships:
             params = (
                 commands.get(ship.id)
@@ -2284,10 +2291,18 @@ class SimulationEngine:
             if params != ship._navigation_params or (params is not None and new_plan):
                 ship.navigator.install(params, current_time)
                 if params is not None:
+                    if new_plan:
+                        self._maneuver_provenance[ship.id] = {
+                            "plan_id": plan_id,
+                            "reason_content": call.get("reason_content") if call else None,
+                            "time_min": call.get("sim_time_min", current_time) if call else current_time,
+                        }
                     self.allocator.sm.add_event("opponent_maneuver_installed", {
                         "side": "blue", "vessel_id": ship.id,
                         "plan_id": plan_id, "parameters": asdict(params),
                     })
+                else:
+                    self._maneuver_provenance.pop(ship.id, None)
         self._installed_red_plan_id = plan_id
 
     def _step_controlled_uav(self, uav: UAVEntity, current_time: float) -> bool:

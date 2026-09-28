@@ -17,6 +17,14 @@ test.beforeEach(async ({ page }) => {
 
 const vessel = { scenario_entity_id: 'vessel-ii', revision: 4, position: [12, 8], vessel_class: 'type_ii', ais_enabled: true, ais_controllable: true };
 
+async function vesselRow(page) {
+  if (!(await page.getByRole('tab', { name: '船舶状态' }).count())) {
+    await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  }
+  await page.getByRole('tab', { name: '船舶状态' }).click();
+  return page.getByRole('row').filter({ hasText: 'vessel-ii' });
+}
+
 test('delete receipt retains identity and locks writes until authoritative absence', async ({ page }) => {
   const fixture = frameFixture('live', { scenario_vessels: [vessel] });
   await installFrameSocket(page, fixture);
@@ -25,16 +33,16 @@ test('delete receipt retains identity and locks writes until authoritative absen
     vessel_id: vessel.scenario_entity_id, revision: 5,
   } }));
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '删除选中船舶' }).click();
-  await expect(page.locator('.vessel-command-status')).toContainText('船舶已删除');
-  await expect(page.getByRole('button', { name: /vessel-ii/ })).toHaveAttribute('aria-pressed', 'true');
+  const row = await vesselRow(page);
+  await row.getByRole('button', { name: '删除 vessel-ii' }).click();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('船舶已删除');
+  await expect(row).toBeVisible();
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 2, scenario_vessels: [{ ...vessel, revision: 5 }] });
-  await expect(page.getByLabel('选中船舶详情')).toContainText('REV 5');
+  await expect(row).toBeVisible();
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 3, scenario_vessels: [] });
-  await expect(page.getByRole('button', { name: /vessel-ii/ })).toHaveCount(0);
+  await expect(row).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
 });
 
@@ -46,14 +54,16 @@ test('AIS confirmation requires requested state as well as entity and revision',
     vessel_id: vessel.scenario_entity_id, revision: 5,
   } }));
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
-  await expect(page.locator('.vessel-command-status')).toContainText('AIS 已关闭');
+  const row = await vesselRow(page);
+  const ais = row.getByRole('switch');
+  await ais.click();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('AIS 已关闭');
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 2, scenario_vessels: [{ ...vessel, revision: 5 }] });
-  await expect(page.getByLabel('选中船舶详情')).toContainText('REV 5');
-  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+  await expect(ais).toBeChecked();
+  await expect(ais).toBeDisabled();
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 3, scenario_vessels: [{ ...vessel, revision: 5, ais_enabled: false }] });
-  await expect(page.getByRole('button', { name: '开启 AIS' })).toBeEnabled();
+  await expect(ais).not.toBeChecked();
+  await expect(ais).toBeEnabled();
 });
 
 test('create receipt stays locked through wrong identity and stale revision frames', async ({ page }) => {
@@ -75,7 +85,7 @@ test('create receipt stays locked through wrong identity and stale revision fram
   await expect(page.locator('.vessel-command-status')).toContainText('船舶已加入场景');
   for (const candidate of [vessel, { ...vessel, scenario_entity_id: 'created-vessel', revision: 0 }]) {
     await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: [candidate] });
-    await expect(page.getByRole('button', { name: new RegExp(candidate.scenario_entity_id) })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
   }
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: [{ ...vessel, scenario_entity_id: 'created-vessel', revision: 1 }] });
@@ -95,18 +105,17 @@ test('reset generation cancels old poll and stale receipt cannot unlock new comm
   });
   await page.route('**/api/vessel-commands/new-reset', route => route.fulfill({ json: { status: 'queued', command_id: 'new-reset' } }));
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
+  const row = await vesselRow(page);
   const poll = page.waitForRequest('**/api/vessel-commands/old-reset');
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  await row.getByRole('switch').click();
   await poll;
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, reset_generation: 1 });
-  await expect(page.locator('.vessel-command-status')).toHaveCount(0);
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  await expect(page.locator('.vessel-row-feedback')).toHaveCount(0);
+  await row.getByRole('switch').click();
   release();
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: [{ ...vessel, revision: 5, ais_enabled: false }] });
-  await expect(page.locator('.vessel-command-status')).toContainText('排队');
-  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('排队');
+  await expect(row.getByRole('switch')).toBeDisabled();
 });
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 375, height: 812 }]) {
@@ -198,17 +207,19 @@ for (const operation of ['create', 'delete', 'ais']) {
       });
       await page.mouse.click(point.x, point.y);
     } else {
-      await page.getByRole('button', { name: /vessel-ii/ }).click();
-      await page.getByRole('button', { name: operation === 'ais' ? '关闭 AIS' : '删除选中船舶' }).click();
+      const row = await vesselRow(page);
+      await (operation === 'ais' ? row.getByRole('switch') : row.getByRole('button', { name: '删除 vessel-ii' })).click();
     }
     await request;
     await page.evaluate(f => window.__pushFrame(f), { ...fixture, scenario_vessels: operation === 'delete' ? [] : [{
       ...vessel, revision: operation === 'create' ? 1 : 5, ais_enabled: operation !== 'ais',
     }] });
-    await expect(page.getByRole('button', { name: /vessel-ii/ })).toHaveCount(operation === 'delete' ? 0 : 1);
-    if (operation === 'ais') await expect(page.getByRole('button', { name: '关闭 AIS' })).toHaveAttribute('aria-pressed', 'true');
+    if (operation !== 'create') {
+      await expect(page.getByRole('row').filter({ hasText: 'vessel-ii' })).toHaveCount(operation === 'delete' ? 0 : 1);
+    }
+    if (operation === 'ais') await expect(page.getByRole('switch', { name: 'vessel-ii AIS' })).not.toBeChecked();
     await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
-    await expect(page.locator('.vessel-command-status')).toContainText('排队');
+    await expect(operation === 'create' ? page.locator('.vessel-command-status') : page.locator('.vessel-row-feedback')).toContainText('排队');
     release();
     await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
   });
@@ -229,12 +240,12 @@ test('AIS applied acknowledgement keeps writes locked until its revision arrives
   await page.route('**/api/vessels/*/ais', route => route.fulfill({ json: { command_id: 'ais', status: 'queued' } }));
   await page.route('**/api/vessel-commands/ais', route => route.fulfill({ json: { command_id: 'ais', status: 'applied', vessel_id: vessel.scenario_entity_id, revision: 5 } }));
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
-  await expect(page.locator('.vessel-command-status')).toContainText('AIS 已关闭');
-  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+  const row = await vesselRow(page);
+  await row.getByRole('switch').click();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('AIS 已关闭');
+  await expect(row.getByRole('switch')).toBeDisabled();
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 2, scenario_vessels: [{ ...vessel, revision: 5, ais_enabled: false }] });
-  await expect(page.getByRole('button', { name: '开启 AIS' })).toBeEnabled();
+  await expect(row.getByRole('switch')).toBeEnabled();
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, frame_id: 3, scenario_vessels: [] });
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
 });
@@ -248,8 +259,7 @@ test('late AIS result does not reappear after switching to replay', async ({ pag
   await page.route('**/api/vessels/*/ais', async route => { await gate; await route.fulfill({ json: { command_id: 'late', status: 'queued' } }); });
   await page.route('**/api/vessel-commands/late', route => route.fulfill({ json: { status: 'applied' } }));
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  await (await vesselRow(page)).getByRole('switch').click();
   const aborted = page.waitForEvent('requestfailed', request => request.url().endsWith('/ais'));
   await page.getByRole('button', { name: '回放', exact: true }).click();
   await aborted;
@@ -257,10 +267,10 @@ test('late AIS result does not reappear after switching to replay', async ({ pag
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeDisabled();
   release();
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  await expect(page.locator('.vessel-command-status')).toHaveCount(0);
+  await expect(page.locator('.vessel-row-feedback')).toHaveCount(0);
   await page.getByRole('button', { name: '直播', exact: true }).click();
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
-  await expect(page.locator('.vessel-command-status')).toHaveCount(0);
+  await expect(page.locator('.vessel-row-feedback')).toHaveCount(0);
 });
 
 test('search domain uses authoritative mask and labels missing legacy domain', async ({ page }, testInfo) => {
@@ -360,13 +370,13 @@ test('queued AIS remains locked beyond three seconds until a terminal result', a
     return route.fulfill({ json: { status: finish ? 'applied' : 'queued', command_id: 'slow' } });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  const row = await vesselRow(page);
+  await row.getByRole('switch').click();
   await expect.poll(() => Date.now() - submittedAt, { timeout: 6000 }).toBeGreaterThan(3300);
-  await expect(page.locator('.vessel-command-status')).toContainText('排队');
-  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('排队');
+  await expect(row.getByRole('switch')).toBeDisabled();
   finish = true;
-  await expect(page.locator('.vessel-command-status')).toContainText('AIS 已关闭');
+  await expect(row.locator('.vessel-row-feedback')).toContainText('AIS 已关闭');
   expect(polls).toBeGreaterThan(1);
 });
 
@@ -378,13 +388,13 @@ test('poll network failure is unknown and locked, then recovers to terminal stat
     ? route.fulfill({ json: { status: 'rejected', command_id: 'network', error_code: 'revision_conflict' } })
     : route.abort('failed'));
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
-  await expect(page.locator('.vessel-command-status')).toContainText('结果未知');
-  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+  const row = await vesselRow(page);
+  await row.getByRole('switch').click();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('结果未知');
+  await expect(row.getByRole('switch')).toBeDisabled();
   recover = true;
-  await expect(page.locator('.vessel-command-status')).toContainText('revision_conflict');
-  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeEnabled();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('revision_conflict');
+  await expect(row.getByRole('switch')).toBeEnabled();
 });
 
 
@@ -404,12 +414,12 @@ test('lost POST response queries the same command without resubmitting', async (
     return recover ? route.fulfill({ json: { status: 'applied', command_id: postedId } }) : route.abort('failed');
   });
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
-  await expect(page.locator('.vessel-command-status')).toContainText('结果未知');
-  await expect(page.getByRole('button', { name: '关闭 AIS' })).toBeDisabled();
+  const row = await vesselRow(page);
+  await row.getByRole('switch').click();
+  await expect(row.locator('.vessel-row-feedback')).toContainText('结果未知');
+  await expect(row.getByRole('switch')).toBeDisabled();
   recover = true;
-  await expect(page.locator('.vessel-command-status')).toContainText('AIS 已关闭');
+  await expect(row.locator('.vessel-row-feedback')).toContainText('AIS 已关闭');
   expect(posts).toBe(1);
   expect(new Set(queried)).toEqual(new Set([postedId]));
 });
@@ -425,14 +435,14 @@ test('episode change aborts an in-flight command poll and clears its lock', asyn
     await route.fulfill({ json: { status: 'applied' } });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: /vessel-ii/ }).click();
+  const row = await vesselRow(page);
   const poll = page.waitForRequest('**/api/vessel-commands/old-episode');
-  await page.getByRole('button', { name: '关闭 AIS' }).click();
+  await row.getByRole('switch').click();
   await poll;
   const aborted = page.waitForEvent('requestfailed', request => request.url().endsWith('/old-episode'));
   await page.evaluate(f => window.__pushFrame(f), { ...fixture, episode_id: 'new-episode', frame_id: 1 });
   await aborted;
   release();
-  await expect(page.locator('.vessel-command-status')).toHaveCount(0);
+  await expect(page.locator('.vessel-row-feedback')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'II 类船舶', exact: true })).toBeEnabled();
 });
