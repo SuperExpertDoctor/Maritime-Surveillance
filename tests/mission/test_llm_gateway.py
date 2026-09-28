@@ -12,8 +12,47 @@ from src.mission.llm_gateway import (
     LLMGateway,
     LLMOutputTruncated,
     ModelResult,
+    _message_text,
     parse_object,
 )
+
+
+def test_message_reason_content_is_kept_separate_from_json_answer():
+    message = SimpleNamespace(
+        content='{"answer": 3}',
+        reason=SimpleNamespace(content="依据任务优先级调整分配"),
+    )
+    result = _message_text(message)
+    assert str(result) == '{"answer": 3}'
+    assert result.reason_content == "依据任务优先级调整分配"
+
+
+def test_gateway_emits_sanitized_retry_and_timeout_status(scripted_transport):
+    transport = scripted_transport({"decision_maker": [TimeoutError("slow model")] * 3})
+    records = []
+    gateway = LLMGateway(transport=transport)
+    gateway.set_event_sink(records.append)
+
+    _request_json(gateway)
+
+    assert [record["status"] for record in records] == [
+        "started", "retry", "retry", "timeout",
+    ]
+    assert all(record["role"] == "decision_maker" for record in records)
+    assert all(record["call_id"] for record in records)
+    assert all("messages" not in record and "raw_output" not in record for record in records)
+
+
+def test_gateway_retains_reason_content_from_successful_response(scripted_transport):
+    class ReasonText(str):
+        reason_content = "重排搜索任务"
+
+    transport = scripted_transport({"decision_maker": [ReasonText('{"answer": 7}')]})
+    gateway = LLMGateway(transport=transport)
+
+    _request_json(gateway)
+
+    assert gateway.call_log[-1]["reason_content"] == "重排搜索任务"
 
 
 def test_parse_object_accepts_one_complete_json_object():

@@ -1553,51 +1553,83 @@ button {
   scrollbar-width: thin;
 }
 
-.timeline-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 2px 18px;
-}
-
-.timeline-item {
-  display: grid;
+.decision-table-wrap {
   min-width: 0;
-  min-height: 30px;
-  grid-template-columns: 58px 7px minmax(88px, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-  border-bottom: 1px solid rgb(39 56 66 / 55%);
-  font-size: 10px;
+  overflow-x: auto;
 }
 
-.timeline-item time,
-.timeline-item span {
-  overflow: hidden;
+.decision-table {
+  width: 100%;
+  min-width: 710px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.decision-table th:nth-child(1) { width: 88px; }
+.decision-table th:nth-child(2) { width: 126px; }
+.decision-table th:nth-child(3) { width: 33%; }
+.decision-table th:nth-child(4) { width: 30%; }
+.decision-table th:nth-child(5) { width: 145px; }
+
+.decision-table th,
+.decision-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.decision-table th {
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+  background: var(--panel);
   color: var(--text-muted);
-  font: 10px/1 Consolas, monospace;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 600;
 }
 
-.timeline-item i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--cyan);
-}
-
-.timeline-item.event-target_found i,
-.timeline-item.event-ship_detected i { background: var(--danger); }
-.timeline-item.event-llm_decision i { background: var(--violet); }
-.timeline-item.event-uav_returned i,
-.timeline-item.event-route_plan_failed i { background: var(--warning); }
-
-.timeline-item strong {
+.decision-table tbody tr:hover { background: var(--panel-hover); }
+.decision-time,
+.decision-uavs { font: 11px/1.5 Consolas, monospace; }
+.decision-time { white-space: nowrap; }
+.decision-uavs { color: var(--text-soft); }
+.trigger-label { color: var(--text-soft); }
+.trigger-event { color: var(--cyan); }
+.trigger-periodic { color: var(--teal); }
+.decision-reason summary { cursor: pointer; line-height: 1.5; }
+.decision-reason details:not([open]) summary {
+  display: -webkit-box;
   overflow: hidden;
-  color: var(--text-soft);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
+.decision-reason details[open] div { margin-top: 6px; color: var(--text-soft); }
+.decision-outcome { color: var(--text); }
+.decision-outcome.failed { color: var(--danger); font-weight: 600; }
+.muted { color: var(--text-muted); }
+
+.runtime-log-row {
+  display: grid;
+  grid-template-columns: 70px minmax(100px, 1fr) minmax(110px, 1fr) minmax(85px, 1fr) minmax(80px, 1fr);
+  min-height: 34px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-soft);
+  font-size: 11px;
+}
+.runtime-log-row time,
+.log-call-id { font: 10px/1.4 Consolas, monospace; color: var(--text-muted); }
+.runtime-log-row strong { color: var(--text); font-weight: 600; }
+.runtime-log-row.level-warning strong { color: var(--amber); }
+.runtime-log-row.level-error strong { color: var(--danger); }
+.log-call-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-log-error { padding: 8px; color: var(--danger); font-size: 11px; }
+.log-entity { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .table-wrap {
   width: 100%;
@@ -2039,7 +2071,14 @@ button {
     padding: 7px 8px;
   }
 
-  .timeline-list,
+  .runtime-log-row {
+    grid-template-columns: 58px minmax(75px, 1fr) minmax(112px, 1fr);
+    gap: 5px;
+  }
+
+  .runtime-log-row .log-entity,
+  .runtime-log-row .log-call-id { display: none; }
+
   .llm-sections {
     grid-template-columns: 1fr;
   }

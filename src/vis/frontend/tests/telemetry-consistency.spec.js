@@ -3,6 +3,8 @@ import { frameFixture, installFrameSocket } from './helpers/frameSocket.js';
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/export/capabilities', route => route.fulfill({ json: { mp4: false } }));
+  await page.route('**/api/runtime/decisions?*', route => route.fulfill({ json: { decisions: [] } }));
+  await page.route('**/api/runtime/logs?*', route => route.fulfill({ json: { entries: [], cursor: 0 } }));
 });
 
 test('contact observation count uses the total rather than the live sample tail', async ({ page }) => {
@@ -30,7 +32,8 @@ test('stale model log HTTP response cannot hide newer pushed calls', async ({ pa
   await page.goto('/');
   await page.getByRole('button', { name: '切换任务详情面板' }).click();
   const requested = page.waitForRequest('**/api/model-calls?*');
-  await page.getByRole('tab', { name: '模型日志' }).click();
+  await page.getByRole('tab', { name: '日志', exact: true }).click();
+  await page.getByText('模型调用详情').click();
   await requested;
   await page.evaluate(call => window.__pushFrame({ ...window.__lastFixture, frame_id: 2, model_calls: [call] }), newCall);
   await expect(page.locator('.llm-log')).toContainText('NEW CALL');
@@ -51,7 +54,8 @@ test('completed polled model call is not reverted by a pending frame snapshot', 
   } }));
   await page.goto('/');
   await page.getByRole('button', { name: '切换任务详情面板' }).click();
-  await page.getByRole('tab', { name: '模型日志' }).click();
+  await page.getByRole('tab', { name: '日志', exact: true }).click();
+  await page.getByText('模型调用详情').click();
   await expect(page.locator('.llm-log')).toContainText('COMPLETED RESULT');
   await page.evaluate(() => window.__pushFrame({ ...window.__lastFixture, frame_id: 2 }));
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -61,7 +65,8 @@ test('completed polled model call is not reverted by a pending frame snapshot', 
   await expect(page.getByRole('region', { name: '任务详情' })).toContainText('not provided');
   await page.getByRole('button', { name: '直播', exact: true }).click();
   await expect(page.locator('.connection-state')).toContainText('实时连接');
-  await page.getByRole('tab', { name: '模型日志' }).click();
+  await page.getByRole('tab', { name: '日志', exact: true }).click();
+  await page.getByText('模型调用详情').click();
   await expect(page.locator('.llm-log')).toContainText('COMPLETED RESULT');
   expect(errors).toEqual([]);
 });

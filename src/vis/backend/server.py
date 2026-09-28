@@ -34,9 +34,10 @@ from src.mission.intent_commands import (
 from src.mission.vessel_commands import CommandConflict as VesselCommandConflict
 from src.vis.backend.frame_builder import build_frame
 from src.vis.backend.frame_logger import FrameLogger
+from src.vis.backend.runtime_journal import RuntimeJournal
 from src.vis.backend.replay_adapter import normalize_replay_frame
 from src.vis.backend.config_snapshot import configuration_snapshot
-from src.vis.backend.public_details import model_calls, public_frame
+from src.vis.backend.public_details import model_calls, public_frame, public_value
 
 OUTPUT_DIR = "outputs"
 _FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
@@ -171,6 +172,7 @@ def create_app(
     app.state.engine = engine
     app.state.config = config
     app.state.frame_logger = FrameLogger(output_dir=OUTPUT_DIR)
+    app.state.runtime_journal = RuntimeJournal()
     app.state.current_cycle = 0
     app.state.total_steps = 480
     app.state.llm_cycle = None
@@ -250,6 +252,20 @@ def create_app(
         finally:
             app.state._live_clients.discard(ws)
             app.state._live_send_locks.pop(ws, None)
+
+    @app.get("/api/runtime/logs")
+    async def runtime_logs(after: int = Query(default=0, ge=0), episode_id: str | None = None):
+        entries = app.state.runtime_journal.since(after, episode_id=episode_id)
+        return {"entries": entries, "cursor": app.state.runtime_journal.cursor}
+
+    @app.get("/api/runtime/decisions")
+    async def runtime_decisions(episode_id: str | None = None):
+        current = getattr(app.state.state_manager, "episode_id", "")
+        if episode_id is not None and episode_id != current:
+            return {"decisions": []}
+        return {"decisions": public_value(app.state.state_manager.get_events_by_type(
+            "allocation_decision", episode_id=episode_id,
+        ))}
 
     @app.get("/api/replay/list")
     async def replay_list():

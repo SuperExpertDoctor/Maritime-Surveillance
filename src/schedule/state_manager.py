@@ -721,6 +721,15 @@ class StateManager:
             if lower(event["time"]) and upper(event["time"])
         ]
 
+    def get_events_by_type(self, event_type: str, limit: int = 200, episode_id: str | None = None) -> list[dict]:
+        matches = [
+            deepcopy(event) for event in reversed(self._events)
+            if event["type"] == event_type and (
+                episode_id is None or event["event_id"].startswith(f"{episode_id}:")
+            )
+        ][:limit]
+        return matches[::-1]
+
     # Information field facade -------------------------------------
     def configure_coverage_metrics(self, fixed_mask, episode_id: str) -> None:
         """Initialize episode-scoped SAR coverage after the map is complete."""

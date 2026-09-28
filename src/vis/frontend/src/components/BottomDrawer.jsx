@@ -1,37 +1,46 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, Bot, Clipboard, GripHorizontal, Map as MapIcon, Satellite, SlidersHorizontal, X } from "lucide-react";
+import { Clipboard, GripHorizontal, ListChecks, Map as MapIcon, Satellite, ScrollText, SlidersHorizontal, X } from "lucide-react";
 
 const TABS = [
-  { label: "时间线", icon: Activity },
+  { label: "决策", icon: ListChecks },
   { label: "区域", icon: MapIcon },
-  { label: "模型日志", icon: Bot },
+  { label: "日志", icon: ScrollText },
   { label: "参数", icon: SlidersHorizontal },
   { label: "AIS", icon: Satellite },
 ];
-const EVENT_NAMES = {
-  target_found: "发现目标",
-  ship_detected: "舰船确认",
-  target_lost: "目标丢失",
+const TRIGGERS = {
+  event: "事件被动触发",
+  periodic: "周期性主动触发",
+  initial: "首次部署（主动）",
+  retry: "失败重试（主动）",
+};
+const LOG_STATUSES = {
+  started: "开始调用",
+  retry: "重试",
+  success: "正常完成",
+  failed: "调用失败",
+  timeout: "超时",
+  running: "运行中",
+  paused_model: "模型暂停",
+  completed: "运行结束",
+  mission_assignment_committed: "任务分配已提交",
+  mission_selection_failed: "任务选择失败",
+  decision_failed: "决策失败",
+  mission_model_failure: "模型决策失败",
+  mission_model_paused: "模型暂停",
+  mission_model_retry_succeeded: "重试成功",
+  mission_model_retry_failed: "重试失败",
+  route_plan_failed: "航路规划失败",
+  task_failed: "任务失败",
+  task_completed: "任务完成",
   uav_returned: "UAV 返航",
-  uav_refueled: "加油完成",
+  target_found: "发现目标",
   search_complete: "搜索完成",
-  llm_decision: "模型决策",
-  route_plan_failed: "航路失败",
-  route_replanned: "航路重规划",
-  environment_reset: "环境重置",
-  mission_assignment_committed: "任务已提交",
-  contact_created: "创建接触",
-  probe_phase_changed: "调查阶段变化",
-  type_i_assessed: "I 类研判",
-  type_ii_assessed: "II 类研判",
   assessment_applied: "研判完成",
   probe_timed_out: "调查超时",
-  task_failed: "任务失败",
-  task_completed: "任务结束",
-  uav_refueled: "加油完成",
 };
 
-export default function BottomDrawer({ frame, events = [], llmCycle, mode = "live", visible, onToggle }) {
+export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions = [], logs = [], logError = "", onSelectDecision, visible, onToggle }) {
   const [activeTab, setActiveTab] = useState(0);
   const [height, setHeight] = useState(220);
   const [config, setConfig] = useState(null);
@@ -78,9 +87,9 @@ export default function BottomDrawer({ frame, events = [], llmCycle, mode = "liv
       </div>
       <div className="drawer-content">
         <small data-testid="drawer-context">{mode === "replay" ? "Historical replay" : "Active episode"} · {frame?.episode_id || "not provided"} · {frame?.sim_time_min ?? "-"} min</small>
-        {activeTab === 0 && <TimelineTab events={events} />}
+        {activeTab === 0 && <DecisionTab decisions={decisions} onSelectDecision={onSelectDecision} />}
         {activeTab === 1 && <RegionTab frame={frame} />}
-        {activeTab === 2 && <ModelCallsTab frame={frame} llm={llmCycle} mode={mode} />}
+        {activeTab === 2 && <LogTab logs={logs} error={logError} frame={frame} llm={llmCycle} mode={mode} />}
         {activeTab === 3 && <ParamsTab config={frame?.config_snapshot || config} error={mode === "replay" && !frame?.config_snapshot ? "Historical parameters: not provided" : configError} />}
         {activeTab === 4 && <AisTab frame={frame} />}
       </div>
@@ -88,18 +97,51 @@ export default function BottomDrawer({ frame, events = [], llmCycle, mode = "liv
   );
 }
 
-function TimelineTab({ events }) {
-  if (!events.length) return <EmptyState text="暂无任务事件" />;
+function DecisionTab({ decisions, onSelectDecision }) {
   return (
-    <div className="timeline-list">
-      {[...events].reverse().slice(0, 120).map((event, index) => (
-        <div className={`timeline-item event-${event.type}`} key={`${event.time}-${event.type}-${index}`}>
-          <time>{Number(event.time || 0).toFixed(0).padStart(3, "0")} min</time>
-          <i />
-          <strong>{EVENT_NAMES[event.type] || event.type}</strong>
-          <details><summary>{event.data?.uav_id || event.data?.ship_id || event.data?.group_id || "Details"}</summary><pre>{JSON.stringify(event.data || {}, null, 2)}</pre></details>
+    <div className="decision-table-wrap">
+      <table className="decision-table">
+        <thead><tr><th>决策时间</th><th>触发类型</th><th>决策原因</th><th>决策内容</th><th>参与调度的 UAV</th></tr></thead>
+        <tbody>{decisions.map((event, index) => {
+          const data = event.data || {};
+          const assigned = data.assignments || [];
+          const selected = (data.selected_task_ids || []).join(", ");
+          const outcome = data.status === "committed" && assigned.length
+            ? assigned.map((item) => `${item.task_id} → ${item.uav_id}`).join("；")
+            : `${selected ? `已选择 ${selected} · ` : ""}${data.status === "rejected" ? "分配未提交" : "未完成分配"}`;
+          return (
+            <tr key={event.event_id || `${event.time}-${index}`} onClick={() => onSelectDecision?.(event)}>
+              <td className="decision-time">{Number(data.time_min ?? event.time ?? 0).toFixed(0).padStart(3, "0")} min</td>
+              <td><span className={`trigger-label trigger-${data.trigger_source}`}>{TRIGGERS[data.trigger_source] || "触发来源未记录"}</span></td>
+              <td className="decision-reason">{data.reason_content ? (
+                <details onClick={(click) => click.stopPropagation()}><summary>{data.reason_content}</summary><div>{data.reason_content}</div></details>
+              ) : <span className="muted">模型未返回原因</span>}</td>
+              <td><span className={data.status === "committed" ? "decision-outcome" : "decision-outcome failed"}>{outcome}</span></td>
+              <td className="decision-uavs">{(data.involved_uav_ids || []).join("、") || "无"}</td>
+            </tr>
+          );
+        })}</tbody>
+      </table>
+      {!decisions.length && <EmptyState text="暂无 LLM 决策记录" />}
+    </div>
+  );
+}
+
+function LogTab({ logs, error, frame, llm, mode }) {
+  return (
+    <div className="runtime-log-list" role="log" aria-label="算法运行日志">
+      {error && <div className="runtime-log-error" role="status">{error}</div>}
+      {logs.map((item) => (
+        <div className={`runtime-log-row level-${item.level || "info"}`} key={item.id}>
+          <time>{Number(item.sim_time_min ?? 0).toFixed(0).padStart(3, "0")} min</time>
+          <span className="log-source">{item.role || item.source || "runtime"}</span>
+          <strong>{LOG_STATUSES[item.status] || item.status}{item.attempt != null && ` · 第 ${item.attempt} 次`}</strong>
+          <span className="log-entity">{item.uav_id || item.task_id || item.failure_category || ""}</span>
+          {item.call_id && <span className="log-call-id" title={item.call_id}>{item.call_id}</span>}
         </div>
       ))}
+      {!logs.length && !error && <EmptyState text="暂无运行日志" />}
+      <details className="model-call-details"><summary>模型调用详情</summary><ModelCallsTab frame={frame} llm={llm} mode={mode} /></details>
     </div>
   );
 }

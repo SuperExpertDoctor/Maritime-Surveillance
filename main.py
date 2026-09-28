@@ -18,6 +18,7 @@ from src.mission.strategy_memory import StrategyMemoryStore
 from src.schedule.config_loader import ConfigLoader
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend.frame_publisher import FramePublisher
+from src.vis.backend.runtime_journal import publish_algorithm_events
 from src.vis.backend.server import create_app
 
 
@@ -178,8 +179,35 @@ def main(
         app=app,
     )
 
+    def model_status(record: dict) -> None:
+        level = "error" if record["status"] in {"failed", "timeout"} else (
+            "warning" if record["status"] == "retry" else "info"
+        )
+        if app is not None:
+            app.state.runtime_journal.append("llm", level, record["status"], **{
+                key: record[key] for key in ("sim_time_min", "role", "call_id", "attempt")
+                if key in record
+            }, episode_id=engine.allocator.sm.episode_id)
+        engine.allocator.sm.add_event("runtime_log", {
+            "source": "llm", "level": level, **record,
+        })
+
+    gateway = getattr(engine.allocator.llm_client, "gateway", None)
+    if callable(getattr(gateway, "set_event_sink", None)):
+        gateway.set_event_sink(model_status)
+    seen_algorithm_events: set[str] = set()
+    last_logged_episode = None
+
     def publish(current_engine: SimulationEngine, result: dict) -> None:
+        nonlocal last_logged_episode
         sm = current_engine.allocator.sm
+        if sm.episode_id != last_logged_episode:
+            seen_algorithm_events.clear()
+            last_logged_episode = sm.episode_id
+        publish_algorithm_events(
+            sm, app.state.runtime_journal if app is not None else None,
+            seen_algorithm_events,
+        )
         llm_cycle = result.get("llm_cycle")
         if app is not None:
             app.state.ships = current_engine.ships
@@ -200,6 +228,13 @@ def main(
                 " | 仿真已暂停，请在右侧模型暂停面板点击重试"
                 if result["trigger_type"] == "model_blocked" else ""
             )
+            if app is not None:
+                app.state.runtime_journal.append(
+                    "scheduler", "info", result.get("action") or "triggered",
+                    sim_time_min=sm.current_time,
+                    trigger_type=result["trigger_type"],
+                    episode_id=sm.episode_id,
+                )
             print(
                 f"[t={sm.current_time:.0f}min] Trigger: {result['trigger_type']} "
                 f"- {result.get('action')}{detail}"
@@ -240,6 +275,12 @@ def main(
                 raise RuntimeError("timed out while flushing replay frames")
         finally:
             frame_publisher.close()
+    if app is not None:
+        app.state.runtime_journal.append(
+            "runtime", "error" if engine.runtime_status == "paused_model" else "info",
+            engine.runtime_status, sim_time_min=engine.allocator.sm.current_time,
+            episode_id=engine.allocator.sm.episode_id,
+        )
     output_path = app.state.frame_logger.path if app is not None else logger.path
     summary["jsonl_path"] = output_path
     summary["wall_seconds"] = elapsed_wall_seconds

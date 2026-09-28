@@ -1534,6 +1534,7 @@ class MissionScheduler:
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
             "response": response,
+            "reason_content": call.get("reason_content", ""),
             "validation": {
                 "is_valid": bool(self.last_selection_success),
                 "errors": list(self.last_selection_errors),

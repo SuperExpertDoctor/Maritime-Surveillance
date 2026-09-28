@@ -8,6 +8,7 @@ import RightSidebar from "./components/RightSidebar";
 import useReplay from "./hooks/useReplay";
 import useMp4Export from "./hooks/useMp4Export";
 import useWebSocket from "./hooks/useWebSocket";
+import useRuntimeLogs from "./hooks/useRuntimeLogs";
 
 
 export default function App() {
@@ -24,7 +25,6 @@ export default function App() {
   const [vesselPlacement, setVesselPlacement] = useState(null);
   const [selectedScenarioVesselId, setSelectedScenarioVesselId] = useState(null);
   const [vesselCommandStatus, setVesselCommandStatus] = useState(null);
-  const [liveEvents, setLiveEvents] = useState([]);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
   const mapExporterRef = useRef(null);
   const commandContext = useRef(null);
@@ -32,6 +32,7 @@ export default function App() {
   const commandAbort = useRef(null);
   const eventContext = useRef(null);
   const live = useWebSocket(mode === "live");
+  const runtime = useRuntimeLogs(mode === "live" ? live.frame?.episode_id : null, live.frame?.reset_generation);
   const replay = useReplay(mode === "replay");
   const mp4Export = useMp4Export(replay, mapExporterRef);
   const frame = mode === "live" ? live.frame : replay.frame;
@@ -88,24 +89,15 @@ export default function App() {
     const changed = eventContext.current !== keyContext;
     eventContext.current = keyContext;
     if (changed) setLastLlmCycle(null);
-    setLiveEvents((previous) => {
-      const current = changed ? [] : previous;
-      const incoming = live.frame.events || [];
-      const keys = new Set(current.map((event) => `${event.time}|${event.type}|${JSON.stringify(event.data)}`));
-      const merged = [...current];
-      for (const event of incoming) {
-        const key = `${event.time}|${event.type}|${JSON.stringify(event.data)}`;
-        if (!keys.has(key)) { merged.push(event); keys.add(key); }
-      }
-      return merged.slice(-300);
-    });
     if (live.frame.llm_cycle) setLastLlmCycle(live.frame.llm_cycle);
   }, [live.frame, mode]);
 
-  const replayEvents = useMemo(() => {
-    if (mode !== "replay") return [];
-    return replay.markers.filter((marker) => marker.frameIndex <= replay.index).map((marker) => marker.event);
-  }, [mode, replay.markers, replay.index]);
+  const decisionEvents = mode === "live" ? runtime.decisions : replay.markers
+    .filter((marker) => marker.type === "allocation_decision" && marker.frameIndex <= replay.index)
+    .map((marker) => marker.event);
+  const runtimeLogs = mode === "live" ? runtime.logs : replay.markers
+    .filter((marker) => marker.type === "runtime_log" && marker.frameIndex <= replay.index)
+    .map((marker) => ({ ...marker.data, id: marker.key, sim_time_min: marker.time }));
 
   const replayLlmCycle = useMemo(() => {
     if (mode !== "replay") return null;
@@ -449,8 +441,14 @@ export default function App() {
         key={`${mode}|${frame?.episode_id}|${replay.selectedFile}`}
         mode={mode}
         frame={frame}
-        events={mode === "live" ? liveEvents : replayEvents}
         llmCycle={displayedLlmCycle}
+        decisions={decisionEvents}
+        logs={runtimeLogs}
+        logError={mode === "live" ? runtime.error : ""}
+        onSelectDecision={mode === "replay" ? (event) => {
+          const marker = replay.markers.find((item) => item.event?.event_id === event.event_id);
+          if (marker) replay.seek(marker.frameIndex);
+        } : undefined}
         visible={drawerVisible}
         onToggle={() => setDrawerVisible((value) => !value)}
       />

@@ -675,7 +675,7 @@ class TaskAllocator:
             # Operator retry is deliberately decision-only: no ship, sensor,
             # UAV, fuel, information-field, or reviewer tick occurs here.
             self.sm.current_time = float(current_time)
-            decision = TriggerDecision("heavy", "operator_retry")
+            decision = TriggerDecision("heavy", "operator_retry", source="retry")
         else:
             self.sm.step(current_time)
             if self.sm.last_information_delta is not None:
@@ -697,7 +697,7 @@ class TaskAllocator:
                 intents=intents, intent_statuses=intent_statuses,
             )
             if self._has_idle_candidate_work(snapshot):
-                decision = TriggerDecision("heavy", "available fleet has feasible work")
+                decision = TriggerDecision("heavy", "available fleet has feasible work", source="event")
         if decision.trigger_type == "none":
             return {"trigger_type": "none", "action": None}, None
         if decision.trigger_type == "light":
@@ -885,6 +885,11 @@ class TaskAllocator:
         })
         result = {
             "trigger_type": "heavy",
+            "trigger_source": decision.source,
+            "trigger_reason": decision.reason,
+            "selected_task_ids": list(
+                (self.mission_scheduler.last_selection_response or {}).get("selected_task_ids", ())
+            ) if isinstance(self.mission_scheduler.last_selection_response, dict) else [],
             "action": (
                 "mission_selection_approved"
                 if batch is not None

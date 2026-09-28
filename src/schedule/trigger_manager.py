@@ -12,6 +12,7 @@ class TriggerDecision:
     reason: str = ""
     affected_uavs: list[str] = field(default_factory=list)
     information_version: int = 0
+    source: str = "unknown"
 
 
 class TriggerManager:
@@ -83,6 +84,7 @@ class TriggerManager:
             return TriggerDecision(
                 trigger_type="heavy",
                 reason=f"retry after {reason}",
+                source="retry",
             )
 
         # The fleet begins with no approved SAR partition.  Waiting an entire
@@ -92,6 +94,7 @@ class TriggerManager:
             return TriggerDecision(
                 trigger_type="heavy",
                 reason="initial fleet deployment",
+                source="initial",
             )
 
         # 周期定时（独立于事件）
@@ -100,6 +103,7 @@ class TriggerManager:
             return TriggerDecision(
                 trigger_type="heavy",
                 reason=f"periodic {cycle}min cycle",
+                source="periodic",
             )
 
         return TriggerDecision("none")
@@ -183,6 +187,7 @@ class TriggerManager:
             return TriggerDecision(
                 trigger_type="heavy",
                 reason=f"{heavy_count} heavy + {light_count} light events",
+                source="event",
                 affected_uavs=affected,
                 information_version=max(
                     (int(event.get("information_version", 0)) for event in recent),
@@ -200,6 +205,7 @@ class TriggerManager:
             return TriggerDecision(
                 trigger_type="light",
                 reason=f"{light_count} light events",
+                source="event",
                 affected_uavs=affected,
             )
 

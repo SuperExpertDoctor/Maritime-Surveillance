@@ -67,6 +67,7 @@ from src.control.heuristic.return_to_base import (
 from src.schedule.config_loader import AppConfig
 from src.schedule.datatypes import BBox, GridCoord, Region
 from src.schedule.task_allocator import TaskAllocator
+from src.schedule.decision_records import build_decision_record
 from src.mission.contracts import (
     AssignmentBatch,
     CommandResult,
@@ -1598,6 +1599,10 @@ class SimulationEngine:
                         "action": "pending_searches_reassigned",
                         "assignments": pending_reassigned,
                     }
+            decision_record = build_decision_record(result, batch, assignment_applied, t)
+            if decision_record is not None:
+                sm.add_event("allocation_decision", decision_record)
+                result["decision_record"] = decision_record
             timing = getattr(self.allocator, "last_decision_timing", None)
             skipped_model_selection = (
                 result.get("action") == "mission_selection_skipped"
@@ -1660,7 +1665,12 @@ class SimulationEngine:
                 force_heavy=True,
             )
             skipped = result.get("action") == "mission_selection_skipped"
-            if skipped or (batch is not None and self.apply_assignment_batch(batch)):
+            applied = not skipped and batch is not None and self.apply_assignment_batch(batch)
+            record = build_decision_record(result, batch, applied, self.clock.time)
+            if record is not None:
+                self.allocator.sm.add_event("allocation_decision", record)
+                result["decision_record"] = record
+            if skipped or applied:
                 self.allocator.trigger_manager.clear_heavy_retry()
                 self._decision_failure_streak = 0
                 self._set_runtime_state("running")

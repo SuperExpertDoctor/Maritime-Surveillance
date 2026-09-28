@@ -44,6 +44,27 @@ class LLMOutputTruncated(RuntimeError):
         self.metadata = metadata or {}
 
 
+class _ModelText(str):
+    def __new__(cls, content: str, reason_content: str = ""):
+        value = super().__new__(cls, content)
+        value.reason_content = reason_content
+        return value
+
+
+def _message_text(message) -> str:
+    """Retain provider reasoning without mixing it into the validated JSON answer."""
+    def field(value, name):
+        return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+    extras = field(message, "model_extra") or {}
+    reason = field(message, "reason") or field(extras, "reason")
+    content = field(message, "content") or ""
+    reason_content = (
+        field(reason, "content") if reason else None
+    ) or field(message, "reasoning_content") or field(extras, "reasoning_content") or ""
+    return _ModelText(content, reason_content if isinstance(reason_content, str) else "")
+
+
 @dataclass(frozen=True)
 class ModelResult:
     call_id: str
@@ -117,6 +138,7 @@ class OpenAICompatibleTransport:
             }
             if getattr(choice, "finish_reason", None) == "length":
                 raise LLMOutputTruncated(metadata)
+            model_text = _message_text(choice.message)
             channels = []
             for name, kind in (("reasoning_content", "external_provider_reasoning"),
                                ("thinking", "external_provider_reasoning"),
@@ -126,7 +148,16 @@ class OpenAICompatibleTransport:
                     channels.append({"kind": kind, "source": f"choices[0].message.{name}",
                                      "content": value, "model": model,
                                      "provenance": "external_api_response"})
-            return ProviderOutput(choice.message.content or "", channels, metadata)
+            if model_text.reason_content and not any(
+                item.get("content") == model_text.reason_content for item in channels
+            ):
+                channels.append({"kind": "external_provider_reasoning",
+                                 "source": "choices[0].message.reason.content",
+                                 "content": model_text.reason_content, "model": model,
+                                 "provenance": "external_api_response"})
+            output = ProviderOutput(str(model_text), channels, metadata)
+            output.reason_content = model_text.reason_content
+            return output
         finally:
             client.close()
 
@@ -191,11 +222,31 @@ class LLMGateway:
         self._validate_required_bindings()
         self.transport = transport if transport is not None else OpenAICompatibleTransport()
         self.call_log: list[dict] = []
+        self._event_sink = None
         self._context = {
             "episode_id": "",
             "sim_time_min": 0.0,
             "memory_version": "baseline",
         }
+
+    def set_event_sink(self, sink) -> None:
+        self._event_sink = sink
+
+    def _emit_status(self, call: dict, status: str, attempt: int) -> None:
+        if self._event_sink is None:
+            return
+        record = {
+            "status": status,
+            "role": call["role"],
+            "call_id": call["call_id"],
+            "sim_time_min": call["sim_time_min"],
+            "attempt": attempt,
+        }
+        try:
+            self._event_sink(record)
+        except Exception:
+            # Diagnostic delivery must not change a model decision.
+            pass
 
     def set_context(
         self,
@@ -304,9 +355,13 @@ class LLMGateway:
 
     @staticmethod
     def _is_timeout(exc: Exception) -> bool:
-        from openai import APITimeoutError
-
-        return isinstance(exc, (TimeoutError, APITimeoutError))
+        if isinstance(exc, TimeoutError):
+            return True
+        try:
+            from openai import APITimeoutError
+        except ImportError:
+            return False
+        return isinstance(exc, APITimeoutError)
 
     @staticmethod
     def _status_code(exc: BaseException) -> int | None:
@@ -482,6 +537,7 @@ class LLMGateway:
             "failure_category": None,
         }
         self.call_log.append(call)
+        self._emit_status(call, "started", 1)
 
         last_errors: tuple[str, ...] = ()
         failure_category = "transport"
@@ -510,6 +566,7 @@ class LLMGateway:
                     failure_category = "timeout"
                     call.setdefault("initial_failure_category", failure_category)
                     break
+                self._emit_status(call, "retry", attempt_number)
             attempt = {
                 "attempt": attempt_number,
                 "max_tokens": attempt_max_tokens,
@@ -641,6 +698,9 @@ class LLMGateway:
             if not isinstance(raw, str):
                 raw = str(raw)
             attempt["raw_output"] = self._redact(raw)
+            reason_content = getattr(raw, "reason_content", "")
+            if isinstance(reason_content, str) and reason_content.strip():
+                call["reason_content"] = self._redact(reason_content)
             call["raw_attempts"].append(self._redact(raw))
             if validate is None:
                 payload = {"text": raw}
@@ -678,6 +738,7 @@ class LLMGateway:
                 break
             if not last_errors:
                 call["success"] = True
+                self._emit_status(call, "success", attempt_number)
                 return ModelResult(
                     call_id,
                     True,
@@ -703,6 +764,7 @@ class LLMGateway:
             )
 
         call["failure_category"] = failure_category
+        self._emit_status(call, "timeout" if failure_category == "timeout" else "failed", len(call["attempts"]))
         return ModelResult(
             call_id=call_id,
             success=False,

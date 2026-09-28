@@ -21,6 +21,7 @@ const npmExecutable = process.env.PLAYWRIGHT_NPM
   || path.join(projectRoot, ".runtime", "node-v24.19.0-win-x64", "npm.cmd");
 
 export default defineConfig({
+  testDir: "./tests",
   timeout: 120_000,
   expect: { timeout: 15_000 },
   retries: 0,

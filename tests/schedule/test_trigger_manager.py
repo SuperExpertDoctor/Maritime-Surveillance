@@ -23,9 +23,11 @@ def test_initial_trigger_is_none(sm):
 
 def test_periodic_heavy_trigger(sm, config):
     tm = TriggerManager(sm)
+    sm.cycle = 1
     cycle = config.llm.heavy_cycle_min
     d = tm.check(cycle)
     assert d.trigger_type == "heavy"
+    assert d.source == "periodic"
 
 
 def test_initial_deployment_triggers_heavy_without_waiting_for_periodic_cycle(sm):
@@ -35,6 +37,7 @@ def test_initial_deployment_triggers_heavy_without_waiting_for_periodic_cycle(sm
 
     assert decision.trigger_type == "heavy"
     assert decision.reason == "initial fleet deployment"
+    assert decision.source == "initial"
 
 
 def test_decision_failure_retries_after_one_simulation_minute(sm):
@@ -47,6 +50,7 @@ def test_decision_failure_retries_after_one_simulation_minute(sm):
     decision = tm.check(11.0)
     assert decision.trigger_type == "heavy"
     assert decision.reason == "retry after decision_deadline_exceeded"
+    assert decision.source == "retry"
     assert tm.check(11.0).trigger_type == "none"
 
 
@@ -63,6 +67,7 @@ def test_uav_returned_heavy_trigger(sm):
                     position={"col": 18, "row": 8}, marker_position={"col": 18, "row": 8})
     d = tm.check(15.0)
     assert d.trigger_type == "heavy"
+    assert d.source == "event"
 
 
 @pytest.mark.parametrize(
