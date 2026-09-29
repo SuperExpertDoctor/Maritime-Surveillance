@@ -100,11 +100,14 @@ export function chooseAisTargets(frame, rng) {
   return typeIIIds.slice(0, Math.max(1, Math.ceil(typeIIIds.length / 2)));
 }
 
-export function auditAcceptance({ report, operatorEvents, frames }) {
+export function auditAcceptance({ report, operatorEvents, frames, requiredWallSeconds = 21600 }) {
   const failures = [];
   const wallSeconds = Number(report?.summary?.wall_seconds);
-  if (!Number.isFinite(wallSeconds) || wallSeconds < 21600) {
-    failures.push(`main.py wall runtime was ${wallSeconds || 0}s; at least 21600s is required`);
+  if (!Number.isFinite(requiredWallSeconds) || requiredWallSeconds <= 0) {
+    throw new RangeError("requiredWallSeconds must be finite and positive");
+  }
+  if (!Number.isFinite(wallSeconds) || wallSeconds < requiredWallSeconds) {
+    failures.push(`main.py wall runtime was ${wallSeconds || 0}s; at least ${requiredWallSeconds}s is required`);
   }
 
   const frameById = new Map();

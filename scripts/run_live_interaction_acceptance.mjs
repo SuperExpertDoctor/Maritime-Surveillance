@@ -27,20 +27,38 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PYTHON = process.env.PYTHON || "python";
-const ACCEPTANCE_SECONDS = 21_720;
+const DEFAULT_ACCEPTANCE_HOURS = 6;
 const SMOKE_SECONDS = 600;
 const ACCEPTANCE_STEP_DELAY = 60;
 const SMOKE_STEP_DELAY = 1;
+// When the final scheduled intervention lands exactly on the window edge the
+// process keeps running briefly so the command can apply and the red-side
+// response stays observable in retained frames.
+const EDGE_OBSERVATION_SECONDS = 720;
+const TRAILING_MARGIN_SECONDS = 120;
 
 export function parseArgs(args = process.argv.slice(2)) {
   let smoke = false;
   let seed = null;
+  let hours = DEFAULT_ACCEPTANCE_HOURS;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--help" || argument === "-h") return { help: true };
     if (argument === "--smoke") {
       if (smoke) throw new Error("--smoke may only be specified once");
       smoke = true;
+      continue;
+    }
+    if (argument === "--hours") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("--") || !/^\d+(\.\d+)?$/.test(value)) {
+        throw new Error("--hours requires a positive number of hours");
+      }
+      hours = Number(value);
+      if (!Number.isFinite(hours) || hours <= 0) {
+        throw new Error("--hours requires a positive number of hours");
+      }
+      index += 1;
       continue;
     }
     if (argument === "--seed") {
@@ -59,15 +77,29 @@ export function parseArgs(args = process.argv.slice(2)) {
     throw new Error(`unknown option: ${argument}`);
   }
   if (seed === null) throw new Error("--seed is required so the run can be reproduced");
-  return { smoke, seed };
+  return { smoke, seed, hours };
 }
 
-export function buildMainArgs({ smoke, port, memoryRoot, reportDir, mainScript = join(ROOT, "main.py") }) {
+export function acceptanceWindowSeconds(hours) {
+  if (!Number.isFinite(hours) || hours <= 0) {
+    throw new RangeError("hours must be finite and positive");
+  }
+  return hours * 3600;
+}
+
+export function acceptanceWallSeconds(hours) {
+  const windowSeconds = acceptanceWindowSeconds(hours);
+  const lastEventSeconds = Math.max(...operatorSchedule().map((event) => event.atMs)) / 1000;
+  return windowSeconds
+    + (lastEventSeconds >= windowSeconds ? EDGE_OBSERVATION_SECONDS : TRAILING_MARGIN_SECONDS);
+}
+
+export function buildMainArgs({ smoke, port, memoryRoot, reportDir, hours = DEFAULT_ACCEPTANCE_HOURS, mainScript = join(ROOT, "main.py") }) {
   return [
     mainScript,
     "--steps", "1000",
     "--step-delay", smoke ? String(SMOKE_STEP_DELAY) : String(ACCEPTANCE_STEP_DELAY),
-    "--wall-seconds", String(smoke ? SMOKE_SECONDS : ACCEPTANCE_SECONDS),
+    "--wall-seconds", String(smoke ? SMOKE_SECONDS : acceptanceWallSeconds(hours)),
     "--llm-probe-timeout", "120",
     "--port", String(port),
     "--memory-root", memoryRoot,
@@ -75,7 +107,16 @@ export function buildMainArgs({ smoke, port, memoryRoot, reportDir, mainScript =
   ];
 }
 
-async function runScenario({ smoke, seed }) {
+async function runScenario({ smoke, seed, hours = DEFAULT_ACCEPTANCE_HOURS }) {
+  const windowSeconds = smoke ? SMOKE_SECONDS : acceptanceWindowSeconds(hours);
+  const wallSeconds = smoke ? SMOKE_SECONDS : acceptanceWallSeconds(hours);
+  const lastEventMs = Math.max(...operatorSchedule().map((event) => event.atMs));
+  if (!smoke && lastEventMs > windowSeconds * 1000) {
+    throw new Error(
+      `--hours ${hours} ends before the final scheduled intervention; `
+      + `at least ${lastEventMs / 3_600_000} hours are required`,
+    );
+  }
   const preflight = runPreflight();
   if (preflight.clearOutputsBeforeRun) {
     throw new Error("configs/common.yaml enables output deletion; the live run was not started");
@@ -132,7 +173,9 @@ async function runScenario({ smoke, seed }) {
     mode: smoke ? "smoke" : "acceptance",
     seed,
     startedAt: runStartedAt,
-    targetWallSeconds: smoke ? SMOKE_SECONDS : ACCEPTANCE_SECONDS,
+    acceptanceHours: smoke ? null : hours,
+    windowSeconds,
+    targetWallSeconds: wallSeconds,
     stepDelaySeconds: smoke ? SMOKE_STEP_DELAY : ACCEPTANCE_STEP_DELAY,
     mainArgs: null,
     port: null,
@@ -165,6 +208,7 @@ async function runScenario({ smoke, seed }) {
     const reportDir = paths.reportDir;
     const args = buildMainArgs({
       smoke,
+      hours,
       port,
       memoryRoot: paths.memoryRoot,
       reportDir,
@@ -337,6 +381,7 @@ async function runScenario({ smoke, seed }) {
     const frameRecords = await readJsonLines(paths.frames).catch(() => []);
     audit = auditAcceptance({
       report,
+      requiredWallSeconds: windowSeconds,
       operatorEvents: ledger.filter((item) => item.type === "scenario_event"),
         frames: frameRecords.filter((item) => item.type === "frame").map((item) => ({
           ...item.frame,
@@ -380,7 +425,7 @@ async function runScenario({ smoke, seed }) {
   await writeOperatorLine.flush().catch(() => {});
 
   process.stdout.write(`Run evidence: ${runDir}\n`);
-  if (audit) process.stdout.write(`Six-hour audit: ${audit.passed ? "PASS" : "FAIL"}\n`);
+  if (audit) process.stdout.write(`${hours}-hour audit: ${audit.passed ? "PASS" : "FAIL"}\n`);
   if (failure) throw Object.assign(failure, { runDir, audit });
   if (audit && !audit.passed) throw Object.assign(new Error(audit.failures.join("; ")), { runDir, audit });
   return { runDir, audit, smokeSummary };
@@ -899,7 +944,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const options = parseArgs();
     if (options.help) {
-      process.stdout.write("Usage: node scripts/run_live_interaction_acceptance.mjs [--smoke] --seed <uint32>\n");
+      process.stdout.write("Usage: node scripts/run_live_interaction_acceptance.mjs [--smoke] [--hours <N>] --seed <uint32>\n");
     } else {
       await runScenario(options);
     }

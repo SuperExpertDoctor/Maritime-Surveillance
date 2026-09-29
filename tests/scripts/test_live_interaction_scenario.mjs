@@ -82,6 +82,18 @@ test("acceptance audit passes only with six-hour runtime and confirmed red respo
   assert.equal(audit.metrics.confirmedFleetRounds, 3);
 });
 
+test("acceptance audit honors a five-hour runtime window", () => {
+  const evidence = completeEvidence();
+  evidence.report.summary.wall_seconds = 18720;
+  const passing = auditAcceptance({ ...evidence, requiredWallSeconds: 18000 });
+  assert.equal(passing.passed, true, passing.failures.join("\n"));
+
+  evidence.report.summary.wall_seconds = 17999;
+  const failing = auditAcceptance({ ...evidence, requiredWallSeconds: 18000 });
+  assert.equal(failing.passed, false);
+  assert.match(failing.failures.join("\n"), /18000/);
+});
+
 test("acceptance audit rejects queued actions and missing red task evidence", () => {
   const evidence = completeEvidence();
   evidence.report.summary.wall_seconds = 21599;
