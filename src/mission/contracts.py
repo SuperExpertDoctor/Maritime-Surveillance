@@ -851,11 +851,11 @@ class RedMotionParameters:
     zigzag_heading_deg: float
     zigzag_period_min: float
     phase_deg: float
+    reason_content: str
 
 
 @dataclass(frozen=True)
 class RedPlan:
-    schema_version: str
     snapshot_id: str
     valid_for_min: float
     commands: tuple[RedMotionParameters, ...]

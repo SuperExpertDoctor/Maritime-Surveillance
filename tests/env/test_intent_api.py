@@ -293,11 +293,12 @@ def test_bounded_red_retries_pause_until_manual_retry_and_resume_in_place():
                 raise TimeoutError('Request timed out.')
             snapshot = json.loads(kwargs['messages'][1]['content'])['snapshot']
             return json.dumps({
-                'schema_version': 'red-plan/v1', 'snapshot_id': snapshot['snapshot_id'],
+                'snapshot_id': snapshot['snapshot_id'],
                 'valid_for_min': 3.0, 'notes': '',
                 'commands': [{
                     'ship_id': ship_id, 'heading_offset_deg': 12.0, 'speed_kn': 18.0,
                     'zigzag_heading_deg': 0.0, 'zigzag_period_min': 10.0, 'phase_deg': 37.0,
+                    'reason_content': f'Evade UAV near {ship_id}',
                 } for ship_id, _stage in snapshot['active_signature']],
             })
 

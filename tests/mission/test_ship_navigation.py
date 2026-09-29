@@ -22,7 +22,7 @@ def vessel(**kwargs):
 
 
 def parameters(offset=0., amplitude=0., phase=0., speed=18., period=12.):
-    return RedMotionParameters("V1", offset, speed, amplitude, period, phase)
+    return RedMotionParameters("V1", offset, speed, amplitude, period, phase, "Navigation test")
 
 
 def test_clear_water_keeps_oscillation_without_astar(monkeypatch):

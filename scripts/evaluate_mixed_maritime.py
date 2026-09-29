@@ -562,7 +562,6 @@ class _FixtureGateway:
                     if isinstance(item, (list, tuple)) and item
                 ]
             payload = {
-                "schema_version": "red-plan/v1",
                 "snapshot_id": snapshot.get("snapshot_id", snapshot_id),
                 "valid_for_min": min(1.0, float(constraints.get("max_valid_for_min", 1.0))),
                 "commands": [
@@ -573,6 +572,7 @@ class _FixtureGateway:
                         "zigzag_heading_deg": 0.0,
                         "zigzag_period_min": period,
                         "phase_deg": 0.0 if phase_upper > 0.0 else 0.0,
+                        "reason_content": f"Evade surveillance UAV near {ship_id}",
                     }
                     for ship_id in active_ship_ids
                 ],

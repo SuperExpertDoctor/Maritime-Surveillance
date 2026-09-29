@@ -483,6 +483,9 @@ class SimulationEngine:
         for ship in self.ships:
             params = ship._navigation_params
             provenance = self._maneuver_provenance.get(ship.id, {}) if params else {}
+            motion = asdict(params) if params else None
+            if motion is not None:
+                motion.pop("reason_content")
             inventory.append({
                 "scenario_entity_id": ship.id,
                 "revision": self._vessel_revisions.get(ship.id, 1),
@@ -493,8 +496,8 @@ class SimulationEngine:
                 "surveillance_stage": self.surveillance_stages.snapshot(ship.id).stage,
                 "speed_kn": float(ship.speed_kn),
                 "heading_deg": float(math.degrees(ship.heading_rad)),
-                "motion_parameters": asdict(params) if params else None,
-                "motion_reason_content": provenance.get("reason_content"),
+                "motion_parameters": motion,
+                "motion_reason_content": params.reason_content if params else None,
                 "motion_plan_id": provenance.get("plan_id"),
                 "motion_decision_time_min": provenance.get("time_min"),
             })
@@ -2278,9 +2281,6 @@ class SimulationEngine:
         commands = {} if plan is None else {command.ship_id: command for command in plan.commands}
         plan_id = None if plan is None else plan.snapshot_id
         new_plan = plan_id != self._installed_red_plan_id
-        call = next((item for item in reversed(getattr(self.red_commander.gateway, "call_log", ()))
-                     if item.get("role") == "red_commander"
-                     and item.get("snapshot_id") == plan_id and item.get("success")), None) if new_plan and plan_id else None
         for ship in self.ships:
             params = (
                 commands.get(ship.id)
@@ -2294,12 +2294,13 @@ class SimulationEngine:
                     if new_plan:
                         self._maneuver_provenance[ship.id] = {
                             "plan_id": plan_id,
-                            "reason_content": call.get("reason_content") if call else None,
-                            "time_min": call.get("sim_time_min", current_time) if call else current_time,
+                            "time_min": current_time,
                         }
                     self.allocator.sm.add_event("opponent_maneuver_installed", {
                         "side": "blue", "vessel_id": ship.id,
-                        "plan_id": plan_id, "parameters": asdict(params),
+                        "plan_id": plan_id,
+                        "parameters": {key: value for key, value in asdict(params).items()
+                                       if key != "reason_content"},
                     })
                 else:
                     self._maneuver_provenance.pop(ship.id, None)

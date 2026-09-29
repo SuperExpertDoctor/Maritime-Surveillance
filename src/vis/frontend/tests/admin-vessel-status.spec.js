@@ -141,3 +141,25 @@ test('long adjustment reasons expand without enlarging every row', async ({ page
   await expect(row.locator('details')).toHaveAttribute('open', '');
   await expect(row).toContainText(reason);
 });
+
+test('each vessel shows only its own maneuver reason after frame updates', async ({ page }) => {
+  const second = { ...typeII, scenario_entity_id: 'ship-iii',
+    motion_reason_content: 'Turn away from southern patrol' };
+  const fixture = frameFixture('live', { scenario_vessels: [typeII, second] });
+  await installFrameSocket(page, fixture);
+  await page.goto('/');
+  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await page.getByRole('tab', { name: '船舶状态' }).click();
+  const table = page.getByRole('table', { name: '船舶状态' });
+  const firstRow = table.getByRole('row', { name: /ship-ii\s/ });
+  const secondRow = table.getByRole('row', { name: /ship-iii\s/ });
+  await expect(firstRow.locator('summary')).toHaveText('Avoid nearby UAV');
+  await expect(secondRow.locator('summary')).toHaveText('Turn away from southern patrol');
+  await page.evaluate(frame => window.__pushFrame(frame), {
+    ...fixture, frame_id: 2, scenario_vessels: [typeII, {
+      ...second, motion_reason_content: 'Change speed near approaching aircraft',
+    }],
+  });
+  await expect(firstRow.locator('summary')).toHaveText('Avoid nearby UAV');
+  await expect(secondRow.locator('summary')).toHaveText('Change speed near approaching aircraft');
+});

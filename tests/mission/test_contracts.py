@@ -147,11 +147,12 @@ from src.mission.contracts import (
                 "zigzag_heading_deg",
                 "zigzag_period_min",
                 "phase_deg",
+                "reason_content",
             ),
         ),
         (
             RedPlan,
-            ("schema_version", "snapshot_id", "valid_for_min", "commands", "notes"),
+            ("snapshot_id", "valid_for_min", "commands", "notes"),
         ),
     ],
 )

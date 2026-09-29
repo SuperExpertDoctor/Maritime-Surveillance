@@ -23,7 +23,7 @@ def red_module():
 
 @pytest.fixture
 def ship_config():
-    return ConfigLoader.load().ship
+    return replace(ConfigLoader.load().ship, speed_kn=18.0, speed_max_kn=24.0)
 
 
 @pytest.mark.parametrize("distance,expected", [(1.49, "evasive"), (1.5, "normal"), (1.51, "normal")])
@@ -141,11 +141,12 @@ def snapshot(snapshot_id="S1", now=0.0, active=("V1", "V2")):
 
 def plan_payload(snapshot_id="S1", active=("V1", "V2"), **changes):
     return {
-        "schema_version": "red-plan/v1", "snapshot_id": snapshot_id,
+        "snapshot_id": snapshot_id,
         "valid_for_min": 3.0,
         "commands": [
             {"ship_id": ship_id, "heading_offset_deg": 12.0, "speed_kn": 18.0,
-             "zigzag_heading_deg": 0.0, "zigzag_period_min": 10.0, "phase_deg": 37.0}
+             "zigzag_heading_deg": 0.0, "zigzag_period_min": 10.0, "phase_deg": 37.0,
+             "reason_content": f"Evade UAV near {ship_id}"}
             for ship_id in active
         ],
         "notes": "fleet maneuver", **changes,
@@ -179,8 +180,9 @@ def test_two_targets_in_one_frame_receive_one_centralized_plan(scripted_transpor
     current = snapshot(now=10.0)
     plan = commander.decide(current)
     assert plan == RedPlan(
-        "red-plan/v1", "S1", 3.0,
-        tuple(RedMotionParameters(ship_id, 12.0, 18.0, 0.0, 10.0, 37.0) for ship_id in ("V1", "V2")),
+        "S1", 3.0,
+        tuple(RedMotionParameters(ship_id, 12.0, 18.0, 0.0, 10.0, 37.0,
+                                  f"Evade UAV near {ship_id}") for ship_id in ("V1", "V2")),
         "fleet maneuver",
     )
     assert len(transport.calls) == len(gateway.call_log) == 1
@@ -280,7 +282,7 @@ def test_invalid_command_number_rejects_whole_batch(scripted_transport, ship_con
 
 
 @pytest.mark.parametrize("changes", [
-    {"schema_version": "red-plan/v2"}, {"schema_version": True},
+    {"schema_version": "obsolete"}, {"schema_version": True},
     {"snapshot_id": "older-snapshot"}, {"snapshot_id": None},
     {"valid_for_min": 0}, {"valid_for_min": -1}, {"valid_for_min": 3.01},
     {"valid_for_min": True}, {"valid_for_min": "3"}, {"valid_for_min": None},
@@ -298,9 +300,9 @@ def test_invalid_plan_schema_rejects_whole_batch(scripted_transport, ship_config
 
 
 @pytest.mark.parametrize("level,field", [
-    ("plan", field) for field in ("schema_version", "snapshot_id", "valid_for_min", "commands", "notes")
+    ("plan", field) for field in ("snapshot_id", "valid_for_min", "commands", "notes")
 ] + [("command", field) for field in (
-    "ship_id", "heading_offset_deg", "speed_kn", "zigzag_heading_deg", "zigzag_period_min", "phase_deg",
+    "ship_id", "heading_offset_deg", "speed_kn", "zigzag_heading_deg", "zigzag_period_min", "phase_deg", "reason_content",
 )])
 def test_missing_required_field_is_a_validation_failure(scripted_transport, ship_config, level, field):
     payload = plan_payload()
@@ -333,6 +335,17 @@ def test_unknown_command_field_is_rejected(scripted_transport, ship_config):
     with pytest.raises(red_module().RedDecisionBlocked):
         commander.decide(snapshot())
     assert commander.installation is None
+
+
+@pytest.mark.parametrize("reason", ["", "   ", None, 7, ["text"]])
+def test_missing_public_ship_reason_rejects_whole_batch(scripted_transport, ship_config, reason):
+    payload = plan_payload()
+    payload["commands"][1]["reason_content"] = reason
+    commander, gateway, _ = commander_with(scripted_transport, ship_config, [payload] * 3)
+    with pytest.raises(red_module().RedDecisionBlocked, match="reason_content"):
+        commander.decide(snapshot())
+    assert commander.installation is None
+    assert gateway.call_log[-1]["failure_category"] == "validation"
 
 
 @pytest.mark.parametrize("heading,amplitude,speed", [(0, 0, 18), (7.99, 7.99, 19.99), (-7.99, 0, 16.01)])
@@ -383,8 +396,9 @@ def test_prompt_states_schema_authority_motion_semantics_and_config_limits(scrip
     commander, _, transport = commander_with(scripted_transport, config, [plan_payload(valid_for_min=2.0)])
     commander.decide(snapshot())
     system, user = transport.calls[0]["messages"]
-    for required in ("red-plan/v1", "active_signature", "normal_tangent_deg", "phase_deg", "type_i", "undetected", "commands", "valid_for_min"):
+    for required in ("reason_content", "active_signature", "normal_tangent_deg", "phase_deg", "type_i", "undetected", "commands", "valid_for_min"):
         assert required in system["content"]
+    assert "schema_version" not in system["content"]
     constraints = json.loads(user["content"])["constraints"]
     assert constraints["heading_offset_deg"] == [-75.0, 75.0]
     assert constraints["speed_kn"] == [10.0, 24.0]

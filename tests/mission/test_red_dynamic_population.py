@@ -52,7 +52,6 @@ def snapshot(snapshot_id="S1", now=0.0, active=(('V1', 'detected'),)):
 
 def plan_payload(snapshot_id, active):
     return {
-        "schema_version": "red-plan/v1",
         "snapshot_id": snapshot_id,
         "valid_for_min": 3.0,
         "commands": [
@@ -63,6 +62,7 @@ def plan_payload(snapshot_id, active):
                 "zigzag_heading_deg": 0.0,
                 "zigzag_period_min": 10.0,
                 "phase_deg": 37.0,
+                "reason_content": f"Evade UAV near {ship_id}",
             }
             for ship_id, _stage in active
         ],
@@ -131,6 +131,8 @@ def test_only_active_type_ii_stages_enter_signature_and_output_has_no_trajectory
         "zigzag_heading_deg",
         "zigzag_period_min",
         "phase_deg",
+        "reason_content",
     }
+    assert plan.commands[0].reason_content == "Evade UAV near V2"
     request = json.loads(transport.calls[0]["messages"][1]["content"])
     assert "trajectory" not in json.dumps(request)

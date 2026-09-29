@@ -75,10 +75,9 @@ def test_valid_red_plan_is_installed_before_ship_motion():
     uav._col, uav._row = target.float_position
     target_id = target.id
     plan = RedPlan(
-        "red-plan/v1",
         "red-0-1",
         3.0,
-        (RedMotionParameters(target_id, 12.0, 18.0, 0.0, 10.0, 37.0),),
+        (RedMotionParameters(target_id, 12.0, 18.0, 0.0, 10.0, 37.0, "Evade test UAV"),),
         "test plan",
     )
     engine.red_commander.decide = lambda snapshot: plan

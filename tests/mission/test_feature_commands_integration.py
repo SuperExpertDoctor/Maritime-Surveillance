@@ -208,7 +208,6 @@ class _InvalidRedGateway(_FixtureGateway):
                 **kwargs,
             )
         payload = {
-            "schema_version": "red-plan/v1",
             "snapshot_id": snapshot_id,
             "valid_for_min": 1.0,
             "commands": [],

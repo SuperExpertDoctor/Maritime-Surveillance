@@ -262,8 +262,6 @@ class RedCommander:
         errors = []
         if set(payload) != {field.name for field in fields(RedPlan)}:
             errors.append("plan fields must exactly match RedPlan")
-        if payload.get("schema_version") != "red-plan/v1":
-            errors.append("schema_version must be red-plan/v1")
         if payload.get("snapshot_id") != snapshot.snapshot_id:
             errors.append("snapshot_id does not match current snapshot")
         validity = payload.get("valid_for_min")
@@ -288,6 +286,9 @@ class RedCommander:
                 errors.append(f"{prefix}.ship_id must be a nonempty string")
             else:
                 command_ids.append(ship_id)
+            reason = command.get("reason_content")
+            if not isinstance(reason, str) or not reason.strip():
+                errors.append(f"{prefix}.reason_content must be a nonempty string")
             numeric_ok = True
             for name in ("heading_offset_deg", "speed_kn", "zigzag_heading_deg", "zigzag_period_min", "phase_deg"):
                 value = command.get(name)
@@ -404,7 +405,7 @@ class RedCommander:
             raise RedDecisionBlocked("; ".join(result.errors))
         payload = result.payload
         plan = RedPlan(
-            schema_version=payload["schema_version"], snapshot_id=payload["snapshot_id"],
+            snapshot_id=payload["snapshot_id"],
             valid_for_min=payload["valid_for_min"],
             commands=tuple(RedMotionParameters(**command) for command in payload["commands"]),
             notes=payload["notes"],
