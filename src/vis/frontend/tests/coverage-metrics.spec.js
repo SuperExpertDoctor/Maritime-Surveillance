@@ -67,6 +67,71 @@ test("coverage follows pushed frames without reload", async ({ page }) => {
   await expect(panel.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "5");
 });
 
+test("sidebar replaces window metadata with a live information heatmap", async ({ page }) => {
+  const info = Array.from({ length: 30 }, () => Array(30).fill(0));
+  info[0][0] = -2;
+  info[1][2] = 2;
+  await installFrameSocket(page, coverageFrame({ minute: 56, overrides: { info_matrix: info } }));
+  await page.goto("/");
+
+  const heatmap = page.getByTestId("information-heatmap");
+  await expect(heatmap).toBeVisible();
+  await expect(page.locator(".coverage-meta")).toHaveCount(0);
+  const sample = (col, row) => heatmap.evaluate((canvas, [x, y]) =>
+    [...canvas.getContext("2d").getImageData(x * 6 + 2, y * 6 + 2, 1, 1).data], [col, row]);
+  const low = await sample(0, 0);
+  const high = await sample(1, 2);
+  expect(high[0]).toBeLessThan(low[0]);
+  const bounds = await heatmap.boundingBox();
+  await page.mouse.move(bounds.x + bounds.width * 1.5 / 30, bounds.y + bounds.height * 2.5 / 30);
+  await expect(page.locator(".information-heatmap-heading small")).toHaveText("2, 3 · 1.00");
+
+  const updated = Array.from({ length: 30 }, () => Array(30).fill(0));
+  updated[0][0] = 1;
+  await page.evaluate((nextFrame) => window.__pushFrame(nextFrame), coverageFrame({
+    minute: 57, overrides: { info_matrix: updated },
+  }));
+  await expect.poll(() => sample(0, 0)).toEqual(high);
+  await expect.poll(() => sample(1, 2)).toEqual(low);
+  await expect(page.locator(".information-heatmap-heading small")).toHaveText("2, 3 · 0.00");
+
+  await page.evaluate((nextFrame) => window.__pushFrame(nextFrame), coverageFrame({
+    minute: 58, overrides: { info_matrix: null },
+  }));
+  await expect(heatmap).toHaveCount(0);
+  await expect(page.locator(".information-heatmap-empty")).toBeVisible();
+});
+
+test("information heatmap stays framed in desktop and mobile sidebars", async ({ page }, testInfo) => {
+  const info = Array.from({ length: 30 }, (_, col) =>
+    Array.from({ length: 30 }, (_, row) => (col + row) / 58));
+  await installFrameSocket(page, coverageFrame({ minute: 56, overrides: { info_matrix: info } }));
+
+  for (const [width, height, label] of [[1365, 900, "desktop"], [390, 844, "mobile"]]) {
+    await page.setViewportSize({ width, height });
+    if (label === "desktop") {
+      await page.goto("/");
+    } else {
+      await page.getByRole("button", { name: "切换编队状态面板" }).click();
+    }
+    const canvas = page.getByTestId("information-heatmap");
+    await canvas.scrollIntoViewIfNeeded();
+    await expect(canvas).toBeVisible();
+    const geometry = await canvas.evaluate((element) => {
+      const heatmap = element.getBoundingClientRect();
+      const panel = element.closest(".coverage-panel").getBoundingClientRect();
+      return { width: heatmap.width, height: heatmap.height,
+        inside: heatmap.left >= panel.left && heatmap.right <= panel.right,
+        ratio: heatmap.width / heatmap.height };
+    });
+    expect(geometry.inside).toBe(true);
+    expect(geometry.width).toBeGreaterThan(150);
+    expect(geometry.width).toBeLessThanOrEqual(200);
+    expect(geometry.ratio).toBeCloseTo(1, 2);
+    await page.screenshot({ path: testInfo.outputPath(`information-${label}.png`) });
+  }
+});
+
 test("window values, areas, and overdue percentage use the selected frame window", async ({ page }) => {
   await installFrameSocket(page, coverageFrame({ minute: 120, cells60: 12, domainCells: 100 }));
   await page.goto("/");

@@ -1,8 +1,10 @@
 import { Radar } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const WINDOW_OPTIONS = [30, 60, 120];
 const COVERAGE_SCHEMA = "persistent-coverage/v1";
+const HEATMAP_CELLS = 30;
+const HEATMAP_CELL_SIZE = 6;
 
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -34,6 +36,69 @@ function connectionMessage(connectionStatus) {
   return null;
 }
 
+function normalizedInformation(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : 0;
+}
+
+function InformationHeatmap({ info }) {
+  const canvasRef = useRef(null);
+  const [hovered, setHovered] = useState(null);
+  const hasInfo = Array.isArray(info) && info.length === HEATMAP_CELLS
+    && info.every((column) => Array.isArray(column) && column.length === HEATMAP_CELLS);
+
+  useEffect(() => {
+    if (!hasInfo) return;
+    const ctx = canvasRef.current?.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#cbdbd7";
+    ctx.fillRect(0, 0, HEATMAP_CELLS * HEATMAP_CELL_SIZE, HEATMAP_CELLS * HEATMAP_CELL_SIZE);
+    for (let col = 0; col < HEATMAP_CELLS; col += 1) {
+      for (let row = 0; row < HEATMAP_CELLS; row += 1) {
+        const value = normalizedInformation(info[col][row]);
+        ctx.fillStyle = `rgb(${Math.round(232 - 210 * value)}, ${Math.round(240 - 100 * value)}, ${Math.round(237 - 130 * value)})`;
+        ctx.fillRect(col * HEATMAP_CELL_SIZE + 1, row * HEATMAP_CELL_SIZE + 1,
+          HEATMAP_CELL_SIZE - 1, HEATMAP_CELL_SIZE - 1);
+      }
+    }
+  }, [hasInfo, info]);
+
+  const handlePointerMove = (event) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const col = Math.min(HEATMAP_CELLS - 1,
+      Math.max(0, Math.floor((event.clientX - bounds.left) / bounds.width * HEATMAP_CELLS)));
+    const row = Math.min(HEATMAP_CELLS - 1,
+      Math.max(0, Math.floor((event.clientY - bounds.top) / bounds.height * HEATMAP_CELLS)));
+    setHovered({ col, row });
+  };
+
+  return (
+    <div className="information-heatmap-section">
+      <div className="information-heatmap-heading">
+        <strong>信息量可视化</strong>
+        <small>{hovered && hasInfo
+          ? `${hovered.col + 1}, ${hovered.row + 1} · ${normalizedInformation(info[hovered.col][hovered.row]).toFixed(2)}`
+          : "30 × 30"}</small>
+      </div>
+      {hasInfo ? (
+        <canvas
+          ref={canvasRef}
+          data-testid="information-heatmap"
+          width={HEATMAP_CELLS * HEATMAP_CELL_SIZE}
+          height={HEATMAP_CELLS * HEATMAP_CELL_SIZE}
+          role="img"
+          aria-label="信息量热力图，30乘30格，信息量归一化范围为0到1"
+          onPointerMove={handlePointerMove}
+          onPointerLeave={() => setHovered(null)}
+        />
+      ) : <p className="information-heatmap-empty">暂无信息量数据</p>}
+      <div className="information-heatmap-legend" aria-label="信息量色阶，从0到1">
+        <span>0</span><i /><span>1</span>
+      </div>
+    </div>
+  );
+}
+
 export default function CoveragePanel({ frame, connectionStatus = "connected", readOnly = false }) {
   const [windowMin, setWindowMin] = useState(60);
 
@@ -62,8 +127,6 @@ export default function CoveragePanel({ frame, connectionStatus = "connected", r
     statusMessages.push("无可搜索海域");
   } else if (!windowData) {
     statusMessages.push("该帧缺少持续覆盖窗口数据");
-  } else if (windowData.window_complete === false) {
-    statusMessages.push("窗口积累中");
   }
 
   if (frame?.runtime_status === "paused_model") {
@@ -145,12 +208,7 @@ export default function CoveragePanel({ frame, connectionStatus = "connected", r
         </div>
       </dl>
 
-      <div className="coverage-meta">
-        <span>{simulationTimeText(metrics?.as_of_min)}</span>
-        {supported && windowData && (
-          <span>{windowData.window_complete === false ? "窗口积累中" : "窗口已完整"}</span>
-        )}
-      </div>
+      <InformationHeatmap info={frame?.info_matrix} />
       {statusText && <p className="coverage-status" role="status">{statusText}</p>}
     </section>
   );
