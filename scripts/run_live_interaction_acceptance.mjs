@@ -877,18 +877,67 @@ async function runIntervention({
   await recordOperator({ type: "scenario_event", ...auditEvent });
 }
 
-function choosePlacementCell(frame, random, excludedPositions = []) {
+// Engine-side placement validation (`SimulationEngine._create_scenario_vessel`)
+// rejects cells inside `ship_land_mask` (mainland + islands) or `obstacle_mask`
+// (islands + thunderstorms plus `storm_safety_margin_cells`), and positions
+// within 1.0 cells of any live ship.  The published `searchable_cells` domain
+// does not carry any of that, so the picker must reproduce the masks from the
+// frame's `config_snapshot` and `obstacles`.  Small extra buffers account for
+// ship/storm drift between the selection frame and command application.
+const PLACEMENT_SHIP_CLEARANCE_CELLS = 1.1;
+const PLACEMENT_STORM_DRIFT_CELLS = 0.25;
+// `config_snapshot.environment` may omit `storm_safety_margin_cells`; fall back
+// to the configured default so storm clearance never drops below the engine's.
+const PLACEMENT_STORM_MARGIN_FALLBACK_CELLS = 1.0;
+
+function obstacleBounds(obstacle) {
+  const center = obstacle?.center;
+  const size = Number(obstacle?.size);
+  if (Array.isArray(center) && Number.isFinite(Number(center[0]))
+    && Number.isFinite(Number(center[1])) && Number.isFinite(size)) {
+    const half = size / 2;
+    return {
+      minX: Number(center[0]) - half, minY: Number(center[1]) - half,
+      maxX: Number(center[0]) + half, maxY: Number(center[1]) + half,
+    };
+  }
+  const vertices = obstacle?.vertices;
+  if (Array.isArray(vertices) && vertices.length) {
+    const xs = vertices.map((vertex) => Number(vertex?.[0])).filter(Number.isFinite);
+    const ys = vertices.map((vertex) => Number(vertex?.[1])).filter(Number.isFinite);
+    if (xs.length && ys.length) {
+      return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
+    }
+  }
+  return null;
+}
+
+export function choosePlacementCell(frame, random, excludedPositions = []) {
   const cells = frame?.search_domain?.searchable_cells;
   if (!Array.isArray(cells) || !cells.length) throw new Error("no searchable cells for vessel placement");
   const cols = Number(frame.search_domain.cols) || 30;
   const rows = Number(frame.search_domain.rows) || 30;
+  const environment = frame?.config_snapshot?.environment || {};
+  const mainlandWidth = Math.max(0, Number(environment.mainland_width_cells) || 0);
+  const stormMarginConfig = Number(environment.storm_safety_margin_cells);
+  const stormSafetyMargin = Number.isFinite(stormMarginConfig) && stormMarginConfig > 0
+    ? stormMarginConfig : PLACEMENT_STORM_MARGIN_FALLBACK_CELLS;
+  const blocked = (Array.isArray(frame?.obstacles) ? frame.obstacles : []).map((obstacle) => ({
+    bounds: obstacleBounds(obstacle),
+    clearance: obstacle?.type === "thunderstorm" ? stormSafetyMargin + PLACEMENT_STORM_DRIFT_CELLS : 0,
+  }));
+  const insideObstacle = (cell) => blocked.some(({ bounds, clearance }) => bounds
+    && cell[0] + 0.5 >= bounds.minX - clearance && cell[0] + 0.5 <= bounds.maxX + clearance
+    && cell[1] + 0.5 >= bounds.minY - clearance && cell[1] + 0.5 <= bounds.maxY + clearance);
   const ships = frame.scenario_vessels || [];
   const candidates = cells.filter((cell) => Array.isArray(cell) && cell.length === 2
     && Number.isInteger(cell[0]) && Number.isInteger(cell[1])
-    && cell[0] >= 1 && cell[0] < cols - 1 && cell[1] >= 1 && cell[1] < rows - 1
+    && cell[0] >= Math.max(1, mainlandWidth) && cell[0] < cols - 1
+    && cell[1] >= 1 && cell[1] < rows - 1
+    && !insideObstacle(cell)
     && [...ships.map((vessel) => vessel.position), ...excludedPositions].every((position) =>
       !Array.isArray(position)
-      || Math.hypot(position[0] - (cell[0] + 0.5), position[1] - (cell[1] + 0.5)) >= 1));
+      || Math.hypot(position[0] - (cell[0] + 0.5), position[1] - (cell[1] + 0.5)) >= PLACEMENT_SHIP_CLEARANCE_CELLS));
   if (!candidates.length) throw new Error("no legal unoccupied cell for vessel placement");
   return candidates[Math.floor(random() * candidates.length)];
 }
