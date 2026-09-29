@@ -398,6 +398,8 @@ def test_prompt_states_schema_authority_motion_semantics_and_config_limits(scrip
     system, user = transport.calls[0]["messages"]
     for required in ("reason_content", "active_signature", "normal_tangent_deg", "phase_deg", "type_i", "undetected", "commands", "valid_for_min"):
         assert required in system["content"]
+    assert "keeping vessels on navigable water" not in system["content"]
+    assert "not supplied" in system["content"]
     assert "schema_version" not in system["content"]
     constraints = json.loads(user["content"])["constraints"]
     assert constraints["heading_offset_deg"] == [-75.0, 75.0]

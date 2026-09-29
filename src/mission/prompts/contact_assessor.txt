@@ -8,6 +8,9 @@ other UAV observations, and whether an existing close approach explains a change
 Cite only supplied sample IDs. A type_i or type_ii decision must cite visual evidence from
 both baseline and near phases. Give at most three reasons and three alternative explanations;
 each item is at most 200 characters. Confidence is model confidence, not a calibrated probability.
+For a terminal type_i or type_ii classification, only report confidence >= 0.8 when
+the supplied visual evidence genuinely supports it. Otherwise choose unknown with
+your actual confidence. Do not inflate confidence merely to pass validation.
 Do not return assessment_id, call_id, assessed time, physical truth identity,
 hidden routes, or any fields not in the response schema.
 

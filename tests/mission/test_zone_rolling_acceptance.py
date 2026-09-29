@@ -369,6 +369,14 @@ def test_real_allocator_wiring_and_legacy():
     engine = _engine(uav_count=10)
     snapshot = engine.allocator.build_mission_snapshot()
     assert snapshot.coverage_summary["gap_pct"] == 100
+    assert snapshot.coverage_summary["rolling_sar_coverage_pct"] == 0
+    assert snapshot.coverage_summary["rolling_window_complete"] is False
+    assert snapshot.coverage_summary["primary_window_min"] == 60
+    assert snapshot.coverage_summary["candidate_expiry"]
+    assert {row["task_id"] for row in snapshot.coverage_summary["candidate_expiry"]} <= set(
+        snapshot.prompt_task_ids
+    )
+    assert MissionScheduler()._prompt_payload(snapshot)["snapshot"]["coverage_summary"] == snapshot.coverage_summary
     assert snapshot.coverage_constraint.required_new_search_count == 10
     # Fleet partitions may cross the fixed reporting zones; do not force
     # nine tiny contained representatives back into the candidate window.

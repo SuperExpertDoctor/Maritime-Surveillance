@@ -20,6 +20,15 @@ def api():
     return importlib.import_module("src.mission.contact_assessor")
 
 
+def test_classification_prompt_matches_terminal_confidence_gate():
+    from pathlib import Path
+
+    prompt = (Path(__file__).parents[2] / "src/mission/prompts/contact_assessor.txt").read_text(encoding="utf-8")
+    assert "0.8" in prompt
+    assert "unknown" in prompt
+    assert "Do not inflate" in prompt
+
+
 @pytest.fixture
 def observed():
     config = ConfigLoader.load().mission.contact

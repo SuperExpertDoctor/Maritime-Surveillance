@@ -17,6 +17,44 @@ def _positive(value: object, name: str) -> int:
     return int(value)
 
 
+def candidate_expiry_summary(
+    candidates: Iterable[Any], *, now_min: float, last_sar: np.ndarray,
+    fixed_mask: np.ndarray, primary_window_min: int,
+    transit_minutes: Mapping[str, float],
+) -> list[dict]:
+    """Describe SAR expiry before the earliest feasible aircraft can arrive."""
+    now = _time(now_min, "now_min")
+    window = _positive(primary_window_min, "primary_window_min")
+    fixed = np.asarray(fixed_mask, dtype=bool)
+    last = _last_sar(last_sar, fixed.shape, now)
+    result = []
+    for task in candidates:
+        if task.kind != "search" or task.bbox is None or task.task_id not in transit_minutes:
+            continue
+        transit = float(transit_minutes[task.task_id])
+        if not math.isfinite(transit) or transit < 0:
+            raise ValueError("transit_minutes must contain finite non-negative times")
+        x0, y0, x1, y1 = _bbox(task.bbox, task.task_id)
+        timestamps = last[x0:x1, y0:y1][fixed[x0:x1, y0:y1]]
+        fresh = timestamps[np.isfinite(timestamps) & (timestamps > now - window)]
+        result.append({
+            "task_id": task.task_id,
+            "fixed_cells": int(timestamps.size),
+            "unseen_cells": int(np.count_nonzero(~np.isfinite(timestamps))),
+            "overdue_cells": int(np.count_nonzero(
+                np.isfinite(timestamps) & (timestamps <= now - window)
+            )),
+            "expiring_before_arrival_cells": int(np.count_nonzero(
+                fresh + window <= now + transit
+            )),
+            "minutes_to_next_expiry": (
+                float(np.min(fresh) + window - now) if fresh.size else None
+            ),
+            "earliest_transit_min": transit,
+        })
+    return result
+
+
 @dataclass(frozen=True)
 class ZoneQuotaInput:
     zone_id: str

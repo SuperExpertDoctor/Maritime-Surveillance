@@ -185,6 +185,27 @@ def test_reviewer_wrapper_routes_text_through_isolated_gateway():
     assert client.last_reviewer_interaction["snapshot_id"] == "review-15.0"
 
 
+def test_reviewer_distinguishes_rolling_coverage_from_cumulative():
+    config = ConfigLoader.load()
+    transport = ScriptedTransport({"reviewer": ["memory"]})
+    reviewer = LLMReviewer(config, LLMClient(config, transport=transport))
+
+    class State(_ReviewerState):
+        @staticmethod
+        def get_persistent_coverage_stats():
+            return {"cumulative_pct": 57.0, "primary_window_min": 60,
+                    "windows": [{"minutes": 60, "coverage_pct": 14.0,
+                                 "window_complete": True}]}
+
+    reviewer.step(15.0, State())
+    payload = json.loads(json.loads(transport.calls[0]["messages"][-1]["content"])["prompt"])
+    assert payload["cumulative_sar_coverage_pct"] == 57.0
+    assert payload["rolling_sar_coverage_pct"] == 14.0
+    assert payload["rolling_window_min"] == 60
+    assert payload["rolling_window_complete"] is True
+    assert "coverage_pct" not in payload
+
+
 @pytest.mark.parametrize("raw", [
     '{}',
     '{"search_regions": null}',
@@ -371,6 +392,7 @@ def test_probe_disables_thinking_without_changing_later_decisions(monkeypatch):
     monkeypatch.setenv('LONGCAT_API_KEY', 'offline-probe-key')
     transport = ScriptedTransport({'decision_maker': ['OK', '{"answer": 1}']})
     client = LLMClient(ConfigLoader.load(), transport=transport)
+    client.gateway._bindings['decision_maker']['thinking'] = 'enabled'
     assert client.resolve_binding('decision_maker')['thinking'] == 'enabled'
     assert client.probe() == 'OK'
     assert transport.calls[0]['thinking'] == 'disabled'

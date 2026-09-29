@@ -4,12 +4,51 @@ import numpy as np
 import pytest
 
 from src.mission.coverage_policy import CoveragePolicy
+from src.mission.coverage_zones import candidate_expiry_summary
 
 
 @dataclass(frozen=True)
 class Candidate:
     task_id: str
     bbox: tuple[int, int, int, int]
+    kind: str = "search"
+
+
+def test_candidate_expiry_summary_counts_only_fixed_cells_and_future_expiry():
+    fixed = np.array([[True], [True], [False]], dtype=bool)
+    last = np.array([[50.0], [39.0], [-np.inf]])
+    summary = candidate_expiry_summary(
+        (Candidate("search:one", (0, 0, 3, 1)),),
+        now_min=100.0, last_sar=last, fixed_mask=fixed,
+        primary_window_min=60, transit_minutes={"search:one": 2.0},
+    )
+    assert summary == [{
+        "task_id": "search:one", "fixed_cells": 2,
+        "unseen_cells": 0, "overdue_cells": 1,
+        "expiring_before_arrival_cells": 0,
+        "minutes_to_next_expiry": 10.0,
+        "earliest_transit_min": 2.0,
+    }]
+
+
+def test_candidate_expiry_summary_flags_fresh_cells_expiring_during_transit():
+    summary = candidate_expiry_summary(
+        (Candidate("search:soon", (0, 0, 1, 1)),),
+        now_min=100.0, last_sar=np.array([[41.0]]),
+        fixed_mask=np.ones((1, 1), dtype=bool),
+        primary_window_min=60, transit_minutes={"search:soon": 2.0},
+    )
+    assert summary[0]["expiring_before_arrival_cells"] == 1
+    assert summary[0]["minutes_to_next_expiry"] == 1.0
+
+
+def test_rank_search_candidates_prefers_fresh_cells_nearing_expiry():
+    ranked = CoveragePolicy.rank_search_candidates(
+        (Candidate("later", (0, 0, 1, 1)), Candidate("soon", (1, 0, 2, 1))),
+        now_min=100.0, last_sar=np.array([[90.0], [41.0]]),
+        estimated_minutes={"later": 2.0, "soon": 2.0},
+    )
+    assert tuple(task.task_id for task in ranked) == ("soon", "later")
 
 
 def test_classify_partitions_fixed_domain_and_preserves_inputs():

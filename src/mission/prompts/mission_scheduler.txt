@@ -58,7 +58,17 @@ PRIORITIES
 1. Preserve safe executing assignments and boundaries; repartition only
    unreserved remaining domain when resources change.
 2. Spread legal work across the domain using coverage_summary's per-zone unseen,
-   overdue, and in-flight gaps. In-flight work is not a sensor observation and
+   overdue, and in-flight gaps. rolling_sar_coverage_pct is actual SAR coverage
+   within primary_window_min over the fixed domain, not cumulative coverage.
+   rolling_window_complete=false means the simulation has not yet accumulated
+   a full observation window; do not present that value as full-window C60.
+   candidate_expiry lists per-task fixed cells unseen, already overdue, and
+   expiring_before_arrival_cells at the earliest feasible UAV transit time;
+   minutes_to_next_expiry is the nearest fresh cell's deadline. Arrival alone
+   does not scan a cell: these are lower-bound warnings, not guaranteed coverage.
+   Prioritize feasible soon-expiring gaps alongside unseen and overdue work
+   without violating explicit quotas, safety, or distinct-UAV matching.
+   In-flight work is not a sensor observation and
    never makes cells fresh. Prefer supplied partition:* candidates; small
    search:* candidates are fallbacks for geometry, weather, or energy limits.
 3. Fill otherwise idle feasible capacity, even with a zero coverage addition

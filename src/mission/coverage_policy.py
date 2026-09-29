@@ -636,7 +636,7 @@ def rank_search_candidates(
 ) -> tuple[Any, ...]:
     """Rank search candidates without changing their identity or order data.
 
-    The key is ``(unseen first, oldest due time, regular work, due density,
+    The key is ``(unseen first, oldest scan time, regular work, due density,
     shorter task, bbox)``.  An unseen cell has episode age zero; otherwise age
     is represented by its actual SAR timestamp.  Residual ``fragment:*``
     candidates are deliberately considered after complete search rectangles
@@ -689,27 +689,6 @@ def rank_search_candidates(
     return tuple(item[0] for item in ranked)
 
 
-def _rank_key(
-    task_id: str,
-    bbox: tuple[int, int, int, int],
-    cells: tuple[tuple[int, int], ...],
-    now: float,
-    last: np.ndarray,
-    estimated_minutes: Mapping[str, Real],
-    primary_window_min: int,
-) -> tuple[int, float, int, float, int, tuple[int, int, int, int]]:
-    return _rank_key_vectorized(
-        task_id,
-        bbox,
-        cells,
-        np.asarray(cells, dtype=np.intp),
-        now,
-        last,
-        estimated_minutes,
-        primary_window_min,
-    )
-
-
 def _rank_key_vectorized(
     task_id: str,
     bbox: tuple[int, int, int, int],
@@ -730,7 +709,7 @@ def _rank_key_vectorized(
     elif due_count:
         oldest_due = float(np.min(timestamps[due]))
     else:
-        oldest_due = now
+        oldest_due = float(np.min(timestamps))
 
     estimate = estimated_minutes.get(task_id)
     if estimate is None:

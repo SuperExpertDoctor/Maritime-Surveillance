@@ -38,6 +38,7 @@ from src.mission.coverage_policy import (
 )
 from src.mission.coverage_zones import (
     ZonePartition, build_zone_coverage_summary, build_zone_quota_inputs,
+    candidate_expiry_summary,
 )
 from src.mission.mission_scheduler import (
     MissionScheduler, match_task_ids, actionable_edges,
@@ -264,6 +265,30 @@ class TaskAllocator:
                 feasible_mask=self.sm.get_searchable_mask(),
                 primary_window_min=coverage_config.primary_window_min,
                 in_flight_tasks=active_records,
+            )
+            sar_snapshot = metrics.snapshot(
+                now_min=now, feasible_mask=self.sm.get_searchable_mask(),
+            )
+            primary_coverage = next(
+                row for row in sar_snapshot["windows"]
+                if row["minutes"] == coverage_config.primary_window_min
+            )
+            coverage_summary["rolling_sar_coverage_pct"] = primary_coverage["coverage_pct"]
+            coverage_summary["rolling_window_complete"] = primary_coverage["window_complete"]
+            coverage_summary["primary_window_min"] = coverage_config.primary_window_min
+            earliest_transit = {}
+            for edge in edges:
+                if edge.task_id in prompt_task_ids:
+                    earliest_transit[edge.task_id] = min(
+                        edge.transit_time_min,
+                        earliest_transit.get(edge.task_id, math.inf),
+                    )
+            coverage_summary["candidate_expiry"] = candidate_expiry_summary(
+                (task for task in prompt_window.tasks if task.task_id in prompt_task_ids),
+                now_min=now, last_sar=metrics.last_scan_matrix(),
+                fixed_mask=metrics.fixed_mask,
+                primary_window_min=coverage_config.primary_window_min,
+                transit_minutes=earliest_transit,
             )
             fraction = adaptive_search_fraction(
                 coverage_summary["gap_pct"], coverage_config.min_search_uav_fraction,

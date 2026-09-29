@@ -44,10 +44,32 @@ class LLMReviewer:
             return None
         self._last_review_time = current_time
 
-        coverage = sm.get_coverage_stats()
+        persistent = (
+            sm.get_persistent_coverage_stats()
+            if hasattr(sm, "get_persistent_coverage_stats") else None
+        )
+        coverage = sm.get_coverage_stats() if persistent is None else None
+        primary_window = persistent["primary_window_min"] if persistent else None
+        rolling = next(
+            (row for row in persistent["windows"] if row["minutes"] == primary_window),
+            None,
+        ) if persistent else None
         payload = {
             "sim_time_min": current_time,
-            "coverage_pct": round(float(coverage["coverage_pct"]), 2),
+            "cumulative_sar_coverage_pct": (
+                None if persistent and persistent["cumulative_pct"] is None
+                else round(float(
+                    persistent["cumulative_pct"] if persistent else coverage["coverage_pct"]
+                ), 2)
+            ),
+            "rolling_window_min": primary_window,
+            "rolling_sar_coverage_pct": (
+                None if rolling is None or rolling["coverage_pct"] is None
+                else round(float(rolling["coverage_pct"]), 2)
+            ),
+            "rolling_window_complete": (
+                None if rolling is None else bool(rolling["window_complete"])
+            ),
             "events": sm.get_recent_events(since_time=max(0, current_time - 120))[-100:],
             "track_regions": [
                 {"id": region.id, "bbox": list(region.bbox), "uav": region.assigned_uav_id}
@@ -63,6 +85,12 @@ class LLMReviewer:
             "硬上限为200个Unicode字符，标点、空格、数字和英文字母也逐个计数，不是200个词。"
             "只保留最重要的两三项，不逐架罗列UAV或复述事件流水。"
             "供下一轮决策模型使用。只陈述输入支持的事实、风险和优先方向，不输出标题或列表。"
+        )
+        system_prompt += (
+            " Cumulative SAR coverage is ever scanned; rolling SAR coverage counts "
+            "only actual scans within rolling_window_min across the fixed domain. "
+            "Never equate them or treat an incomplete rolling window as full-window "
+            "performance. Null means unavailable."
         )
         user_prompt = json.dumps(payload, ensure_ascii=False, default=str)
         try:

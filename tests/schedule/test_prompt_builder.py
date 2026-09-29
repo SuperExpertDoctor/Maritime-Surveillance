@@ -38,13 +38,14 @@ def test_lifecycle_prompt_reserves_slots_for_returning_uavs():
 def test_prompt_reports_runtime_grid_constraints():
     state = StateManager(ConfigLoader.load())
 
-    _, user_prompt = PromptBuilder().build(
+    system_prompt, user_prompt = PromptBuilder().build(
         state,
         InfoValueTable(state),
         CandidateResult(),
     )
 
     assert f"{state.config.grid.search_min_cells}-{state.config.grid.search_max_cells}" in user_prompt
+    assert "20-40" not in system_prompt
     assert f"{state.config.grid.aspect_ratio_max:.1f}:1" in user_prompt
 
 
