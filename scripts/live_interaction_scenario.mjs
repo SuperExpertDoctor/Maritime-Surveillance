@@ -63,8 +63,16 @@ export function chooseFocusBBox(frame, rng, previousBBoxes = []) {
   if (!candidates.length) {
     throw new Error("no legal 5x5 focus area in the live searchable domain");
   }
-  shuffle(candidates, rng);
-  return candidates[0];
+  const activeSearchBBoxes = (frame.search_regions || [])
+    .filter((region) => region.status === "active"
+      && typeof region.id === "string" && region.id.startsWith("search:")
+      && Array.isArray(region.bbox) && region.bbox.length === 4)
+    .map((region) => region.bbox);
+  const taskBackedCandidates = candidates.filter((bbox) =>
+    activeSearchBBoxes.some((regionBBox) => overlaps(bbox, regionBBox)));
+  const selectionPool = taskBackedCandidates.length ? taskBackedCandidates : candidates;
+  shuffle(selectionPool, rng);
+  return selectionPool[0];
 }
 
 export function chooseFleetTargets(frame, rng) {
@@ -99,9 +107,18 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
     failures.push(`main.py wall runtime was ${wallSeconds || 0}s; at least 21600s is required`);
   }
 
-  const frameById = new Map((Array.isArray(frames) ? frames : [])
-    .filter((frame) => Number.isInteger(frame?.frame_id))
-    .map((frame) => [frame.frame_id, frame]));
+  const frameById = new Map();
+  const frameByCaptureId = new Map();
+  const allFrames = [];
+  for (const frame of Array.isArray(frames) ? frames : []) {
+    if (!Number.isInteger(frame?.frame_id)) continue;
+    allFrames.push(frame);
+    frameById.set(frame.frame_id, frame);
+    if (typeof frame.capture_id === "string") frameByCaptureId.set(frame.capture_id, frame);
+  }
+  const evidenceFrame = (captureId, frameId) =>
+    (typeof captureId === "string" ? frameByCaptureId.get(captureId) : null)
+      || frameById.get(frameId);
   const events = Array.isArray(operatorEvents) ? operatorEvents : [];
   const focusEvents = events.filter((event) => event.kind === "focus");
   const fleetEvents = events.filter((event) => event.kind === "fleet");
@@ -123,6 +140,7 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
   }
 
   let focusAreasWithRedTasks = 0;
+  let confirmedFocusAreas = 0;
   let eligibleFocusCells = 0;
   for (const event of focusEvents) {
     const intentId = event.intentId || "unknown";
@@ -134,7 +152,7 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
       failures.push(`focus ${intentId} does not have an integer 5x5 bbox`);
       continue;
     }
-    const selectedFrame = frameById.get(event.selectedFrameId);
+    const selectedFrame = evidenceFrame(event.selectedFrameCaptureId, event.selectedFrameId);
     if (!selectedFrame) {
       failures.push(`focus ${intentId} has no source frame ${event.selectedFrameId}`);
     } else if (countSearchableCells(selectedFrame, bbox) !== 25) {
@@ -143,15 +161,17 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
       eligibleFocusCells += 25;
     }
 
-    const confirmationFrame = frameById.get(event.confirmedFrameId);
+    const confirmationFrame = evidenceFrame(event.confirmedFrameCaptureId, event.confirmedFrameId);
     const confirmedIntent = confirmationFrame?.intents?.find((intent) =>
       intent.intent_id === intentId && sameArray(intent.bbox, bbox));
     if (!confirmedIntent) {
       failures.push(`focus ${intentId} has no matching authoritative intent frame`);
       continue;
     }
-    const taskAssigned = [...frameById.values()].some((frame) =>
-      frame.frame_id > confirmationFrame.frame_id
+    if (event.status === "confirmed") confirmedFocusAreas += 1;
+    const confirmationOrder = evidenceFrameOrder(confirmationFrame);
+    const taskAssigned = allFrames.some((frame) =>
+      evidenceFrameOrder(frame) > confirmationOrder
       && frame.intents?.some((intent) => intent.intent_id === intentId)
       && frame.intent_statuses?.some((status) => status.intent_id === intentId
         && Array.isArray(status.assigned_task_ids) && status.assigned_task_ids.length > 0));
@@ -162,6 +182,7 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
   let confirmedFleetRounds = 0;
   let confirmedAisChanges = 0;
   for (const event of fleetEvents) {
+    const eventFailureCount = failures.length;
     const operations = Array.isArray(event.operations) ? event.operations : [];
     const deletes = operations.filter((operation) => operation.kind === "delete");
     const creates = operations.filter((operation) => operation.kind === "create");
@@ -176,7 +197,7 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
     }
     if (!aisChanges.length) failures.push(`fleet round ${round} has no Type II AIS toggle`);
 
-    const selectedFrame = frameById.get(event.selectionFrameId);
+    const selectedFrame = evidenceFrame(event.selectionFrameCaptureId, event.selectionFrameId);
     if (!selectedFrame) failures.push(`fleet round ${round} has no vessel-selection frame`);
     const selectedVessels = selectedFrame?.scenario_vessels || [];
     const selectedById = new Map(selectedVessels.map((vessel) => [vessel.scenario_entity_id, vessel]));
@@ -189,7 +210,7 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
       if (!original || original.vessel_class !== operation.vesselClass) {
         failures.push(`fleet round ${round} did not select active ${operation.vesselClass} vessel ${operation.vesselId}`);
       }
-      const state = frameById.get(operation.frameId)?.scenario_vessels;
+      const state = evidenceFrame(operation.frameCaptureId, operation.frameId)?.scenario_vessels;
       if (!Array.isArray(state) || state.some((vessel) => vessel.scenario_entity_id === operation.vesselId)) {
         failures.push(`fleet round ${round} deletion ${operation.vesselId} is absent from no authoritative frame`);
       }
@@ -200,7 +221,7 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
         failures.push(`fleet round ${round} replacement ${operation.vesselId} was not confirmed`);
       }
       const original = selectedById.get(operation.replacementFor);
-      const state = frameById.get(operation.frameId)?.scenario_vessels;
+      const state = evidenceFrame(operation.frameCaptureId, operation.frameId)?.scenario_vessels;
       const replacement = state?.find((vessel) => vessel.scenario_entity_id === operation.vesselId);
       if (!original || original.vessel_class !== operation.vesselClass
         || !deletes.some((deletion) => deletion.vesselId === operation.replacementFor
@@ -222,29 +243,34 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
       failures.push(`fleet round ${round} expected ${expectedAisCount} randomized AIS toggles; found ${aisChanges.length}`);
     }
     const changedIds = new Set();
+    let frameConfirmedAisChanges = 0;
     for (const operation of aisChanges) {
+      const priorFrame = evidenceFrame(operation.selectionFrameCaptureId, operation.selectionFrameId);
+      const prior = priorFrame?.scenario_vessels?.find((vessel) =>
+        vessel.scenario_entity_id === operation.vesselId);
+      const current = evidenceFrame(operation.frameCaptureId, operation.frameId)?.scenario_vessels?.find((vessel) =>
+        vessel.scenario_entity_id === operation.vesselId);
+      const stateChanged = Boolean(prior && prior.vessel_class === "type_ii"
+        && prior.ais_controllable === true
+        && prior.ais_enabled !== operation.aisEnabled && current
+        && current.vessel_class === "type_ii" && current.ais_enabled === operation.aisEnabled);
       if (operation.status !== "confirmed") {
         failures.push(`fleet round ${round} AIS toggle ${operation.vesselId} was not confirmed`);
       }
-      const priorFrame = frameById.get(operation.selectionFrameId);
-      const prior = priorFrame?.scenario_vessels?.find((vessel) =>
-        vessel.scenario_entity_id === operation.vesselId);
-      const current = frameById.get(operation.frameId)?.scenario_vessels?.find((vessel) =>
-        vessel.scenario_entity_id === operation.vesselId);
-      if (!prior || prior.vessel_class !== "type_ii" || prior.ais_controllable !== true
-        || prior.ais_enabled === operation.aisEnabled || !current
-        || current.vessel_class !== "type_ii" || current.ais_enabled !== operation.aisEnabled) {
+      if (!stateChanged) {
         failures.push(`fleet round ${round} AIS toggle ${operation.vesselId} lacks a confirmed Type II state change`);
       }
+      if (operation.status === "confirmed" && stateChanged) frameConfirmedAisChanges += 1;
       if (changedIds.has(operation.vesselId)) {
         failures.push(`fleet round ${round} toggles ${operation.vesselId} more than once`);
       }
       changedIds.add(operation.vesselId);
     }
-    if (event.status === "confirmed" && operations.every((operation) => operation.status === "confirmed")) {
+    if (event.status === "confirmed" && operations.every((operation) => operation.status === "confirmed")
+      && failures.length === eventFailureCount) {
       confirmedFleetRounds += 1;
     }
-    confirmedAisChanges += aisChanges.filter((operation) => operation.status === "confirmed").length;
+    confirmedAisChanges += frameConfirmedAisChanges;
   }
 
   return {
@@ -253,7 +279,7 @@ export function auditAcceptance({ report, operatorEvents, frames }) {
     metrics: {
       wallSeconds,
       maxDispatchDriftMs,
-      focusAreasConfirmed: focusEvents.filter((event) => event.status === "confirmed").length,
+      focusAreasConfirmed: confirmedFocusAreas,
       focusAreasWithRedTasks,
       eligibleFocusCells,
       confirmedFleetRounds,
@@ -300,4 +326,8 @@ function positionMatches(actual, requested) {
   return Array.isArray(actual) && Array.isArray(requested) && actual.length === 2
     && actual.every((value, index) => Number.isFinite(value)
       && Number.isFinite(requested[index]) && Math.abs(value - requested[index]) <= 0.15);
+}
+
+function evidenceFrameOrder(frame) {
+  return Number.isFinite(frame?.capture_order) ? frame.capture_order : frame?.frame_id;
 }

@@ -34,6 +34,18 @@ test("focus boxes use 25 searchable cells and avoid previous boxes", () => {
     || second[3] <= first[1] || second[1] >= first[3]);
 });
 
+test("focus selection prefers a legal box that intersects an active search region", () => {
+  const cells = Array.from({ length: 30 }, (_, x) => Array.from({ length: 30 }, (_, y) => [x, y]))
+    .flat();
+  const frame = {
+    search_domain: { searchable_cells: cells },
+    search_regions: [{ id: "search:20:10:26:18", type: "search", status: "active", bbox: [20, 10, 26, 18] }],
+  };
+  const bbox = chooseFocusBBox(frame, seededRandom(17), []);
+
+  assert.ok(bbox[0] < 26 && bbox[2] > 20 && bbox[1] < 18 && bbox[3] > 10);
+});
+
 test("same seed selects the same fleet and AIS changes", () => {
   const vessels = [
     { scenario_entity_id: "i-1", vessel_class: "type_i" },
@@ -99,6 +111,82 @@ test("acceptance audit rejects an intervention started over one minute late", ()
   const audit = auditAcceptance(evidence);
   assert.equal(audit.passed, false);
   assert.match(audit.failures.join("\n"), /outside its scheduled offset/i);
+});
+
+test("audit confirmation metrics require authoritative fleet and AIS state", () => {
+  const evidence = completeEvidence();
+  const firstFleet = evidence.operatorEvents.find((event) => event.kind === "fleet");
+  firstFleet.operations.find((operation) => operation.kind === "ais").frameId = 9999;
+
+  const audit = auditAcceptance(evidence);
+  assert.equal(audit.passed, false);
+  assert.equal(audit.metrics.confirmedFleetRounds, 2);
+  assert.equal(audit.metrics.confirmedAisChanges, 2);
+});
+
+test("audit rejects focus confirmations without a matching authoritative intent", () => {
+  const evidence = completeEvidence();
+  evidence.operatorEvents[0].confirmedFrameId = 9999;
+
+  const audit = auditAcceptance(evidence);
+  assert.equal(audit.passed, false);
+  assert.equal(audit.metrics.focusAreasConfirmed, 4);
+  assert.match(audit.failures.join("\n"), /authoritative intent frame/);
+});
+
+test("audit rejects a focus bbox that is not exactly five cells per side", () => {
+  const evidence = completeEvidence();
+  const event = evidence.operatorEvents.find((item) => item.kind === "focus");
+  event.bbox = [0, 0, 4, 5];
+
+  const audit = auditAcceptance(evidence);
+  assert.equal(audit.passed, false);
+  assert.match(audit.failures.join("\n"), /integer 5x5 bbox/);
+});
+
+test("audit rejects queued vessel and AIS operations", () => {
+  const evidence = completeEvidence();
+  const firstFleet = evidence.operatorEvents.find((event) => event.kind === "fleet");
+  firstFleet.operations.find((operation) => operation.kind === "delete").status = "queued";
+  firstFleet.operations.find((operation) => operation.kind === "ais").status = "queued";
+
+  const audit = auditAcceptance(evidence);
+  assert.equal(audit.passed, false);
+  assert.equal(audit.metrics.confirmedFleetRounds, 2);
+  assert.equal(audit.metrics.confirmedAisChanges, 2);
+  assert.match(audit.failures.join("\n"), /deletion .* was not confirmed/);
+  assert.match(audit.failures.join("\n"), /AIS toggle .* was not confirmed/);
+});
+
+test("audit distinguishes command-boundary frames sharing a simulation frame id", () => {
+  const evidence = completeEvidence();
+  const captureByFrameId = new Map();
+  evidence.frames.forEach((frame, index) => {
+    const captureId = `${frame.frame_id}:${index + 1}`;
+    captureByFrameId.set(frame.frame_id, captureId);
+    frame.capture_id = captureId;
+    frame.capture_order = index + 1;
+  });
+  for (const event of evidence.operatorEvents) {
+    if (event.kind === "focus") {
+      event.selectedFrameCaptureId = captureByFrameId.get(event.selectedFrameId);
+      event.confirmedFrameCaptureId = captureByFrameId.get(event.confirmedFrameId);
+    } else {
+      event.selectionFrameCaptureId = captureByFrameId.get(event.selectionFrameId);
+      for (const operation of event.operations) {
+        if (operation.selectionFrameId != null) {
+          operation.selectionFrameCaptureId = captureByFrameId.get(operation.selectionFrameId);
+        }
+        if (operation.frameId != null) operation.frameCaptureId = captureByFrameId.get(operation.frameId);
+      }
+    }
+  }
+  for (const frame of evidence.frames) frame.frame_id = 1;
+
+  const audit = auditAcceptance(evidence);
+  assert.equal(audit.passed, true, audit.failures.join("\n"));
+  assert.equal(audit.metrics.focusAreasWithRedTasks, 5);
+  assert.equal(audit.metrics.confirmedFleetRounds, 3);
 });
 
 function completeEvidence() {

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run the actual `main.py` process for 21,600 wall-clock seconds with reproducible browser-driven blue-operator changes, and retain evidence that red reconnaissance responds to each map focus area.
+**Goal:** Run the actual `main.py` process for at least 21,600 wall-clock seconds with reproducible browser-driven blue-operator changes, and retain evidence that red reconnaissance responds to each map focus area.
 
 **Architecture:** Add a small Node.js ESM harness that launches `main.py`, attaches Playwright to its live UI, and schedules UI actions against a monotonic clock. Keep deterministic selection and final evidence auditing as pure functions so their contracts can be unit-tested without simulating six hours.
 
@@ -10,9 +10,9 @@
 
 ## Global Constraints
 
-- Run the actual `main.py` process for 21,600 seconds of wall-clock time with the configured live LongCat provider and browser-based operator interactions.
-- Start with `--steps 1000`, `--step-delay 60`, and `--wall-seconds 21600`; the 60-second delay paces each one-minute simulation step at real-time speed.
-- At elapsed hours 1, 2, 3, 4, and 5, draw and submit one 5x5 cell `search_priority` area through the map UI; select only boxes whose 25 cells are in the live frame's searchable domain, and keep each active for 360 simulation minutes.
+- Run the actual `main.py` process for at least 21,600 seconds of wall-clock time with the configured live LongCat provider and browser-based operator interactions.
+- Start with `--steps 1000`, `--step-delay 60`, and `--wall-seconds 21720`; the two-minute margin covers initialization/report timing, and the 60-second delay paces each one-minute simulation step at real-time speed.
+- At elapsed hours 1, 2, 3, 4, and 5, draw and submit one 5x5 cell `search_priority` area through the map UI; select only boxes whose 25 cells are in the live frame's searchable domain, prefer boxes overlapping an active search region when one is available, and keep each active for 360 simulation minutes.
 - At elapsed hours 1.5, 3, and 4.5, delete and replace one randomly selected active Type I and one Type II vessel, and toggle AIS for a random half of the active Type II vessels, with at least one selected.
 - Use the live browser controls, not configuration edits or direct state mutation. Use a recorded seed and a monotonic clock.
 - Preserve existing output artifacts. Record planned and actual command times, receipts, authoritative-frame confirmations, model decisions, screenshots, rejected commands, and model-blocked states.
@@ -38,7 +38,7 @@
 **Interfaces:**
 - `operatorSchedule()` returns eight entries sorted by elapsed milliseconds: focus at 3,600,000; fleet/AIS at 5,400,000; focus at 7,200,000; focus then fleet/AIS at 10,800,000; focus at 14,400,000; fleet/AIS at 16,200,000; focus at 18,000,000.
 - `seededRandom(seed)` returns a deterministic `[0, 1)` random generator.
-- `chooseFocusBBox(frame, rng, previousBBoxes)` returns an integer `[x1, y1, x2, y2]` bbox exactly five cells wide/high, with all 25 cells present in `frame.search_domain.searchable_cells`; it excludes overlap with previous boxes and throws when no legal candidate exists.
+- `chooseFocusBBox(frame, rng, previousBBoxes)` returns an integer `[x1, y1, x2, y2]` bbox exactly five cells wide/high, with all 25 cells present in `frame.search_domain.searchable_cells`; it excludes overlap with previous boxes, prefers a candidate intersecting an active search region when available, and throws when no legal candidate exists.
 - `chooseFleetTargets(frame, rng)` returns `{ replaceTypeIId, replaceTypeIIId }` chosen from `frame.scenario_vessels` and throws when either class is absent.
 - `chooseAisTargets(frame, rng)` returns a unique ID array containing `max(1, ceil(activeTypeIICount / 2))` current, controllable Type II vessels.
 - `auditAcceptance({ report, operatorEvents, frames })` returns `{ passed, failures, metrics }`; it requires a 21,600-second `summary.wall_seconds`, all eight groups confirmed, exactly 25 eligible cells in each focus bbox, all vessel deletes/replacements and at least one AIS toggle per round confirmed, and at least one focus-owned task or matching successful decision for every focus.
@@ -106,7 +106,7 @@ Expected: FAIL because `scripts/live_interaction_scenario.mjs` does not exist.
 
 - [x] **Step 3: Implement pure schedule, selection, and acceptance audit functions**
 
-Use `seededRandom` with a recorded 32-bit seed. Build candidate boxes by enumerating top-left cells `(x, y)` from `search_domain.searchable_cells`, requiring every cell in `[x,x+5) × [y,y+5)` to be present. Shuffle legal non-overlapping candidates with the seeded generator and select the first. For AIS, shuffle active controllable Type II IDs and take `Math.max(1, Math.ceil(ids.length / 2))`. The audit reads only frame snapshots, operator ledger records, and `report.summary.wall_seconds`; it records every unsatisfied check as a failure and never infers application from enqueue.
+Use `seededRandom` with a recorded 32-bit seed. Build candidate boxes by enumerating top-left cells `(x, y)` from `search_domain.searchable_cells`, requiring every cell in `[x,x+5) × [y,y+5)` to be present. Shuffle legal non-overlapping candidates that intersect an active search region when any are available; otherwise shuffle all legal candidates. For AIS, shuffle active controllable Type II IDs and take `Math.max(1, Math.ceil(ids.length / 2))`. The audit reads only frame snapshots, operator ledger records, and `report.summary.wall_seconds`; it records every unsatisfied check as a failure and never infers application from enqueue.
 
 ```js
 export function operatorSchedule() {
@@ -140,6 +140,7 @@ Expected: PASS for schedule, focus geometry, deterministic randomization, AIS co
 **Files:**
 - Create: `scripts/live_interaction_ui.mjs`
 - Create: `src/vis/frontend/tests/live-interaction-operator.spec.js`
+- Modify: `src/vis/frontend/playwright.interactions.config.js` to include the new browser spec.
 - Reuse: `src/vis/frontend/tests/helpers/frameSocket.js`
 - Reuse: `src/vis/frontend/src/renderer/geometry.js`
 
@@ -151,7 +152,7 @@ Expected: PASS for schedule, focus geometry, deterministic randomization, AIS co
 - `setVesselAis(page, vesselId, enabled)` uses the row switch and returns only after applied receipt plus the requested value in an authoritative frame.
 - Each helper returns `{ commandId, queuedAt, appliedAt, frameId, state }`; no helper calls command APIs directly.
 
-- [ ] **Step 1: Add a failing browser test for exact map selection**
+- [x] **Step 1: Add a failing browser test for exact map selection**
 
 Install the fixture frame socket, intercept only the intent POST/poll responses, load `/`, and call `drawFocusArea` with `[10, 10, 15, 15]`. Assert the request has that exact bbox, mode `search_priority`, and duration `360`; assert the helper waits until the fixture frame contains the same applied intent.
 
@@ -159,7 +160,7 @@ Run: `cd src/vis/frontend; npx playwright test --config playwright.interactions.
 
 Expected: FAIL because the helper module/test does not exist.
 
-- [ ] **Step 2: Implement frame capture and visible map/sidebar helpers**
+- [x] **Step 2: Implement frame capture and visible map/sidebar helpers**
 
 Compute drag points from `.canvas-area canvas` bounds and `computeLayout`; for bbox `[x1,y1,x2,y2]`, drag from cell `(x1 + 0.25, y1 + 0.25)` to `(x2 - 0.25, y2 - 0.25)`. Read and operate on the `船舶状态` table by vessel ID, wait on command feedback, and separately require a confirming frame. Attach request/response listeners solely for correlation logging; use UI button/switch/canvas actions to submit every command.
 
@@ -181,7 +182,7 @@ await page.getByLabel("有效期").fill(String(durationMin));
 await page.getByRole("button", { name: "提交重点区" }).click();
 ```
 
-- [ ] **Step 3: Add browser tests for create, delete, and AIS frame confirmation**
+- [x] **Step 3: Add browser tests for create, delete, and AIS frame confirmation**
 
 For each vessel operation, return a queued response, publish the applied command and authoritative state change as separate fixture updates, and assert the helper remains pending until the matching entity/revision/state is visible. Assert Type I has no AIS mutation helper path.
 
@@ -197,19 +198,19 @@ Expected: PASS; browser console contains no errors.
 - Reuse: `scripts/live_interaction_ui.mjs`
 
 **Interfaces:**
-- CLI: `node scripts/run_live_interaction_acceptance.mjs --seed 20260929` starts the acceptance run. No duration override is accepted in acceptance mode. `--smoke --seed 20260929` starts a separate four-minute, real-provider UI smoke with immediate focus and vessel/AIS operations; smoke output is marked non-acceptance.
-- The runner creates a new `outputs/live-interaction-<timestamp>-<seed>/` report directory, then launches `python main.py --steps 1000 --step-delay 60 --wall-seconds 21600 --port <free-port> --memory-root outputs/live-interaction-<timestamp>-<seed>/strategy_memory --run-report-dir outputs/live-interaction-<timestamp>-<seed>/main-report`.
+- CLI: `node scripts/run_live_interaction_acceptance.mjs --seed 20260929` starts the acceptance run. No duration override is accepted in acceptance mode. `--smoke --seed 20260929` starts a separate ten-minute, real-provider UI smoke with immediate focus and vessel/AIS operations; smoke output is marked non-acceptance.
+- The runner creates a new `outputs/live-interaction-<timestamp>-<seed>/` report directory, then launches `python main.py --steps 1000 --step-delay 60 --wall-seconds 21720 --port <free-port> --memory-root outputs/live-interaction-<timestamp>-<seed>/strategy_memory --run-report-dir outputs/live-interaction-<timestamp>-<seed>/main-report`.
 - `operator.jsonl` includes a run-start record, every intended/sent/queued/applied/confirmed/rejected transition, selected coordinates/IDs, retries, and completion/failure. `frames.jsonl` stores observed live frames and decisions. `screenshots/` stores one screenshot per scheduled event group and a final screenshot. `runtime-console.log` stores child stdout/stderr. The final main report is `main-report/report.json`; its `summary.jsonl_path` identifies the authoritative frame JSONL under `outputs/`.
 - The runner stops only when `main.py` exits after its wall budget, closes Chromium, writes `audit.json`, and exits nonzero for process failure or audit failure.
 - `waitUntil(targetNs)` compares `process.hrtime.bigint()` to an absolute nanosecond deadline and sleeps only for the remaining duration; it never accumulates handler time into later event offsets.
 - `runUiIntervention(event, context)` accepts `{ page, getLatestFrame, rng, previousBBoxes, record }` and dispatches only `focus` or `fleet` UI workflows; it appends each returned receipt/frame confirmation through `record(event)`.
 - The evidence poller requests `/api/runtime/logs?after=<cursor>` and `/api/runtime/decisions` while the process is active, appending sanitized records to `frames.jsonl` alongside captured WebSocket snapshots.
 
-- [ ] **Step 1: Test acceptance audit failures before adding the launcher**
+- [x] **Step 1: Test acceptance audit failures before adding the launcher**
 
 Add tests for short runtime, missing focus confirmation, non-25-cell bbox, unconfirmed vessel/AIS command, and absent focus task evidence. Run `node --test tests/scripts/test_live_interaction_scenario.mjs` and verify each failure is detected.
 
-- [ ] **Step 2: Implement no-overwrite run directory and process launcher**
+- [x] **Step 2: Implement no-overwrite run directory and process launcher**
 
 Choose an available loopback port by binding a temporary server to port `0`, release it, and pass the assigned port. Create only the outer run directory and `screenshots/`; refuse to start if the unique run directory exists or the loaded runtime config has `clear_outputs_before_run=true`. Leave `main-report/` absent so `main.py` can create it. Spawn Python with `--skip-llm-probe` omitted, tee stdout/stderr into the outer report directory, poll `/api/runtime/logs` until HTTP 200, then open Chromium at `http://127.0.0.1:<port>` and require a connected live frame before scheduling. Use `createRequire(resolve("src/vis/frontend/package.json"))("@playwright/test")` so Node resolves the repository's existing Playwright installation without adding a dependency.
 
@@ -222,7 +223,7 @@ const child = spawn("python", [
 ], { cwd: repoRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
 ```
 
-- [ ] **Step 3: Implement monotonic scheduling, live actions, and failure records**
+- [x] **Step 3: Implement monotonic scheduling, live actions, and failure records**
 
 Use `process.hrtime.bigint()` as the timer source. For each absolute offset, wait until `start + atMs` without adding prior action duration to later deadlines. At a shared 3-hour offset, process focus then fleet/AIS and retain their common intended timestamp. Before each choice, use the latest authoritative frame and seeded PRNG. On `paused_model`, record the state and perform at most one visible `重试` UI click for that pause; log its receipt and resulting frame. Do not send a direct runtime POST. If a command is rejected/unconfirmed, preserve the error and continue to the next scheduled event unless the main process exits.
 
@@ -235,13 +236,13 @@ for (const event of operatorSchedule()) {
 }
 ```
 
-In `--smoke` mode only, use a separate unique directory, `--steps 1000`, `--step-delay 1`, and `--wall-seconds 240`; run one immediate focus submission and one each Type I/II delete-and-replace plus one Type II AIS toggle. Set a top-level `acceptance: false` and skip the six-hour audit. Never expose duration/step overrides in the normal acceptance CLI.
+In `--smoke` mode only, use a separate unique directory, `--steps 1000`, `--step-delay 1`, and `--wall-seconds 600`; run one immediate focus submission and one each Type I/II delete-and-replace plus one Type II AIS toggle. Set a top-level `acceptance: false` and skip the six-hour audit. Never expose duration/step overrides in the normal acceptance CLI.
 
-- [ ] **Step 4: Capture all run evidence and execute the audit at exit**
+- [x] **Step 4: Capture all run evidence and execute the audit at exit**
 
 Append operator and frame JSONL records as events arrive, take event screenshots after authoritative confirmation, and preserve partial artifacts in `finally` on interruption. After child exit, load its `report.json`, invoke `auditAcceptance`, write `audit.json`, and fail the command unless `summary.wall_seconds >= 21600`, all events confirm, and each focus has a task/decision link.
 
-- [ ] **Step 5: Run all automated checks**
+- [x] **Step 5: Run all automated checks**
 
 Run: `node --test tests/scripts/test_live_interaction_scenario.mjs`
 
@@ -255,7 +256,9 @@ Expected: PASS for the new scheduler/audit and UI-driver regressions. Existing s
 - Create after run: `docs/validation/2026-09-29-live-six-hour-interaction-run.md`
 - Evidence: `outputs/live-interaction-<timestamp>-<seed>/`
 
-- [ ] **Step 1: Check acceptance prerequisites**
+The first full attempt on 2026-09-29 ran for 21,785.937 seconds and confirmed all five operator focus commands and all three fleet rounds. It was not accepted because focus `I0005` had no overlapping active search task and the live frame reported `resource_blocked`; its artifacts are preserved. The follow-up attempt prefers random legal focus boxes intersecting active search-task footprints when possible, without directly assigning or mutating tasks.
+
+- [x] **Step 1: Check acceptance prerequisites**
 
 Require a configured `LONGCAT_API_KEY` without printing its value, an available Chromium binary, `clear_outputs_before_run=false`, a fresh report directory, and a cleanly starting main process with a successful live connectivity probe. A failed probe aborts before starting the six-hour timer. First run `node scripts/run_live_interaction_acceptance.mjs --smoke --seed 20260929` and verify every short live UI operation against actual model-backed frames; this smoke is a development gate only and is never included as acceptance evidence.
 
