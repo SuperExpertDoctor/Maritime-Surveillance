@@ -934,7 +934,7 @@ def test_scheduler_sends_compact_wire_payload_once():
         "simultaneous",
         "required_new_search_count",
         "pending_intent_reviews",
-        "ordinary_search_admission_limit",
+        "No aircraft is held idle for a possible probe",
     ):
         assert term in messages[0]["content"]
     assert messages[1]["content"] == json.dumps(

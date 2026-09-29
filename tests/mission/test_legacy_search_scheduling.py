@@ -180,7 +180,7 @@ def test_scheduler_prompt_distinguishes_retained_work_from_new_search_additions(
     assert "simultaneous" in instructions
     assert "required_new_search_count" in instructions
     assert "pending_intent_reviews" in instructions
-    assert "ordinary_search_admission_limit" in instructions
+    assert "No aircraft is held idle for a possible probe" in instructions
     assert "pending_search_task_ids are retained work" in instructions
     assert "do not select or recreate pending search regions" in instructions
     assert "selected ordinary searches are additions only" in instructions

@@ -269,7 +269,17 @@ class CandidateExtractor:
             for region in sm.get_unfinished_search_regions():
                 b = region.bbox
                 free[b.col_start:b.col_end, b.row_start:b.row_end] = False
-            for raw_box in partition_search_mask(free, len(sm.get_available_uavs())):
+            # The existing turning-clearance certificate needs a two-cell
+            # obstacle envelope; split the usable mask before partitioning.
+            blocked = np.pad(np.asarray(sm.obstacle_mask, dtype=bool), 2)
+            for dc in range(5):
+                for dr in range(5):
+                    free &= ~blocked[dc:dc + cols, dr:dr + rows]
+            slots = len(sm.get_available_uavs())
+            max_area = max(gc.search_max_cells, math.ceil(int(free.sum()) / max(slots, 1)))
+            for raw_box in partition_search_mask(
+                free, slots, min_area=gc.search_min_cells, max_area=max_area,
+            ):
                 bbox = BBox(*raw_box)
                 if (bbox.col_end - bbox.col_start) * (bbox.row_end - bbox.row_start) < gc.search_min_cells:
                     continue

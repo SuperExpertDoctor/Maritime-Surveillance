@@ -6,6 +6,7 @@ import numpy as np
 from src.mission.contracts import FeasibleEdge, TaskCandidate, TaskRecord
 from src.mission.mission_scheduler import MissionScheduler, validate_selection
 from src.schedule.task_allocator import TaskAllocator
+from src.schedule.config_loader import ConfigLoader
 from tests.mission.test_feature_episode_integration import (
     _coverage_capacity_satisfied_snapshot,
 )
@@ -171,14 +172,14 @@ def test_unexecutable_probe_does_not_limit_search_admission():
     assert validate_selection(_selection(snapshot, ["S1"]), snapshot) == ()
 
 
-def test_search_edges_at_probe_cap_are_not_actionable_model_work():
+def test_search_edges_remain_actionable_with_probe_candidate():
     active = TaskRecord("S0", "search", "executing", (20, 20, 22, 22), None,
                         (), "U0", None, 0., 0., None, None)
     snapshot = _snapshot([_task("S1"), _task("Q", kind="probe", contact_id="C1")],
         [_resource("U0", operation="coverage", current_task_id="S0"), _resource("U1")],
         [_edge("S1", "U1", 1.), _edge("Q", "U1", 1.)], active_tasks=(active,))
     prompt = MissionScheduler()._prompt_payload(snapshot)["snapshot"]
-    assert [t["task_id"] for t in prompt["candidates"]] == ["Q"]
+    assert {t["task_id"] for t in prompt["candidates"]} == {"S1", "Q"}
 
 
 def test_episode_reset_does_not_acknowledge_the_next_episodes_focus():
@@ -218,7 +219,7 @@ def test_undersized_focus_fragment_does_not_duplicate_its_pending_owner():
 
 
 @pytest.mark.parametrize("count", [1, 2, 3, 10])
-def test_executable_probe_reserves_real_search_admission(count):
+def test_executable_probe_does_not_reserve_search_admission(count):
     ids = range(count)
     tasks = [_task(f"S{i}", bbox=(i * 3, 0, i * 3 + 2, 2)) for i in ids]
     tasks.append(_task("Q", kind="probe", contact_id="C1"))
@@ -226,14 +227,13 @@ def test_executable_probe_reserves_real_search_admission(count):
                          [_edge(t.task_id, f"U{i}", 1.) for t in tasks for i in ids],
                          available=tuple(f"U{i}" for i in ids))
     errors = validate_selection(_selection(snapshot, [t.task_id for t in tasks[:-1]]), snapshot)
-    assert any(e.startswith("probe_search_admission_limit:") for e in errors)
-    cap = int(count * .8)
-    legal = [t.task_id for t in tasks[:cap]] + ["Q"]
+    assert errors == ()
+    legal = [t.task_id for t in tasks[:count - 1]] + ["Q"]
     assert validate_selection(_selection(snapshot, legal), snapshot) == ()
 
 
 @pytest.mark.parametrize("blocked", [False, True])
-def test_production_snapshot_probe_reserve_releases_search_preemption(blocked):
+def test_production_snapshot_probe_does_not_reduce_search_target(blocked):
     engine = _engine()
     allocator = engine.allocator
     resources = tuple(replace(r, operation="coverage", current_task_id=f"S{i}",
@@ -257,8 +257,8 @@ def test_production_snapshot_probe_reserve_releases_search_preemption(blocked):
     allocator._mission_edges = lambda *_a, **_k: (() if blocked else tuple(
         _edge("Q", r.uav_id, 1.) for r in resources))
     snapshot = allocator.build_mission_snapshot(20., active_tasks=records)
-    assert snapshot.coverage_constraint.desired_search_count == (len(resources) if blocked else int(len(resources) * .8))
-    assert bool(snapshot.preemptible_uav_ids) is not blocked
+    assert snapshot.coverage_constraint.desired_search_count == len(resources)
+    assert snapshot.preemptible_uav_ids == ()
 
 
 def test_focus_utility_is_not_displaced_by_partition_admission():
@@ -273,6 +273,38 @@ def test_focus_utility_is_not_displaced_by_partition_admission():
     assert window.tasks[0].task_id == focus.task_id
 
 
+def test_due_search_prefers_shorter_time_until_first_scan():
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    allocator.sm.configure_coverage_metrics(
+        np.ones(allocator.config.grid.resolution, dtype=bool), 'transit-ranking',
+    )
+    allocator.mission_scheduler.max_tasks_in_prompt = 1
+    far = _task('partition:far', bbox=(0, 0, 5, 5))
+    near = _task('partition:near', bbox=(4, 12, 9, 17))
+
+    window = allocator._coverage_prompt_window((far, near), 60.)
+
+    assert window.tasks[0].task_id == near.task_id
+
+
+def test_overdue_fallback_is_not_hidden_by_larger_fresh_window():
+    allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
+    allocator.sm.configure_coverage_metrics(
+        np.ones(allocator.config.grid.resolution, dtype=bool), 'expiry-ranking',
+    )
+    allocator.mission_scheduler.max_tasks_in_prompt = 1
+    fresh = _task('search:fresh', bbox=(2, 2, 10, 10))
+    due = _task('search:due', bbox=(20, 20, 24, 24))
+    allocator.sm.coverage_metrics.record_sar(
+        tuple((col, row) for col in range(2, 10) for row in range(2, 10)),
+        at_min=59.,
+    )
+
+    window = allocator._coverage_prompt_window((fresh, due), 60.)
+
+    assert window.tasks[0].task_id == due.task_id
+
+
 def test_focus_priority_survives_zone_containment_preference():
     from src.mission.coverage_policy import CoveragePolicy
     from src.mission.coverage_zones import ZonePartition
@@ -285,7 +317,7 @@ def test_focus_priority_survives_zone_containment_preference():
 
 
 @pytest.mark.parametrize("count,blocked", [(1, False), (10, False), (1, True), (10, True)])
-def test_pending_search_reassignment_respects_probe_admission_and_preserves_reservations(count, blocked):
+def test_pending_search_reassignment_fills_fleet_and_preserves_reservations(count, blocked):
     from src.schedule.config_loader import ConfigLoader
     from src.schedule.datatypes import BBox, Region
     allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
@@ -313,28 +345,27 @@ def test_pending_search_reassignment_respects_probe_admission_and_preserves_rese
     batch = allocator.build_pending_search_batch(20., active_tasks=records)
 
     assignments = () if batch is None else batch.assignments
-    expected = count if blocked else int(count * .8)
+    expected = count
     assert len(assignments) == expected
     assert allocator.last_mission_snapshot.coverage_constraint.matchable_pending_count == expected
     assert allocator.pending_search_match_count(20., active_tasks=records) == expected
-    if not blocked:
-        assert resources[0].uav_id not in {item.uav_id for item in assignments}
+    assert resources[0].uav_id in {item.uav_id for item in assignments}
     assert all(record.status == "approved" and record.assigned_uav_id is None for record in records)
     assert allocator.sm.get_search_regions() == regions
     assert all(region.status == "active" and region.assigned_uav_id is None
                and region.completion_pct == 37.5 for region in regions)
 
 
-def test_approved_unassigned_search_cannot_bypass_selection_admission_limit():
+def test_approved_unassigned_search_can_use_last_aircraft_with_probe_candidate():
     pending = TaskRecord("S1", "search", "approved", (1, 1, 5, 6), None,
                          (), None, "validated", 0., None, None, None)
     snapshot = _snapshot([_task("Q", kind="probe", contact_id="C1")], [_resource("U1")],
                          [_edge("Q", "U1", 1.), _edge("S1", "U1", 1.)], active_tasks=(pending,))
     errors = validate_selection(_selection(snapshot, ["S1"]), snapshot)
-    assert "probe_search_admission_limit:0:1" in errors
+    assert errors == ()
 
 
-def test_light_trigger_preserves_probe_reserve_for_pending_search():
+def test_light_trigger_assigns_approved_search_despite_probe_candidate():
     from src.schedule.config_loader import ConfigLoader
     from src.schedule.datatypes import BBox, Region
     allocator = TaskAllocator(ConfigLoader.load(), llm_gateway=object())
@@ -347,13 +378,13 @@ def test_light_trigger_preserves_probe_reserve_for_pending_search():
 
     result, batch = allocator._handle_light_mission_trigger(10., None, (pending,))
 
-    assert batch is None
-    assert result["action"] == "approved_tasks_deferred"
+    assert batch is not None
+    assert result["action"] == "approved_task_pairing"
     assert pending.status == "approved" and pending.assigned_uav_id is None
     assert allocator.sm.get_pending_search_regions()[0].completion_pct == 37.5
 
 
-def test_committed_pending_batch_cannot_be_followed_by_a_second_cap_bypass():
+def test_committed_pending_batch_assigns_every_aircraft_once():
     from src.env.simulation import SimulationEngine
     from src.schedule.config_loader import ConfigLoader
     from src.schedule.datatypes import BBox, Region
@@ -371,16 +402,17 @@ def test_committed_pending_batch_cannot_be_followed_by_a_second_cap_bypass():
         Region(record.task_id, BBox(*record.bbox), "search", completion_pct=37.5) for record in records])
 
     first = engine.allocator.build_pending_search_batch(0., active_tasks=records)
-    assert first is not None and len(first.assignments) == 1
+    assert first is not None and len(first.assignments) == 2
     assert engine.apply_assignment_batch(first)
     current = tuple(engine._mission_task_records.values())
-    assert sum(record.status == "executing" for record in current) == 1
+    assert sum(record.status == "executing" for record in current) == 2
 
     second = engine.allocator.build_pending_search_batch(0., active_tasks=current)
     assert second is None
     _result, light = engine.allocator._handle_light_mission_trigger(0., None, current)
     assert light is None
     assert engine._mission_task_records == {record.task_id: record for record in current}
-    assert len(engine.allocator.sm.get_pending_search_regions()) == 1
+    assert len(engine.allocator.sm.get_pending_search_regions()) == 0
     assert len(engine.allocator.sm.get_unfinished_search_regions()) == 2
-    assert engine.allocator.sm.get_pending_search_regions()[0].completion_pct == 37.5
+    assert all(region.completion_pct == 37.5
+               for region in engine.allocator.sm.get_unfinished_search_regions())

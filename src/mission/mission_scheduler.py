@@ -424,28 +424,12 @@ def _resource_usable_edges(
 
 
 def actionable_edges(snapshot: MissionSnapshot, **policy) -> tuple[FeasibleEdge, ...]:
-    """Exclude retained audit edges and exhausted search admissions."""
+    """Expose only visible work that a resource can actually take."""
     visible = {task.task_id for task in snapshot.candidates} - set(snapshot.pending_search_task_ids)
     if snapshot.prompt_task_ids:
         visible &= set(snapshot.prompt_task_ids)
-    edges = tuple(edge for edge in _resource_usable_edges(snapshot, **policy)
-                  if edge.task_id in visible)
-    candidates, _active = _task_maps(snapshot)
-    probes = {t.task_id for t in snapshot.candidates if t.kind == "probe"}
-    retained = sum(t.kind == "search" and t.assigned_uav_id is not None
-                   for t in snapshot.active_tasks)
-    if any(e.task_id in probes for e in edges) and retained >= math.floor(len(snapshot.resources) * .8):
-        edges = tuple(e for e in edges if e.task_id not in candidates
-                      or candidates[e.task_id].kind != "search")
-    return edges
-
-
-def probe_search_limit(snapshot: MissionSnapshot, **policy) -> int | None:
-    """Reserve a rounded-down 80% search share only for executable probes."""
-    probes = {task.task_id for task in snapshot.candidates if task.kind == "probe"}
-    if probes and any(edge.task_id in probes for edge in _resource_usable_edges(snapshot, **policy)):
-        return math.floor(len(snapshot.resources) * 0.8)
-    return None
+    return tuple(edge for edge in _resource_usable_edges(snapshot, **policy)
+                 if edge.task_id in visible)
 
 
 def _edge_options(
@@ -761,21 +745,6 @@ def _validate_selection(
         if task_id in known_tasks
     ]
     coverage_constraint = snapshot.coverage_constraint
-    search_limit = probe_search_limit(
-        snapshot, reassignment_cooldown_min=reassignment_cooldown_min,
-        allow_probe_preempt_search=allow_probe_preempt_search,
-        allow_intent_preempt_search=allow_intent_preempt_search,
-    )
-    if search_limit is not None:
-        retained = sum(t.kind == "search" and t.assigned_uav_id is not None
-                       and t.assigned_uav_id not in preempt_uav_ids
-                       for t in snapshot.active_tasks)
-        additions = sum(t.kind == "search" and getattr(t, "assigned_uav_id", None) is None
-                        for t in selected_tasks)
-        # Existing owners survive; assigning an approved unowned search still
-        # consumes a new aircraft admission, even though its record is retained.
-        if additions and retained + additions > search_limit:
-            errors.append(f"probe_search_admission_limit:{search_limit}:{retained + additions}")
     if coverage_constraint is not None:
         selected_representatives = (
             set(selected_task_ids)
@@ -1682,11 +1651,6 @@ class MissionScheduler:
             "prompt_fairness_bound_cycles": fairness_bound_cycles,
             "prompt_geometry_filtered": geometry_filtered,
             "pending_search_task_ids": list(snapshot.pending_search_task_ids),
-            "ordinary_search_admission_limit": probe_search_limit(
-                snapshot, reassignment_cooldown_min=self.reassignment_cooldown_min,
-                allow_probe_preempt_search=self.allow_probe_preempt_search,
-                allow_intent_preempt_search=self.allow_intent_preempt_search,
-            ),
         }
         if snapshot.coverage_constraint is not None:
             full["coverage_constraint"] = _jsonable(snapshot.coverage_constraint)

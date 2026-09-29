@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 
 from src.mission.contracts import CoverageConstraint, TaskRecord
-from src.mission.mission_scheduler import validate_selection
+from src.mission.mission_scheduler import actionable_edges, validate_selection
 from src.schedule.task_allocator import TaskAllocator
 from src.schedule.trigger_manager import TriggerDecision
 from src.schedule.config_loader import ConfigLoader
@@ -27,6 +27,20 @@ def test_coverage_floor_does_not_leave_available_aircraft_unused():
     assert 'underutilized_feasible_work:S2' in validate_selection(
         _selection(snapshot, ['S1']), snapshot,
     )
+
+
+def test_executable_probe_does_not_reserve_idle_aircraft_from_search():
+    tasks = [_task(f'S{i}', bbox=(i * 3, 0, i * 3 + 2, 2)) for i in range(10)]
+    probe = _task('Q', kind='probe', contact_id='C1')
+    resources = [_resource(f'U{i}') for i in range(10)]
+    snapshot = _snapshot(
+        [*tasks, probe], resources,
+        [*(_edge(task.task_id, f'U{i}', 1.) for i, task in enumerate(tasks)),
+         _edge('Q', 'U0', 1.)],
+        available=tuple(resource.uav_id for resource in resources),
+    )
+    assert validate_selection(_selection(snapshot, [task.task_id for task in tasks]), snapshot) == ()
+    assert {edge.task_id for edge in actionable_edges(snapshot)} >= {task.task_id for task in tasks}
 
 
 @pytest.mark.parametrize('trigger', ['none', 'light', 'heavy'])

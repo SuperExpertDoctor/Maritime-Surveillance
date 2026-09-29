@@ -1184,7 +1184,7 @@ def test_timeout_backoff_does_not_consume_useful_retry_budget(scripted_transport
     assert len(transport.calls) == 1
 
 
-def test_soft_thinking_target_preserves_complete_json(scripted_transport):
+def test_disabled_thinking_preserves_complete_decision_json(scripted_transport):
     from src.mission.mission_scheduler import MissionScheduler
     payload = {'answer': 1, 'detail': 'complete output ' * 1200}
     transport = scripted_transport({'decision_maker': [json.dumps(payload)]})
@@ -1197,6 +1197,6 @@ def test_soft_thinking_target_preserves_complete_json(scripted_transport):
     assert result.success
     assert result.payload == payload
     call = transport.calls[0]
-    assert call['thinking'] == 'enabled'
-    assert 'approximately 1024 tokens' in call['messages'][0]['content']
+    assert call['thinking'] == 'disabled'
+    assert 'approximately 1024 tokens' not in call['messages'][0]['content']
     assert call['max_tokens'] == 4096

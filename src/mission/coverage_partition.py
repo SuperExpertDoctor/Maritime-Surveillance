@@ -1,10 +1,18 @@
 """Stable rectangular partitions of currently unreserved searchable space."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
-def partition_search_mask(mask: np.ndarray, slots: int) -> tuple[tuple[int, int, int, int], ...]:
+def partition_search_mask(
+    mask: np.ndarray,
+    slots: int,
+    *,
+    min_area: int = 1,
+    max_area: int | None = None,
+) -> tuple[tuple[int, int, int, int], ...]:
     """Cover free space with about one compact rectangle per search aircraft.
 
     Obstacles can require more rectangles than aircraft. In that case retain
@@ -14,6 +22,8 @@ def partition_search_mask(mask: np.ndarray, slots: int) -> tuple[tuple[int, int,
     remaining = np.asarray(mask, dtype=bool).copy()
     if remaining.ndim != 2 or slots < 0:
         raise ValueError('expected a 2D mask and non-negative slot count')
+    if min_area < 1 or (max_area is not None and max_area < min_area):
+        raise ValueError('invalid partition area bounds')
     if slots == 0:
         return ()
     boxes = []
@@ -42,6 +52,29 @@ def partition_search_mask(mask: np.ndarray, slots: int) -> tuple[tuple[int, int,
         x0, y0, x1, y1 = best
         remaining[x0:x1, y0:y1] = False
     boxes.sort(key=lambda b: (-_area(b), b))
+    if max_area is not None:
+        bounded = []
+        for box in boxes:
+            width, height = box[2] - box[0], box[3] - box[1]
+            count = max(
+                math.ceil(_area(box) / max_area),
+                math.ceil(max(width, height) / (2 * min(width, height))),
+            )
+            bounded.extend(_split(box, count))
+        boxes = [box for box in bounded if min_area <= _area(box) <= max_area]
+        boxes.sort(key=lambda b: (-_area(b), b))
+        if len(boxes) >= slots:
+            return tuple(sorted(boxes[:slots]))
+        while len(boxes) < slots:
+            choices = [i for i, box in enumerate(boxes) if _area(box) >= 2 * min_area]
+            if not choices:
+                break
+            index = max(choices, key=lambda i: (_area(boxes[i]), -i))
+            parts = _split(boxes[index], 2)
+            if len(parts) != 2 or min(_area(part) for part in parts) < min_area:
+                break
+            boxes[index:index + 1] = parts
+        return tuple(sorted(boxes))
     boxes = boxes[:slots]
     counts = [1] * len(boxes)
     while sum(counts) < slots:

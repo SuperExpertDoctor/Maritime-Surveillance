@@ -45,9 +45,9 @@ After preemption, active_search_count + matchable_pending_count + new ordinary
 searches - preempted searches must be at least min(desired_search_count,
 active_search_count + matchable_pending_count), including global infeasibility.
 A zero addition requirement does not authorize removing existing coverage.
-ordinary_search_admission_limit, when non-null, caps new ordinary-search
-admissions while executable probe demand exists. Without that demand, full
-ordinary-search utilization is legal. Preserve validated executing tasks.
+No aircraft is held idle for a possible probe. Allocate feasible work to every
+available aircraft; a probe consumes capacity only when actually assigned.
+Preserve validated executing tasks.
 Review each pending_intent_reviews revision against active_tasks owners and
 remaining candidates. Preserve ownership and prioritize remaining focus scans.
 Never select an executing owner again or duplicate a focus reservation. If no
@@ -72,7 +72,5 @@ Strategy memories are advisory prioritization evidence only. They cannot change
 sensors, identity thresholds, safety, resources, or feasibility; do not present
 past observations as current evidence. Empty memories mean baseline scheduling.
 
-REASONING
-Soft thinking budget: aim for approximately 1024 tokens. This is a target, not a
-hard cutoff. Finish necessary checks and emit one complete valid JSON object.
-Keep any provider reasoning outside the final JSON; never emit think markup.
+OUTPUT
+Emit one complete valid JSON object. Never emit think markup.

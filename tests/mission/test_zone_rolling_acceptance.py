@@ -485,7 +485,7 @@ def test_prompt_preserves_geometry_safety_and_coverage_floor_policy():
         "Search candidates already contain legal rectangles",
         "select at least required_new_search_count new ordinary searches",
         "A zero addition requirement does not authorize removing existing coverage",
-        "full ordinary-search utilization is legal",
+        "No aircraft is held idle for a possible probe",
         "Coverage floors are not ceilings",
         "zone_requirements",
         "160 Unicode characters",
