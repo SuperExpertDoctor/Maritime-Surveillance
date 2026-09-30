@@ -974,25 +974,39 @@ class SimulationEngine:
         if not regions:
             if not (
                 allow_missing_region
-                and state == "completed"
+                and state != "executing"
                 and record is not None
             ):
                 raise ValueError(f"search region missing: {task_id}")
-            self._mission_task_records[task_id] = replace(
-                record,
-                status="completed",
-                assigned_uav_id=None,
-                finished_at_min=(
-                    record.finished_at_min
-                    if record.status in {"completed", "cancelled", "blocked"}
-                    else current_time
-                ),
-                release_reason=(
-                    record.release_reason
-                    if record.status in {"completed", "cancelled", "blocked"}
-                    else reason
-                ),
-            )
+            if state == "pending":
+                desired = replace(
+                    record,
+                    status="approved",
+                    assigned_uav_id=None,
+                    finished_at_min=None,
+                    release_reason=reason,
+                )
+            else:
+                desired = replace(
+                    record,
+                    status=(
+                        record.status
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else ("completed" if state == "completed" else "blocked")
+                    ),
+                    assigned_uav_id=None,
+                    finished_at_min=(
+                        record.finished_at_min
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else current_time
+                    ),
+                    release_reason=(
+                        record.release_reason
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else reason
+                    ),
+                )
+            self._mission_task_records[task_id] = desired
             return
 
         region = regions[0]
@@ -2785,13 +2799,19 @@ class SimulationEngine:
                 if status == "completed"
                 else "stale"
             )
+            has_search_region = any(
+                item.id == task.task_id and item.type == "search"
+                for item in sm.get_search_regions()
+            )
             self._set_search_task_projection(
                 task.task_id,
                 state=projection_state,
                 uav_id=None,
                 current_time=current_time,
                 reason=reason,
-                allow_missing_region=allow_missing_search_region,
+                allow_missing_region=(
+                    allow_missing_search_region or not has_search_region
+                ),
             )
 
         if task.target_contact_id is not None:
