@@ -771,9 +771,18 @@ def _validate_selection(
             + coverage_constraint.matchable_pending_count
         )
         protected_budget = min(coverage_constraint.desired_search_count, retained_budget)
+        # Capacity committed to feasible target-directed work is a lawful
+        # diversion, not a coverage shortfall: each selected contact task
+        # offsets one unit of the residual addition requirement 1:1.  The
+        # floor still binds when the deficit exceeds that diversion.
+        target_diverted = sum(
+            task.kind in _TARGET_TASK_KINDS and task.task_id in candidates
+            for task in selected_tasks
+        )
         if (
             not floor_infeasible
-            and ordinary_count < coverage_constraint.required_new_search_count
+            and ordinary_count + target_diverted
+                < coverage_constraint.required_new_search_count
         ):
             errors.append(
                 "coverage_floor_not_met:"

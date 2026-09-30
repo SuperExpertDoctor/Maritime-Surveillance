@@ -38,6 +38,9 @@ ordinary searches and all global must_service_task_ids, unless global
 infeasible_reason is present. Investigation/direction_search are not ordinary
 search. required_new_search_count is the residual addition count after active
 searches and matchable pending work, not the fleet's total search count.
+Each selected probe, track, investigation, or direction_search candidate
+offsets one unit of required_new_search_count — a shortfall up to the number
+of selected target-directed tasks is lawful diversion, never a violation.
 For every feasible zone_requirements entry, meet its required_search_count from
 representative_task_ids and include its must_service_task_ids, even if the global
 budget is infeasible. zone_infeasible records exclusions; do not invent work.

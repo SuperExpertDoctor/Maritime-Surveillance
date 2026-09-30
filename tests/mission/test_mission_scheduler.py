@@ -1023,6 +1023,56 @@ def test_probe_preemption_exempt_from_sar_coverage_floor(
     assert errors == ()
 
 
+def test_target_tasks_offset_required_new_search_count():
+    # probe + 9 searches on 10 idle UAVs: the contact task lawfully diverts
+    # one unit of the residual coverage requirement (observed live deadlock).
+    from src.mission.contracts import CoverageConstraint
+    from src.mission.mission_scheduler import _validate_selection
+
+    candidates = [_task('Q1', kind='probe', contact_id='C1')]
+    candidates += [
+        _task(f'SR{i}', kind='search', bbox=(i, 0, i + 1, 1))
+        for i in range(9)
+    ]
+    resources = [_resource(f'U{i}', operation='idle') for i in range(10)]
+    edges = [_edge('Q1', 'U0', 1.0)] + [
+        _edge(f'SR{i}', f'U{i + 1}', 1.0) for i in range(9)
+    ]
+    snapshot = _snapshot(
+        candidates, resources, edges,
+        available=tuple(f'U{i}' for i in range(10)), preemptible=(),
+        active_tasks=(),
+    )
+    snapshot = replace(snapshot, coverage_constraint=CoverageConstraint(
+        desired_search_count=10, active_search_count=0,
+        required_new_search_count=10, representative_task_ids=(),
+        must_service_task_ids=(), infeasible_reason=None,
+    ))
+    selected = ['Q1'] + [f'SR{i}' for i in range(9)]
+    assert _validate_selection(
+        _selection(snapshot, selected), snapshot
+    ) == ()
+
+    # One probe cannot justify a two-unit coverage shortfall.
+    underfilled = _snapshot(
+        candidates[:-1], resources, edges,
+        available=tuple(f'U{i}' for i in range(10)), preemptible=(),
+        active_tasks=(),
+    )
+    underfilled = replace(underfilled, coverage_constraint=CoverageConstraint(
+        desired_search_count=10, active_search_count=0,
+        required_new_search_count=10, representative_task_ids=(),
+        must_service_task_ids=(), infeasible_reason=None,
+    ))
+    errors = _validate_selection(
+        _selection(underfilled, ['Q1'] + [f'SR{i}' for i in range(8)]),
+        underfilled,
+    )
+    assert any(
+        error.startswith('coverage_floor_not_met:') for error in errors
+    )
+
+
 def test_search_for_search_swap_preserves_coverage_floor():
     # An intent-backed new ordinary search may preempt a busy search UAV; the
     # swap keeps the budget net-neutral, so the floor stays satisfied.
