@@ -399,6 +399,50 @@ def test_pending_reassignment_preserves_region_and_sar_progress():
     assert engine._control_event_sequence == before_delivery + 1
 
 
+def test_pending_reassignment_skips_unplannable_region(monkeypatch):
+    """One unflyable pending region no longer vetoes the rest of the batch."""
+    from src.utils.search_route_planner import plan_search_route as _plan
+
+    engine, pending_ids = _two_pending_searches()
+    regions = {
+        region.id: region for region in engine.allocator.sm.get_search_regions()
+    }
+    blocked_id = pending_ids[0]
+    blocked_bbox = tuple(regions[blocked_id].bbox)
+
+    def selective_failure(request):
+        if tuple(request.bbox) == blocked_bbox:
+            raise RuntimeError("scan line crosses no-fly obstacle")
+        return _plan(request)
+
+    monkeypatch.setattr("src.env.simulation.plan_search_route", selective_failure)
+
+    reassigned = engine._apply_pending_search_reassignments(1.0)
+
+    assert reassigned == 1
+    assert regions[blocked_id].status == "active"
+    assert regions[blocked_id].assigned_uav_id is None
+    committed_id = pending_ids[1]
+    record = engine._mission_task_records[committed_id]
+    assert record.status == "executing"
+    assert record.assigned_uav_id is not None
+    committed_region = next(
+        region
+        for region in engine.allocator.sm.get_search_regions()
+        if region.id == committed_id
+    )
+    assert committed_region.assigned_uav_id == record.assigned_uav_id
+    active = engine.control_coordinator.active_task(record.assigned_uav_id)
+    assert active is not None and active.task_id == committed_id
+    assert any(
+        event["data"]["reason"] == "search_route_planning_failed"
+        and event["data"]["task_id"] == blocked_id
+        for event in engine.allocator.sm.get_events_by_type(
+            "mission_assignment_rejected"
+        )
+    )
+
+
 def test_pending_reassignment_route_failure_keeps_pending_state(monkeypatch):
     engine, task_id, _old_uav_id, _bbox = pending_search_fixture()
     before_record = engine._mission_task_records[task_id]

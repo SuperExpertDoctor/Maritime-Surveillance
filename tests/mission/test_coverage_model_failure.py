@@ -71,7 +71,9 @@ def test_decision_maker_retry_uses_one_frozen_clock_decision_and_recovers():
     engine = _engine()
     engine._set_runtime_state("paused_model", "decision_maker")
     calls = []
-    batch = SimpleNamespace(selection_call_id="retry-call")
+    batch = AssignmentBatch(
+        snapshot_id="retry-snapshot", assignments=(), selection_call_id="retry-call"
+    )
 
     def retry(current_time, **kwargs):
         calls.append((current_time, kwargs))

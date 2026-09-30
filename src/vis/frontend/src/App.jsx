@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Eye, EyeOff, Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
+import { Download, Eye, EyeOff, Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
 
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
@@ -313,6 +313,18 @@ export default function App() {
             <option value="">选择任务记录</option>
             {replay.files.map((file) => <option key={file} value={file}>{file}</option>)}
           </select>
+        )}
+        {mode === "replay" && replay.selectedFile && (
+          <button
+            className="export-mp4-btn"
+            onClick={mp4Export.exportMp4}
+            disabled={!mp4Export.available || mp4Export.exporting}
+            title={mp4Export.error || (!mp4Export.available ? "MP4 encoder unavailable" : "下载回放 MP4")}
+            aria-label={mp4Export.exporting ? `Exporting MP4 ${mp4Export.progress}%` : "下载回放 MP4"}
+          >
+            <Download size={15} />
+            <span>{mp4Export.exporting ? `${mp4Export.progress}%` : "MP4"}</span>
+          </button>
         )}
         <span className={`connection-state ${mode === "live" ? live.status : replayConnectionStatus}`}>
           <span className="connection-dot" />

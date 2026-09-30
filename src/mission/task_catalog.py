@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+
+import numpy as np
+
 from src.mission.contracts import ContactSnapshot, Intent, TaskCandidate
 from src.mission.intent_store import build_scheduling_value
 from src.schedule.candidate_extractor import CandidateExtractor
@@ -266,8 +269,10 @@ class TaskCatalog:
             x, y = position.position_cells
             col = int(math.floor(x - width / 2.0))
             row = int(math.floor(y - width / 2.0))
-            col = max(1, min(col, resolution[0] - width - 1))
-            row = max(1, min(row, resolution[1] - width - 1))
+            origin = TaskCatalog._searchable_origin(state, col, row, width, resolution)
+            if origin is None:
+                continue
+            col, row = origin
             bbox = (col, row, col + width, row + width)
             result.append({
                 "task_id": f"investigation:{position.emitter_track_id}",
@@ -307,8 +312,10 @@ class TaskCatalog:
             )
             col = int(math.floor(center[0] - width / 2.0))
             row = int(math.floor(center[1] - width / 2.0))
-            col = max(1, min(col, resolution[0] - width - 1))
-            row = max(1, min(row, resolution[1] - width - 1))
+            origin = TaskCatalog._searchable_origin(state, col, row, width, resolution)
+            if origin is None:
+                continue
+            col, row = origin
             result.append({
                 "task_id": f"direction:{observation.observation_id}",
                 "kind": "direction_search",
@@ -320,6 +327,52 @@ class TaskCatalog:
                 "priority": "high",
             })
         return tuple(result)
+
+    @staticmethod
+    def _searchable_origin(state, col, row, width, resolution):
+        """Shift a passive-task bbox to the nearest fully-searchable origin.
+
+        The SAR route planner rejects scan lines crossing the no-fly mask, so a
+        candidate whose bbox overlaps a storm or island can never be applied.
+        Origins are probed in order of increasing distance from the requested
+        position; ``None`` means no nearby placement is flyable and the caller
+        must drop the candidate.  Without a searchable mask the legacy clamp is
+        preserved.
+        """
+        lo = 1
+        hi_col = resolution[0] - width - 1
+        hi_row = resolution[1] - width - 1
+        fallback = (max(lo, min(col, hi_col)), max(lo, min(row, hi_row)))
+        getter = getattr(state, "get_searchable_mask", None)
+        mask = getter() if callable(getter) else None
+        try:
+            searchable = np.asarray(mask, dtype=bool)
+        except (TypeError, ValueError):
+            return fallback
+        if (
+            searchable.ndim != 2
+            or searchable.shape[0] < resolution[0]
+            or searchable.shape[1] < resolution[1]
+        ):
+            return fallback
+        radius = max(0, width - 1)
+        best = None
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                new_col = col + dx
+                new_row = row + dy
+                if new_col < lo or new_row < lo or new_col > hi_col or new_row > hi_row:
+                    continue
+                if not bool(
+                    searchable[new_col:new_col + width, new_row:new_row + width].all()
+                ):
+                    continue
+                distance = dx * dx + dy * dy
+                if best is None or distance < best[0]:
+                    best = (distance, new_col, new_row)
+        if best is None:
+            return None
+        return best[1], best[2]
 
     def _search_candidates(
         self, state, intents: tuple[Intent, ...], now: float,

@@ -197,11 +197,16 @@ class TaskAllocator:
                 and record.assigned_uav_id is None
             )
         )
+        cooldown_min = self.mission_scheduler.reassignment_cooldown_min
         preemptible = tuple(sorted(
             resource.uav_id
             for resource in resources
             if self.config.mission.scheduling.allow_probe_preempt_search
             and self._ordinary_search_resource(resource, active_by_id)
+            # A cooled-down aircraft can never be preempted; advertising it
+            # invites selections that validation must reject, which becomes an
+            # unrecoverable loop while a model pause freezes sim time.
+            and not now - resource.last_reassigned_at_min < cooldown_min - 1e-9
         ))
         planning_map_version = int(self.sm.obstacle_version)
         edge_candidates = (

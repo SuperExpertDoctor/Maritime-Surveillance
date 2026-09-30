@@ -449,6 +449,7 @@ class SimulationEngine:
         self._runtime_status = "running"
         self._blocked_role: str | None = None
         self._decision_failure_streak = 0
+        self._model_retry_streak = 0
         self._mission_invariant_failure_signatures: set[tuple[str, ...]] = set()
         self._retired_command_results: dict[str, CommandResult] = {}
         self._publish_runtime_state()
@@ -1595,12 +1596,15 @@ class SimulationEngine:
             )
             assignment_applied = batch is not None
             if batch is not None:
-                assignment_applied = self.apply_assignment_batch(batch)
+                applied_batch = self.apply_assignment_batch(batch)
+                assignment_applied = bool(applied_batch)
                 if not assignment_applied:
                     result = {
                         **result,
                         "action": "mission_assignment_rejected",
                     }
+                elif isinstance(applied_batch, AssignmentBatch):
+                    batch = applied_batch
             if pending_reassigned:
                 result = {
                     **result,
@@ -1679,7 +1683,14 @@ class SimulationEngine:
                 force_heavy=True,
             )
             skipped = result.get("action") == "mission_selection_skipped"
-            applied = not skipped and batch is not None and self.apply_assignment_batch(batch)
+            applied_batch = (
+                self.apply_assignment_batch(batch)
+                if not skipped and batch is not None
+                else None
+            )
+            applied = bool(applied_batch)
+            if isinstance(applied_batch, AssignmentBatch):
+                batch = applied_batch
             record = build_decision_record(result, batch, applied, self.clock.time)
             if record is not None:
                 self.allocator.sm.add_event("allocation_decision", record)
@@ -1687,6 +1698,7 @@ class SimulationEngine:
             if skipped or applied:
                 self.allocator.trigger_manager.clear_heavy_retry()
                 self._decision_failure_streak = 0
+                self._model_retry_streak = 0
                 self._set_runtime_state("running")
                 self.last_result = result
                 self.allocator.sm.add_event("mission_model_retry_succeeded", {
@@ -1696,7 +1708,7 @@ class SimulationEngine:
                     ),
                 })
             else:
-                self._set_runtime_state("paused_model", "decision_maker")
+                self._model_retry_streak += 1
                 self.allocator.sm.add_event("mission_model_retry_failed", {
                     "snapshot_id": result.get("snapshot_id"),
                     "failure_category": (
@@ -1707,6 +1719,27 @@ class SimulationEngine:
                         self.allocator.mission_scheduler.last_selection_errors
                     ),
                 })
+                if (
+                    self._model_retry_streak
+                    >= self.config.mission.coverage.max_consecutive_decision_failures
+                ):
+                    # Sim time is frozen while paused, so time-gated
+                    # constraints (e.g. reassignment cooldowns) can never
+                    # expire inside the pause — a decision that keeps failing
+                    # validation there is unrecoverable by definition.  Defer
+                    # it and resume; the next heavy trigger re-decides on an
+                    # advanced snapshot.
+                    self.allocator.sm.add_event("mission_model_retry_exhausted", {
+                        "snapshot_id": result.get("snapshot_id"),
+                        "retry_count": self._model_retry_streak,
+                    })
+                    self.allocator.trigger_manager.clear_heavy_retry()
+                    self._decision_failure_streak = 0
+                    self._model_retry_streak = 0
+                    self._set_runtime_state("running")
+                    self.last_result = result
+                    return
+                self._set_runtime_state("paused_model", "decision_maker")
             return
         try:
             self._prepare_red_decision(self.clock.time)
@@ -1720,8 +1753,13 @@ class SimulationEngine:
             "sim_time_min": self.clock.time,
         })
 
-    def apply_assignment_batch(self, batch: AssignmentBatch) -> bool:
-        """Validate and install one scheduler batch at the simulation boundary."""
+    def apply_assignment_batch(self, batch: AssignmentBatch) -> AssignmentBatch | bool:
+        """Validate and install one scheduler batch at the simulation boundary.
+
+        Returns the committed batch — a strict subset of ``batch.assignments``
+        when individual tasks proved unplannable at apply time — or ``False``
+        when the batch itself was rejected.
+        """
         if not isinstance(batch, AssignmentBatch):
             return False
         snapshot = self.allocator.last_mission_snapshot
@@ -1774,6 +1812,7 @@ class SimulationEngine:
         handoff_commits: list[tuple[object, str, str]] = []
         next_probe_number = self._next_probe_number
         for assignment in batch.assignments:
+            pending_handoff = None
             candidate = candidates.get(assignment.task_id)
             resource = resources.get(assignment.uav_id)
             if candidate is None or resource is None:
@@ -1827,7 +1866,7 @@ class SimulationEngine:
                     if candidate.kind in _SEARCH_TASK_KINDS:
                         if handoff.state != "required" or self.clock.time > handoff.assignment_deadline_min:
                             return False
-                        handoff_commits.append((handoff, assignment.uav_id, candidate.contact_id))
+                        pending_handoff = (handoff, assignment.uav_id, candidate.contact_id)
 
             if candidate.kind in _SEARCH_TASK_KINDS:
                 if candidate.bbox is None:
@@ -1872,15 +1911,33 @@ class SimulationEngine:
                         self._search_route_request(uav, region)
                     )
                 except Exception as exc:
+                    # One unflyable task must not veto the rest of the batch:
+                    # skipping it keeps the scheduler from deadlocking on a
+                    # candidate whose bbox drifts into a no-fly obstacle.
                     self.allocator.sm.add_event("mission_assignment_rejected", {
                         "reason": "search_route_planning_failed",
                         "error_type": type(exc).__name__,
                         "task_id": candidate.task_id,
+                        "uav_id": assignment.uav_id,
                         "snapshot_id": snapshot.snapshot_id,
                     })
-                    return False
+                    continue
                 if not route_plan.scanned_swath_count:
-                    return False
+                    self.allocator.sm.add_event("mission_assignment_rejected", {
+                        "reason": "empty_search_route",
+                        "task_id": candidate.task_id,
+                        "uav_id": assignment.uav_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                    })
+                    self._set_search_task_projection(
+                        candidate.task_id,
+                        state="completed",
+                        uav_id=None,
+                        current_time=self.clock.time,
+                        reason="empty_search_route",
+                        allow_missing_region=True,
+                    )
+                    continue
                 route_plans[assignment.task_id] = route_plan
                 control_task = ControlTask(
                     candidate.task_id,
@@ -1926,7 +1983,7 @@ class SimulationEngine:
                 if handoff is not None:
                     if self.clock.time > handoff.assignment_deadline_min:
                         return False
-                    handoff_commits.append((handoff, assignment.uav_id, contact_id))
+                    pending_handoff = (handoff, assignment.uav_id, contact_id)
                 target = contact.estimated_position_cells
                 radius = (
                     self.config.mission.contact.baseline_standoff_cells
@@ -1943,15 +2000,24 @@ class SimulationEngine:
                         snapshot.planning_map_version,
                     )
                 except Exception as exc:
+                    # Same single-task tolerance as search routes: an
+                    # unreachable standoff target drops only this assignment.
                     self.allocator.sm.add_event("mission_assignment_rejected", {
                         "reason": "standoff_route_planning_failed",
                         "error_type": type(exc).__name__,
                         "task_id": candidate.task_id,
+                        "uav_id": assignment.uav_id,
                         "snapshot_id": snapshot.snapshot_id,
                     })
-                    return False
+                    continue
                 if not route:
-                    return False
+                    self.allocator.sm.add_event("mission_assignment_rejected", {
+                        "reason": "standoff_route_unavailable",
+                        "task_id": candidate.task_id,
+                        "uav_id": assignment.uav_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                    })
+                    continue
                 reuse_existing_probe = (
                     candidate.kind == "probe"
                     and active is not None
@@ -1981,6 +2047,8 @@ class SimulationEngine:
                 reserved_contacts.add(contact_id)
             else:
                 return False
+            if pending_handoff is not None:
+                handoff_commits.append(pending_handoff)
             prepared.append(
                 (
                     uav,
@@ -2036,16 +2104,9 @@ class SimulationEngine:
                 "successor_uav_id": successor_uav_id,
             })
 
-        by_uav = {
-            assignment.uav_id: (
-                uav, task, candidate, assignment, previous_task, region
-            )
-            for (
-                uav, task, candidate, assignment, previous_task, region
-            ) in prepared
-        }
-        for lease, assignment in zip(leases, batch.assignments):
-            uav, task, candidate, _, old_task, prepared_region = by_uav[assignment.uav_id]
+        for lease, (
+            uav, task, candidate, assignment, old_task, prepared_region
+        ) in zip(leases, prepared):
             if old_task is not None and old_task.task_id != task.task_id:
                 old_record = self._mission_task_records.get(old_task.task_id)
                 if old_record is not None:
@@ -2190,13 +2251,14 @@ class SimulationEngine:
                     generation=lease.generation,
                 )
         self._next_probe_number = next_probe_number
+        committed = tuple(item[3] for item in prepared)
         self.allocator.sm.add_event("mission_assignment_committed", {
             "snapshot_id": snapshot.snapshot_id,
             "selection_call_id": batch.selection_call_id,
-            "task_ids": [assignment.task_id for assignment in batch.assignments],
+            "task_ids": [assignment.task_id for assignment in committed],
         })
         self._publish_control_routes()
-        return True
+        return replace(batch, assignments=committed)
 
     def _apply_pending_search_reassignments(self, current_time: float) -> int:
         """Install deterministic pending-search handoffs at one engine boundary."""
@@ -2206,17 +2268,18 @@ class SimulationEngine:
         )
         if batch is None:
             return 0
-        if not self.apply_assignment_batch(batch):
+        applied_batch = self.apply_assignment_batch(batch)
+        if not isinstance(applied_batch, AssignmentBatch) or not applied_batch.assignments:
             return 0
         self.allocator.sm.add_event("pending_search_reassigned", {
             "snapshot_id": batch.snapshot_id,
             "selection_call_id": batch.selection_call_id,
             "assignments": [
                 {"task_id": item.task_id, "uav_id": item.uav_id}
-                for item in batch.assignments
+                for item in applied_batch.assignments
             ],
         })
-        return len(batch.assignments)
+        return len(applied_batch.assignments)
 
     def _prepare_red_decision(self, current_time: float) -> None:
         """Build one red-only fleet snapshot and install its validated plan."""

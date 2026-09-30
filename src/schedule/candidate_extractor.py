@@ -165,6 +165,8 @@ class CandidateExtractor:
                             continue
                         if not self._has_turning_clearance(bbox, sm.obstacle_mask):
                             continue
+                        if not self._land_free(bbox, getattr(sm, "land_mask", None)):
+                            continue
                         if self._distance_to_bases(bbox, sm.get_base_positions()) < (
                             sm.config.environment.base_task_min_distance_cells
                         ):
@@ -524,6 +526,8 @@ class CandidateExtractor:
                     continue
                 if not self._has_turning_clearance(bbox, sm.obstacle_mask):
                     continue
+                if not self._land_free(bbox, getattr(sm, "land_mask", None)):
+                    continue
                 swath_width = (
                     sm.config.sensor.sar.swath_km
                     / sm.config.grid.cell_size_km
@@ -839,6 +843,8 @@ class CandidateExtractor:
                     continue
                 if not self._has_turning_clearance(bbox, sm.obstacle_mask):
                     continue
+                if not self._land_free(bbox, getattr(sm, "land_mask", None)):
+                    continue
                 if self._distance_to_bases(bbox, sm.get_base_positions()) < (
                     sm.config.environment.base_task_min_distance_cells
                 ):
@@ -974,6 +980,8 @@ class CandidateExtractor:
                         bbox = BBox(c0, r0, c1, r1)
                         if not self._has_turning_clearance(bbox, sm.obstacle_mask):
                             continue
+                        if not self._land_free(bbox, getattr(sm, "land_mask", None)):
+                            continue
                         distance = self._distance_to_bases(bbox, base_positions)
                         if distance < sm.config.environment.base_task_min_distance_cells:
                             continue
@@ -1027,6 +1035,16 @@ class CandidateExtractor:
             if len(selected) >= max(limit * 4, 20):
                 break
         return selected
+
+    @staticmethod
+    @staticmethod
+    def _land_free(bbox: BBox, land_mask) -> bool:
+        """Reject candidate boxes that sit on mainland cells."""
+        if land_mask is None:
+            return True
+        return not bool(
+            land_mask[bbox.col_start:bbox.col_end, bbox.row_start:bbox.row_end].any()
+        )
 
     @staticmethod
     def _has_turning_clearance(

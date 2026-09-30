@@ -1,4 +1,7 @@
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
 from src.mission.contracts import ContactSnapshot, Intent
@@ -250,3 +253,65 @@ def test_catalog_scales_search_duration_with_sar_workload(state):
     assert tasks[0].estimated_duration_min == pytest.approx(20 / 1.5)
     assert tasks[1].estimated_duration_min == pytest.approx(48 / 1.5)
     assert tasks[0].estimated_duration_min < tasks[1].estimated_duration_min
+
+
+def _direction_observation(observer=(7.0, 12.0), bearing_deg=0.0):
+    return SimpleNamespace(
+        observation_id="OBS-1",
+        bearing_deg=bearing_deg,
+        observer_position_cells=observer,
+        observed_at_min=1.0,
+    )
+
+
+def _patch_passive_sources(state, monkeypatch, observations, positions=()):
+    monkeypatch.setattr(
+        state, "get_passive_observations", lambda now=None: tuple(observations)
+    )
+    monkeypatch.setattr(
+        state, "get_passive_positions", lambda now=None: tuple(positions)
+    )
+
+
+def test_direction_candidate_bbox_shifts_off_no_fly_cells(state, monkeypatch):
+    searchable = np.ones((30, 30), dtype=bool)
+    searchable[10:15, 10:15] = False
+    monkeypatch.setattr(state, "get_searchable_mask", lambda: searchable)
+    _patch_passive_sources(state, monkeypatch, [_direction_observation()])
+
+    tasks = TaskCatalog(candidate_extractor=CandidateSource([])).build(
+        state, (), (), now_min=10.0,
+    )
+
+    direction = [task for task in tasks if task.kind == "direction_search"]
+    assert len(direction) == 1
+    bbox = direction[0].bbox
+    assert bbox != (7, 9, 12, 14)
+    assert bool(searchable[bbox[0]:bbox[2], bbox[1]:bbox[3]].all())
+
+
+def test_direction_candidate_dropped_when_no_flyable_bbox(state, monkeypatch):
+    searchable = np.ones((30, 30), dtype=bool)
+    searchable[:, :] = True
+    searchable[0:20, 0:20] = False
+    monkeypatch.setattr(state, "get_searchable_mask", lambda: searchable)
+    _patch_passive_sources(state, monkeypatch, [_direction_observation()])
+
+    tasks = TaskCatalog(candidate_extractor=CandidateSource([])).build(
+        state, (), (), now_min=10.0,
+    )
+
+    assert not any(task.kind == "direction_search" for task in tasks)
+
+
+def test_direction_candidate_keeps_legacy_clamp_without_mask(state, monkeypatch):
+    monkeypatch.delattr(StateManager, "get_searchable_mask")
+    _patch_passive_sources(state, monkeypatch, [_direction_observation()])
+
+    tasks = TaskCatalog(candidate_extractor=CandidateSource([])).build(
+        state, (), (), now_min=10.0,
+    )
+
+    direction = [task for task in tasks if task.kind == "direction_search"]
+    assert len(direction) == 1
+    assert direction[0].bbox == (7, 9, 12, 14)

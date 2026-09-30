@@ -41,6 +41,12 @@ function normalizedInformation(value) {
   return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : 0;
 }
 
+// Gamma-lift low values so sparsely-scanned cells remain visible on the
+// heatmap instead of collapsing into the background color.
+function heatmapIntensity(value) {
+  return Math.sqrt(normalizedInformation(value));
+}
+
 function InformationHeatmap({ info }) {
   const canvasRef = useRef(null);
   const [hovered, setHovered] = useState(null);
@@ -55,7 +61,7 @@ function InformationHeatmap({ info }) {
     ctx.fillRect(0, 0, HEATMAP_CELLS * HEATMAP_CELL_SIZE, HEATMAP_CELLS * HEATMAP_CELL_SIZE);
     for (let col = 0; col < HEATMAP_CELLS; col += 1) {
       for (let row = 0; row < HEATMAP_CELLS; row += 1) {
-        const value = normalizedInformation(info[col][row]);
+        const value = heatmapIntensity(info[col][row]);
         ctx.fillStyle = `rgb(${Math.round(232 - 210 * value)}, ${Math.round(240 - 100 * value)}, ${Math.round(237 - 130 * value)})`;
         ctx.fillRect(col * HEATMAP_CELL_SIZE + 1, row * HEATMAP_CELL_SIZE + 1,
           HEATMAP_CELL_SIZE - 1, HEATMAP_CELL_SIZE - 1);
