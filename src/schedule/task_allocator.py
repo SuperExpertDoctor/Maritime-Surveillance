@@ -895,6 +895,9 @@ class TaskAllocator:
                 "information_version": snapshot.information_version,
                 "reason": failure_reason or "decision_failed",
                 "errors": list(self.mission_scheduler.last_selection_errors),
+                "attempt_errors": list(
+                    self.mission_scheduler.last_selection_attempt_errors
+                ),
                 "call_id": self.mission_scheduler.last_selection_call_id,
                 "failure_stage": (
                     self.mission_scheduler.last_selection_failure_stage

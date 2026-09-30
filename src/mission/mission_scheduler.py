@@ -1148,6 +1148,7 @@ class MissionScheduler:
         self.last_selection_call_id: str | None = None
         self.last_selection_success = False
         self.last_selection_errors: tuple[str, ...] = ()
+        self.last_selection_attempt_errors: tuple[str, ...] = ()
         self.last_selection_failure_category: str | None = None
         self.last_selection_failure_stage: str | None = None
         self.last_selection_timing: dict = {}
@@ -1291,6 +1292,7 @@ class MissionScheduler:
         self.last_selection_call_id = None
         self.last_selection_success = False
         self.last_selection_errors = ()
+        self.last_selection_attempt_errors = ()
         self.last_selection_failure_category = None
         self.last_selection_failure_stage = None
         if prompt_bytes > 100 * 1024:
@@ -1371,6 +1373,16 @@ class MissionScheduler:
             self._fail_selection("decision_deadline_exceeded", "timeout", "transport")
             return None
         if not success or response is None:
+            attempt_errors: list[str] = []
+            if self.gateway is not None and self.selection_provider is None:
+                for candidate in reversed(getattr(self.gateway, "call_log", ())):
+                    if candidate.get("call_id") == call_id:
+                        for attempt in candidate.get("attempts", ()):
+                            for err in attempt.get("errors") or ():
+                                if err not in attempt_errors:
+                                    attempt_errors.append(err)
+                        break
+            self.last_selection_attempt_errors = tuple(attempt_errors)
             self.last_selection_errors = (
                 ("decision_deadline_exceeded",)
                 if failure_category == "timeout"
