@@ -969,7 +969,9 @@ def test_prompt_removes_illegal_search_preemption_edges(explicit_window):
     if explicit_window:
         snapshot = replace(snapshot, prompt_task_ids=('Q1', 'S2', 'I1'))
     payload = MissionScheduler()._prompt_payload(snapshot)['snapshot']
-    assert [t['task_id'] for t in payload['candidates']] == ['Q1']
+    # Ordinary searches still may not preempt; probe and target-directed
+    # investigation edges on the busy airframe are legal and stay visible.
+    assert [t['task_id'] for t in payload['candidates']] == ['Q1', 'I1']
     assert payload['candidates'][0]['feasible_uav_ids'] == ['U1']
 
 
@@ -985,16 +987,18 @@ def test_infeasible_live_selection_remains_rejected_after_bounded_corrections():
     assert 1 <= len(transport.calls) <= 3
     assert scheduler.last_selection_success is False
 
-@pytest.mark.parametrize('active_count,desired,preempt_count,infeasible,allowed', [
-    (2, 2, 1, None, False),
-    (2, 3, 1, 'insufficient_available_resources', False),
-    (2, 1, 1, None, True),
-    (3, 2, 1, None, True),
-    (3, 2, 2, None, False),
+@pytest.mark.parametrize('active_count,desired,preempt_count,infeasible', [
+    (2, 2, 1, None),
+    (2, 3, 1, 'insufficient_available_resources'),
+    (2, 1, 1, None),
+    (3, 2, 1, None),
+    (3, 2, 2, None),
 ])
-def test_probe_preemption_preserves_existing_sar_coverage_floor(
-    active_count, desired, preempt_count, infeasible, allowed,
+def test_probe_preemption_exempt_from_sar_coverage_floor(
+    active_count, desired, preempt_count, infeasible,
 ):
+    # Target-directed tasks outrank area coverage: probe/track preemption is
+    # legal even when it pushes active coverage below the standing floor.
     from src.mission.contracts import CoverageConstraint
     ids = range(1, active_count + 1)
     probes = range(1, preempt_count + 1)
@@ -1016,7 +1020,136 @@ def test_probe_preemption_preserves_existing_sar_coverage_floor(
     errors = validate_selection(_selection(
         snapshot, [f'Q{i}' for i in probes], preempt=tuple(f'U{i}' for i in probes),
     ), snapshot)
-    if allowed:
-        assert errors == ()
-    else:
-        assert any(error.startswith('coverage_preemption_floor:') for error in errors)
+    assert errors == ()
+
+
+def test_search_for_search_swap_preserves_coverage_floor():
+    # An intent-backed new ordinary search may preempt a busy search UAV; the
+    # swap keeps the budget net-neutral, so the floor stays satisfied.
+    from src.mission.contracts import CoverageConstraint
+    from src.mission.mission_scheduler import _validate_selection
+
+    snapshot = _snapshot(
+        [replace(_task('Q-new'), intent_ids=('I1',))],
+        [
+            _resource('U1', operation='coverage', current_task_id='S1'),
+            _resource('U2', operation='coverage', current_task_id='S2'),
+        ],
+        [_edge('Q-new', 'U1', 1.0)],
+        available=(), preemptible=('U1', 'U2'),
+        active_tasks=tuple(
+            TaskRecord(
+                f'S{i}', 'search', 'executing', (i * 6, 1, i * 6 + 4, 6),
+                None, (), f'U{i}', None, 0., 1., None, None,
+            )
+            for i in (1, 2)
+        ),
+    )
+    snapshot = replace(snapshot, coverage_constraint=CoverageConstraint(
+        desired_search_count=2, active_search_count=2,
+        required_new_search_count=0, representative_task_ids=(),
+        must_service_task_ids=(), infeasible_reason=None,
+    ))
+    errors = _validate_selection(
+        _selection(snapshot, ['Q-new'], preempt=('U1',)),
+        snapshot,
+        allow_intent_preempt_search=True,
+    )
+    assert errors == ()
+
+
+def test_active_search_repair_churn_still_counts_against_floor():
+    # Diverting a preempted UAV to an already-active search record removes one
+    # executing search without adding coverage — a net loss the floor rejects.
+    from src.mission.contracts import CoverageConstraint
+    from src.mission.mission_scheduler import _validate_selection
+
+    active = tuple(
+        TaskRecord(
+            f'S{i}', 'search', 'approved' if i == 2 else 'executing',
+            (i * 6, 1, i * 6 + 4, 6),
+            None, ('I1',) if i == 2 else (), f'U{i}', None, 0., 1., None, None,
+        )
+        for i in (1, 2)
+    )
+    snapshot = _snapshot(
+        (),
+        [
+            _resource('U1', operation='coverage', current_task_id='S1'),
+            _resource('U2', operation='coverage', current_task_id='S2'),
+        ],
+        [_edge('S2', 'U1', 1.0)],
+        available=(), preemptible=('U1', 'U2'),
+        active_tasks=active,
+    )
+    snapshot = replace(snapshot, coverage_constraint=CoverageConstraint(
+        desired_search_count=2, active_search_count=2,
+        required_new_search_count=0, representative_task_ids=(),
+        must_service_task_ids=(), infeasible_reason=None,
+    ))
+    errors = _validate_selection(
+        _selection(snapshot, ['S2'], preempt=('U1',)),
+        snapshot,
+        allow_intent_preempt_search=True,
+    )
+    assert any(
+        error.startswith('coverage_preemption_floor:') for error in errors
+    )
+
+
+def test_investigation_preempts_ordinary_search():
+    snapshot = _snapshot(
+        [_task('I1', kind='investigation', bbox=(15, 15, 19, 20))],
+        [_resource('U1', operation='coverage', current_task_id='S1')],
+        [_edge('I1', 'U1', 1.0)],
+        available=(), preemptible=('U1',),
+        active_tasks=(TaskRecord(
+            'S1', 'search', 'executing', (1, 1, 5, 6),
+            None, (), 'U1', None, 0., 1., None, None,
+        ),),
+    )
+    assert validate_selection(
+        _selection(snapshot, ['I1'], preempt=('U1',)), snapshot
+    ) == ()
+
+
+def test_ordinary_search_still_cannot_preempt():
+    snapshot = _snapshot(
+        [_task('S-new', bbox=(15, 15, 19, 20))],
+        [_resource('U1', operation='coverage', current_task_id='S1')],
+        [_edge('S-new', 'U1', 1.0)],
+        available=(), preemptible=('U1',),
+        active_tasks=(TaskRecord(
+            'S1', 'search', 'executing', (1, 1, 5, 6),
+            None, (), 'U1', None, 0., 1., None, None,
+        ),),
+    )
+    errors = validate_selection(
+        _selection(snapshot, ['S-new'], preempt=('U1',)), snapshot
+    )
+    assert 'infeasible_assignment' in errors
+
+
+def test_preempted_search_region_does_not_block_overlapping_search():
+    # The preempted region is vacated by the same decision; a replacement
+    # ordinary search may lawfully overlap it.
+    snapshot = _snapshot(
+        [
+            _task('Q-probe', kind='probe', contact_id='C1'),
+            _task('S-new', bbox=(1, 1, 5, 6)),
+        ],
+        [
+            _resource('U1', operation='coverage', current_task_id='S1'),
+            _resource('U2'),
+        ],
+        [_edge('Q-probe', 'U1', 1.0), _edge('S-new', 'U2', 1.0)],
+        available=('U2',), preemptible=('U1',),
+        active_tasks=(TaskRecord(
+            'S1', 'search', 'executing', (1, 1, 5, 6),
+            None, (), 'U1', None, 0., 1., None, None,
+        ),),
+    )
+    errors = validate_selection(
+        _selection(snapshot, ['Q-probe', 'S-new'], preempt=('U1',)), snapshot
+    )
+    assert errors == ()

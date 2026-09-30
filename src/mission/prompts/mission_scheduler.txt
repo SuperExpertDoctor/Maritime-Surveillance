@@ -41,10 +41,16 @@ searches and matchable pending work, not the fleet's total search count.
 For every feasible zone_requirements entry, meet its required_search_count from
 representative_task_ids and include its must_service_task_ids, even if the global
 budget is infeasible. zone_infeasible records exclusions; do not invent work.
-After preemption, active_search_count + matchable_pending_count + new ordinary
-searches - preempted searches must be at least min(desired_search_count,
-active_search_count + matchable_pending_count), including global infeasibility.
-A zero addition requirement does not authorize removing existing coverage.
+Preemption of a busy ordinary-search UAV is authorized only for
+target-directed work: probe, track, investigation, and direction_search.
+Such preemption may reduce active coverage below the floor — contact tasks
+outrank area coverage. The floor only restrains search-for-search churn:
+diverting a preempted UAV to another ordinary search still requires
+active_search_count + matchable_pending_count + new ordinary searches -
+preempted searches to stay at least min(desired_search_count,
+active_search_count + matchable_pending_count), including global
+infeasibility. A zero addition requirement does not authorize removing
+existing coverage.
 No aircraft is held idle for a possible probe. Allocate feasible work to every
 available aircraft; a probe consumes capacity only when actually assigned.
 Preserve validated executing tasks.
@@ -57,6 +63,10 @@ notes or defer_reason. A deferral never overrides required feasible idle work.
 PRIORITIES
 1. Preserve safe executing assignments and boundaries; repartition only
    unreserved remaining domain when resources change.
+   Feasible probe, track, investigation, and direction_search work outranks
+   ordinary coverage: preempt a busy ordinary-search UAV rather than defer
+   contact tasks, and keep the change minimal — prefer the closest legal
+   resource so remaining assignments carry over unchanged.
 2. Spread legal work across the domain using coverage_summary's per-zone unseen,
    overdue, and in-flight gaps. rolling_sar_coverage_pct is actual SAR coverage
    within primary_window_min over the fixed domain, not cumulative coverage.

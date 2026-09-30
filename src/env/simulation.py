@@ -4038,6 +4038,7 @@ class SimulationEngine:
                 sm.record_passive_observations(tuple(observations))
                 delta = sm.apply_information_facts(facts, sample_time)
                 self._publish_information_delta(delta, sample_time)
+                assessed_contacts: set[str] = set()
                 for activity in activity_facts:
                     sm.add_event("radiation_activity_evidence", {
                         "evidence_id": activity.evidence_id,
@@ -4045,6 +4046,12 @@ class SimulationEngine:
                         "source_id": activity.source_id,
                         "observed_at_min": activity.observed_at_min,
                     })
+                    resolved_id = sm.resolve_contact_id(activity.contact_id)
+                    if resolved_id not in assessed_contacts:
+                        assessed_contacts.add(resolved_id)
+                        self._apply_contact_dimension_assessment(
+                            resolved_id, sample_time,
+                        )
                 for observation in observations:
                     sm.add_event("passive_bearing_observed", {
                         "observation_id": observation.observation_id,
@@ -4178,6 +4185,83 @@ class SimulationEngine:
                     "contact_id": fact.contact_id,
                     "position": list(fact.position_cells),
                 })
+                # Observed evasive motion is the motion-family evidence that
+                # combines with radiation activity toward a violation finding.
+                evidence = EvidenceRecord(
+                    evidence_id=fact.fact_id,
+                    kind="evasive_maneuver",
+                    source_id=fact.mmsi,
+                    contact_id=fact.contact_id,
+                    observed_at_min=fact.observed_at_min,
+                    expires_at_min=fact.observed_at_min + 60.0,
+                    strength=1.0,
+                    spatial=CovarianceKernel(
+                        mean_cells=fact.position_cells,
+                        covariance_cells2=fact.covariance_cells2,
+                    ),
+                )
+                if sm.contacts.register_dimension_evidence(
+                    fact.contact_id, evidence,
+                ):
+                    self._apply_contact_dimension_assessment(
+                        fact.contact_id, current_time,
+                    )
+
+    _ACTIVITY_RANK = {
+        "unknown": 0,
+        "suspected_violation": 1,
+        "confirmed_violation": 2,
+    }
+
+    def _apply_contact_dimension_assessment(
+        self,
+        contact_id: str,
+        now_min: float,
+    ) -> None:
+        """Fold accumulated observation evidence into contact class/activity.
+
+        Observation-derived dimension evidence (radiation activity, evasive
+        motion, visual class) upgrades a contact deterministically.  The probe
+        pathway still owns terminal vessel-class identification; assessments
+        here never regress an established dimension.
+        """
+        sm = self.allocator.sm
+        try:
+            contact = sm.contacts.snapshot(contact_id)
+        except KeyError:
+            return
+        if contact.state == "departed" or contact.vessel_class == "type_i":
+            return
+        evidence = sm.contacts.dimension_evidence(contact_id)
+        if not evidence:
+            return
+        assessment = ContactAssessor.assess_dimensions(evidence)
+        current_rank = self._ACTIVITY_RANK.get(contact.activity, 0)
+        new_rank = self._ACTIVITY_RANK.get(assessment.activity, 0)
+        if new_rank < current_rank:
+            return
+        if (
+            new_rank == current_rank
+            and assessment.vessel_class == contact.vessel_class
+            and set(assessment.activity_evidence_ids)
+            == set(contact.activity_evidence_ids)
+            and set(assessment.class_evidence_ids)
+            == set(contact.class_evidence_ids)
+        ):
+            return
+        try:
+            sm.contacts.apply_dimension_assessment(
+                contact_id,
+                assessment,
+                assessed_at_min=now_min,
+                expected_revision=contact.revision,
+            )
+        except ValueError:
+            sm.add_event("dimension_assessment_rejected", {
+                "contact_id": contact_id,
+                "activity": assessment.activity,
+                "assessed_at_min": now_min,
+            })
 
     def _expire_contacts(self, current_time: float) -> None:
         self.allocator.sm.contacts.expire(current_time)

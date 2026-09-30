@@ -194,6 +194,7 @@ class ContactAssessor:
             family = {
                 "type_ii_assessment": "radiation_activity",
                 "violation_assessment": "violation_activity",
+                "evasive_maneuver": "survey_motion",
                 "eo_class": "class",
                 "sar_class": "class",
             }.get(family, family)

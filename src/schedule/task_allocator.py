@@ -49,6 +49,11 @@ from src.mission.strategy_memory import StrategyMemoryStore
 
 
 _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
+# Target-directed work that outranks ordinary area coverage.  These kinds may
+# preempt busy ordinary-search UAVs and are exempt from the coverage floor.
+_TARGET_TASK_KINDS = frozenset(
+    {"probe", "track", "investigation", "direction_search"}
+)
 _LOGGER = logging.getLogger(__name__)
 _CACHE_MISS = object()
 
@@ -334,9 +339,16 @@ class TaskAllocator:
                 zone_requirements_input=quota_inputs,
             )
             if active_search_count + matchable_pending_count <= desired_search_count:
-                # Do not advertise preemptions that would immediately violate
-                # the standing SAR floor; validator also checks partial excess.
-                preemptible = ()
+                # The SAR floor only restrains ordinary coverage churn.
+                # Target-directed demand (probe/track/investigation/direction)
+                # outranks coverage and keeps legal preemption edges open;
+                # without this escape, contact work is structurally starved
+                # whenever the fleet is fully committed to searches.
+                target_demand = any(
+                    task.kind in _TARGET_TASK_KINDS for task in candidates
+                )
+                if not target_demand:
+                    preemptible = ()
         self._mission_snapshot_counter += 1
         snapshot_id = f"mission:{now:g}:{self._mission_snapshot_counter}"
         snapshot = MissionSnapshot(

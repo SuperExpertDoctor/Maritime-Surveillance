@@ -43,6 +43,7 @@ class ContactStore:
         self._passive_bursts: dict[str, dict[str, float]] = {}
         self._radiation_activity_bursts: dict[str, set[str]] = {}
         self._radiation_activity_queue: list[EvidenceRecord] = []
+        self._dimension_evidence: dict[str, dict[str, EvidenceRecord]] = {}
         self._counter = 0
         self._now = 0.0
 
@@ -88,6 +89,47 @@ class ContactStore:
         evidence = tuple(self._radiation_activity_queue)
         self._radiation_activity_queue.clear()
         return evidence
+
+    def register_dimension_evidence(
+        self,
+        contact_id: str,
+        record: EvidenceRecord,
+    ) -> bool:
+        """Attach one observation-derived fact to a contact's evidence pool.
+
+        The pool feeds ``ContactAssessor.assess_dimensions``.  Records are
+        deduplicated by evidence_id and only retained for contacts the store
+        actually tracks.
+        """
+        if not isinstance(record, EvidenceRecord):
+            raise TypeError("record must be EvidenceRecord")
+        try:
+            resolved = self.resolve(contact_id)
+            self._contacts[resolved]
+        except KeyError:
+            return False
+        pool = self._dimension_evidence.setdefault(resolved, {})
+        pool.setdefault(record.evidence_id, record)
+        return True
+
+    def dimension_evidence(self, contact_id: str) -> tuple[EvidenceRecord, ...]:
+        """Return the live dimension-assessment evidence for a contact.
+
+        Records past ``expires_at_min`` no longer contribute and are dropped
+        from the pool, so a stale burst cannot keep a suspicion alive forever.
+        """
+        resolved = self.resolve(contact_id)
+        pool = self._dimension_evidence.get(resolved)
+        if not pool:
+            return ()
+        expired = [
+            key
+            for key, record in pool.items()
+            if record.expires_at_min <= self._now
+        ]
+        for key in expired:
+            del pool[key]
+        return tuple(pool.values())
 
     def ingest_passive_position(
         self,
@@ -207,7 +249,7 @@ class ContactStore:
             and position.burst_id not in qualified_bursts
         ):
             qualified_bursts.add(position.burst_id)
-            self._radiation_activity_queue.append(EvidenceRecord(
+            radiation_record = EvidenceRecord(
                 evidence_id=(
                     f"RADIATION-ACTIVITY:{position.emitter_track_id}:"
                     f"{position.burst_id}"
@@ -222,7 +264,9 @@ class ContactStore:
                     mean_cells=position.position_cells,
                     sigma_cells=1.0,
                 ),
-            ))
+            )
+            self._radiation_activity_queue.append(radiation_record)
+            self.register_dimension_evidence(contact_id, radiation_record)
             self._event(
                 "radiation_activity_evidence",
                 contact_id=contact_id,
@@ -494,6 +538,11 @@ class ContactStore:
             merged = replace(merged, state="cleared", assigned_uav_id=None, active_probe_id=None)
         self._contacts[aid] = self._estimate(merged)
         del self._contacts[vid]
+        # Fold the merged contact's dimension evidence into the survivor so
+        # pre-merge radiation/motion facts still count toward its assessment.
+        merged_pool = self._dimension_evidence.setdefault(aid, {})
+        for record in self._dimension_evidence.pop(vid, {}).values():
+            merged_pool.setdefault(record.evidence_id, record)
         self._aliases[vid] = aid
         self._confirmations.pop(vid, None)
         self._event("contact_merged", contact_id=aid, alias_contact_id=vid,
@@ -516,7 +565,13 @@ class ContactStore:
 
     def reserve(self, contact_id: str, uav_id: str, probe_id: str | None) -> None:
         c = self.snapshot(contact_id)
-        if not uav_id or c.state in ("cleared", "lost", "departed") or self._now < c.next_probe_not_before_min:
+        # The not-before gate is a probe retry cooldown: it must not block a
+        # track reservation on a suspected/confirmed contact (probe_id None).
+        if (
+            not uav_id
+            or c.state in ("cleared", "lost", "departed")
+            or (probe_id is not None and self._now < c.next_probe_not_before_min)
+        ):
             raise ValueError("contact cannot be reserved")
         if c.assigned_uav_id is not None and (c.assigned_uav_id, c.active_probe_id) != (uav_id, probe_id):
             raise ValueError("contact already reserved")
@@ -667,21 +722,30 @@ class ContactStore:
             and assessment.class_confidence < self.config.assessment_confidence_min
         ):
             raise ValueError("class assessment confidence is below threshold")
+        # A confirmed violation is a terminal conclusion and keeps the strict
+        # confidence gate.  A suspected violation is a preliminary trigger that
+        # only needs some positive evidence; it must not clear an established
+        # class or demote the contact lifecycle state.
         if (
-            assessment.activity != "unknown"
+            assessment.activity == "confirmed_violation"
             and assessment.activity_confidence < self.config.assessment_confidence_min
         ):
             raise ValueError("activity assessment confidence is below threshold")
-        updated = replace(
-            contact,
-            vessel_class=assessment.vessel_class,
-            class_confidence=assessment.class_confidence,
-            class_evidence_ids=assessment.class_evidence_ids,
-            activity=assessment.activity,
-            activity_confidence=assessment.activity_confidence,
-            activity_evidence_ids=assessment.activity_evidence_ids,
-        )
-        if assessment.activity in {"suspected_violation", "confirmed_violation"}:
+        if assessment.activity != "unknown" and assessment.activity_confidence <= 0.0:
+            raise ValueError("activity assessment confidence must be positive")
+        update_fields: dict = {
+            "activity": assessment.activity,
+            "activity_confidence": assessment.activity_confidence,
+            "activity_evidence_ids": assessment.activity_evidence_ids,
+        }
+        if assessment.vessel_class != "unknown":
+            update_fields.update({
+                "vessel_class": assessment.vessel_class,
+                "class_confidence": assessment.class_confidence,
+                "class_evidence_ids": assessment.class_evidence_ids,
+            })
+        updated = replace(contact, **update_fields)
+        if assessment.activity == "confirmed_violation":
             updated = replace(updated, state="tracking")
         self._contacts[updated.contact_id] = updated
         self._event(

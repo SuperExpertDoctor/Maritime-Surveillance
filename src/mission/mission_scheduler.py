@@ -59,6 +59,11 @@ _ORDINARY_SEARCH_OPERATIONS = {
 }
 _ACTIVE_RECORD_STATUSES = {"approved", "executing"}
 _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
+# Target-directed work that outranks ordinary area coverage.  These kinds may
+# preempt busy ordinary-search UAVs and are exempt from the coverage floor.
+_TARGET_TASK_KINDS = frozenset(
+    {"probe", "track", "investigation", "direction_search"}
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -382,7 +387,7 @@ def _edge_usable(
         # A declared preemption must actually launch a new contact task.
         if kind == "probe" and not allow_probe_preempt_search:
             return False
-        if kind in _SEARCH_TASK_KINDS and not (
+        if kind in _SEARCH_TASK_KINDS and kind not in _TARGET_TASK_KINDS and not (
             allow_intent_preempt_search and bool(task.intent_ids)
         ):
             return False
@@ -647,7 +652,7 @@ def _actual_preempted(
         if (
             task is not None
             and (
-                task.kind in {"probe", "track"}
+                task.kind in _TARGET_TASK_KINDS
                 or (
                     task.kind in _SEARCH_TASK_KINDS
                     and allow_intent_preempt_search
@@ -758,20 +763,14 @@ def _validate_selection(
         )
         # A zero addition budget does not authorize removing the searches
         # that satisfied it. Even an infeasible floor must not be worsened.
-        preempted_searches = sum(
-            task.kind == "search"
-            and task.status in _ACTIVE_RECORD_STATUSES
-            and task.assigned_uav_id in set(preempt_uav_ids)
-            for task in snapshot.active_tasks
-        )
+        # The actual preemption accounting is deferred until the matching is
+        # known: only capacity diverted back into ordinary coverage churn
+        # counts against the floor, because target-directed tasks outrank it.
         retained_budget = (
             coverage_constraint.active_search_count
             + coverage_constraint.matchable_pending_count
         )
         protected_budget = min(coverage_constraint.desired_search_count, retained_budget)
-        projected_budget = retained_budget + ordinary_count - preempted_searches
-        if preempted_searches and projected_budget < protected_budget:
-            errors.append(f"coverage_preemption_floor:{protected_budget}:{projected_budget}")
         if (
             not floor_infeasible
             and ordinary_count < coverage_constraint.required_new_search_count
@@ -812,10 +811,16 @@ def _validate_selection(
         errors.append("duplicate_contact_with_active_task")
 
     searches = [task for task in selected_tasks if task.kind in _SEARCH_TASK_KINDS and task.bbox]
-    for left_index, left in enumerate(searches):
-        for right in searches[left_index + 1:]:
+    coverage_scans = [task for task in searches if task.kind == "search"]
+    for left_index, left in enumerate(coverage_scans):
+        for right in coverage_scans[left_index + 1:]:
             if _overlap(left.bbox, right.bbox):
                 errors.append(f"overlapping_search: {left.task_id}/{right.task_id}")
+    preempted_task_ids = {
+        task.task_id
+        for task in snapshot.active_tasks
+        if task.assigned_uav_id in set(preempt_uav_ids)
+    }
     active_searches = [
         task for task in snapshot.active_tasks
         if (
@@ -823,9 +828,16 @@ def _validate_selection(
             and task.kind in _SEARCH_TASK_KINDS
             and task.bbox
             and task.task_id not in selected_task_ids
+            and task.task_id not in preempted_task_ids
         )
     ]
+    # Target-directed scans (investigation/direction_search) lawfully overlap
+    # ongoing coverage: they re-scan a cued area sooner for a contact rather
+    # than competing for region ownership.  Ordinary searches still may not
+    # overlap retained/executing regions.
     for candidate in searches:
+        if candidate.kind != "search":
+            continue
         if any(_overlap(candidate.bbox, active_task.bbox) for active_task in active_searches):
             errors.append(f"overlapping_active_search: {candidate.task_id}")
 
@@ -867,6 +879,24 @@ def _validate_selection(
                 if matching is None:
                     errors.append("infeasible_assignment")
     if matching is not None:
+        if coverage_constraint is not None and preempt_uav_ids:
+            preempted_for_coverage = sum(
+                1
+                for task_id, edge in matching.items()
+                if edge.uav_id in set(preempt_uav_ids)
+                and (
+                    task := active.get(task_id) or candidates.get(task_id)
+                ) is not None
+                and task.kind not in _TARGET_TASK_KINDS
+            )
+            projected_budget = (
+                retained_budget + ordinary_count - preempted_for_coverage
+            )
+            if preempted_for_coverage and projected_budget < protected_budget:
+                errors.append(
+                    "coverage_preemption_floor:"
+                    f"{protected_budget}:{projected_budget}"
+                )
         actual_preempted = _actual_preempted(
             matching,
             selection,

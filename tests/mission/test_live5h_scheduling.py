@@ -258,6 +258,35 @@ def test_production_snapshot_probe_does_not_reduce_search_target(blocked):
         _edge("Q", r.uav_id, 1.) for r in resources))
     snapshot = allocator.build_mission_snapshot(20., active_tasks=records)
     assert snapshot.coverage_constraint.desired_search_count == len(resources)
+    # Probe demand outranks the coverage floor: ordinary-search resources stay
+    # legally preemptible even at full coverage commitment.
+    assert snapshot.preemptible_uav_ids == tuple(
+        sorted(r.uav_id for r in resources)
+    )
+
+
+def test_production_snapshot_without_target_demand_still_empties_preemptible():
+    engine = _engine()
+    allocator = engine.allocator
+    resources = tuple(replace(r, operation="coverage", current_task_id=f"S{i}",
+                              last_reassigned_at_min=0.)
+                      for i, r in enumerate(allocator._mission_resources()))
+    records = tuple(TaskRecord(f"S{i}", "search", "executing", (i, 0, i + 1, 1),
+                              None, (), r.uav_id, None, 0., 1., None, None)
+                    for i, r in enumerate(resources))
+    allocator.task_catalog.build = lambda *_a: ()
+    allocator._mission_resources = lambda: resources
+    for r in resources:
+        state = allocator.sm.get_uav(r.uav_id)
+        state.control_mode = "heuristic"
+        state.control_owner = "heuristic"
+    allocator.sm.get_available_uavs = lambda: []
+    regions = tuple(type("Region", (), {"id": r.task_id, "bbox": r.bbox})() for r in records)
+    allocator.sm.get_unfinished_search_regions = lambda: regions
+    allocator.sm.get_assigned_search_regions = lambda: regions
+    allocator._mission_edges = lambda *_a, **_k: ()
+    snapshot = allocator.build_mission_snapshot(20., active_tasks=records)
+    assert snapshot.coverage_constraint.desired_search_count == len(resources)
     assert snapshot.preemptible_uav_ids == ()
 
 
