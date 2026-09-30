@@ -380,3 +380,74 @@ def test_restored_search_tick_rebinds_task_region_and_sar_generation():
     assert restored is not None
     assert restored.scanned_cells == progress.required_cells[:1]
     assert engine._validate_mission_state_invariants(strict=True) == ()
+
+
+def test_investigation_region_may_overlap_ordinary_coverage():
+    # Replicates the observed live invariant failure: an investigation task's
+    # region overlaps a retained search region.  Target-directed scans share
+    # the search projection but are exempt from the no-overlap rule.
+    engine, uav, task = _coverage_task_fixture()
+    other = engine.uavs[1]
+    inv_id = "investigation:EMITTER-X"
+    inv_region = Region(
+        inv_id,
+        BBox(task.region_bbox.col_start, task.region_bbox.row_start,
+             task.region_bbox.col_end, task.region_bbox.row_end),
+        "search",
+        assigned_uav_id=other.id,
+    )
+    engine.allocator.sm.set_search_regions([
+        *engine.allocator.sm.get_search_regions(), inv_region,
+    ])
+    engine._mission_task_records[inv_id] = TaskRecord(
+        inv_id,
+        "investigation",
+        "approved",
+        tuple(inv_region.bbox),
+        None,
+        (),
+        other.id,
+        "fixture",
+        0.0,
+        None,
+        None,
+        None,
+    )
+
+    assert engine._validate_mission_state_invariants(strict=True) == ()
+
+
+def test_two_overlapping_ordinary_searches_still_violate_invariant():
+    engine, uav, task = _coverage_task_fixture()
+    other = engine.uavs[1]
+    dup_id = "search:overlap"
+    dup_region = Region(
+        dup_id,
+        BBox(task.region_bbox.col_start, task.region_bbox.row_start,
+             task.region_bbox.col_end, task.region_bbox.row_end),
+        "search",
+        assigned_uav_id=other.id,
+    )
+    engine.allocator.sm.set_search_regions([
+        *engine.allocator.sm.get_search_regions(), dup_region,
+    ])
+    engine._mission_task_records[dup_id] = TaskRecord(
+        dup_id,
+        "search",
+        "approved",
+        tuple(dup_region.bbox),
+        None,
+        (),
+        other.id,
+        "fixture",
+        0.0,
+        None,
+        None,
+        None,
+    )
+
+    errors = engine._validate_mission_state_invariants()
+    assert any(
+        error.startswith("overlapping_unfinished_search_regions:")
+        for error in errors
+    )

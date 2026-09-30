@@ -1082,7 +1082,7 @@ class SimulationEngine:
         records = {
             record.task_id: record
             for record in self._mission_task_records.values()
-            if record.kind == "search"
+            if record.kind in _SEARCH_TASK_KINDS
         }
         assigned_records: dict[str, list[str]] = defaultdict(list)
         for record in records.values():
@@ -1125,6 +1125,13 @@ class SimulationEngine:
         ]
         for index, left in enumerate(unfinished):
             for right in unfinished[index + 1:]:
+                # Target-directed scans (investigation/direction_search)
+                # lawfully re-scan cued areas that overlap coverage regions;
+                # only ordinary coverage scans compete for region ownership.
+                left_kind = getattr(records.get(left.id), "kind", "search")
+                right_kind = getattr(records.get(right.id), "kind", "search")
+                if left_kind != "search" or right_kind != "search":
+                    continue
                 if not (
                     left.bbox.col_end <= right.bbox.col_start
                     or right.bbox.col_end <= left.bbox.col_start
