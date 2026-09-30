@@ -889,6 +889,22 @@ class TaskAllocator:
                 "error_codes": list(self.mission_scheduler.last_selection_errors),
                 "available_count": len(snapshot.available_uav_ids),
             })
+            failed_response = (
+                self.mission_scheduler.last_selection_response
+                if isinstance(self.mission_scheduler.last_selection_response, dict)
+                else {}
+            )
+            failed_selected = failed_response.get("selected_task_ids") or []
+            failed_candidates = (
+                (self.mission_scheduler.last_selection_payload or {})
+                .get("snapshot", {})
+                .get("candidates", ())
+            )
+            selected_feasible = {
+                task.get("task_id"): list(task.get("feasible_uav_ids") or ())
+                for task in failed_candidates
+                if task.get("task_id") in failed_selected
+            }
             self.sm.add_event("decision_failed", {
                 "cycle": self.sm.cycle,
                 "snapshot_id": snapshot.snapshot_id,
@@ -898,6 +914,13 @@ class TaskAllocator:
                 "attempt_errors": list(
                     self.mission_scheduler.last_selection_attempt_errors
                 ),
+                "model_selected_task_ids": list(failed_selected),
+                "model_preempt_uav_ids": list(
+                    failed_response.get("preempt_uav_ids") or ()
+                ),
+                "available_uav_ids": list(snapshot.available_uav_ids),
+                "preemptible_uav_ids": list(snapshot.preemptible_uav_ids),
+                "selected_task_feasible_uav_ids": selected_feasible,
                 "call_id": self.mission_scheduler.last_selection_call_id,
                 "failure_stage": (
                     self.mission_scheduler.last_selection_failure_stage
