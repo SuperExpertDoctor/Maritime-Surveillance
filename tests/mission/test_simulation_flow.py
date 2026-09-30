@@ -301,19 +301,25 @@ def test_decision_maker_failure_preserves_existing_task():
         1.0,
     )
 
-    assert returned_batch is None
-    assert result["action"] == "mission_selection_unavailable"
+    # The failed model call still surfaces as failure telemetry, but the
+    # deterministic fallback covers tasking so the fleet keeps working; it
+    # never preempts, so the existing assignment is untouched.
+    assert returned_batch is not None
+    assert result["action"] == "mission_selection_approved"
     assert engine.control_coordinator.current_lease(assignment.uav_id) == before
     assert engine.control_coordinator.active_task(assignment.uav_id) == before_task
 
 
-def test_failed_mission_decision_emits_failure_and_retries_after_one_minute():
+def test_failed_mission_decision_emits_failure_and_falls_back_to_deterministic_tasking():
     engine = _engine()
 
     result, returned_batch = engine.allocator.mission_step(1.0)
 
-    assert returned_batch is None
-    assert result["action"] == "mission_selection_unavailable"
+    # The model failure is still reported through the failure events and
+    # llm_cycle trace, while the deterministic fallback produces a legal
+    # batch so the fleet is not left idle for the retry interval.
+    assert returned_batch is not None
+    assert result["action"] == "mission_selection_approved"
     trace = result["llm_cycle"]
     assert {
         "system_prompt", "user_prompt", "response", "attempts",
@@ -330,7 +336,8 @@ def test_failed_mission_decision_emits_failure_and_retries_after_one_minute():
         if event["type"] == "decision_failed"
     )
     assert failure["data"]["reason"] == "model_selection_unavailable"
-    assert failure["data"]["retry_at_min"] == 2.0
+    assert failure["data"]["covered_by_fallback"] is True
+    assert failure["data"]["retry_at_min"] is None
     selection_failure = next(
         event
         for event in engine.allocator.sm.get_recent_events(1.0)
@@ -343,5 +350,7 @@ def test_failed_mission_decision_emits_failure_and_retries_after_one_minute():
     assert selection_failure["data"]["failure_category"] == "transport"
     assert selection_failure["data"]["error_codes"] == ["model_selection_unavailable"]
     assert "LONGCAT_API_KEY" not in str(selection_failure)
+    # With the fallback covering tasking there is no forced +1min model retry;
+    # the next heavy decision arrives on the natural trigger cadence.
     assert engine.allocator.trigger_manager.check(1.99).trigger_type == "none"
-    assert engine.allocator.trigger_manager.check(2.0).trigger_type == "heavy"
+    assert engine.allocator.trigger_manager.check(2.0).trigger_type == "none"

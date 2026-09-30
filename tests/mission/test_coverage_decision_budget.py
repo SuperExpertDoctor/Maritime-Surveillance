@@ -211,8 +211,15 @@ def test_seed_42_initial_scenario_wire_payload_is_lossless_and_under_30_kib(monk
 
     monkeypatch.setattr(mission_scheduler_module, "encode_selection_payload", record_encode)
 
-    for _ in range(3):
+    # A committed fleet no longer retries the model every step: the
+    # deterministic fallback covers failed calls between heavy triggers, so
+    # requests arrive at the trigger cadence rather than once per step.
+    for _ in range(120):
+        if len(gateway.requests) >= 3:
+            break
         engine.step()
+        while engine.runtime_status == "paused_model":
+            engine.retry_blocked_decision()
 
     assert len(gateway.requests) == 3
     for request in gateway.requests:

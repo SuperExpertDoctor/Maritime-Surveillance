@@ -877,10 +877,6 @@ class TaskAllocator:
         self.trigger_manager.mark_triggered("heavy", current_time)
         self.sm.cycle += 1
         if batch is None:
-            self.trigger_manager.schedule_heavy_retry(
-                current_time,
-                reason=failure_reason or "decision_failed",
-            )
             self.sm.add_event("mission_selection_failed", {
                 "snapshot_id": snapshot.snapshot_id,
                 "failure_category": (
@@ -910,6 +906,9 @@ class TaskAllocator:
                 for task in failed_candidates
                 if task.get("task_id") in failed_selected
             }
+            fallback_batch = self.mission_scheduler._deterministic_fallback_batch(
+                snapshot,
+            )
             self.sm.add_event("decision_failed", {
                 "cycle": self.sm.cycle,
                 "snapshot_id": snapshot.snapshot_id,
@@ -931,8 +930,19 @@ class TaskAllocator:
                     self.mission_scheduler.last_selection_failure_stage
                     or "unknown"
                 ),
-                "retry_at_min": current_time + 1.0,
+                "covered_by_fallback": fallback_batch is not None,
+                "retry_at_min": (
+                    None if fallback_batch is not None else current_time + 1.0
+                ),
             })
+            if fallback_batch is None:
+                # No deterministic cover either: keep the model-retry cadence
+                # so the next successful call can retask the fleet.
+                self.trigger_manager.schedule_heavy_retry(
+                    current_time,
+                    reason=failure_reason or "decision_failed",
+                )
+            batch = fallback_batch
         self.sm.add_event("mission_decision", {
             "cycle": self.sm.cycle,
             "success": bool(batch is not None),

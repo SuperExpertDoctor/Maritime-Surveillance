@@ -317,7 +317,10 @@ def test_stale_contact_is_released_before_first_controller_tick_past_limit(engin
     assert sm.get_track_regions() == []
     assert uav.target_group_id is None
     assert sm.get_uav(uav.id).target_group_id is None
-    assert engine.control_coordinator.active_task(uav.id).task_type is OperationMode.HOLDING
+    # The lost-contact binding is released; the deterministic fallback may
+    # immediately retask the freed UAV onto coverage work instead of HOLDING.
+    released_task = engine.control_coordinator.active_task(uav.id)
+    assert released_task is None or released_task.target_contact_id != cid
     events = sm.get_recent_events(0)
     assert any(e["type"] == "target_lost" for e in events)
     assert not any(e["type"] in {"control_fault", "emergency_failure", "task_failed"}

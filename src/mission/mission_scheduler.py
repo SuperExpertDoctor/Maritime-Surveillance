@@ -1257,6 +1257,191 @@ class MissionScheduler:
             for task_id in selected
         )
 
+    def _deterministic_fallback_batch(
+        self,
+        snapshot: MissionSnapshot,
+        *,
+        visible_task_ids: frozenset[str] | None = None,
+    ) -> AssignmentBatch | None:
+        """Produce a legal assignment batch without a model call.
+
+        The model remains the decision authority whenever it answers
+        successfully; this fallback only fires on failure so an outage or an
+        invalid response does not strand the fleet for the retry interval.
+        It plays by the exact same rules: the greedy selection it proposes
+        must clear the same post-validation and matching pipeline as a model
+        answer, and it never declares preemptions.
+        """
+        selection = self._deterministic_fallback_selection(
+            snapshot, visible_task_ids=visible_task_ids,
+        )
+        if selection is None:
+            return None
+        pairing = self.pair_selected_tasks(
+            selection,
+            snapshot,
+            visible_task_ids=visible_task_ids,
+        )
+        if not pairing.is_valid:
+            return None
+        return AssignmentBatch(
+            snapshot.snapshot_id,
+            pairing.assignments,
+            f"{self.last_selection_call_id or 'model'}:fallback",
+            _information_version=snapshot.information_version,
+        )
+
+    def _deterministic_fallback_selection(
+        self,
+        snapshot: MissionSnapshot,
+        *,
+        visible_task_ids: frozenset[str] | None = None,
+    ) -> MissionSelection | None:
+        """Greedy legal selection used only when the model cannot produce one.
+
+        Hard coverage obligations (zone must-service tasks and quotas, the
+        ordinary-search floor) are served first from tasks with an edge to a
+        free UAV.  Remaining capacity goes to the most time-efficient legal
+        work — utility per minute of transit-plus-mission — which keeps the
+        fleet scanning instead of churning long transits.  Contact-targeted
+        kinds naturally outrank searches through their higher utility, so
+        detection follow-up and tracking stay stable through an outage.
+        """
+        visible = (
+            {task.task_id for task in snapshot.candidates}
+            if visible_task_ids is None else set(visible_task_ids)
+        )
+        pending = set(snapshot.pending_search_task_ids)
+        candidates = {
+            task.task_id: task
+            for task in snapshot.candidates
+            if task.task_id in visible and task.task_id not in pending
+        }
+        free_uavs = {
+            resource.uav_id
+            for resource in snapshot.resources
+            if _is_available(resource, snapshot)
+        }
+        transit: dict[str, float] = {}
+        for edge in snapshot.feasible_edges:
+            if edge.uav_id not in free_uavs or edge.task_id not in candidates:
+                continue
+            best = transit.get(edge.task_id)
+            if best is None or edge.transit_time_min < best:
+                transit[edge.task_id] = edge.transit_time_min
+
+        selected: list[str] = []
+        seen: set[str] = set()
+        search_bboxes: list = []
+        used_contacts: set[str] = set()
+        active_contacts: set[str] = set()
+        retained_bboxes: list = []
+        for record in snapshot.active_tasks:
+            if record.status not in _ACTIVE_RECORD_STATUSES:
+                continue
+            if record.contact_id:
+                active_contacts.add(record.contact_id)
+            if record.kind in _SEARCH_TASK_KINDS and record.bbox is not None:
+                retained_bboxes.append((record.task_id, record.bbox))
+
+        def add(task_id: str) -> bool:
+            task = candidates.get(task_id)
+            if task is None or task_id in seen or task_id not in transit:
+                return False
+            if task.contact_id is not None and (
+                task.contact_id in used_contacts
+                or task.contact_id in active_contacts
+            ):
+                return False
+            if (
+                task.contact_id is None
+                and task.kind == "search"
+                and task.bbox is not None
+            ):
+                if any(_overlap(task.bbox, other) for other in search_bboxes):
+                    return False
+                if any(
+                    _overlap(task.bbox, bbox)
+                    for other_id, bbox in retained_bboxes
+                    if other_id not in seen
+                ):
+                    return False
+            selected.append(task_id)
+            seen.add(task_id)
+            if task.contact_id is not None:
+                used_contacts.add(task.contact_id)
+            elif task.kind == "search" and task.bbox is not None:
+                search_bboxes.append(task.bbox)
+            return True
+
+        constraint = snapshot.coverage_constraint
+        capacity = len(free_uavs)
+        if constraint is not None:
+            for task_id in constraint.must_service_task_ids:
+                add(task_id)
+            for zone in constraint.zone_requirements:
+                if zone.infeasible_reason is not None:
+                    continue
+                for task_id in zone.must_service_task_ids:
+                    add(task_id)
+                needed = zone.required_search_count - len(
+                    set(selected) & set(zone.representative_task_ids)
+                )
+                for task_id in zone.representative_task_ids:
+                    if needed <= 0 or len(selected) >= capacity:
+                        break
+                    if add(task_id):
+                        needed -= 1
+            for task_id in constraint.representative_task_ids:
+                if len(selected) >= capacity:
+                    break
+                add(task_id)
+
+        required = (
+            0
+            if constraint is None
+            else max(0, int(constraint.required_new_search_count))
+        )
+        # Every selectable kind counts toward the floor 1:1 — ordinary
+        # "search" directly, contact kinds through the target-diverted
+        # budget — so ranking the whole pool by time efficiency also
+        # satisfies the coverage floor once enough tasks fit.
+        ordered = sorted(
+            transit,
+            key=lambda task_id: (
+                -(
+                    float(candidates[task_id].utility or 0.0)
+                    / (
+                        transit[task_id]
+                        + max(
+                            0.1,
+                            float(
+                                candidates[task_id].estimated_duration_min or 0.0
+                            ),
+                        )
+                    )
+                ),
+                task_id,
+            ),
+        )
+        for task_id in ordered:
+            if len(selected) >= max(required, capacity):
+                break
+            add(task_id)
+
+        return MissionSelection(
+            SELECTION_SCHEMA,
+            snapshot.snapshot_id,
+            tuple(selected),
+            (),
+            (
+                None
+                if selected
+                else "fleet committed or no feasible candidates; awaiting task completion"
+            ),
+            "deterministic fallback selection",
+        )
+
     def decide(
         self,
         snapshot: MissionSnapshot,
