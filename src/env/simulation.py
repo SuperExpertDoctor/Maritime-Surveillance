@@ -1167,6 +1167,14 @@ class SimulationEngine:
             return ()
         if strict:
             raise ValueError("; ".join(errors))
+        repaired = self._repair_orphaned_pending_records(errors)
+        if repaired:
+            self.allocator.sm.add_event("mission_state_invariant_repaired", {
+                "repaired": list(repaired),
+            })
+            errors = self._mission_state_invariant_errors()
+            if not errors:
+                return ()
         signature = tuple(errors)
         if signature not in self._mission_invariant_failure_signatures:
             self._mission_invariant_failure_signatures.add(signature)
@@ -1176,6 +1184,37 @@ class SimulationEngine:
         self._runtime_status = "paused_safety"
         self._blocked_role = "mission_state_invariant"
         return errors
+
+    def _repair_orphaned_pending_records(self, errors: tuple[str, ...]) -> tuple[str, ...]:
+        """Cancel approved-but-unassigned records whose region projection is gone.
+
+        Region retirements (track-overlap retire, heavy-trigger active-only
+        refresh, contact loss) drop the region object but leave the task
+        record in ``approved`` with no UAV — an unrecoverable
+        ``pending_search_projection_mismatch`` that used to pause the run.
+        An orphaned record can never execute, so cancel it and re-validate.
+        """
+        repaired: list[str] = []
+        now = float(self.clock.time)
+        for error in errors:
+            prefix = "pending_search_projection_mismatch:"
+            if not error.startswith(prefix):
+                continue
+            task_id = error[len(prefix):]
+            record = self._mission_task_records.get(task_id)
+            if (
+                record is not None
+                and record.status == "approved"
+                and record.assigned_uav_id is None
+            ):
+                self._mission_task_records[task_id] = replace(
+                    record,
+                    status="cancelled",
+                    finished_at_min=now,
+                    release_reason="region_projection_removed",
+                )
+                repaired.append(task_id)
+        return tuple(repaired)
 
     def _publish_control_routes(self) -> None:
         """Publish immutable controller route envelopes for frame readers."""
