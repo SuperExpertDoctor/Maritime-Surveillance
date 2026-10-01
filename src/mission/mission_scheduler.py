@@ -1085,6 +1085,14 @@ def _overlap(left, right) -> bool:
     )
 
 
+def _overlap_area(left, right) -> int:
+    if not _overlap(left, right):
+        return 0
+    return (min(left[2], right[2]) - max(left[0], right[0])) * (
+        min(left[3], right[3]) - max(left[1], right[1])
+    )
+
+
 class MissionScheduler:
     """LLM-backed selection facade with deterministic local pairing."""
 
@@ -1301,11 +1309,15 @@ class MissionScheduler:
 
         Hard coverage obligations (zone must-service tasks and quotas, the
         ordinary-search floor) are served first from tasks with an edge to a
-        free UAV.  Remaining capacity goes to the most time-efficient legal
-        work — utility per minute of transit-plus-mission — which keeps the
-        fleet scanning instead of churning long transits.  Contact-targeted
-        kinds naturally outrank searches through their higher utility, so
-        detection follow-up and tracking stay stable through an outage.
+        free UAV.  Contact-targeted kinds take the next seats — their higher
+        utility keeps detection follow-up and tracking stable through an
+        outage.  Remaining capacity is quotaed across the coverage-summary
+        zones, largest effective gap first, one pick per zone per round, so
+        the batch spans the whole search domain instead of letting the
+        nearest region consume every slot; inside a zone the most
+        time-efficient task (utility per minute of transit-plus-mission)
+        still wins, and a final global pass fills whatever the quotas could
+        not place.
         """
         visible = (
             {task.task_id for task in snapshot.candidates}
@@ -1402,30 +1414,75 @@ class MissionScheduler:
             if constraint is None
             else max(0, int(constraint.required_new_search_count))
         )
-        # Every selectable kind counts toward the floor 1:1 — ordinary
-        # "search" directly, contact kinds through the target-diverted
-        # budget — so ranking the whole pool by time efficiency also
-        # satisfies the coverage floor once enough tasks fit.
-        ordered = sorted(
-            transit,
-            key=lambda task_id: (
-                -(
-                    float(candidates[task_id].utility or 0.0)
-                    / (
-                        transit[task_id]
-                        + max(
-                            0.1,
-                            float(
-                                candidates[task_id].estimated_duration_min or 0.0
-                            ),
-                        )
-                    )
+
+        def efficiency(task_id: str) -> float:
+            task = candidates[task_id]
+            return float(task.utility or 0.0) / (
+                transit[task_id]
+                + max(0.1, float(task.estimated_duration_min or 0.0))
+            )
+
+        target = max(required, capacity)
+        # Contact-targeted kinds carry the highest utility and keep
+        # detection follow-up and tracking stable through an outage, so
+        # they take their seats before coverage work is spread.
+        for task_id in sorted(
+            (tid for tid in transit if candidates[tid].contact_id is not None),
+            key=lambda tid: (-efficiency(tid), tid),
+        ):
+            if len(selected) >= target:
+                break
+            add(task_id)
+
+        # Coverage fill is quotaed across the coverage-summary zones
+        # (largest effective gap first, one pick per zone per round) so the
+        # task mix spans the whole search domain; a pure global ranking
+        # lets the nearest region consume every slot and leaves far bands
+        # unscanned until transit frees up.
+        zone_rows = (snapshot.coverage_summary or {}).get("zones") or ()
+        zone_boxes = [
+            (str(row.get("zone_id")), tuple(row.get("bbox") or ()))
+            for row in sorted(
+                zone_rows,
+                key=lambda row: (
+                    -float(row.get("effective_gap_fraction") or 0.0),
+                    str(row.get("zone_id")),
                 ),
-                task_id,
-            ),
-        )
+            )
+            if len(row.get("bbox") or ()) == 4
+        ]
+        if zone_boxes:
+            zone_tasks: dict[str, list[str]] = {zid: [] for zid, _ in zone_boxes}
+            for task_id in transit:
+                task = candidates[task_id]
+                if task.contact_id is not None or task.bbox is None:
+                    continue
+                best_zone, best_area = None, 0
+                for zone_id, zone_box in zone_boxes:
+                    area = _overlap_area(tuple(task.bbox), zone_box)
+                    if area > best_area:
+                        best_zone, best_area = zone_id, area
+                if best_zone is not None:
+                    zone_tasks[best_zone].append(task_id)
+            for task_ids in zone_tasks.values():
+                task_ids.sort(key=lambda tid: (-efficiency(tid), tid))
+            while len(selected) < target:
+                picked = False
+                for zone_id, _zone_box in zone_boxes:
+                    if len(selected) >= target:
+                        break
+                    for task_id in zone_tasks[zone_id]:
+                        if add(task_id):
+                            picked = True
+                            break
+                if not picked:
+                    break
+
+        # Leftover pass: global time-efficiency fill for anything the zone
+        # quotas could not place (no zone summary, saturated zones).
+        ordered = sorted(transit, key=lambda tid: (-efficiency(tid), tid))
         for task_id in ordered:
-            if len(selected) >= max(required, capacity):
+            if len(selected) >= target:
                 break
             add(task_id)
 
