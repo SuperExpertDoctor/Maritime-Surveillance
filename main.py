@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
 import os
@@ -128,6 +129,7 @@ def main(
     wall_seconds: float | None = None,
     run_report_dir: str | None = None,
 ) -> dict:
+    run_started_label = datetime.now().strftime("%Y%m%d_%H%M%S")
     if wall_seconds is not None and (not math.isfinite(wall_seconds) or wall_seconds <= 0):
         raise ValueError("wall_seconds must be finite and positive")
     report_dir = Path(run_report_dir) if run_report_dir is not None else None
@@ -282,6 +284,19 @@ def main(
             episode_id=engine.allocator.sm.episode_id,
         )
     output_path = app.state.frame_logger.path if app is not None else logger.path
+    # Archive the run's replay into outputs/<start-date-time>/ so every live
+    # session keeps its recording under a directory named after the moment
+    # the program started.
+    try:
+        run_dir = Path("outputs") / run_started_label
+        source = Path(output_path)
+        if source.is_file() and source.resolve().parent == Path("outputs").resolve():
+            run_dir.mkdir(parents=True, exist_ok=True)
+            target = run_dir / source.name
+            source.replace(target)
+            output_path = str(target)
+    except OSError as exc:
+        print(f"回放文件归档失败: {exc}")
     summary["jsonl_path"] = output_path
     summary["wall_seconds"] = elapsed_wall_seconds
     summary["runtime_before_finalize"] = runtime_before_finalize
