@@ -132,6 +132,7 @@ def test_ship_and_mission_config_fields_match_design():
         "align_timeout_min",
         "max_stall_replans",
         "max_consecutive_decision_failures",
+        "target_diversion_max_fraction",
     )
     assert config.mission.activity.regulated_bboxes == ((8, 8, 22, 22),)
     assert config.mission.evasion.enabled is True

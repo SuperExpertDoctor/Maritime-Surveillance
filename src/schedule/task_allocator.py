@@ -342,10 +342,13 @@ class TaskAllocator:
                 fraction=fraction,
                 search_limit=None,
                 zone_requirements_input=quota_inputs,
+                diversion_max_fraction=(
+                    coverage_config.target_diversion_max_fraction
+                ),
             )
             if active_search_count + matchable_pending_count <= desired_search_count:
                 # The SAR floor only restrains ordinary coverage churn.
-                # Target-directed demand (probe/track/investigation/direction)
+                # Target-directed demand (probe/track/investigation)
                 # outranks coverage and keeps legal preemption edges open;
                 # without this escape, contact work is structurally starved
                 # whenever the fleet is fully committed to searches.

@@ -315,6 +315,7 @@ def build_coverage_constraint(
     zone_requirements_input=(),
     healthy_count: int | None = None,
     search_limit: int | None = None,
+    diversion_max_fraction: float | None = None,
 ):
     """Build a healthy-fleet budget with one quota-first maximum matching.
 
@@ -327,6 +328,12 @@ def build_coverage_constraint(
     """
     from src.mission.contracts import CoverageConstraint, ZoneCoverageRequirement
 
+    if diversion_max_fraction is not None and (
+        isinstance(diversion_max_fraction, bool)
+        or not isinstance(diversion_max_fraction, Real)
+        or not 0.0 <= float(diversion_max_fraction) <= 1.0
+    ):
+        raise ValueError("diversion_max_fraction must be finite in [0, 1] or None")
     if any(
         isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0
         for value in (
@@ -623,6 +630,11 @@ def build_coverage_constraint(
         zone_infeasible=tuple(zone_infeasible),
         reserved_search_count=reserved_search_count,
         matchable_pending_count=int(matchable_pending_count),
+        diversion_credit_max=(
+            None
+            if diversion_max_fraction is None
+            else int(math.ceil(desired * float(diversion_max_fraction)))
+        ),
     )
 
 

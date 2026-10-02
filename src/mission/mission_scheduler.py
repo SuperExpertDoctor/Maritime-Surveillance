@@ -62,7 +62,7 @@ _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
 # Target-directed work that outranks ordinary area coverage.  These kinds may
 # preempt busy ordinary-search UAVs and are exempt from the coverage floor.
 _TARGET_TASK_KINDS = frozenset(
-    {"probe", "track", "investigation", "direction_search"}
+    {"probe", "track", "investigation"}
 )
 _LOGGER = logging.getLogger(__name__)
 
@@ -773,15 +773,22 @@ def _validate_selection(
         protected_budget = min(coverage_constraint.desired_search_count, retained_budget)
         # Capacity committed to feasible target-directed work is a lawful
         # diversion, not a coverage shortfall: each selected contact task
-        # offsets one unit of the residual addition requirement 1:1.  The
-        # floor still binds when the deficit exceeds that diversion.
+        # offsets one unit of the residual addition requirement, up to the
+        # configured diversion cap.  Without the cap a contact-rich picture
+        # can excuse the entire coverage floor and stall broad-area SAR.
         target_diverted = sum(
             task.kind in _TARGET_TASK_KINDS and task.task_id in candidates
             for task in selected_tasks
         )
+        credit_max = coverage_constraint.diversion_credit_max
+        credited_diversion = (
+            target_diverted
+            if credit_max is None
+            else min(target_diverted, credit_max)
+        )
         if (
             not floor_infeasible
-            and ordinary_count + target_diverted
+            and ordinary_count + credited_diversion
                 < coverage_constraint.required_new_search_count
         ):
             errors.append(
