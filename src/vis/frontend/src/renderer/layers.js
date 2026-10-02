@@ -723,6 +723,19 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
       ctx.restore();
     }
 
+    // ── Hold loiter ring (awaiting retask / base slot) ────────────
+    if (uav.status === "holding" && uav.position?.length >= 2) {
+      ctx.save();
+      ctx.strokeStyle = isSelected ? "rgba(217, 119, 6, .75)" : "rgba(217, 119, 6, .38)";
+      ctx.lineWidth = isSelected ? 1.4 : 0.8;
+      ctx.setLineDash([3, 4]);
+      const c = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 1.2 * cellSize, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // ── Storm-avoidance detour path (cyan, prominent) ────────────
     const avoidancePath = uav.avoidance_path || [];
     if (avoidancePath.length >= 2) {
