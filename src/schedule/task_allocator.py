@@ -1324,6 +1324,7 @@ class TaskAllocator:
                         allow_revisit=bool(allow_revisit),
                         seed=17,
                         along_track_cells=0.8,
+                        allow_fallback=False,
                     )
                 )
                 path = tuple(path_plan.path)

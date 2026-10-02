@@ -56,6 +56,7 @@ class AStarNavigator:
         candidate_limit: int = 32,
         primitive_length: float = 1.0,
         sample_step: float = 0.2,
+        max_expansions: int = 40000,
     ) -> None:
         if not math.isfinite(xy_resolution) or xy_resolution <= 0.0:
             raise ValueError("xy_resolution must be a finite positive number")
@@ -67,11 +68,14 @@ class AStarNavigator:
             raise ValueError("primitive_length must be a finite positive number")
         if not math.isfinite(sample_step) or sample_step <= 0.0:
             raise ValueError("sample_step must be a finite positive number")
+        if max_expansions < 1:
+            raise ValueError("max_expansions must be positive")
         self.xy_resolution = float(xy_resolution)
         self.heading_bins = int(heading_bins)
         self.candidate_limit = int(candidate_limit)
         self.primitive_length = float(primitive_length)
         self.sample_step = float(sample_step)
+        self.max_expansions = int(max_expansions)
 
     def plan_grid(
         self,
@@ -198,9 +202,13 @@ class AStarNavigator:
         )
         attempted_pairs: set[AnalyticAttempt] = set()
         incumbent: tuple[float, tuple[float, float, NodeKey], list[Pose]] | None = None
+        expansions = 0
 
         while open_heap:
             f_score, g_score, key, _ = heapq.heappop(open_heap)
+            expansions += 1
+            if expansions > self.max_expansions:
+                raise PathNotFoundError(start, goal_summary, planning_map_version, attempts)
             if g_score != g_scores.get(key) or key in closed:
                 continue
             if incumbent is not None and f_score >= incumbent[0] - 1e-12:

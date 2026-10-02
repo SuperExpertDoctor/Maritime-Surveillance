@@ -30,6 +30,7 @@ class SearchRouteRequest:
     direction: str | None = None
     seed: int = 17
     along_track_cells: float | None = None
+    allow_fallback: bool = True
 
 
 @dataclass(frozen=True)
@@ -84,12 +85,18 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
             connector = direct
         else:
             try:
-                connector = avoider.plan_path(path[-1], entry, mask, request.r_min)
+                connector = avoider.plan_path(
+                    path[-1], entry, mask, request.r_min,
+                    allow_fallback=request.allow_fallback,
+                )
             except RuntimeError:
                 connector = ObstacleAvoider(
                     max_iterations=2400,
                     seed=request.seed + 31 + index * 101,
-                ).plan_path(path[-1], entry, mask, request.r_min)
+                ).plan_path(
+                    path[-1], entry, mask, request.r_min,
+                    allow_fallback=request.allow_fallback,
+                )
         path.extend(connector[1:])
         if index == 0:
             transit_end_index = len(path) - 1

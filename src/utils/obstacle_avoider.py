@@ -142,6 +142,7 @@ class ObstacleAvoider:
         goal_pose: Sequence[float],
         obstacle_mask: np.ndarray,
         R_min: float,
+        allow_fallback: bool = True,
     ) -> list[Pose]:
         self._start_plan()
         start = tuple(map(float, start_pose))
@@ -224,14 +225,15 @@ class ObstacleAvoider:
                         break
 
         if not goal_candidates:
-            fallback = self._plan_via_free_anchor(start, goal, obstacle_mask, R_min)
-            if fallback:
-                self._finish_plan("free_anchor")
-                return fallback
-            hybrid = self._plan_via_hybrid_astar(start, goal, obstacle_mask, R_min)
-            if hybrid:
-                self._finish_plan("hybrid_astar")
-                return hybrid
+            if allow_fallback:
+                fallback = self._plan_via_free_anchor(start, goal, obstacle_mask, R_min)
+                if fallback:
+                    self._finish_plan("free_anchor")
+                    return fallback
+                hybrid = self._plan_via_hybrid_astar(start, goal, obstacle_mask, R_min)
+                if hybrid:
+                    self._finish_plan("hybrid_astar")
+                    return hybrid
             self._finish_plan("failure", reason="no_collision_free_path")
             raise RuntimeError("RRT* could not find a collision-free Dubins path")
 
