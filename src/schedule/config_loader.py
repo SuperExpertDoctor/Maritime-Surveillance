@@ -125,6 +125,9 @@ class UAVConfig:
     freshness_patrol_start_min: float = 120.0
     freshness_patrol_count: int = 5
     freshness_patrol_coverage_threshold_pct: float = 80.0
+    # Cap on simultaneous transit legs to base for deferrable rotation
+    # reasons; fuel/reserve triggers always return immediately.
+    max_concurrent_returns: int = 4
 
     @property
     def count(self) -> int:

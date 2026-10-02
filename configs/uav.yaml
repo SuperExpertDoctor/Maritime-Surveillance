@@ -23,3 +23,6 @@ freshness_patrol_count: 5
 # pass is complete.  Before this gate, every completed sector returns to the
 # exploration pool so unique offshore coverage can reach the 8-hour target.
 freshness_patrol_coverage_threshold_pct: 80
+# Cap simultaneous base-transit legs from deferrable rotation triggers so
+# most of the fleet stays on task; fuel/reserve triggers ignore the cap.
+max_concurrent_returns: 4

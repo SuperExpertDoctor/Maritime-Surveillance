@@ -146,8 +146,8 @@ class ObstacleAvoider:
         self._start_plan()
         start = tuple(map(float, start_pose))
         goal = tuple(map(float, goal_pose))
-        self._validate_endpoint(start, obstacle_mask, "start")
-        self._validate_endpoint(goal, obstacle_mask, "goal")
+        start = self._project_endpoint(start, obstacle_mask, "start")
+        goal = self._project_endpoint(goal, obstacle_mask, "goal")
         self._check_timeout()
 
         direct = DubinsPath.compute(start, goal, R_min, self.sample_step)
@@ -228,6 +228,10 @@ class ObstacleAvoider:
             if fallback:
                 self._finish_plan("free_anchor")
                 return fallback
+            hybrid = self._plan_via_hybrid_astar(start, goal, obstacle_mask, R_min)
+            if hybrid:
+                self._finish_plan("hybrid_astar")
+                return hybrid
             self._finish_plan("failure", reason="no_collision_free_path")
             raise RuntimeError("RRT* could not find a collision-free Dubins path")
 
@@ -461,6 +465,73 @@ class ObstacleAvoider:
     def _validate_endpoint(cls, pose: Pose, mask: np.ndarray, name: str) -> None:
         if cls._blocked(pose, mask):
             raise ValueError(f"{name} pose is outside the free configuration space")
+
+    @classmethod
+    def _project_endpoint(cls, pose: Pose, mask: np.ndarray, name: str) -> Pose:
+        """Snap a blocked endpoint to the nearest free cell center.
+
+        Dynamic obstacles (vessels, other UAVs) can flag the cell a pose
+        occupies, which would otherwise make planning impossible even though
+        the airframe can still fly.  A nearby free cell is a legal plan
+        endpoint; only a pose with no free cell within reach stays an error.
+        """
+        if not cls._blocked(pose, mask):
+            return pose
+        free = cls._nearest_free_cell(pose, mask)
+        if free is None:
+            raise ValueError(f"{name} pose is outside the free configuration space")
+        heading = pose[2] if len(pose) > 2 else 0.0
+        return (free[0] + 0.5, free[1] + 0.5, heading)
+
+    @classmethod
+    def _nearest_free_cell(
+        cls, pose: Sequence[float], mask: np.ndarray, max_radius: int = 6
+    ) -> tuple[int, int] | None:
+        """Breadth-first nearest free cell around a blocked pose."""
+        cols, rows = mask.shape
+        origin = (int(math.floor(pose[0])), int(math.floor(pose[1])))
+        seen = {origin}
+        frontier = [origin]
+        for _ in range(max_radius):
+            next_frontier = []
+            for cell_x, cell_y in frontier:
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    cell = (cell_x + dx, cell_y + dy)
+                    if cell in seen:
+                        continue
+                    seen.add(cell)
+                    if not (0 <= cell[0] < cols and 0 <= cell[1] < rows):
+                        continue
+                    if not mask[cell]:
+                        return cell
+                    next_frontier.append(cell)
+            frontier = next_frontier
+            if not frontier:
+                break
+        return None
+
+    def _plan_via_hybrid_astar(
+        self,
+        start: Pose,
+        goal: Pose,
+        obstacle_mask: np.ndarray,
+        R_min: float,
+    ) -> list[Pose] | None:
+        """Last-resort Hybrid A* when the RRT* sweep cannot connect."""
+        try:
+            from src.control.heuristic.navigation import AStarNavigator
+        except ImportError:
+            return None
+        try:
+            path = AStarNavigator().plan_grid(
+                start, {(goal[0], goal[1])}, obstacle_mask, R_min,
+                goal_heading_rad=goal[2] if len(goal) > 2 else None,
+            )
+        except Exception:
+            return None
+        if not path or not self.is_path_safe(path, obstacle_mask):
+            return None
+        return path
 
     @staticmethod
     def _length(path: Sequence[Sequence[float]]) -> float:

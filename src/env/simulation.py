@@ -1568,6 +1568,10 @@ class SimulationEngine:
         self._refresh_ais_signals(t)
         self._expire_contacts(t)
 
+        returning_uavs = sum(1 for e in self.uavs if e.status == "returning")
+        max_concurrent_returns = int(
+            getattr(self.config.uav, "max_concurrent_returns", 4) or 4
+        )
         for uav in self.uavs:
             self._publish_fuel_warning(uav, t)
             fuel_low = self._step_controlled_uav(uav, t)
@@ -1593,13 +1597,17 @@ class SimulationEngine:
                 and t - self._tracking_started_at[uav.id]
                 >= self.config.uav.lifecycle_search_dwell_min
             )
+            # Lifecycle rotations are deferrable: keep the bulk of the fleet
+            # on task by capping how many airframes may be in transit at once.
+            # Fuel and reserve triggers still return immediately.
+            defer_lifecycle = returning_uavs >= max_concurrent_returns
             return_reason = next(
                 (
                     reason
                     for reason, triggered in (
                         ("fuel_low", fuel_low),
-                        ("lifecycle_search", lifecycle_search_due),
-                        ("lifecycle_tracking", tracking_due),
+                        ("lifecycle_search", lifecycle_search_due and not defer_lifecycle),
+                        ("lifecycle_tracking", tracking_due and not defer_lifecycle),
                         ("range_reserve", self._needs_reserve_return(uav)),
                     )
                     if triggered
@@ -1614,6 +1622,7 @@ class SimulationEngine:
                     "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
                 })
                 self._begin_return(uav, t)
+                returning_uavs += 1
 
         self._record_uav_position_history(t)
         self._update_passive_sensors(t)
@@ -3407,6 +3416,12 @@ class SimulationEngine:
             "uav_id": uav.id,
             "error": str(error),
         })
+        if self._is_recoverable_planning_fault(error):
+            # The airframe is airworthy; the task, not the UAV, is lost. Keep
+            # it on station so the next decision cycle can retask it instead
+            # of paying a 40-80 min base round trip.
+            if self._hold_for_retask(uav, current_time, reason):
+                return
         try:
             self._request_recovery_return(uav, current_time, reason)
         except NoSafeRecoveryPath as recovery_error:
@@ -3415,6 +3430,56 @@ class SimulationEngine:
                 "no_safe_recovery_path",
                 recovery_error,
             )
+
+    _PLANNING_FAULT_MARKERS = (
+        "outside the free configuration space",
+        "collision-free Dubins path",
+        "unsafe path",
+        "coverage route blocked",
+    )
+
+    @classmethod
+    def _is_recoverable_planning_fault(cls, error: Exception) -> bool:
+        """Planning-space failures strand the task, not the airframe."""
+        if isinstance(error, (EmergencyRevokeRequired, ProbeValidationError, UnsafeControlState)):
+            return False
+        text = str(error)
+        return any(marker in text for marker in cls._PLANNING_FAULT_MARKERS)
+
+    def _hold_for_retask(
+        self, uav: UAVEntity, current_time: float, reason: str
+    ) -> bool:
+        """Release mission bindings and hover on station awaiting retasking.
+
+        Returns True when the UAV was parked (SYSTEM holding lease or idle),
+        False when the caller should fall back to a recovery return.
+        """
+        self._release_mission_bindings(uav, current_time, reason)
+        try:
+            self.control_coordinator.promote_to_system_holding(
+                uav.id, current_time=current_time
+            )
+        except Exception:
+            if self.control_coordinator.has_controller(uav.id):
+                return False
+            # Legacy entity without a coordinator lease: releasing the
+            # bindings already made it free; idle is strictly better than a
+            # base round trip.
+            uav.status = "idle"
+            self.allocator.sm.add_event("control_fault_retasked", {
+                "uav_id": uav.id,
+                "reason": reason,
+                "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
+            })
+            return True
+        uav.status = "holding"
+        self.allocator.sm.add_event("control_fault_retasked", {
+            "uav_id": uav.id,
+            "reason": reason,
+            "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
+        })
+        self._publish_control_routes()
+        return True
 
     def _request_recovery_return(
         self,
@@ -3551,14 +3616,16 @@ class SimulationEngine:
         uav.status = "returning"
         uav.sensor_mode = "off"
 
-    def _enter_emergency_failure(
-        self, uav: UAVEntity, reason: str, error: Exception
+    def _release_mission_bindings(
+        self, uav: UAVEntity, current_time: float, reason: str
     ) -> None:
-        """Freeze one airframe and release every mission binding it owned."""
-        if uav.id in self._emergency_failures:
-            return
+        """Detach every mission binding from an airborne UAV.
 
-        current_time = float(self.clock.time)
+        Used both by the emergency-failure path (followed by a permanent
+        freeze) and by the retask path (the airframe stays flyable and is
+        promoted to system holding so the next decision cycle can assign it
+        fresh work instead of paying a base round trip).
+        """
         sm = self.allocator.sm
         active_task = self.control_coordinator.active_task(uav.id)
         if active_task is None:
@@ -3696,6 +3763,17 @@ class SimulationEngine:
         uav.last_requested_command = None
         uav.last_applied_command = None
         uav.last_safety_interventions = ()
+
+    def _enter_emergency_failure(
+        self, uav: UAVEntity, reason: str, error: Exception
+    ) -> None:
+        """Freeze one airframe and release every mission binding it owned."""
+        if uav.id in self._emergency_failures:
+            return
+
+        current_time = float(self.clock.time)
+        sm = self.allocator.sm
+        self._release_mission_bindings(uav, current_time, reason)
         uav.request_active_mode("standby")
         uav.sensor_mode = "off"
 
@@ -4430,6 +4508,10 @@ class SimulationEngine:
                 state = sm.get_uav(uav.id)
                 region = regions.get(state.assigned_region_id if state else None)
                 if region is None:
+                    if self._hold_for_retask(
+                        uav, sm.current_time, "route_blocked"
+                    ):
+                        continue
                     self._begin_return(uav, sm.current_time)
                     continue
                 try:
@@ -4448,11 +4530,19 @@ class SimulationEngine:
                         "region_id": region.id,
                         "error": str(exc),
                     })
+                    if self._hold_for_retask(
+                        uav, sm.current_time, "route_blocked"
+                    ):
+                        continue
                     self._begin_return(uav, sm.current_time)
                     continue
             elif uav.mission_kind == "track_entry" and uav.target_group_id:
                 center = self._contact_center(uav.target_group_id)
                 if center is None:
+                    if self._hold_for_retask(
+                        uav, sm.current_time, "route_blocked"
+                    ):
+                        continue
                     self._begin_return(uav, sm.current_time)
                     continue
                 uav.start_tracking(uav.target_group_id, center)
@@ -5122,11 +5212,19 @@ class SimulationEngine:
                     current_time,
                     {"reason": "search_region_retired"},
                 )
+                if self._hold_for_retask(
+                    entity, current_time, "search_region_retired"
+                ):
+                    continue
                 self._begin_return(entity, current_time)
                 continue
             # A retired search is not an implicit handoff.  Leave the UAV
             # available only after its current route has been safely ended;
             # the next mission assignment must come from the global scheduler.
+            if self._hold_for_retask(
+                entity, current_time, "search_region_retired"
+            ):
+                continue
             self._begin_return(entity, current_time)
 
     def _begin_return(
