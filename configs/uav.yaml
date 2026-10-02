@@ -26,3 +26,9 @@ freshness_patrol_coverage_threshold_pct: 80
 # Cap simultaneous base-transit legs from deferrable rotation triggers so
 # most of the fleet stays on task; fuel/reserve triggers ignore the cap.
 max_concurrent_returns: 4
+# Staggered fuel-rotation band: each UAV gets its own fuel threshold spread
+# across [min, max] remaining-range fraction so returns happen at different
+# mileage points and never resynchronize into one fleet-wide wave.
+rotation_stagger_enabled: true
+rotation_threshold_min_pct: 0.15
+rotation_threshold_max_pct: 0.45

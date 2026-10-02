@@ -128,6 +128,13 @@ class UAVConfig:
     # Cap on simultaneous transit legs to base for deferrable rotation
     # reasons; fuel/reserve triggers always return immediately.
     max_concurrent_returns: int = 4
+    # Staggered fuel-rotation: each airframe carries its own fuel threshold
+    # inside [rotation_threshold_min_pct, rotation_threshold_max_pct] so
+    # sorties end at different mileage points instead of one synchronized
+    # return wave.  The trigger is deferrable like lifecycle rotations.
+    rotation_stagger_enabled: bool = True
+    rotation_threshold_min_pct: float = 0.15
+    rotation_threshold_max_pct: float = 0.45
 
     @property
     def count(self) -> int:

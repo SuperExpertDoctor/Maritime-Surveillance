@@ -272,6 +272,26 @@ class SimulationEngine:
             )
             for index in range(config.uav.count)
         ]
+        # Staggered fuel-rotation thresholds: spread the fleet's return
+        # points across the configured band so sorties end at different
+        # mileage instead of one synchronized wave.
+        self._rotation_threshold_by_uav: dict[str, float] = {}
+        if config.uav.rotation_stagger_enabled and self.uavs:
+            t_min = min(
+                config.uav.rotation_threshold_min_pct,
+                config.uav.rotation_threshold_max_pct,
+            )
+            t_max = max(
+                config.uav.rotation_threshold_min_pct,
+                config.uav.rotation_threshold_max_pct,
+            )
+            t_max = min(t_max, 1.0)
+            span = t_max - t_min
+            n = len(self.uavs)
+            for index, uav in enumerate(self.uavs):
+                self._rotation_threshold_by_uav[uav.id] = (
+                    t_min if n <= 1 else t_min + span * index / (n - 1)
+                )
         for index, uav in enumerate(self.uavs):
             uav.heading_rad = self._inward_heading(self.bases[index % len(self.bases)].position)
             # StateManager drives Hungarian assignment before the first
@@ -1597,9 +1617,16 @@ class SimulationEngine:
                 and t - self._tracking_started_at[uav.id]
                 >= self.config.uav.lifecycle_search_dwell_min
             )
-            # Lifecycle rotations are deferrable: keep the bulk of the fleet
-            # on task by capping how many airframes may be in transit at once.
-            # Fuel and reserve triggers still return immediately.
+            rotation_threshold = self._rotation_threshold_by_uav.get(uav.id)
+            rotation_due = (
+                rotation_threshold is not None
+                and uav.status in ("transit", "searching", "tracking")
+                and uav.fuel_remaining_pct <= rotation_threshold
+            )
+            # Lifecycle and staggered-fuel rotations are deferrable: keep the
+            # bulk of the fleet on task by capping how many airframes may be
+            # in transit at once.  Fuel and reserve triggers still return
+            # immediately.
             defer_lifecycle = returning_uavs >= max_concurrent_returns
             return_reason = next(
                 (
@@ -1609,6 +1636,7 @@ class SimulationEngine:
                         ("lifecycle_search", lifecycle_search_due and not defer_lifecycle),
                         ("lifecycle_tracking", tracking_due and not defer_lifecycle),
                         ("range_reserve", self._needs_reserve_return(uav)),
+                        ("rotation_fuel", rotation_due and not defer_lifecycle),
                     )
                     if triggered
                 ),
