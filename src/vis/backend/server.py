@@ -310,7 +310,15 @@ def create_app(
                 for f in os.listdir(subdir)
                 if f.endswith(".jsonl")
             )
-        return JSONResponse({"files": sorted(names, reverse=True)[:20]})
+        # Newest recordings first; the name sort used previously pushed
+        # run-directory entries behind every top-level file.
+        def _mtime(name: str) -> float:
+            try:
+                return -os.path.getmtime(os.path.join(OUTPUT_DIR, name))
+            except OSError:
+                return 0.0
+        names.sort(key=lambda name: (_mtime(name), name))
+        return JSONResponse({"files": names[:20]})
 
     @app.get("/api/replay")
     async def replay_file(
