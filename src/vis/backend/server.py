@@ -117,6 +117,7 @@ def _transcode_webm_to_mp4(payload: bytes) -> tuple[Path, Path]:
         completed = subprocess.run(
             [
                 executable, "-y", "-i", str(source),
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-c:v", "libx264", "-preset", "ultrafast", "-threads", "0",
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", str(output),
