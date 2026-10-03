@@ -451,6 +451,13 @@ class SimulationEngine:
             uav.id: False for uav in self.uavs
         }
         self._search_started_at: dict[str, float] = {}
+        self._hold_started_at: dict[str, float] = {}
+        self._retask_cooldown_min = 10.0
+        self._midmap_hold_timeout_min = 10.0
+        self._retask_strike_window_min = 10.0
+        self._retask_strike_limit = 3
+        self._retask_strikes: dict[str, int] = {}
+        self._last_retask_at: dict[str, float] = {}
         self._tracking_started_at: dict[str, float] = {}
         self._ais_tracking_started_at: dict[str, float] = {}
         self._ais_measurements: dict[str, list[tuple[float, float]]] = {}
@@ -752,6 +759,9 @@ class SimulationEngine:
                 uav.assigned_region = None
                 uav.status = "idle"
                 uav.sensor_mode = "off"
+                self.allocator.trigger_manager.notify_event(
+                    "resource_available", time=now, uav_id=uav_id,
+                )
             sm.clear_uav_assignment(uav_id)
             if self.control_coordinator.has_controller(uav_id):
                 lease = self.control_coordinator.current_lease(uav_id)
@@ -1187,7 +1197,10 @@ class SimulationEngine:
             return ()
         if strict:
             raise ValueError("; ".join(errors))
-        repaired = self._repair_orphaned_pending_records(errors)
+        repaired = (
+            *self._repair_orphaned_pending_records(errors),
+            *self._repair_overlapping_search_regions(errors),
+        )
         if repaired:
             self.allocator.sm.add_event("mission_state_invariant_repaired", {
                 "repaired": list(repaired),
@@ -1235,6 +1248,77 @@ class SimulationEngine:
                 )
                 repaired.append(task_id)
         return tuple(repaired)
+
+    def _repair_overlapping_search_regions(
+        self, errors: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Retire the loser of each overlapping unfinished-search pair.
+
+        Two active coverage regions competing for the same cells means one
+        partition is stale (a repartition already re-scoped the area).  Keep
+        the side with an executing assignee when exactly one has work, else
+        keep the earlier-registered region and release the other's assignee
+        for retasking instead of pausing the run.
+        """
+        prefix = "overlapping_unfinished_search_regions:"
+        sm = self.allocator.sm
+        now = float(self.clock.time)
+        retire_ids: set[str] = set()
+        for error in errors:
+            if not error.startswith(prefix):
+                continue
+            left_id, _, right_id = error[len(prefix):].partition("/")
+            regions = {
+                region.id: region
+                for region in sm.get_active_search_regions()
+                if region.id in {left_id, right_id}
+            }
+            left = regions.get(left_id)
+            right = regions.get(right_id)
+            if left is None or right is None:
+                continue
+            if left.assigned_uav_id is not None and right.assigned_uav_id is None:
+                loser = right
+            elif right.assigned_uav_id is not None and left.assigned_uav_id is None:
+                loser = left
+            else:
+                loser = right
+            retire_ids.add(loser.id)
+        released: list[str] = []
+        entities = {entity.id: entity for entity in self.uavs}
+        assignees = {
+            region.id: region.assigned_uav_id
+            for region in sm.get_search_regions()
+            if region.id in retire_ids
+        }
+        for region in sm.retire_search_regions_by_id(retire_ids):
+            record = self._mission_task_records.get(region.id)
+            if record is not None and record.status == "approved" and record.assigned_uav_id is None:
+                self._mission_task_records[region.id] = replace(
+                    record,
+                    status="cancelled",
+                    finished_at_min=now,
+                    release_reason="region_overlap_retired",
+                )
+            assigned = (
+                record.assigned_uav_id if record is not None else None
+            ) or assignees.get(region.id)
+            if assigned is None:
+                continue
+            sm.clear_uav_assignment(assigned)
+            entity = entities.get(assigned)
+            if entity is None or entity.status in {
+                "idle", "tracking", "returning", "holding", "refueling",
+            }:
+                continue
+            if self._hold_for_retask(entity, now, "region_overlap_retired"):
+                released.append(assigned)
+            else:
+                self._begin_return(entity, now)
+                released.append(assigned)
+        return tuple(sorted(retire_ids)) + tuple(
+            f"retask:{uav_id}" for uav_id in released
+        )
 
     def _publish_control_routes(self) -> None:
         """Publish immutable controller route envelopes for frame readers."""
@@ -1659,6 +1743,7 @@ class SimulationEngine:
         self._advance_probe_sessions(t)
         self._update_lifecycle_mode(t)
         self._process_refuelling(t)
+        self._process_holding_timeouts(t)
         self._publish_information_delta(
             sm.information_policy.advance_time(t), t,
         )
@@ -3154,7 +3239,11 @@ class SimulationEngine:
                 self._finish_base_service(base, self.clock.time, 0.0)
             return
         if base is not None:
+            # Full base: divert to another accepting base before orbiting.
+            if self._redirect_to_alternate_base(uav, base):
+                return
             self._holding_base_by_uav[uav.id] = base
+            self._hold_started_at[uav.id] = self.clock.time
             uav.start_holding(base.position)
             if self.control_coordinator.has_controller(uav.id):
                 lease = self.control_coordinator.current_lease(uav.id)
@@ -3169,6 +3258,33 @@ class SimulationEngine:
                         current_time=self.clock.time,
                     )
                     self._coordinator_tasks[uav.id] = holding_task
+
+    def _redirect_to_alternate_base(
+        self, uav: UAVEntity, full_base: BaseStation
+    ) -> bool:
+        """Divert a landing UAV to another accepting base instead of orbiting.
+
+        The reserved base is full, so recovery planning picks the nearest
+        base that still has a maintenance slot; only when no alternate exists
+        or no safe route does the caller fall back to orbiting the base.
+        """
+        alternates = [
+            base
+            for base in self._available_recovery_bases(exclude_uav_id=uav.id)
+            if base is not full_base
+        ]
+        if not alternates:
+            return False
+        try:
+            self._set_return_route(uav, self.clock.time)
+        except (RuntimeError, ValueError):
+            return False
+        self.allocator.sm.add_event("base_diverted", {
+            "uav_id": uav.id,
+            "from_base_id": full_base.id,
+            "to_base_id": self._return_base_by_uav[uav.id].id,
+        })
+        return True
 
     def _maybe_revoke_for_range(
         self, uav: UAVEntity, current_time: float, *, force: bool = False
@@ -3482,7 +3598,40 @@ class SimulationEngine:
         Returns True when the UAV was parked (SYSTEM holding lease or idle),
         False when the caller should fall back to a recovery return.
         """
+        # A fault -> retask -> instant fault churn burns fuel orbiting.  Three
+        # releases inside the strike window mean every fresh plan is failing;
+        # send the airframe home through the checked landing path instead.
+        last = self._last_retask_at.get(uav.id)
+        strikes = (
+            self._retask_strikes.get(uav.id, 0) + 1
+            if last is not None
+            and current_time - last <= self._retask_strike_window_min
+            else 1
+        )
+        self._last_retask_at[uav.id] = current_time
+        self._retask_strikes[uav.id] = strikes
         self._release_mission_bindings(uav, current_time, reason)
+        if strikes >= self._retask_strike_limit:
+            self.allocator.sm.add_event("retask_strikeout", {
+                "uav_id": uav.id,
+                "strikes": strikes,
+                "reason": reason,
+            })
+            self._retask_strikes[uav.id] = 0
+            if self.control_coordinator.has_controller(uav.id):
+                lease = self.control_coordinator.current_lease(uav.id)
+                if lease.owner is ControlOwner.SYSTEM:
+                    self._resume_queued_landing(uav, current_time)
+                else:
+                    try:
+                        self._request_recovery_return(
+                            uav, current_time, "retask_strikeout",
+                        )
+                    except Exception:
+                        self._resume_queued_landing(uav, current_time)
+            else:
+                self._resume_queued_landing(uav, current_time)
+            return True
         try:
             self.control_coordinator.promote_to_system_holding(
                 uav.id, current_time=current_time
@@ -3499,13 +3648,20 @@ class SimulationEngine:
                 "reason": reason,
                 "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
             })
+            self.allocator.trigger_manager.notify_event(
+                "resource_available", time=current_time, uav_id=uav.id,
+            )
             return True
         uav.status = "holding"
+        self._hold_started_at[uav.id] = current_time
         self.allocator.sm.add_event("control_fault_retasked", {
             "uav_id": uav.id,
             "reason": reason,
             "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
         })
+        self.allocator.trigger_manager.notify_event(
+            "resource_available", time=current_time, uav_id=uav.id,
+        )
         self._publish_control_routes()
         return True
 
@@ -3659,6 +3815,27 @@ class SimulationEngine:
         if active_task is None:
             active_task = self._coordinator_tasks.get(uav.id)
         lease = self.control_coordinator.current_lease(uav.id)
+
+        # A fault usually re-fails on the same task when the next decision
+        # hands it straight back.  Cool every released (task, bbox) pair for
+        # this airframe so it draws different work on the retask.
+        cooldown_until = current_time + self._retask_cooldown_min
+        released_ids = {
+            record.task_id
+            for record in self._mission_task_records.values()
+            if record.assigned_uav_id == uav.id
+        }
+        if active_task is not None:
+            released_ids.add(active_task.task_id)
+        for task_id in released_ids:
+            sm.add_uav_task_cooldown(uav.id, task_id, cooldown_until)
+            record = self._mission_task_records.get(task_id)
+            if record is not None and record.bbox is not None:
+                sm.add_uav_task_cooldown(
+                    uav.id,
+                    "bbox:" + ",".join(str(v) for v in record.bbox),
+                    cooldown_until,
+                )
 
         if active_task is not None and active_task.task_type in {
             OperationMode.COVERAGE,
@@ -4505,14 +4682,32 @@ class SimulationEngine:
     def _release_departed_group(self, group_id: str, current_time: float) -> None:
         self._release_target_group(group_id, current_time, "target_departed")
 
+    @staticmethod
+    def _path_prefix_within(path, max_distance: float):
+        """Keep the route segment reachable within a travel-time window."""
+        prefix = list(path[:2])
+        travelled = 0.0
+        for start, end in zip(path, path[1:]):
+            travelled += math.dist(start[:2], end[:2])
+            if travelled > max_distance:
+                break
+            prefix.append(end)
+        return prefix
+
     def _replan_conflicting_routes(self) -> None:
         sm = self.allocator.sm
         regions = {region.id: region for region in sm.get_active_search_regions()}
+        lookahead_cells = (
+            self.config.uav.cruise_speed_kmh
+            / self.config.grid.cell_size_km
+            / 60.0
+            * self.config.control.safety.replan_lookahead_min
+        )
         for uav in self.uavs:
             if uav.status in ("idle", "refueling", "holding", "tracking"):
                 continue
             if not self.obstacle_avoider.path_conflicts(
-                uav.remaining_path,
+                self._path_prefix_within(uav.remaining_path, lookahead_cells),
                 self.obstacle_mask,
             ):
                 continue
@@ -5117,6 +5312,7 @@ class SimulationEngine:
                     uav.id, current_time=current_time, task_id=holding.task_id,
                 )
                 self._coordinator_tasks[uav.id] = holding
+                self._hold_started_at[uav.id] = current_time
                 uav.start_holding(uav.position)
             # Re-observing an existing contact does not emit contact_created.
             # Wake the scheduler so this SAR investigation can become EO work.
@@ -5708,6 +5904,33 @@ class SimulationEngine:
             "uav_id": uav.id, "base_id": base.id,
         })
 
+    def _process_holding_timeouts(self, current_time: float) -> None:
+        """Send a stranded mid-map hold home instead of orbiting indefinitely.
+
+        A hold awaiting retask should clear within a couple of steps.  When no
+        feasible work can absorb the airframe (every candidate cooled or out
+        of reach), topping up at a base beats burning mileage in a loiter.
+        """
+        for uav in self.uavs:
+            if uav.status != "holding":
+                self._hold_started_at.pop(uav.id, None)
+                continue
+            started = self._hold_started_at.setdefault(uav.id, current_time)
+            if self._holding_base_by_uav.get(uav.id) is not None:
+                # Queueing at a full base is resolved by capacity, not by
+                # retasking; the redirect already tried the alternates.
+                continue
+            if current_time - started < self._midmap_hold_timeout_min:
+                continue
+            self._hold_started_at.pop(uav.id, None)
+            # The queued-landing path already handles the SYSTEM holding
+            # lease -> RETURN task handoff via a checked recovery plan.
+            self._resume_queued_landing(uav, current_time)
+            self.allocator.sm.add_event("hold_timeout_return", {
+                "uav_id": uav.id,
+                "held_min": round(current_time - started, 2),
+            })
+
     def _process_refuelling(self, current_time: float) -> None:
         for uav in self.uavs:
             if uav.status != "refueling":
@@ -5717,7 +5940,10 @@ class SimulationEngine:
                 continue
             self._promote_work_controller_to_holding(uav, current_time)
             if not base.is_refueling(uav.id) and not base.land_uav(uav.id):
+                if self._redirect_to_alternate_base(uav, base):
+                    continue
                 self._holding_base_by_uav[uav.id] = base
+                self._hold_started_at[uav.id] = current_time
                 uav.start_holding(base.position)
                 self.allocator.sm.add_event("base_capacity_full", {
                     "uav_id": uav.id,
@@ -5952,7 +6178,14 @@ class SimulationEngine:
         request = self._search_route_request(
             uav, region, allow_revisit=allow_revisit, direction=direction,
         )
-        self._apply_search_route_plan(uav, region, plan_search_route(request))
+        try:
+            plan = plan_search_route(request)
+        except (RuntimeError, ValueError):
+            # RRT* sampling is seed-sensitive; one retry with a fresh seed
+            # recovers many transient misses before the task is lost.
+            request = replace(request, seed=request.seed ^ 0x9E3779B9)
+            plan = plan_search_route(request)
+        self._apply_search_route_plan(uav, region, plan)
 
     def _search_route_request(
         self,

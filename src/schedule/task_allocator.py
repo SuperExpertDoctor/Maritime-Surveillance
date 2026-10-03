@@ -1138,8 +1138,23 @@ class TaskAllocator:
                 target = None
             if target is None:
                 continue
+            bbox_key = (
+                None if task.bbox is None
+                else "bbox:" + ",".join(str(v) for v in task.bbox)
+            )
             for resource in resources:
                 if task.feasible_uav_ids and resource.uav_id not in task.feasible_uav_ids:
+                    continue
+                # A just-released task/bbox is cooled for that airframe so a
+                # retask draws different work instead of re-failing on it.
+                if self.sm.is_task_cooling(
+                    resource.uav_id, task.task_id, self.sm.current_time
+                ) or (
+                    bbox_key is not None
+                    and self.sm.is_task_cooling(
+                        resource.uav_id, bbox_key, self.sm.current_time
+                    )
+                ):
                     continue
                 route_metrics = self._mission_route_metrics(
                     resource,
@@ -1711,6 +1726,21 @@ class TaskAllocator:
                 target_group_id=candidate_target_by_bbox.get(tuple(bbox)),
             )
             new_regions.append(region)
+
+        # Regions may not overlap: retained work keeps its area, so any new
+        # region colliding with a retained or already-accepted region is
+        # dropped and its cells return to next cycle's candidate pool.
+        accepted_new: list[Region] = []
+        kept_bboxes = [region.bbox for region in retained_regions]
+        for region in new_regions:
+            if any(
+                self.sm._bboxes_overlap(region.bbox, bbox)
+                for bbox in kept_bboxes
+            ):
+                continue
+            kept_bboxes.append(region.bbox)
+            accepted_new.append(region)
+        new_regions = accepted_new
 
         combined_regions = [*retained_regions, *new_regions]
         self.sm.set_search_regions(combined_regions)

@@ -65,6 +65,7 @@ class StateManager:
         self._coverage_task_generations: dict[str, int] = {}
         self._coverage_task_uavs: dict[str, str] = {}
         self._last_information_delta = None
+        self._uav_task_cooldowns: dict[str, dict[str, float]] = {}
         self._uavs = [
             UAVState(
                 id=f"UAV-{index + 1}",
@@ -182,6 +183,32 @@ class StateManager:
             and uav.status in {"idle", "holding"}
             and uav.operation_mode in {"idle", "holding"}
         ]
+
+    def add_uav_task_cooldown(
+        self, uav_id: str, task_key: str, until_min: float
+    ) -> None:
+        """Exclude one (uav, task) pair from edge feasibility until a time.
+
+        A planning fault usually re-fails on the same task immediately after
+        retasking.  Cooling the released task's id and bbox for a short window
+        breaks the park-retask-refault loop without removing the region from
+        the pool for healthier airframes.
+        """
+        self._uav_task_cooldowns.setdefault(uav_id, {})[str(task_key)] = float(until_min)
+
+    def is_task_cooling(self, uav_id: str, task_key: str, now_min: float) -> bool:
+        entries = self._uav_task_cooldowns.get(uav_id)
+        if not entries:
+            return False
+        until = entries.get(str(task_key))
+        if until is None:
+            return False
+        if float(now_min) >= until:
+            del entries[str(task_key)]
+            if not entries:
+                self._uav_task_cooldowns.pop(uav_id, None)
+            return False
+        return True
 
     def update_uav_control(
         self,
@@ -440,6 +467,33 @@ class StateManager:
             region.id: region for region in self._previous_search_regions
         }
         previous_by_id.update({region.id: region for region, _ in retired})
+        self._previous_search_regions = list(previous_by_id.values())
+        self._search_regions = retained
+        return retired
+
+    def retire_search_regions_by_id(
+        self,
+        region_ids: set[str],
+    ) -> list[Region]:
+        """Retire named active search regions, tombstoning their IDs."""
+        ids = set(region_ids)
+        if not ids or not self._search_regions:
+            return []
+        retired: list[Region] = []
+        retained: list[Region] = []
+        for region in self._search_regions:
+            if region.id in ids and region.status == "active":
+                region.status = "stale"
+                region.assigned_uav_id = None
+                retired.append(region)
+            else:
+                retained.append(region)
+        if not retired:
+            return []
+        previous_by_id = {
+            region.id: region for region in self._previous_search_regions
+        }
+        previous_by_id.update({region.id: region for region in retired})
         self._previous_search_regions = list(previous_by_id.values())
         self._search_regions = retained
         return retired

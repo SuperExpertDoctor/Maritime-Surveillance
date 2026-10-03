@@ -230,6 +230,7 @@ class SafetyControlConfig:
     max_speed_fraction: float = 1.2
     reserve_range_cells: float = 4.0
     max_invalid_commands: int = 3
+    replan_lookahead_min: float = 30.0
 
 
 @dataclass(frozen=True)
