@@ -48,6 +48,17 @@ function phaseResult(taskType, phase) {
   return TASK_PHASES[taskType]?.[phase] || null;
 }
 
+// A hold far from home base is a retask loiter, not a landing queue.
+function holdingDisplayState(uav) {
+  const pos = uav.position;
+  const home = uav.home_base_grid;
+  if (pos?.length >= 2 && home?.length >= 2) {
+    const dist = Math.hypot(pos[0] - home[0], pos[1] - home[1]);
+    if (dist > 3) return { label: "等待任务", tone: "holding", phase: "holding" };
+  }
+  return { label: "等待降落", tone: "holding", phase: "holding" };
+}
+
 function probeDisplayState(taskVisual) {
   if (taskVisual.phase === "baseline") {
     return taskVisual.observation_started
@@ -72,6 +83,7 @@ export function uavDisplayState(uav = {}) {
     const mapped = phaseResult(taskVisual.task_type, taskVisual.phase);
     if (mapped) return mapped;
   }
+  if (uav.status === "holding") return holdingDisplayState(uav);
   return LEGACY_STATUS[uav.status] || LEGACY_STATUS.idle;
 }
 

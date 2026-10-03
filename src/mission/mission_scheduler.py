@@ -62,7 +62,7 @@ _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
 # Target-directed work that outranks ordinary area coverage.  These kinds may
 # preempt busy ordinary-search UAVs and are exempt from the coverage floor.
 _TARGET_TASK_KINDS = frozenset(
-    {"probe", "track", "investigation", "direction_search"}
+    {"probe", "track", "investigation"}
 )
 _LOGGER = logging.getLogger(__name__)
 
@@ -773,15 +773,22 @@ def _validate_selection(
         protected_budget = min(coverage_constraint.desired_search_count, retained_budget)
         # Capacity committed to feasible target-directed work is a lawful
         # diversion, not a coverage shortfall: each selected contact task
-        # offsets one unit of the residual addition requirement 1:1.  The
-        # floor still binds when the deficit exceeds that diversion.
+        # offsets one unit of the residual addition requirement, up to the
+        # configured diversion cap.  Without the cap a contact-rich picture
+        # can excuse the entire coverage floor and stall broad-area SAR.
         target_diverted = sum(
             task.kind in _TARGET_TASK_KINDS and task.task_id in candidates
             for task in selected_tasks
         )
+        credit_max = coverage_constraint.diversion_credit_max
+        credited_diversion = (
+            target_diverted
+            if credit_max is None
+            else min(target_diverted, credit_max)
+        )
         if (
             not floor_infeasible
-            and ordinary_count + target_diverted
+            and ordinary_count + credited_diversion
                 < coverage_constraint.required_new_search_count
         ):
             errors.append(
@@ -1085,6 +1092,14 @@ def _overlap(left, right) -> bool:
     )
 
 
+def _overlap_area(left, right) -> int:
+    if not _overlap(left, right):
+        return 0
+    return (min(left[2], right[2]) - max(left[0], right[0])) * (
+        min(left[3], right[3]) - max(left[1], right[1])
+    )
+
+
 class MissionScheduler:
     """LLM-backed selection facade with deterministic local pairing."""
 
@@ -1255,6 +1270,240 @@ class MissionScheduler:
                 resources[matching[task_id].uav_id].current_task_id,
             )
             for task_id in selected
+        )
+
+    def _deterministic_fallback_batch(
+        self,
+        snapshot: MissionSnapshot,
+        *,
+        visible_task_ids: frozenset[str] | None = None,
+    ) -> AssignmentBatch | None:
+        """Produce a legal assignment batch without a model call.
+
+        The model remains the decision authority whenever it answers
+        successfully; this fallback only fires on failure so an outage or an
+        invalid response does not strand the fleet for the retry interval.
+        It plays by the exact same rules: the greedy selection it proposes
+        must clear the same post-validation and matching pipeline as a model
+        answer, and it never declares preemptions.
+        """
+        selection = self._deterministic_fallback_selection(
+            snapshot, visible_task_ids=visible_task_ids,
+        )
+        if selection is None:
+            return None
+        pairing = self.pair_selected_tasks(
+            selection,
+            snapshot,
+            visible_task_ids=visible_task_ids,
+        )
+        if not pairing.is_valid:
+            return None
+        return AssignmentBatch(
+            snapshot.snapshot_id,
+            pairing.assignments,
+            f"{self.last_selection_call_id or 'model'}:fallback",
+            _information_version=snapshot.information_version,
+        )
+
+    def _deterministic_fallback_selection(
+        self,
+        snapshot: MissionSnapshot,
+        *,
+        visible_task_ids: frozenset[str] | None = None,
+    ) -> MissionSelection | None:
+        """Greedy legal selection used only when the model cannot produce one.
+
+        Hard coverage obligations (zone must-service tasks and quotas, the
+        ordinary-search floor) are served first from tasks with an edge to a
+        free UAV.  Contact-targeted kinds take the next seats — their higher
+        utility keeps detection follow-up and tracking stable through an
+        outage.  Remaining capacity is quotaed across the coverage-summary
+        zones, largest effective gap first, one pick per zone per round, so
+        the batch spans the whole search domain instead of letting the
+        nearest region consume every slot; inside a zone the most
+        time-efficient task (utility per minute of transit-plus-mission)
+        still wins, and a final global pass fills whatever the quotas could
+        not place.
+        """
+        visible = (
+            {task.task_id for task in snapshot.candidates}
+            if visible_task_ids is None else set(visible_task_ids)
+        )
+        pending = set(snapshot.pending_search_task_ids)
+        candidates = {
+            task.task_id: task
+            for task in snapshot.candidates
+            if task.task_id in visible and task.task_id not in pending
+        }
+        free_uavs = {
+            resource.uav_id
+            for resource in snapshot.resources
+            if _is_available(resource, snapshot)
+        }
+        transit: dict[str, float] = {}
+        for edge in snapshot.feasible_edges:
+            if edge.uav_id not in free_uavs or edge.task_id not in candidates:
+                continue
+            best = transit.get(edge.task_id)
+            if best is None or edge.transit_time_min < best:
+                transit[edge.task_id] = edge.transit_time_min
+
+        selected: list[str] = []
+        seen: set[str] = set()
+        search_bboxes: list = []
+        used_contacts: set[str] = set()
+        active_contacts: set[str] = set()
+        retained_bboxes: list = []
+        for record in snapshot.active_tasks:
+            if record.status not in _ACTIVE_RECORD_STATUSES:
+                continue
+            if record.contact_id:
+                active_contacts.add(record.contact_id)
+            if record.kind in _SEARCH_TASK_KINDS and record.bbox is not None:
+                retained_bboxes.append((record.task_id, record.bbox))
+
+        def add(task_id: str) -> bool:
+            task = candidates.get(task_id)
+            if task is None or task_id in seen or task_id not in transit:
+                return False
+            if task.contact_id is not None and (
+                task.contact_id in used_contacts
+                or task.contact_id in active_contacts
+            ):
+                return False
+            if (
+                task.contact_id is None
+                and task.kind == "search"
+                and task.bbox is not None
+            ):
+                if any(_overlap(task.bbox, other) for other in search_bboxes):
+                    return False
+                if any(
+                    _overlap(task.bbox, bbox)
+                    for other_id, bbox in retained_bboxes
+                    if other_id not in seen
+                ):
+                    return False
+            selected.append(task_id)
+            seen.add(task_id)
+            if task.contact_id is not None:
+                used_contacts.add(task.contact_id)
+            elif task.kind == "search" and task.bbox is not None:
+                search_bboxes.append(task.bbox)
+            return True
+
+        constraint = snapshot.coverage_constraint
+        capacity = len(free_uavs)
+        if constraint is not None:
+            for task_id in constraint.must_service_task_ids:
+                add(task_id)
+            for zone in constraint.zone_requirements:
+                if zone.infeasible_reason is not None:
+                    continue
+                for task_id in zone.must_service_task_ids:
+                    add(task_id)
+                needed = zone.required_search_count - len(
+                    set(selected) & set(zone.representative_task_ids)
+                )
+                for task_id in zone.representative_task_ids:
+                    if needed <= 0 or len(selected) >= capacity:
+                        break
+                    if add(task_id):
+                        needed -= 1
+            for task_id in constraint.representative_task_ids:
+                if len(selected) >= capacity:
+                    break
+                add(task_id)
+
+        required = (
+            0
+            if constraint is None
+            else max(0, int(constraint.required_new_search_count))
+        )
+
+        def efficiency(task_id: str) -> float:
+            task = candidates[task_id]
+            return float(task.utility or 0.0) / (
+                transit[task_id]
+                + max(0.1, float(task.estimated_duration_min or 0.0))
+            )
+
+        target = max(required, capacity)
+        # Contact-targeted kinds carry the highest utility and keep
+        # detection follow-up and tracking stable through an outage, so
+        # they take their seats before coverage work is spread.
+        for task_id in sorted(
+            (tid for tid in transit if candidates[tid].contact_id is not None),
+            key=lambda tid: (-efficiency(tid), tid),
+        ):
+            if len(selected) >= target:
+                break
+            add(task_id)
+
+        # Coverage fill is quotaed across the coverage-summary zones
+        # (largest effective gap first, one pick per zone per round) so the
+        # task mix spans the whole search domain; a pure global ranking
+        # lets the nearest region consume every slot and leaves far bands
+        # unscanned until transit frees up.
+        zone_rows = (snapshot.coverage_summary or {}).get("zones") or ()
+        zone_boxes = [
+            (str(row.get("zone_id")), tuple(row.get("bbox") or ()))
+            for row in sorted(
+                zone_rows,
+                key=lambda row: (
+                    -float(row.get("effective_gap_fraction") or 0.0),
+                    str(row.get("zone_id")),
+                ),
+            )
+            if len(row.get("bbox") or ()) == 4
+        ]
+        if zone_boxes:
+            zone_tasks: dict[str, list[str]] = {zid: [] for zid, _ in zone_boxes}
+            for task_id in transit:
+                task = candidates[task_id]
+                if task.contact_id is not None or task.bbox is None:
+                    continue
+                best_zone, best_area = None, 0
+                for zone_id, zone_box in zone_boxes:
+                    area = _overlap_area(tuple(task.bbox), zone_box)
+                    if area > best_area:
+                        best_zone, best_area = zone_id, area
+                if best_zone is not None:
+                    zone_tasks[best_zone].append(task_id)
+            for task_ids in zone_tasks.values():
+                task_ids.sort(key=lambda tid: (-efficiency(tid), tid))
+            while len(selected) < target:
+                picked = False
+                for zone_id, _zone_box in zone_boxes:
+                    if len(selected) >= target:
+                        break
+                    for task_id in zone_tasks[zone_id]:
+                        if add(task_id):
+                            picked = True
+                            break
+                if not picked:
+                    break
+
+        # Leftover pass: global time-efficiency fill for anything the zone
+        # quotas could not place (no zone summary, saturated zones).
+        ordered = sorted(transit, key=lambda tid: (-efficiency(tid), tid))
+        for task_id in ordered:
+            if len(selected) >= target:
+                break
+            add(task_id)
+
+        return MissionSelection(
+            SELECTION_SCHEMA,
+            snapshot.snapshot_id,
+            tuple(selected),
+            (),
+            (
+                None
+                if selected
+                else "fleet committed or no feasible candidates; awaiting task completion"
+            ),
+            "deterministic fallback selection",
         )
 
     def decide(

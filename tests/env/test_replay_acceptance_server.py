@@ -22,7 +22,10 @@ def test_acceptance_app_serves_only_the_requested_replay_root(tmp_path, monkeypa
 
     app = create_replay_app(tmp_path)
     with TestClient(app) as client:
-        assert client.get("/api/replay/list").json() == {"files": [replay.name]}
+        # Replay listing recurses into run-archive subdirectories.
+        assert client.get("/api/replay/list").json() == {
+            "files": ["outside/outside.jsonl", replay.name]
+        }
         response = client.get("/api/replay", params={"file": replay.name})
 
     assert response.status_code == 200

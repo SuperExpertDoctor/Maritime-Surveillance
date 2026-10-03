@@ -3,7 +3,7 @@ import { markerColor, UAV_STATUS_COLORS } from "./colors";
 import { informationCategory, uavDisplayState } from "./displayState";
 import { layoutLabels } from "./labelLayout";
 
-const FONT = '"Fira Code", "Microsoft YaHei", monospace';
+const FONT = '"Noto Sans Mono CJK SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", "Fira Code", "Microsoft YaHei", "PingFang SC", monospace';
 const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
 
 function gridCenter(col, row, cellSize, ox, oy) {
@@ -304,27 +304,43 @@ function taskCells(region) {
   return cells;
 }
 
+const REGION_KIND_STYLE = {
+  search: { color: "#0E7490", tag: "S" },
+  partition: { color: "#0E7490", tag: "P" },
+  fragment: { color: "#0E7490", tag: "F" },
+  direction: { color: "#7C3AED", tag: "D" },
+  investigation: { color: "#D97706", tag: "I" },
+};
+
+function regionKind(region) {
+  const kind = String(region?.id || "search").split(":")[0];
+  return REGION_KIND_STYLE[kind] || REGION_KIND_STYLE.search;
+}
+
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
   const labels = [];
   const labelSources = new Map();
+  const kindCounters = {};
   for (const region of regions || []) {
-    const color = "#F59E0B";
+    const style = regionKind(region);
+    const color = style.color;
     const cells = taskCells(region);
     const assigned = Boolean(region.assigned_uav_id);
-    ctx.fillStyle = `${color}${assigned ? "70" : "52"}`;
+    ctx.fillStyle = `${color}${assigned ? "70" : "40"}`;
     for (const [col, row] of cells) {
       const point = coordToPixel(col, row, cellSize, ox, oy);
       ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
     }
-    const uav = (uavs || []).find((item) => item.id === region.assigned_uav_id);
-    const arrow = uav?.sar_look_direction === "left" ? "<" : ">";
+    kindCounters[style.tag] = (kindCounters[style.tag] || 0) + 1;
+    const uavShort = region.assigned_uav_id
+      ? ` ·${String(region.assigned_uav_id).replace("UAV-", "U")}`
+      : "";
     const fontSize = Math.max(8, Math.min(10, cellSize * 0.34));
-    const fullLabel = `${region.id} ${Math.round(region.completion_pct || 0)}% ${arrow}`;
+    const label = `${style.tag}${kindCounters[style.tag]} ${Math.round(region.completion_pct || 0)}%${uavShort}`;
     ctx.font = `700 ${fontSize}px ${FONT}`;
     const labelCell = cells[0];
     if (labelCell) {
       const point = coordToPixel(labelCell[0], labelCell[1], cellSize, ox, oy);
-      const label = cellSize >= 14 ? fullLabel : region.id;
       const labelWidth = ctx.measureText(label).width + 8;
       const id = `search:${region.id}`;
       labels.push({
@@ -704,6 +720,19 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
         ctx.arc(lastPt.x, lastPt.y, 1.8 * cellSize, 0, Math.PI * 2);
         ctx.stroke();
       }
+      ctx.restore();
+    }
+
+    // ── Hold loiter ring (awaiting retask / base slot) ────────────
+    if (uav.status === "holding" && uav.position?.length >= 2) {
+      ctx.save();
+      ctx.strokeStyle = isSelected ? "rgba(217, 119, 6, .75)" : "rgba(217, 119, 6, .38)";
+      ctx.lineWidth = isSelected ? 1.4 : 0.8;
+      ctx.setLineDash([3, 4]);
+      const c = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 1.2 * cellSize, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -1522,7 +1551,9 @@ export function drawLabels(
 export function drawTransparencyLegend(ctx, bounds) {
   if (!bounds || bounds.width < 128) return;
   const swatches = [
-    { color: "#D97706", label: "TASK CELLS" },
+    { color: "#0E7490", label: "COVERAGE AREA (S/P/F)" },
+    { color: "#7C3AED", label: "DIRECTION SWEEP (D)" },
+    { color: "#D97706", label: "INVESTIGATE (I)" },
     { color: "#0F766E", label: "FRESH SAR" },
     { color: "#0891B2", label: "SAR APERTURE / SWATH", shape: "strip" },
     { color: "#D97706", label: "EO / IR FOV", shape: "cone" },

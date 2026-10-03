@@ -223,7 +223,9 @@ const CanvasMap = forwardRef(function CanvasMap({
       });
 
       exportingRef.current = true;
-      recorder.start();
+      // A timeslice keeps MediaRecorder flushing data even for replays only
+      // a few frames long, where a single stop-flush can emit nothing.
+      recorder.start(250);
       try {
         for (let index = 0; index < frames.length; index += 1) {
           const { cellSize, offsetX, offsetY, mapBounds, legendBounds } = layoutRef.current;
@@ -239,6 +241,9 @@ const CanvasMap = forwardRef(function CanvasMap({
           onProgress?.((index + 1) / frames.length);
           await new Promise((resolve) => window.setTimeout(resolve, 1000 / fps));
         }
+        // Hold the last frame briefly so short replays still emit a tail
+        // chunk before the recorder stops.
+        await new Promise((resolve) => window.setTimeout(resolve, 400));
       } finally {
         exportingRef.current = false;
         recorder.stop();

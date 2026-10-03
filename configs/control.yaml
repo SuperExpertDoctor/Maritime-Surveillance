@@ -10,6 +10,9 @@ safety:
   max_speed_fraction: 1.2
   reserve_range_cells: 4.0
   max_invalid_commands: 3
+  # Only routes about to reach a moved storm get replanned; conflicts further
+  # out in travel time are left for later mask updates to handle.
+  replan_lookahead_min: 30
 
 heuristic:
   astar_dynamic_replan_limit: 3

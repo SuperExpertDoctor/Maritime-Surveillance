@@ -117,6 +117,7 @@ def _transcode_webm_to_mp4(payload: bytes) -> tuple[Path, Path]:
         completed = subprocess.run(
             [
                 executable, "-y", "-i", str(source),
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-c:v", "libx264", "-preset", "ultrafast", "-threads", "0",
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", str(output),
@@ -133,6 +134,37 @@ def _transcode_webm_to_mp4(payload: bytes) -> tuple[Path, Path]:
     except Exception:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
+
+
+def _archive_export(mp4_path: Path, replay_file: str) -> Path | None:
+    """Place the exported MP4 beside the replay under outputs/<start-ts>/.
+
+    The JSONL filename already encodes the program's start date-time, so a
+    top-level ``simulation_<ts>.jsonl`` maps to ``outputs/<ts>/``; a replay
+    already inside a run directory exports in place.  The source JSONL is
+    copied (never moved) so the replay view keeps working after export.
+    """
+    allowed = Path(OUTPUT_DIR).resolve()
+    source = (allowed / replay_file).resolve()
+    if source.parent != allowed and allowed not in source.parents:
+        return None
+    if not source.is_file():
+        return None
+    if source.parent == allowed:
+        label = source.stem.removeprefix("simulation_") or source.stem
+        # A replay served straight out of its own run directory (e.g. the
+        # acceptance server with --output-dir outputs/<ts>) already sits
+        # where an export belongs — archive in place instead of nesting.
+        run_dir = allowed if allowed.name == label else allowed / label
+    else:
+        run_dir = source.parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    archived_jsonl = run_dir / source.name
+    if archived_jsonl.resolve() != source:
+        shutil.copy2(source, archived_jsonl)
+    target = run_dir / f"{archived_jsonl.stem}.mp4"
+    shutil.copy2(mp4_path, target)
+    return target
 
 
 def create_app(
@@ -269,14 +301,28 @@ def create_app(
 
     @app.get("/api/replay/list")
     async def replay_list():
-        """列出 outputs/ 下所有 JSONL 文件。"""
+        """列出 outputs/ 下所有 JSONL 文件（含 outputs/<start-ts>/ 归档目录）。"""
         if not os.path.isdir(OUTPUT_DIR):
             return JSONResponse({"files": []})
-        files = sorted(
-            [f for f in os.listdir(OUTPUT_DIR) if f.endswith(".jsonl")],
-            reverse=True,
-        )[:20]
-        return JSONResponse({"files": files})
+        names = [f for f in os.listdir(OUTPUT_DIR) if f.endswith(".jsonl")]
+        for entry in os.listdir(OUTPUT_DIR):
+            subdir = os.path.join(OUTPUT_DIR, entry)
+            if not os.path.isdir(subdir):
+                continue
+            names.extend(
+                f"{entry}/{f}"
+                for f in os.listdir(subdir)
+                if f.endswith(".jsonl")
+            )
+        # Newest recordings first; the name sort used previously pushed
+        # run-directory entries behind every top-level file.
+        def _mtime(name: str) -> float:
+            try:
+                return -os.path.getmtime(os.path.join(OUTPUT_DIR, name))
+            except OSError:
+                return 0.0
+        names.sort(key=lambda name: (_mtime(name), name))
+        return JSONResponse({"files": names[:20]})
 
     @app.get("/api/replay")
     async def replay_file(
@@ -341,7 +387,7 @@ def create_app(
         return JSONResponse({"mp4": _find_ffmpeg() is not None})
 
     @app.post("/api/export/mp4")
-    async def export_mp4(request: Request):
+    async def export_mp4(request: Request, file: str = Query(default="")):
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
@@ -372,6 +418,11 @@ def create_app(
             return JSONResponse({"error": "MP4 encoding timed out"}, status_code=504)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
+        if file:
+            try:
+                _archive_export(output, file)
+            except OSError:
+                pass  # Archiving is best-effort; the download still succeeds.
         return FileResponse(
             output,
             media_type="video/mp4",

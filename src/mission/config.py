@@ -293,6 +293,9 @@ class CoverageConfig:
     align_timeout_min: float = 8.0
     max_stall_replans: int = 2
     max_consecutive_decision_failures: int = 3
+    # Upper bound on how much of the desired coverage budget a selection may
+    # excuse 1:1 with target-directed work; the rest must be real searches.
+    target_diversion_max_fraction: float = 0.5
 
     def __post_init__(self) -> None:
         if not isinstance(self.windows_min, tuple):
@@ -325,6 +328,10 @@ class CoverageConfig:
             self.max_consecutive_decision_failures,
             "coverage.max_consecutive_decision_failures",
             minimum=1,
+        )
+        _probability(
+            self.target_diversion_max_fraction,
+            "coverage.target_diversion_max_fraction",
         )
 
 

@@ -342,10 +342,13 @@ class TaskAllocator:
                 fraction=fraction,
                 search_limit=None,
                 zone_requirements_input=quota_inputs,
+                diversion_max_fraction=(
+                    coverage_config.target_diversion_max_fraction
+                ),
             )
             if active_search_count + matchable_pending_count <= desired_search_count:
                 # The SAR floor only restrains ordinary coverage churn.
-                # Target-directed demand (probe/track/investigation/direction)
+                # Target-directed demand (probe/track/investigation)
                 # outranks coverage and keeps legal preemption edges open;
                 # without this escape, contact work is structurally starved
                 # whenever the fleet is fully committed to searches.
@@ -877,10 +880,6 @@ class TaskAllocator:
         self.trigger_manager.mark_triggered("heavy", current_time)
         self.sm.cycle += 1
         if batch is None:
-            self.trigger_manager.schedule_heavy_retry(
-                current_time,
-                reason=failure_reason or "decision_failed",
-            )
             self.sm.add_event("mission_selection_failed", {
                 "snapshot_id": snapshot.snapshot_id,
                 "failure_category": (
@@ -910,6 +909,9 @@ class TaskAllocator:
                 for task in failed_candidates
                 if task.get("task_id") in failed_selected
             }
+            fallback_batch = self.mission_scheduler._deterministic_fallback_batch(
+                snapshot,
+            )
             self.sm.add_event("decision_failed", {
                 "cycle": self.sm.cycle,
                 "snapshot_id": snapshot.snapshot_id,
@@ -931,8 +933,19 @@ class TaskAllocator:
                     self.mission_scheduler.last_selection_failure_stage
                     or "unknown"
                 ),
-                "retry_at_min": current_time + 1.0,
+                "covered_by_fallback": fallback_batch is not None,
+                "retry_at_min": (
+                    None if fallback_batch is not None else current_time + 1.0
+                ),
             })
+            if fallback_batch is None:
+                # No deterministic cover either: keep the model-retry cadence
+                # so the next successful call can retask the fleet.
+                self.trigger_manager.schedule_heavy_retry(
+                    current_time,
+                    reason=failure_reason or "decision_failed",
+                )
+            batch = fallback_batch
         self.sm.add_event("mission_decision", {
             "cycle": self.sm.cycle,
             "success": bool(batch is not None),
@@ -1125,8 +1138,23 @@ class TaskAllocator:
                 target = None
             if target is None:
                 continue
+            bbox_key = (
+                None if task.bbox is None
+                else "bbox:" + ",".join(str(v) for v in task.bbox)
+            )
             for resource in resources:
                 if task.feasible_uav_ids and resource.uav_id not in task.feasible_uav_ids:
+                    continue
+                # A just-released task/bbox is cooled for that airframe so a
+                # retask draws different work instead of re-failing on it.
+                if self.sm.is_task_cooling(
+                    resource.uav_id, task.task_id, self.sm.current_time
+                ) or (
+                    bbox_key is not None
+                    and self.sm.is_task_cooling(
+                        resource.uav_id, bbox_key, self.sm.current_time
+                    )
+                ):
                     continue
                 route_metrics = self._mission_route_metrics(
                     resource,
@@ -1314,6 +1342,7 @@ class TaskAllocator:
                         allow_revisit=bool(allow_revisit),
                         seed=17,
                         along_track_cells=0.8,
+                        allow_fallback=False,
                     )
                 )
                 path = tuple(path_plan.path)
@@ -1697,6 +1726,21 @@ class TaskAllocator:
                 target_group_id=candidate_target_by_bbox.get(tuple(bbox)),
             )
             new_regions.append(region)
+
+        # Regions may not overlap: retained work keeps its area, so any new
+        # region colliding with a retained or already-accepted region is
+        # dropped and its cells return to next cycle's candidate pool.
+        accepted_new: list[Region] = []
+        kept_bboxes = [region.bbox for region in retained_regions]
+        for region in new_regions:
+            if any(
+                self.sm._bboxes_overlap(region.bbox, bbox)
+                for bbox in kept_bboxes
+            ):
+                continue
+            kept_bboxes.append(region.bbox)
+            accepted_new.append(region)
+        new_regions = accepted_new
 
         combined_regions = [*retained_regions, *new_regions]
         self.sm.set_search_regions(combined_regions)

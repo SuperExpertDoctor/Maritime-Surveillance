@@ -228,11 +228,9 @@ def test_lifecycle_rotation_preplans_candidates_before_any_uav_refuels(sm):
 
     result = CandidateExtractor().extract(sm)
 
-    # Two coastal bases can release six airframes at once (three refuelling
-    # positions each); keep at least that many legal recovery sorties queued.
-    minimum_ready_sorties = (
-        sm.config.environment.base_count * sm.config.environment.base_capacity
-    )
+    # Simultaneous returns are rate-limited by max_concurrent_returns, so at
+    # least that many legal recovery sorties must stay pre-planned.
+    minimum_ready_sorties = sm.config.uav.max_concurrent_returns
     assert minimum_ready_sorties <= len(result.candidate_regions) <= 10
 
 
