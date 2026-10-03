@@ -293,6 +293,25 @@ def test_retired_search_region_reconciles_pending_task_record():
     assert engine._mission_state_invariant_errors() == ()
 
 
+def test_unreachable_recovery_bases_enter_emergency_failure_not_crash():
+    import numpy as np
+
+    engine = _engine()
+    uav = engine.uavs[0]
+    uav.status = "searching"
+    blocked = np.ones_like(engine.obstacle_mask, dtype=bool)
+    engine.obstacle_mask = blocked
+    engine.allocator.sm.obstacle_mask = blocked
+
+    engine._begin_return(uav, 0.0)
+
+    assert uav.status == "failed"
+    assert uav.id in engine._emergency_failures
+    event_types = [e["type"] for e in engine.allocator.sm.get_recent_events(0.0)]
+    assert "no_safe_recovery_path" in event_types
+    assert "emergency_failure" in event_types
+
+
 def test_completion_without_generation_cannot_complete_current_task():
     engine, uav, task = _coverage_task_fixture()
     generation = engine.control_coordinator.current_lease(uav.id).generation

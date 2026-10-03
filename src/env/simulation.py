@@ -4413,7 +4413,22 @@ class SimulationEngine:
                 continue
 
             if uav.status == "returning":
-                self._set_return_route(uav, sm.current_time)
+                try:
+                    self._set_return_route(uav, sm.current_time)
+                except (RuntimeError, ValueError) as exc:
+                    error = (
+                        exc
+                        if isinstance(exc, NoSafeRecoveryPath)
+                        else NoSafeRecoveryPath(
+                            "none", sm.obstacle_version, str(exc),
+                        )
+                    )
+                    self._emit_no_safe_recovery_path(
+                        uav, sm.current_time, error,
+                    )
+                    self._enter_emergency_failure(
+                        uav, "no_safe_recovery_path", error,
+                    )
             elif uav.mission_kind in ("search",):
                 state = sm.get_uav(uav.id)
                 region = regions.get(state.assigned_region_id if state else None)
@@ -5195,7 +5210,19 @@ class SimulationEngine:
                 else:
                     region.assigned_uav_id = None
 
-        self._set_return_route(uav, current_time)
+        try:
+            self._set_return_route(uav, current_time)
+        except (RuntimeError, ValueError) as exc:
+            error = (
+                exc
+                if isinstance(exc, NoSafeRecoveryPath)
+                else NoSafeRecoveryPath(
+                    "none", sm.obstacle_version, str(exc),
+                )
+            )
+            self._emit_no_safe_recovery_path(uav, current_time, error)
+            self._enter_emergency_failure(uav, "no_safe_recovery_path", error)
+            return
         sm.clear_uav_assignment(uav.id)
         sm.update_uav_status(uav.id, "returning", uav.position, fuel_remaining_pct=uav.fuel_remaining_pct)
         self.allocator.trigger_manager.notify_event(
@@ -5302,9 +5329,11 @@ class SimulationEngine:
             self._holding_base_by_uav.pop(uav.id, None)
             uav.plan_return(path)
             return
-        raise RuntimeError(
+        raise NoSafeRecoveryPath(
+            "none",
+            self.allocator.sm.obstacle_version,
             f"no land recovery base has a safe return path for {uav.id}: "
-            + "; ".join(errors)
+            + "; ".join(errors),
         )
 
     def _base_maintenance_load(
