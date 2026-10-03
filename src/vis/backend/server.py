@@ -152,7 +152,10 @@ def _archive_export(mp4_path: Path, replay_file: str) -> Path | None:
         return None
     if source.parent == allowed:
         label = source.stem.removeprefix("simulation_") or source.stem
-        run_dir = allowed / label
+        # A replay served straight out of its own run directory (e.g. the
+        # acceptance server with --output-dir outputs/<ts>) already sits
+        # where an export belongs — archive in place instead of nesting.
+        run_dir = allowed if allowed.name == label else allowed / label
     else:
         run_dir = source.parent
     run_dir.mkdir(parents=True, exist_ok=True)
