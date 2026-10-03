@@ -981,10 +981,22 @@ class SimulationEngine:
             if state == "pending":
                 desired = replace(
                     record,
-                    status="approved",
+                    status=(
+                        record.status
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else "approved"
+                    ),
                     assigned_uav_id=None,
-                    finished_at_min=None,
-                    release_reason=reason,
+                    finished_at_min=(
+                        record.finished_at_min
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else None
+                    ),
+                    release_reason=(
+                        record.release_reason
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else reason
+                    ),
                 )
             else:
                 desired = replace(
@@ -1023,10 +1035,22 @@ class SimulationEngine:
         if state == "pending":
             desired = replace(
                 record,
-                status="approved",
+                status=(
+                    record.status
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else "approved"
+                ),
                 assigned_uav_id=None,
-                finished_at_min=None,
-                release_reason=reason,
+                finished_at_min=(
+                    record.finished_at_min
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else None
+                ),
+                release_reason=(
+                    record.release_reason
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else reason
+                ),
             )
         elif state == "executing":
             desired = replace(
@@ -2792,16 +2816,19 @@ class SimulationEngine:
                     reason,
                     uav_id=uav_id,
                 )
-            projection_state = (
-                "pending"
-                if preserve_search
-                else "completed"
-                if status == "completed"
-                else "stale"
-            )
             has_search_region = any(
                 item.id == task.task_id and item.type == "search"
                 for item in sm.get_search_regions()
+            )
+            # Preserving a search only makes sense while its region still
+            # exists; a region retired for tracking means the task's airspace
+            # is gone and the record must go terminal instead of pending.
+            projection_state = (
+                "pending"
+                if preserve_search and has_search_region
+                else "completed"
+                if status == "completed"
+                else "stale"
             )
             self._set_search_task_projection(
                 task.task_id,
@@ -5065,7 +5092,19 @@ class SimulationEngine:
             return
 
         entities = {entity.id: entity for entity in self.uavs}
-        for _, assigned_uav_id in retired:
+        for region, assigned_uav_id in retired:
+            # Retiring the region removes the task's projection surface. The
+            # surviving task record must not stay pending without a region or
+            # the mission-state invariant reports a projection mismatch.
+            if region.id in self._mission_task_records:
+                self._set_search_task_projection(
+                    region.id,
+                    state="stale",
+                    uav_id=None,
+                    current_time=current_time,
+                    reason="search_region_retired_for_tracking",
+                    allow_missing_region=True,
+                )
             if not assigned_uav_id:
                 continue
             self.allocator.sm.clear_uav_assignment(assigned_uav_id)

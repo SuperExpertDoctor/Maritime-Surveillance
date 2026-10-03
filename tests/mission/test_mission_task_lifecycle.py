@@ -259,6 +259,40 @@ def test_production_invariant_failure_pauses_once_and_emits_structured_event():
     assert failures[0]["data"]["violations"]
 
 
+def test_retired_search_region_reconciles_pending_task_record():
+    engine = _engine()
+    sm = engine.allocator.sm
+    bbox = BBox(24, 12, 30, 18)
+    task_id = f"search:{bbox.col_start}:{bbox.row_start}:{bbox.col_end}:{bbox.row_end}"
+    sm.set_search_regions([
+        *sm.get_search_regions(),
+        Region(task_id, bbox, "search", assigned_uav_id=None),
+    ])
+    engine._mission_task_records[task_id] = TaskRecord(
+        task_id, "search", "approved", tuple(bbox), None, (), None,
+        "fixture", 0.0, None, None, None,
+    )
+    sm.create_track_region("C1", GridCoord(26, 14))
+    assert engine._mission_state_invariant_errors() == ()
+
+    engine._resolve_search_track_conflicts(0.0)
+
+    assert engine._mission_state_invariant_errors() == ()
+    record = engine._mission_task_records[task_id]
+    assert record.status == "blocked"
+    assert record.release_reason == "search_region_retired_for_tracking"
+    assert engine.runtime_status != "paused_safety"
+
+    # A late preserve-search close must not resurrect the terminal record
+    # back into the pending+missing-region state the invariant rejects.
+    engine._set_search_task_projection(
+        task_id, state="pending", uav_id=None, current_time=1.0,
+        reason="late_close", allow_missing_region=True,
+    )
+    assert engine._mission_task_records[task_id].status == "blocked"
+    assert engine._mission_state_invariant_errors() == ()
+
+
 def test_completion_without_generation_cannot_complete_current_task():
     engine, uav, task = _coverage_task_fixture()
     generation = engine.control_coordinator.current_lease(uav.id).generation
