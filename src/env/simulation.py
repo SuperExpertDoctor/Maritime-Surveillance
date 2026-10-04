@@ -3373,11 +3373,11 @@ class SimulationEngine:
             + candidate.reserve_cells
             + max_speed * self.clock.dt_min
         )
-        if (
-            not force
-            and not allow_reserved_bases
-            and uav.remaining_range_cells > threshold
-        ):
+        # The fuel gate must also hold on the reserved-base path.  Without it,
+        # a full fleet at capacity revokes every healthy work task each tick:
+        # the released task is re-matched instantly and revoked again, which
+        # lands another airframe and keeps every base full forever.
+        if not force and uav.remaining_range_cells > threshold:
             return False
 
         base = next(
