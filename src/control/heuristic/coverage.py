@@ -178,6 +178,9 @@ class CoverageController(HeuristicControllerBase):
         self._last_guidance: CoverageGuidance | None = None
         self._last_heading_error_deg: float | None = None
         self._last_cross_track_error_cells: float | None = None
+        # En-route imaging reference: fixed (origin, heading) per settled
+        # straight so the executor's aperture gate can open mid-leg.
+        self._en_route_scan_geometry: tuple[tuple[float, float], float] | None = None
 
     def reset(self, context: ControllerContext) -> None:
         super().reset(context)
@@ -212,6 +215,7 @@ class CoverageController(HeuristicControllerBase):
         self._stopped = False
         self._completion_event_emitted = False
         self._direction = None
+        self._en_route_scan_geometry = None
         bbox = task.region_bbox
         self._uncovered_cells = frozenset(
             (col, row)
@@ -267,9 +271,14 @@ class CoverageController(HeuristicControllerBase):
             )
             self._update_phase(observation, guidance)
         self._save_guidance_diagnostics(observation, guidance)
+        # En-route imaging: a transit leg is a ferry flight the stripmap
+        # would otherwise waste.  Command SAR during TRANSIT_ASTAR too; the
+        # executor only opens the aperture once heading and cross-track
+        # errors settle on a straight leg, so turns still gate it off.
+        en_route_scan = self.phase is CoveragePhase.TRANSIT_ASTAR
         sensor_mode = (
             SensorMode.SAR
-            if self.phase is CoveragePhase.SCANNING
+            if (self.phase is CoveragePhase.SCANNING or en_route_scan)
             and SensorMode.SAR in observation.action_mask.allowed_sensor_modes
             else SensorMode.OFF
         )
@@ -283,15 +292,42 @@ class CoverageController(HeuristicControllerBase):
         )
         if sensor_mode is SensorMode.SAR:
             scan_index = guidance.scan_segment_index
-            if scan_index is None:
+            if scan_index is not None:
+                swath = self.scan_swaths[scan_index]
+                command = replace(
+                    command,
+                    sar_look_direction=swath.look_direction,
+                    sar_scan_heading_rad=swath.heading,
+                    sar_scan_origin=swath.start,
+                )
+            elif en_route_scan:
+                # Route waypoints are dense along smooth curves, so leg
+                # boundaries churn faster than the aperture can form.
+                # Anchor the reference once, then re-anchor only when the
+                # aircraft is on a straight (turn rate ~0) whose direction
+                # diverges from the stored one — i.e. when a new leg has
+                # settled.  Turns keep the stale reference, which holds
+                # the executor's heading gate closed until the next
+                # straight begins.
+                pos = observation.self_state.position
+                head = observation.self_state.heading_rad
+                on_straight = abs(guidance.turn_rate_rad_min) <= 0.1
+                geom = self._en_route_scan_geometry
+                if geom is None or (
+                    on_straight
+                    and abs(_wrap_pi(head - geom[1]))
+                    > self.sar_heading_tolerance_rad
+                ):
+                    self._en_route_scan_geometry = (pos, head)
+                origin, desired_heading = self._en_route_scan_geometry
+                command = replace(
+                    command,
+                    sar_look_direction="left",
+                    sar_scan_heading_rad=desired_heading,
+                    sar_scan_origin=origin,
+                )
+            else:
                 raise RuntimeError("SAR enabled without an active scan swath")
-            swath = self.scan_swaths[scan_index]
-            command = replace(
-                command,
-                sar_look_direction=swath.look_direction,
-                sar_scan_heading_rad=swath.heading,
-                sar_scan_origin=swath.start,
-            )
         if self.phase is CoveragePhase.COMPLETED and not self._completion_event_emitted:
             self._completion_event_emitted = True
             return ControlDecision(
@@ -946,6 +982,9 @@ class CoverageController(HeuristicControllerBase):
         self.planning_map_version = planning_map_version
         self._route_revision += 1
         self._route_status = "ready"
+        # A new route redraws the ferry legs: drop the cached en-route
+        # reference so it is re-anchored on the first settled straight.
+        self._en_route_scan_geometry = None
 
     def _update_phase(
         self, observation: ControlObservation, guidance: CoverageGuidance

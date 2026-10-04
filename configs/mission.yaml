@@ -31,9 +31,11 @@ scheduling:
   allow_probe_preempt_search: true
   allow_intent_preempt_search: false
   # A freshly assigned airframe may not be preempted for this long: long
-  # enough to transit to its region and bank several scanned cells before
-  # an escalation task can bounce it back into transit.
-  reassignment_cooldown_min: 25.0
+  # enough to transit to a corner region (~15-25 min) and bank a real
+  # block of scanned cells before an escalation task can bounce it back
+  # into transit.  Shorter values were observed to keep every searcher
+  # perpetually en route and starve coverage.
+  reassignment_cooldown_min: 60.0
   max_tasks_in_prompt: 40
 evolution:
   enabled: true

@@ -4732,7 +4732,10 @@ class SimulationEngine:
     def _update_sensors_and_detections(self, current_time: float) -> None:
         sm = self.allocator.sm
         for uav in self.uavs:
-            if uav.status == "searching" and uav.sar_imaging:
+            # En-route imaging keeps sar_imaging on during stable-heading
+            # transit legs, so the gate is the aperture flag rather than the
+            # "searching" status label.
+            if uav.sar_imaging and uav.sar_look_direction is not None:
                 footprint = uav.sar_sensor.compute_swath_footprint(
                     uav.float_position,
                     uav.heading_rad,

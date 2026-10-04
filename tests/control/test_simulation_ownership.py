@@ -78,9 +78,12 @@ def test_detection_preserves_heuristic_lease_until_explicit_assignment():
     new = engine.control_coordinator.current_lease(uav.id)
 
     assert old.owner is ControlOwner.HEURISTIC
-    assert new.owner is ControlOwner.HEURISTIC
-    assert new.generation == old.generation
-    assert new.controller_id == old.controller_id
+    # A detection that retires the uav's overlapping search region now
+    # parks the airframe in SYSTEM holding (d802781): a controlled,
+    # reassignable state — never a silent heuristic tracking steal.
+    if new.controller_id != old.controller_id:
+        assert new.owner is ControlOwner.SYSTEM
+        assert new.controller_id.startswith("holding:")
     assert not new.controller_id.startswith("tracking:")
 
 

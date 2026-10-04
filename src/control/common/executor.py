@@ -116,8 +116,14 @@ class UAVDynamicsExecutor:
                 abs(applied_command.speed_cells_min) * dt_min,
                 self.coverage_execution.along_track_cells / 2.0,
             )
+            # En-route imaging: a TRANSIT command may also carry SAR
+            # geometry, letting a coverage ferry leg bank the strip it
+            # overflies instead of wasting the leg.
             uav.sar_imaging = (
-                applied_command.operation_mode is OperationMode.COVERAGE
+                applied_command.operation_mode in (
+                    OperationMode.COVERAGE,
+                    OperationMode.TRANSIT,
+                )
                 and heading_error <= self.coverage_execution.heading_tolerance_rad
                 and cross_track_error <= self.coverage_execution.cross_track_tolerance_cells
                 and uav._aperture_length() + 1e-12 >= stable_margin
