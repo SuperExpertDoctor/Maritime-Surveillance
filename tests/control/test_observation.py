@@ -165,7 +165,11 @@ def test_observation_action_mask_respects_return_lease(engine):
         operation_mode=OperationMode.RETURN,
     )
 
-    assert observation.action_mask.allowed_sensor_modes == (SensorMode.OFF,)
+    # RETURN legs may image en route; HOLDING stays sensor-off.
+    assert observation.action_mask.allowed_sensor_modes == (
+        SensorMode.OFF,
+        SensorMode.SAR,
+    )
     assert observation.action_mask.allowed_operation_modes == (
         OperationMode.RETURN,
         OperationMode.HOLDING,

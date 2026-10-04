@@ -303,7 +303,11 @@ class ObservationProvider:
             OperationMode.RETURN,
             OperationMode.HOLDING,
         ):
+            # RETURN legs may image the strip below en route; HOLDING
+            # airframes stay sensor-off.
             sensor_modes = [SensorMode.OFF]
+            if operation_mode is OperationMode.RETURN:
+                sensor_modes.append(SensorMode.SAR)
             operation_modes = [OperationMode.RETURN, OperationMode.HOLDING]
         else:
             sensor_modes = [SensorMode.OFF]

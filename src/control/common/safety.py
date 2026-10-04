@@ -110,9 +110,13 @@ class SafetyEnvelope:
             interventions.append(SafetyIntervention("motion_corrected"))
 
         if applied.sensor_mode is SensorMode.SAR and (
-            # En-route imaging allows TRANSIT legs to collect too; the
-            # heading/turn-rate gates below still strip SAR on curves.
-            command.operation_mode not in (OperationMode.COVERAGE, OperationMode.TRANSIT)
+            # En-route imaging allows TRANSIT/RETURN legs to collect too;
+            # the heading/turn-rate gates below still strip SAR on curves.
+            command.operation_mode not in (
+                OperationMode.COVERAGE,
+                OperationMode.TRANSIT,
+                OperationMode.RETURN,
+            )
             or abs(applied.turn_rate_rad_min) > SAR_HEADING_STABILITY_TOLERANCE_RAD_MIN
         ):
             applied = replace(
