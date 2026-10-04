@@ -5327,7 +5327,13 @@ class SimulationEngine:
                     current_time,
                     {"reason": "search_region_retired"},
                 )
-                self._begin_return(entity, current_time)
+                # A retired region is not a reason to land the airframe: the
+                # fleet needs every fueled aircraft for coverage.  Park it in
+                # system holding so the scheduler can re-task it immediately;
+                # the next mission assignment comes from the global scheduler,
+                # exactly as the old return path intended but without the
+                # round trip to base.
+                self._promote_work_controller_to_holding(entity, current_time)
                 continue
             # A retired search is not an implicit handoff.  Leave the UAV
             # available only after its current route has been safely ended;
