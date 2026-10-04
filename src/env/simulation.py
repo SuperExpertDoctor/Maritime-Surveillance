@@ -2180,9 +2180,13 @@ class SimulationEngine:
                             else None
                         ),
                     )
-                self.allocator.sm.mark_uav_reassigned(
-                    assignment.uav_id, self.clock.time,
-                )
+            # Every committed assignment starts a fresh no-bump window for
+            # the airframe: without this an aircraft freshly loaded with work
+            # stays advertised as preemptible and the next batch can bounce
+            # it back into transit before it ever reaches its region.
+            self.allocator.sm.mark_uav_reassigned(
+                assignment.uav_id, self.clock.time,
+            )
             if candidate.kind in _SEARCH_TASK_KINDS:
                 region = prepared_region
                 if region is None:
@@ -2486,6 +2490,12 @@ class SimulationEngine:
                 for item in applied_batch.assignments
             ],
         })
+        # The deterministic matcher commits real assignments too: mark the
+        # same no-bump window the LLM commit path does, otherwise a freshly
+        # matched search airframe is instantly preemptible and ping-pongs
+        # between pending searches and escalation tasks.
+        for item in applied_batch.assignments:
+            self.allocator.sm.mark_uav_reassigned(item.uav_id, current_time)
         return len(applied_batch.assignments)
 
     def _prepare_red_decision(self, current_time: float) -> None:
