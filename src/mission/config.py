@@ -298,6 +298,9 @@ class CoverageConfig:
     sweep_enabled: bool = True
     sweep_pending_max: int = 3
     sweep_pending_ttl_min: float = 120.0
+    # Backoff before a search task released by a coverage-install fault is
+    # offered to the deterministic pending matcher again.
+    install_retry_cooldown_min: float = 10.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.windows_min, tuple):
@@ -335,6 +338,7 @@ class CoverageConfig:
         _positive(self.sweep_pending_ttl_min, "coverage.sweep_pending_ttl_min")
         if not isinstance(self.sweep_enabled, bool):
             raise ValueError("coverage.sweep_enabled must be a bool")
+        _positive(self.install_retry_cooldown_min, "coverage.install_retry_cooldown_min")
 
 
 @dataclass(frozen=True)

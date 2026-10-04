@@ -62,6 +62,9 @@ coverage:
   sweep_enabled: true
   sweep_pending_max: 3
   sweep_pending_ttl_min: 120.0
+  # Backoff before a coverage task whose install faulted (e.g. storm-blocked
+  # swaths) is offered to the deterministic pending matcher again.
+  install_retry_cooldown_min: 10.0
 activity:
   regulated_bboxes: [[8, 8, 22, 22]]
   schedule_start_min: [30.0, 120.0]

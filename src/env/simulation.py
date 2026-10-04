@@ -432,6 +432,7 @@ class SimulationEngine:
         }
         self._search_started_at: dict[str, float] = {}
         self._sweep_pending_tasks: dict[str, float] = {}
+        self._coverage_install_cooldown: dict[str, float] = {}
         self._tracking_started_at: dict[str, float] = {}
         self._ais_tracking_started_at: dict[str, float] = {}
         self._ais_measurements: dict[str, list[tuple[float, float]]] = {}
@@ -2462,9 +2463,15 @@ class SimulationEngine:
 
     def _apply_pending_search_reassignments(self, current_time: float) -> int:
         """Install deterministic pending-search handoffs at one engine boundary."""
+        active_tasks = tuple(
+            record
+            for record in self._mission_task_records.values()
+            if self._coverage_install_cooldown.get(record.task_id, float("-inf"))
+            <= current_time
+        )
         batch = self.allocator.build_pending_search_batch(
             current_time,
-            active_tasks=tuple(self._mission_task_records.values()),
+            active_tasks=active_tasks,
         )
         if batch is None:
             return 0
@@ -3557,6 +3564,27 @@ class SimulationEngine:
             "uav_id": uav.id,
             "error": str(error),
         })
+        task = self.control_coordinator.active_task(uav.id)
+        if (
+            reason == "controller_fault"
+            and task is not None
+            and task.task_type is OperationMode.COVERAGE
+        ):
+            # A coverage-planning fault is transient by nature: storms drift,
+            # the same task becomes flyable minutes later, and sending the
+            # airframe home just shuffles the same unflyable task to the next
+            # airframe in the match.  Release the task back to pending and
+            # hold position instead; the airframe stays available for other
+            # work and a short cooldown stops a hot re-assign loop.
+            try:
+                self._promote_work_controller_to_holding(uav, current_time)
+                self._coverage_install_cooldown[task.task_id] = (
+                    current_time
+                    + self.config.mission.coverage.install_retry_cooldown_min
+                )
+                return
+            except Exception:
+                pass
         try:
             self._request_recovery_return(uav, current_time, reason)
         except NoSafeRecoveryPath as recovery_error:

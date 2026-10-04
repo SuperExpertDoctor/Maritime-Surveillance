@@ -491,14 +491,16 @@ class CoverageController(HeuristicControllerBase):
             along_track_cells=self.sar_along_track_cells,
             bounds=bounds,
         )
+        coverage_route, coverage_scan_ranges, kept_swaths = (
+            self._assemble_coverage_route(
+                coverage,
+                observation.planning_obstacle_mask,
+            )
+        )
         # The navigator reaches the scan entry position, but its final heading
         # is only a transit tangent.  Let the first scan segment carry the
         # physical heading transition while the SAR gate remains closed.
-        transit[-1] = coverage.waypoints[0]
-        coverage_route, coverage_scan_ranges = self._assemble_coverage_route(
-            coverage,
-            observation.planning_obstacle_mask,
-        )
+        transit[-1] = coverage_route[0]
         route = tuple(transit) + coverage_route[1:]
         offset = len(transit) - 1
         scan_ranges = tuple(
@@ -508,7 +510,7 @@ class CoverageController(HeuristicControllerBase):
         self._set_route(
             route,
             scan_ranges,
-            coverage.swaths,
+            kept_swaths,
             observation.planning_obstacle_mask,
             observation.planning_map_version,
             progress_offset_cells=progress_offset_cells,
@@ -531,16 +533,34 @@ class CoverageController(HeuristicControllerBase):
         self,
         coverage: CoveragePath,
         obstacle_mask: object,
-    ) -> tuple[tuple[tuple[float, float, float], ...], tuple[tuple[int, int], ...]]:
+    ) -> tuple[
+        tuple[tuple[float, float, float], ...],
+        tuple[tuple[int, int], ...],
+        tuple,
+    ]:
         """Keep scan lines fixed while making Dubins connectors world-safe."""
         if not coverage.swaths or not coverage.waypoints:
             raise ValueError("coverage planner produced no route")
         avoider = ObstacleAvoider(max_iterations=1000, seed=17)
+        # A drifting storm can cover part of a region between the engine's
+        # commit-time check and this install.  Swaths whose scan leg crosses a
+        # blocked cell are dropped here instead of aborting the whole route:
+        # the aircraft still covers every reachable cell, and the missed cells
+        # are re-offered later by the sweep/investigation channels once the
+        # hazard moves on.  Only a region with zero flyable swaths is a real
+        # install failure.
+        safe_legs = []
+        for swath in coverage.swaths:
+            scan_line = self.planner.sample_scan_line(swath)
+            if avoider.is_path_safe(scan_line, obstacle_mask):
+                safe_legs.append((swath, scan_line))
+        if not safe_legs:
+            raise ValueError("coverage planner produced no obstacle-safe swaths")
         route: list[tuple[float, float, float]] = [coverage.waypoints[0]]
         scan_ranges: list[tuple[int, int]] = []
-        for index, swath in enumerate(coverage.swaths):
-            if index:
-                entry = (swath.start[0], swath.start[1], swath.heading)
+        for index, (swath, scan_line) in enumerate(safe_legs):
+            entry = (swath.start[0], swath.start[1], swath.heading)
+            if math.dist(route[-1][:2], entry[:2]) > 1e-6:
                 direct = DubinsPath.compute(
                     route[-1], entry, self.r_min, self.planner.sample_step
                 ).waypoints
@@ -559,12 +579,17 @@ class CoverageController(HeuristicControllerBase):
                             route[-1], entry, obstacle_mask, self.r_min
                         )
                 route.extend(tuple(pose) for pose in connector[1:])
+            else:
+                route[-1] = entry
 
-            scan_line = self.planner.sample_scan_line(swath)
             scan_start = len(route) - 1
             route.extend(tuple(pose) for pose in scan_line[1:])
             scan_ranges.append((scan_start, len(route) - 1))
-        return tuple(route), tuple(scan_ranges)
+        return (
+            tuple(route),
+            tuple(scan_ranges),
+            tuple(swath for swath, _scan_line in safe_legs),
+        )
 
     def _plan_transit_to_pose(
         self,
@@ -611,11 +636,11 @@ class CoverageController(HeuristicControllerBase):
             transit = self._plan_transit_to_pose(
                 (*observation.self_state.position, observation.self_state.heading_rad), entry, observation)
             coverage = CoveragePath(swaths=ordered, waypoints=[entry])
-            route, ranges = self._assemble_coverage_route(coverage, observation.planning_obstacle_mask)
+            route, ranges, kept = self._assemble_coverage_route(coverage, observation.planning_obstacle_mask)
             offset = len(transit) - 1
-            transit[-1] = entry
+            transit[-1] = route[0]
             self._set_route(tuple(transit) + route[1:],
-                tuple((offset + start, offset + end) for start, end in ranges), ordered,
+                tuple((offset + start, offset + end) for start, end in ranges), kept,
                 observation.planning_obstacle_mask, observation.planning_map_version,
                 progress_offset_cells=self.follower.progress_cells)
         except (CoverageRouteBlockedError, ValueError, RuntimeError):

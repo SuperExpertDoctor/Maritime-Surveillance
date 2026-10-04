@@ -79,6 +79,16 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
 
     for index, swath in enumerate(swaths):
         entry = (swath.start[0], swath.start[1], swath.heading)
+        scan_line = planner.sample_scan_line(swath)
+        if not _path_in_bounds(scan_line, mask.shape):
+            raise RuntimeError("SAR scan line exits planning bounds")
+        if not avoider.is_path_safe(scan_line, mask):
+            # A drifting hazard can cover part of a region between matching
+            # and install.  Skip the blocked leg rather than vetoing the whole
+            # route: the aircraft still covers every reachable cell, and the
+            # missed cells are re-offered by the sweep channel once the hazard
+            # moves on.
+            continue
         direct = DubinsPath.compute(path[-1], entry, request.r_min, 0.2).waypoints
         if avoider.is_path_safe(direct, mask):
             connector = direct
@@ -90,14 +100,10 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
                     max_iterations=2400,
                     seed=request.seed + 31 + index * 101,
                 ).plan_path(path[-1], entry, mask, request.r_min)
+        first_leg = not scan_ranges
         path.extend(connector[1:])
-        if index == 0:
+        if first_leg:
             transit_end_index = len(path) - 1
-        scan_line = planner.sample_scan_line(swath)
-        if not _path_in_bounds(scan_line, mask.shape):
-            raise RuntimeError("SAR scan line exits planning bounds")
-        if not avoider.is_path_safe(scan_line, mask):
-            raise RuntimeError("SAR scan line intersects a no-fly obstacle")
         scan_start = len(path) - 1
         path.extend(scan_line[1:])
         scan_ranges.append((scan_start, len(path) - 1, swath.look_direction))
@@ -107,7 +113,7 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
         tuple(path),
         transit_end_index,
         tuple(scan_ranges),
-        len(swaths),
+        len(scan_ranges),
     )
 
 
