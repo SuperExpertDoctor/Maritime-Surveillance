@@ -83,6 +83,18 @@ function text(ctx, value, x, y, color = "#0F172A", size = 10, weight = 500) {
   ctx.fillText(value, x, y);
 }
 
+// Hover-driven labels: object captions stay hidden unless the pointer is on
+// (or inside) the entity they belong to. `hover` is canvas-space {x, y}.
+function hoverPoint(hover, x, y, radius) {
+  return Boolean(hover) && Math.hypot(x - hover.x, y - hover.y) <= radius;
+}
+
+function hoverRect(hover, x, y, width, height) {
+  return Boolean(hover)
+    && hover.x >= x && hover.x <= x + width
+    && hover.y >= y && hover.y <= y + height;
+}
+
 function drawMapImage(ctx, image, bounds) {
   if (!image?.complete || !image.naturalWidth || !image.naturalHeight) return;
   ctx.save();
@@ -231,7 +243,7 @@ export function drawGridLines(ctx, cellSize, ox, oy, showGrid) {
   }
 }
 
-export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
+export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase, hover = null) {
   for (const obstacle of obstacles || []) {
     if (obstacle.type === "thunderstorm") {
       const size = Math.max(1, obstacle.size || obstacle.radius * 2 || 1) * cellSize;
@@ -260,7 +272,9 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
       ctx.lineWidth = 1;
       ctx.strokeRect(x - cellSize, y - cellSize, size + 2 * cellSize, size + 2 * cellSize);
       ctx.restore();
-      text(ctx, "STORM", x + 3, y + Math.max(10, cellSize * 0.45), "#7F1D1D", Math.max(7, cellSize * 0.28), 700);
+      if (hoverRect(hover, x - cellSize, y - cellSize, size + 2 * cellSize, size + 2 * cellSize)) {
+        text(ctx, "STORM", x + 3, y + Math.max(10, cellSize * 0.45), "#7F1D1D", Math.max(7, cellSize * 0.28), 700);
+      }
     } else {
       const vertices = obstacle.vertices || [];
       if (!vertices.length) continue;
@@ -284,7 +298,9 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase) {
       );
       const label = obstacle.label || obstacle.id || "ISLAND";
       const point = coordToPixel(col, row, cellSize, ox, oy);
-      text(ctx, label, point.x + 3, point.y + 3 + Math.max(7, cellSize * 0.25), "#FFFFFF", Math.max(7, cellSize * 0.25), 700);
+      if (hoverPoint(hover, point.x, point.y, Math.max(14, cellSize * 1.4))) {
+        text(ctx, label, point.x + 3, point.y + 3 + Math.max(7, cellSize * 0.25), "#FFFFFF", Math.max(7, cellSize * 0.25), 700);
+      }
     }
   }
 }
@@ -304,7 +320,7 @@ function taskCells(region) {
   return cells;
 }
 
-export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
+export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = null) {
   const labels = [];
   const labelSources = new Map();
   for (const region of regions || []) {
@@ -327,6 +343,10 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
       const label = cellSize >= 14 ? fullLabel : region.id;
       const labelWidth = ctx.measureText(label).width + 8;
       const id = `search:${region.id}`;
+      const cols = cells.map(([col]) => col);
+      const rows = cells.map(([, row]) => row);
+      const minX = ox + Math.min(...cols) * cellSize;
+      const minY = oy + Math.min(...rows) * cellSize;
       labels.push({
         id,
         anchor: { x: point.x + cellSize / 2, y: point.y + cellSize / 2 },
@@ -334,7 +354,17 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
         height: fontSize + 6,
         priority: assigned ? 0 : 2,
       });
-      labelSources.set(id, { color, fontSize, text: label });
+      labelSources.set(id, {
+        color,
+        fontSize,
+        text: label,
+        hitBox: {
+          x: minX,
+          y: minY,
+          width: (Math.max(...cols) - Math.min(...cols) + 1) * cellSize,
+          height: (Math.max(...rows) - Math.min(...rows) + 1) * cellSize,
+        },
+      });
     }
   }
   const placed = layoutLabels(labels, {
@@ -347,6 +377,8 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
     if (label.hidden) continue;
     const source = labelSources.get(label.id);
     if (!source) continue;
+    const hit = source.hitBox;
+    if (!hoverRect(hover, hit.x, hit.y, hit.width, hit.height)) continue;
     ctx.save();
     ctx.strokeStyle = `${source.color}99`;
     ctx.lineWidth = 0.8;
@@ -360,7 +392,7 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy) {
   return placed;
 }
 
-export function drawIntents(ctx, intents, statuses, cellSize, ox, oy) {
+export function drawIntents(ctx, intents, statuses, cellSize, ox, oy, hover = null) {
   const statusById = new Map((statuses || []).map((status) => [status.intent_id, status]));
   for (const intent of intents || []) {
     if (!Array.isArray(intent.bbox) || intent.bbox.length !== 4) continue;
@@ -384,7 +416,9 @@ export function drawIntents(ctx, intents, statuses, cellSize, ox, oy) {
     ctx.restore();
     const coverage = status ? Math.round((status.coverage_ratio || 0) * 100) : null;
     const label = `${intent.intent_id}${coverage == null ? "" : ` ${coverage}%`}`;
-    text(ctx, label, point.x + 4, point.y + Math.max(11, cellSize * 0.48), color, Math.max(7, cellSize * 0.27), 700);
+    if (hoverRect(hover, point.x, point.y, width, height)) {
+      text(ctx, label, point.x + 4, point.y + Math.max(11, cellSize * 0.48), color, Math.max(7, cellSize * 0.27), 700);
+    }
   }
 }
 
@@ -1041,7 +1075,7 @@ export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy, phase = 0) {
   }
 }
 
-export function drawMarkers(ctx, markers, cellSize, ox, oy, time, phase) {
+export function drawMarkers(ctx, markers, cellSize, ox, oy, time, phase, hover = null) {
   for (const marker of markers || []) {
     const age = time - marker.created_time_min;
     if (age > 60) continue;
@@ -1054,11 +1088,13 @@ export function drawMarkers(ctx, markers, cellSize, ox, oy, time, phase) {
     ctx.arc(center.x, center.y, 4 + Math.sin(phase / 12) * 1.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-    text(ctx, marker.id, center.x + 7, center.y - 7, "#0F172A", 10);
+    if (hoverPoint(hover, center.x, center.y, Math.max(12, cellSize * 1.5))) {
+      text(ctx, marker.id, center.x + 7, center.y - 7, "#0F172A", 10);
+    }
   }
 }
 
-function drawGroupRings(ctx, ships, cellSize, ox, oy) {
+function drawGroupRings(ctx, ships, cellSize, ox, oy, hover = null) {
   const groups = new Map();
   for (const ship of ships || []) {
     if (ship.departed) continue;
@@ -1081,7 +1117,9 @@ function drawGroupRings(ctx, ships, cellSize, ox, oy) {
     ctx.arc(center.x, center.y, Math.max(9, cellSize * 1.22), 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
-    text(ctx, groupId, center.x + 5, center.y - Math.max(9, cellSize * 1.28), color, Math.max(7, cellSize * 0.25), 700);
+    if (hoverPoint(hover, center.x, center.y, Math.max(12, cellSize * 1.8))) {
+      text(ctx, groupId, center.x + 5, center.y - Math.max(9, cellSize * 1.28), color, Math.max(7, cellSize * 0.25), 700);
+    }
   }
 }
 
@@ -1201,9 +1239,9 @@ function drawShipRadar(ctx, ship, center, cellSize) {
   ctx.restore();
 }
 
-export function drawShips(ctx, ships, cellSize, ox, oy, assets) {
+export function drawShips(ctx, ships, cellSize, ox, oy, assets, hover = null) {
   const observedShips = (ships || []).filter((ship) => ship?.is_detected);
-  drawGroupRings(ctx, observedShips, cellSize, ox, oy);
+  drawGroupRings(ctx, observedShips, cellSize, ox, oy, hover);
   for (const ship of observedShips) {
     const classification = ship.vessel_class || ship.assessment?.vessel_class || "unknown";
     const color = classification === "type_ii"
@@ -1294,7 +1332,7 @@ export function drawBases(ctx, bases, baseCenters, cellSize, phase) {
   }
 }
 
-export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCenters) {
+export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCenters, hover = null) {
   for (const uav of uavs || []) {
     const center = resolveUavDisplayCenter(uav, cellSize, ox, oy, baseCenters);
     const color = UAV_STATUS_COLORS[uav.status] || "#94A3B8";
@@ -1345,7 +1383,9 @@ export function drawUavs(ctx, uavs, cellSize, ox, oy, selectedId, assets, baseCe
     if (uav.avoidance_level > 0) {
       const level = Number(uav.avoidance_level);
       const levelColor = level >= 3 ? "#F87171" : level === 2 ? "#FBBF24" : "#67E8F9";
-      text(ctx, `L${level}`, center.x + size + 3, center.y + size + 8, levelColor, Math.max(7, cellSize * 0.25), 700);
+      if (hoverPoint(hover, center.x, center.y, Math.max(16, cellSize * 1.6))) {
+        text(ctx, `L${level}`, center.x + size + 3, center.y + size + 8, levelColor, Math.max(7, cellSize * 0.25), 700);
+      }
     }
   }
 }
@@ -1399,6 +1439,7 @@ export function drawLabels(
   selectedScenarioVesselId,
   baseCenters,
   showScenario = false,
+  hover = null,
 ) {
   const labels = [];
   const styles = new Map();
@@ -1501,6 +1542,10 @@ export function drawLabels(
     const source = labels.find((item) => item.id === label.id);
     const style = styles.get(label.id);
     if (!source || !style) continue;
+    if (!style.selected) {
+      const radius = Math.max(20, cellSize * 1.4);
+      if (!hoverPoint(hover, label.anchor.x, label.anchor.y, radius)) continue;
+    }
     ctx.save();
     if (style.selected) {
       ctx.strokeStyle = `${style.color}B8`;
@@ -1612,6 +1657,7 @@ export function renderFrame(ctx, frame, options = {}) {
     selectedContactId,
     showScenario = false,
     selectedScenarioVesselId,
+    hover = null,
   } = options;
   const width = ctx.canvas.clientWidth || ctx.canvas.width;
   const height = ctx.canvas.clientHeight || ctx.canvas.height;
@@ -1631,9 +1677,9 @@ export function renderFrame(ctx, frame, options = {}) {
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawSearchDomain(ctx, frame.search_domain, cellSize, offsetX, offsetY);
-    drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount);
-    drawIntents(ctx, frame.intents, frame.intent_statuses, cellSize, offsetX, offsetY);
-    drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY);
+    drawObstacles(ctx, frame.obstacles, cellSize, offsetX, offsetY, frameCount, hover);
+    drawIntents(ctx, frame.intents, frame.intent_statuses, cellSize, offsetX, offsetY, hover);
+    drawSearchRegions(ctx, frame.search_regions, frame.uavs, cellSize, offsetX, offsetY, hover);
     const contacts = Array.isArray(frame.contacts) && frame.contacts.length
       ? frame.contacts : frame.ships;
     drawTrackRegions(ctx, frame.track_regions, contacts, cellSize, offsetX, offsetY);
@@ -1641,16 +1687,16 @@ export function renderFrame(ctx, frame, options = {}) {
     drawUavTrails(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, trailMode);
     drawPaths(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, baseCenters);
     drawSensorFootprints(ctx, frame.uavs, cellSize, offsetX, offsetY, frameCount);
-    drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount);
+    drawMarkers(ctx, frame.markers, cellSize, offsetX, offsetY, frame.sim_time_min, frameCount, hover);
     if (Array.isArray(frame.contacts) && frame.contacts.length) {
       drawContacts(ctx, frame.contacts, cellSize, offsetX, offsetY, selectedContactId, frameCount);
     } else {
-      drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets);
+      drawShips(ctx, frame.ships, cellSize, offsetX, offsetY, assets, hover);
     }
     if (showScenario) {
       drawScenarioVessels(ctx, frame.scenario_vessels, cellSize, offsetX, offsetY, selectedScenarioVesselId);
     }
-    drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets, baseCenters);
+    drawUavs(ctx, frame.uavs, cellSize, offsetX, offsetY, selectedUavId, assets, baseCenters, hover);
     drawBases(ctx, bases, baseCenters, cellSize, frameCount);
     drawLabels(
       ctx,
@@ -1664,6 +1710,7 @@ export function renderFrame(ctx, frame, options = {}) {
       selectedScenarioVesselId,
       baseCenters,
       showScenario,
+      hover,
     );
     drawTransparencyLegend(ctx, legendBounds);
     const domain = frame.search_domain;
