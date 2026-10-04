@@ -317,7 +317,14 @@ def test_stale_contact_is_released_before_first_controller_tick_past_limit(engin
     assert sm.get_track_regions() == []
     assert uav.target_group_id is None
     assert sm.get_uav(uav.id).target_group_id is None
-    assert engine.control_coordinator.active_task(uav.id).task_type is OperationMode.HOLDING
+    # The deterministic coverage sweep may immediately retask the freed
+    # airframe; it only must not stay bound to the lost contact.
+    active = engine.control_coordinator.active_task(uav.id)
+    assert active is None or active.task_type in {
+        OperationMode.HOLDING, OperationMode.COVERAGE,
+    }
+    if active is not None:
+        assert active.target_contact_id is None
     events = sm.get_recent_events(0)
     assert any(e["type"] == "target_lost" for e in events)
     assert not any(e["type"] in {"control_fault", "emergency_failure", "task_failed"}

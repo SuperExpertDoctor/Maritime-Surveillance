@@ -293,6 +293,11 @@ class CoverageConfig:
     align_timeout_min: float = 8.0
     max_stall_replans: int = 2
     max_consecutive_decision_failures: int = 3
+    # Deterministic sweep backstop: due cells become pending searches even
+    # when the bounded model prompt never selects them.
+    sweep_enabled: bool = True
+    sweep_pending_max: int = 3
+    sweep_pending_ttl_min: float = 120.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.windows_min, tuple):
@@ -326,6 +331,10 @@ class CoverageConfig:
             "coverage.max_consecutive_decision_failures",
             minimum=1,
         )
+        _integer(self.sweep_pending_max, "coverage.sweep_pending_max", minimum=1)
+        _positive(self.sweep_pending_ttl_min, "coverage.sweep_pending_ttl_min")
+        if not isinstance(self.sweep_enabled, bool):
+            raise ValueError("coverage.sweep_enabled must be a bool")
 
 
 @dataclass(frozen=True)

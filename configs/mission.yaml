@@ -57,6 +57,11 @@ coverage:
   align_timeout_min: 8.0
   max_stall_replans: 2
   max_consecutive_decision_failures: 3
+  # Deterministic coverage sweep: turn stale/never-scanned cells into pending
+  # searches so low-value areas cannot starve behind the model prompt window.
+  sweep_enabled: true
+  sweep_pending_max: 3
+  sweep_pending_ttl_min: 120.0
 activity:
   regulated_bboxes: [[8, 8, 22, 22]]
   schedule_start_min: [30.0, 120.0]

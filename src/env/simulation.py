@@ -431,6 +431,7 @@ class SimulationEngine:
             uav.id: False for uav in self.uavs
         }
         self._search_started_at: dict[str, float] = {}
+        self._sweep_pending_tasks: dict[str, float] = {}
         self._tracking_started_at: dict[str, float] = {}
         self._ais_tracking_started_at: dict[str, float] = {}
         self._ais_measurements: dict[str, list[tuple[float, float]]] = {}
@@ -1616,6 +1617,7 @@ class SimulationEngine:
             result = self.allocator.step(t)
             self._sync_assignments()
         else:
+            sweep_created = self._apply_coverage_sweep(t)
             pending_reassigned = self._apply_pending_search_reassignments(t)
             if pending_reassigned:
                 # Refresh the immutable snapshot after the atomic handoff so
@@ -1654,6 +1656,18 @@ class SimulationEngine:
                         "trigger_type": "light",
                         "action": "pending_searches_reassigned",
                         "assignments": pending_reassigned,
+                    }
+            if sweep_created:
+                result = {
+                    **result,
+                    "coverage_sweep_tasks": sweep_created,
+                }
+                if result.get("trigger_type") == "none":
+                    result = {
+                        **result,
+                        "trigger_type": "light",
+                        "action": "coverage_sweep_created",
+                        "assignments": 0,
                     }
             decision_record = build_decision_record(result, batch, assignment_applied, t)
             if decision_record is not None:
@@ -2297,6 +2311,154 @@ class SimulationEngine:
         })
         self._publish_control_routes()
         return replace(batch, assignments=committed)
+
+    def _apply_coverage_sweep(self, current_time: float) -> int:
+        """Turn due cells into pending searches the model prompt cannot starve.
+
+        New ordinary-search work otherwise enters only through the bounded
+        model prompt window; low-value areas can starve indefinitely even
+        though legal rectangles exist. Pending searches created here reuse
+        the deterministic pending matcher (the same channel that hands off
+        unassigned searches after returns) instead of waiting on a model
+        selection, so every stale or never-scanned cell eventually receives
+        a tasked sweep.
+        """
+        sm = self.allocator.sm
+        metrics = getattr(sm, "coverage_metrics", None)
+        if metrics is None or self.allocator.uses_legacy_scheduler():
+            return 0
+        coverage_config = getattr(self.config.mission, "coverage", None)
+        if coverage_config is None or not coverage_config.sweep_enabled:
+            return 0
+        retired = self._retire_stale_sweep_tasks(
+            current_time, coverage_config.sweep_pending_ttl_min
+        )
+        if len(self._sweep_pending_tasks) >= coverage_config.sweep_pending_max:
+            return retired
+
+        last_sar = metrics.last_scan_matrix()
+        due = ~np.isfinite(last_sar) | (
+            last_sar <= current_time - coverage_config.primary_window_min
+        )
+
+        pool = self.allocator.extractor.extract_pool(sm)
+        existing_ids = {region.id for region in sm.get_search_regions()}
+        existing_ids.update(self._mission_task_records)
+        # Unassigned pending regions are not part of the extractor's occupied
+        # mask, so raw pool candidates may overlap unfinished work. The mission
+        # snapshot applies the same exclusion downstream; the sweep must too.
+        unfinished = [
+            region.bbox for region in sm.get_unfinished_search_regions()
+        ]
+        scored = []
+        for candidate in pool.candidates:
+            if candidate.bbox is None or candidate.task_id in existing_ids:
+                continue
+            x0, y0, x1, y1 = candidate.bbox
+            if any(
+                not (
+                    x1 <= other.col_start
+                    or other.col_end <= x0
+                    or y1 <= other.row_start
+                    or other.row_end <= y0
+                )
+                for other in unfinished
+            ):
+                continue
+            due_cells = int(due[x0:x1, y0:y1].sum())
+            if due_cells <= 0:
+                continue
+            scored.append((
+                -due_cells,
+                -float(candidate.unseen_fraction),
+                candidate.task_id,
+                candidate,
+            ))
+        if not scored:
+            return retired
+        scored.sort()
+        created = 0
+        slots = (
+            coverage_config.sweep_pending_max - len(self._sweep_pending_tasks)
+        )
+        for _, _, task_id, candidate in scored:
+            if created >= slots:
+                break
+            cx0, cy0, cx1, cy1 = candidate.bbox
+            if any(
+                not (
+                    cx1 <= other.col_start
+                    or other.col_end <= cx0
+                    or cy1 <= other.row_start
+                    or other.row_end <= cy0
+                )
+                for other in unfinished
+            ):
+                continue
+            region = Region(
+                task_id,
+                BBox(*candidate.bbox),
+                "search",
+                created_cycle=sm.cycle,
+            )
+            sm.set_search_regions([*sm.get_search_regions(), region])
+            self._mission_task_records[task_id] = TaskRecord(
+                task_id,
+                "search",
+                "approved",
+                tuple(candidate.bbox),
+                None,
+                (),
+                None,
+                None,
+                current_time,
+                None,
+                None,
+                None,
+            )
+            self._sweep_pending_tasks[task_id] = current_time
+            unfinished.append(BBox(*candidate.bbox))
+            x0, y0, x1, y1 = candidate.bbox
+            sm.add_event("coverage_sweep_task_created", {
+                "task_id": task_id,
+                "bbox": list(candidate.bbox),
+                "due_cells": int(due[x0:x1, y0:y1].sum()),
+            })
+            created += 1
+        return retired + created
+
+    def _retire_stale_sweep_tasks(
+        self, current_time: float, ttl_min: float
+    ) -> int:
+        """Retire sweep pendings that never produced a feasible assignment."""
+        sm = self.allocator.sm
+        retired = 0
+        for task_id, created_at in tuple(self._sweep_pending_tasks.items()):
+            record = self._mission_task_records.get(task_id)
+            if (
+                record is None
+                or record.status != "approved"
+                or record.assigned_uav_id is not None
+            ):
+                del self._sweep_pending_tasks[task_id]
+                continue
+            if current_time - created_at < ttl_min:
+                continue
+            self._set_search_task_projection(
+                task_id,
+                state="stale",
+                uav_id=None,
+                current_time=current_time,
+                reason="sweep_unmatched",
+            )
+            del self._sweep_pending_tasks[task_id]
+            sm.add_event("coverage_sweep_task_retired", {
+                "task_id": task_id,
+                "reason": "sweep_unmatched",
+                "age_min": round(current_time - created_at, 3),
+            })
+            retired += 1
+        return retired
 
     def _apply_pending_search_reassignments(self, current_time: float) -> int:
         """Install deterministic pending-search handoffs at one engine boundary."""
