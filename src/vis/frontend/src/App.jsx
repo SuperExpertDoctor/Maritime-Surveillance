@@ -14,7 +14,7 @@ import useRuntimeLogs from "./hooks/useRuntimeLogs";
 export default function App() {
   const [mode, setMode] = useState("live");
   const [selectedUavId, setSelectedUavId] = useState(null);
-  const [drawerVisible, setDrawerVisible] = useState(false);
+  const [drawerVisible, setDrawerVisible] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [showScenario, setShowScenario] = useState(false);
