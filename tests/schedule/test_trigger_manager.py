@@ -70,6 +70,28 @@ def test_uav_returned_heavy_trigger(sm):
     assert d.source == "event"
 
 
+def test_event_trigger_reason_describes_each_triggering_event(sm):
+    tm = TriggerManager(sm)
+    tm.notify_event("uav_returned", time=15.0, uav_id="UAV-3")
+    tm.notify_event("intent_changed", time=15.0, intent_id="I0001")
+
+    decision = tm.check(15.0)
+
+    assert decision.trigger_type == "heavy"
+    assert decision.source == "event"
+    assert decision.reason == "uav_returned(UAV-3)、intent_changed(I0001)"
+
+
+def test_light_trigger_reason_names_the_light_event(sm):
+    tm = TriggerManager(sm)
+    tm.notify_event("search_complete", time=10.0, uav_id="UAV-1", region_id="S1")
+
+    decision = tm.check(10.0)
+
+    assert decision.trigger_type == "light"
+    assert decision.reason == "search_complete(UAV-1)"
+
+
 @pytest.mark.parametrize(
     "event_type",
     ["assessment_changed", "resource_available", "intent_changed", "intent_expired"],

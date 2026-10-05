@@ -88,11 +88,11 @@ export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions
         <button className="drawer-close" onClick={onToggle} aria-label="关闭任务详情" title="关闭"><X size={16} /></button>
       </div>
       <div className="drawer-content">
-        <small data-testid="drawer-context">{mode === "replay" ? "Historical replay" : "Active episode"} · {frame?.episode_id || "not provided"} · {frame?.sim_time_min ?? "-"} min</small>
+        <small data-testid="drawer-context">{mode === "replay" ? "Historical replay" : "Active episode"} · {frame?.episode_id || "-"} · {frame?.sim_time_min ?? "-"} min</small>
         {activeTab === 0 && <DecisionTab decisions={decisions} onSelectDecision={onSelectDecision} />}
         {activeTab === 1 && <RegionTab frame={frame} />}
         {activeTab === 2 && <LogTab logs={logs} error={logError} frame={frame} llm={llmCycle} mode={mode} />}
-        {activeTab === 3 && <ParamsTab config={frame?.config_snapshot || config} error={mode === "replay" && !frame?.config_snapshot ? "Historical parameters: not provided" : configError} />}
+        {activeTab === 3 && <ParamsTab config={frame?.config_snapshot || config} error={mode === "replay" && !frame?.config_snapshot ? "该回放未记录参数快照" : configError} />}
         {activeTab === 4 && <VesselStatusTab vessels={frame?.scenario_vessels || []} mode={mode}
           editingAllowed={editingAllowed} commandBusy={vesselCommandBusy}
           commandStatus={vesselCommandStatus} onSetAis={onSetVesselAis} onDelete={onDeleteVessel} />}
@@ -110,16 +110,28 @@ function DecisionTab({ decisions, onSelectDecision }) {
           const data = event.data || {};
           const assigned = data.assignments || [];
           const selected = (data.selected_task_ids || []).join(", ");
+          const errorText = (data.errors || []).filter(Boolean).join("；")
+            || (data.failure_category ? `failure: ${data.failure_category}` : "");
           const outcome = data.status === "committed" && assigned.length
             ? assigned.map((item) => `${item.task_id} → ${item.uav_id}`).join("；")
-            : `${selected ? `已选择 ${selected} · ` : ""}${data.status === "rejected" ? "分配未提交" : "未完成分配"}`;
+            : `${selected ? `已选择 ${selected} · ` : ""}${data.status === "rejected" ? "分配未提交" : "未完成分配"}${errorText ? `：${errorText}` : ""}`;
+          // 决策原因按触发来源取真实内容：事件触发写触发事件的描述，
+          // 主动触发写模型的 think 内容；均缺失时如实说明失败情况，绝不放占位词。
+          const isEvent = data.trigger_source === "event";
+          const reason = (isEvent ? data.trigger_reason : data.reason_content)
+            || (isEvent ? data.reason_content : data.trigger_reason)
+            || (errorText ? `模型未产出有效决策：${errorText}` : "")
+            || TRIGGERS[data.trigger_source] || data.trigger_source || "";
+          const triggerNote = !isEvent && data.reason_content && data.trigger_reason
+            && data.trigger_reason !== data.reason_content ? `触发 · ${data.trigger_reason}` : "";
           return (
             <tr key={event.event_id || `${event.time}-${index}`} onClick={() => onSelectDecision?.(event)}>
               <td className="decision-time">{Number(data.time_min ?? event.time ?? 0).toFixed(0).padStart(3, "0")} min</td>
-              <td><span className={`trigger-label trigger-${data.trigger_source}`}>{TRIGGERS[data.trigger_source] || "触发来源未记录"}</span></td>
-              <td className="decision-reason">{data.reason_content ? (
-                <details onClick={(click) => click.stopPropagation()}><summary>{data.reason_content}</summary><div>{data.reason_content}</div></details>
-              ) : <span className="muted">模型未返回原因</span>}</td>
+              <td><span className={`trigger-label trigger-${data.trigger_source}`}>{TRIGGERS[data.trigger_source] || data.trigger_source || "unknown"}</span></td>
+              <td className="decision-reason">
+                <details onClick={(click) => click.stopPropagation()}><summary>{reason}</summary><div>{reason}</div></details>
+                {triggerNote && <small className="muted">{triggerNote}</small>}
+              </td>
               <td><span className={data.status === "committed" ? "decision-outcome" : "decision-outcome failed"}>{outcome}</span></td>
               <td className="decision-uavs">{(data.involved_uav_ids || []).join("、") || "无"}</td>
             </tr>
@@ -162,10 +174,10 @@ function RegionTab({ frame }) {
         <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>边界</th><th>优先级</th><th>信息素</th><th>价值</th><th>完成</th><th>执行单元</th></tr></thead>
         <tbody>{rows.map((region) => (
           <tr key={`${region.displayType}-${region.id}`}>
-            <td><b>{region.id}</b></td><td>{region.displayType}</td><td>{region.status || "not provided"}</td><td className="mono">[{region.bbox?.join(", ")}]</td>
+            <td><b>{region.id}</b></td><td>{region.displayType}</td><td>{region.status || "-"}</td><td className="mono">[{region.bbox?.join(", ")}]</td>
             <td><span className={`priority ${region.priority || "high"}`}>{region.priority || "持续"}</span></td>
             <td>{region.avg_info == null ? "-" : Number(region.avg_info).toFixed(2)}</td><td>{region.info_value == null ? "-" : Number(region.info_value).toFixed(2)}</td>
-            <td>{region.completion_pct == null ? "-" : `${Math.round(region.completion_pct)}% (${region.completion_basis || "not provided"})`}</td><td>{region.assigned_uav_id || "待分配"}</td>
+            <td>{region.completion_pct == null ? "-" : `${Math.round(region.completion_pct)}%${region.completion_basis ? ` (${region.completion_basis})` : ""}`}</td><td>{region.assigned_uav_id || "待分配"}</td>
           </tr>
         ))}</tbody>
       </table>
@@ -213,7 +225,7 @@ function ModelCallsTab({ frame, llm, mode }) {
   }
   const calls = [...byId.values()].sort((a, b) => (a.sim_time_min || 0) - (b.sim_time_min || 0));
   const call = calls.find((item) => item.call_id === selected) || calls.at(-1) || llm;
-  if (!call) return <EmptyState text={error || "Model calls: not provided"} />;
+  if (!call) return <EmptyState text={error || "本时段没有模型调用记录"} />;
   const latest = calls.at(-1);
   return <div>
     {error && <small role="status">{error} · showing last available data</small>}
@@ -226,7 +238,7 @@ function ModelCallsTab({ frame, llm, mode }) {
 }
 
 function LLMTab({ llm }) {
-  const text = (value) => typeof value === "string" ? value : value == null ? "not provided" : JSON.stringify(value, null, 2);
+  const text = (value) => typeof value === "string" ? value : value == null ? "无返回内容" : JSON.stringify(value, null, 2);
   const copy = (value) => navigator.clipboard?.writeText(text(value));
   const attempts = llm.attempts || [];
   const last = attempts.at(-1) || {};
@@ -234,16 +246,16 @@ function LLMTab({ llm }) {
   const reasoning = channels.filter((item) => item.kind === "external_provider_reasoning" && item.provenance === "external_api_response");
   const summaries = channels.filter((item) => item.kind === "public_provider_summary" && item.provenance === "external_api_response");
   const sections = [
-    ["Decision notes / rationale", llm.decision_summary || "not provided"],
-    ["External provider reasoning (think)", reasoning.length ? reasoning : "not provided"],
-    ["Public provider reasoning summary", summaries.length ? summaries : llm.public_reasoning_summary || "not provided"],
+    ["Decision notes / rationale", llm.decision_summary || "无返回内容"],
+    ["External provider reasoning (think)", reasoning.length ? reasoning : "无返回内容"],
+    ["Public provider reasoning summary", summaries.length ? summaries : llm.public_reasoning_summary || "无返回内容"],
     ["Response", llm.response ?? last.raw_output ?? last.response],
     ["Validation", llm.validation ?? llm.validation_errors ?? last.errors],
     ["Attempts", attempts],
   ];
   return <div className="llm-log">
-    <div className="llm-log-head"><div><span className={llm.success ? "success" : "failed"}>{llm.success ? "VALID" : llm.failure_category ? "FAILED" : "PENDING / UNKNOWN"}</span><strong>{llm.model}</strong></div><small>{attempts.length} attempts · {llm.role} · {llm.provider} · thinking: {llm.thinking_mode ?? "not provided"}</small></div>
-    <small>{llm.call_id} · snapshot: {llm.snapshot_id || "not provided"} · {llm.sim_time_min ?? "-"} min · {llm.failure_category}</small>
+    <div className="llm-log-head"><div><span className={llm.success ? "success" : "failed"}>{llm.success ? "VALID" : llm.failure_category ? "FAILED" : "PENDING / UNKNOWN"}</span><strong>{llm.model}</strong></div><small>{attempts.length} attempts · {llm.role} · {llm.provider} · thinking: {llm.thinking_mode ?? "-"}</small></div>
+    <small>{llm.call_id} · snapshot: {llm.snapshot_id || "-"} · {llm.sim_time_min ?? "-"} min · {llm.failure_category}</small>
     <div className="llm-sections">{sections.map(([label, content], index) => <details key={label} open={index < 4}>
       <summary>{label}<button onClick={(event) => { event.preventDefault(); copy(content); }} aria-label={`复制 ${label}`}><Clipboard size={14} /></button></summary><pre>{text(content)}</pre>
     </details>)}</div>

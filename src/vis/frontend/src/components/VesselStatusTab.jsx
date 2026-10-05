@@ -39,7 +39,7 @@ export default function VesselStatusTab({ vessels = [], mode, editingAllowed, co
                 ? vessel.motion_reason_content
                   ? <details><summary aria-label={`展开 ${id} 调整原因`}>{vessel.motion_reason_content}</summary>
                     <p>{vessel.motion_reason_content}</p></details>
-                  : "模型未返回调整原因"
+                  : `规避机动指令${vessel.motion_decision_time_min != null ? `（决策于 ${number(vessel.motion_decision_time_min, 0)} min）` : ""}`
                 : "—"}</td>
               <td className="vessel-position">{Array.isArray(vessel.position)
                 ? vessel.position.map((coordinate) => number(coordinate)).join(", ") : "-"}</td>

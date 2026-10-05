@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { frameFixture, installFrameSocket } from "./helpers/frameSocket.js";
+import { ensureDrawerOpen, frameFixture, installFrameSocket } from "./helpers/frameSocket.js";
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/export/capabilities", (route) => route.fulfill({ json: { mp4: false } }));
@@ -39,7 +39,7 @@ test("live decision table appends records and logs show retries and timeouts", a
     await route.fulfill({ json: { entries, cursor: entries.at(-1)?.id ?? after } });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await expect(page.getByRole("columnheader")).toHaveText([
     "决策时间", "触发类型", "决策原因", "决策内容", "参与调度的 UAV",
   ]);
@@ -67,7 +67,7 @@ test("mobile decision table scrolls within the drawer", async ({ page }, testInf
   await installFrameSocket(page, frameFixture());
   await page.route("**/api/runtime/decisions?**", (route) => route.fulfill({ json: { decisions: [decision(24, 3)] } }));
   await page.goto("/");
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await expect(page.locator(".decision-table tbody tr")).toHaveCount(1);
   const dimensions = await page.evaluate(() => ({
     pageWidth: document.documentElement.scrollWidth,
@@ -96,7 +96,7 @@ test("episode reset drops prior decision and runtime log rows", async ({ page })
     return route.fulfill({ json: { entries, cursor: entries.at(-1)?.id ?? 2 } });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await expect(page.locator(".decision-table tbody tr")).toHaveCount(1);
   await page.getByRole("tab", { name: "日志" }).click();
   await expect(page.locator(".runtime-log-row")).toHaveCount(1);
@@ -120,7 +120,7 @@ test("replay decisions respect playback position", async ({ page }) => {
   await page.goto("/");
   await page.locator(".mode-switch button").nth(1).click();
   await page.locator(".file-select").selectOption("decisions.jsonl");
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await expect(page.locator(".decision-table tbody tr")).toHaveCount(0);
   await page.getByRole("button", { name: "下一帧" }).click();
   await expect(page.locator(".decision-table tbody tr")).toHaveCount(1);

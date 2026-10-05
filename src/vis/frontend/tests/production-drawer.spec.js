@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { ensureDrawerOpen } from "./helpers/frameSocket.js";
 // Production read-only smoke: no mocks. Empty regions/calls are valid and reported.
 test('production WS/HTTP and five drawer tabs', async ({ page, request }, testInfo) => {
   let frame;
@@ -14,7 +15,7 @@ test('production WS/HTTP and five drawer tabs', async ({ page, request }, testIn
   const callsResponse = await request.get(`/api/model-calls?episode_id=${encodeURIComponent(frame.episode_id)}`);
   expect(callsResponse.ok()).toBeTruthy();
   const calls = (await callsResponse.json()).calls;
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   const drawer = page.getByRole('region', { name: '任务详情' });
   await expect(drawer.getByTestId('drawer-context')).toContainText(frame.episode_id);
   const observations = {};

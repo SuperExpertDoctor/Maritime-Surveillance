@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { frameFixture, installFrameSocket } from './helpers/frameSocket.js';
+import { ensureDrawerOpen, frameFixture, installFrameSocket } from './helpers/frameSocket.js';
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/export/capabilities', route => route.fulfill({ json: { mp4: false } }));
@@ -30,7 +30,7 @@ test('stale model log HTTP response cannot hide newer pushed calls', async ({ pa
     await route.fulfill({ json: { episode_id: 'episode-browser', calls: [oldCall] } });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   const requested = page.waitForRequest('**/api/model-calls?*');
   await page.getByRole('tab', { name: '日志', exact: true }).click();
   await page.getByText('模型调用详情').click();
@@ -53,7 +53,7 @@ test('completed polled model call is not reverted by a pending frame snapshot', 
     episode_id: 'episode-browser', calls: [{ ...pending, success: true, decision_summary: 'COMPLETED RESULT' }],
   } }));
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '日志', exact: true }).click();
   await page.getByText('模型调用详情').click();
   await expect(page.locator('.llm-log')).toContainText('COMPLETED RESULT');
@@ -62,7 +62,7 @@ test('completed polled model call is not reverted by a pending frame snapshot', 
   await expect(page.locator('.llm-log')).toContainText('COMPLETED RESULT');
   await page.route('**/api/replay/list', route => route.fulfill({ json: { files: [] } }));
   await page.getByRole('button', { name: '回放', exact: true }).click();
-  await expect(page.getByRole('region', { name: '任务详情' })).toContainText('not provided');
+  await expect(page.getByRole('region', { name: '任务详情' })).toContainText('Historical replay · - · - min');
   await page.getByRole('button', { name: '直播', exact: true }).click();
   await expect(page.locator('.connection-state')).toContainText('实时连接');
   await page.getByRole('tab', { name: '日志', exact: true }).click();

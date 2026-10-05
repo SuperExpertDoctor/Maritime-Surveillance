@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { frameFixture, installFrameSocket } from './helpers/frameSocket.js';
+import { ensureDrawerOpen, frameFixture, installFrameSocket } from './helpers/frameSocket.js';
 
 const typeI = { scenario_entity_id: 'ship-i', revision: 2, vessel_class: 'type_i',
   position: [4.5, 7.5], ais_enabled: true, ais_controllable: false,
@@ -27,7 +27,7 @@ test('admin table controls each ship by its own ID and revision', async ({ page 
       vessel_id: 'ship-ii', revision: 5 } });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '船舶状态' }).click();
   const table = page.getByRole('table', { name: '船舶状态' });
   const rowI = table.getByRole('row', { name: /ship-i\s/ });
@@ -61,7 +61,7 @@ test('row deletion waits for authoritative absence', async ({ page }) => {
       vessel_id: 'ship-ii', revision: 5 } });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '船舶状态' }).click();
   const row = page.getByRole('table', { name: '船舶状态' }).getByRole('row', { name: /ship-ii\s/ });
   await row.getByRole('button', { name: '删除 ship-ii' }).click();
@@ -78,7 +78,7 @@ test('mobile ship table scrolls inside the drawer', async ({ page }, testInfo) =
   await page.setViewportSize({ width: 390, height: 844 });
   await installFrameSocket(page, frameFixture('live', { scenario_vessels: [typeI, typeII] }));
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '船舶状态' }).click();
   const dimensions = await page.evaluate(() => {
     const wrap = document.querySelector('.vessel-table-wrap');
@@ -96,7 +96,7 @@ test('rejected AIS command shows row error without changing confirmed state', as
     status: 409, json: { error_code: 'revision_conflict' },
   }));
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '船舶状态' }).click();
   const row = page.getByRole('table', { name: '船舶状态' }).getByRole('row', { name: /ship-ii\s/ });
   await row.getByRole('switch').click();
@@ -118,7 +118,7 @@ test('legacy replay table remains read-only without motion fields', async ({ pag
   await page.goto('/');
   await page.locator('.mode-switch button').nth(1).click();
   await page.locator('.file-select').selectOption('old-run.jsonl');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '船舶状态' }).click();
   const row = page.getByRole('table', { name: '船舶状态' }).getByRole('row', { name: /old-ii\s/ });
   await expect(row).toContainText('无当前机动指令');
@@ -133,7 +133,7 @@ test('long adjustment reasons expand without enlarging every row', async ({ page
     { ...typeII, motion_reason_content: reason },
   ] }));
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '船舶状态' }).click();
   const row = page.getByRole('table', { name: '船舶状态' }).getByRole('row', { name: /ship-ii\s/ });
   expect((await row.boundingBox()).height).toBeLessThan(100);
@@ -148,7 +148,7 @@ test('each vessel shows only its own maneuver reason after frame updates', async
   const fixture = frameFixture('live', { scenario_vessels: [typeII, second] });
   await installFrameSocket(page, fixture);
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole('tab', { name: '船舶状态' }).click();
   const table = page.getByRole('table', { name: '船舶状态' });
   const firstRow = table.getByRole('row', { name: /ship-ii\s/ });

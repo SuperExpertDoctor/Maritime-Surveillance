@@ -96,6 +96,14 @@ export function frameFixture(mode = "live", overrides = {}) {
   };
 }
 
+export async function ensureDrawerOpen(page) {
+  // The drawer opens by default; click the toggle only when a spec needs it
+  // but the panel is currently closed.
+  if (!(await page.locator(".bottom-drawer").isVisible())) {
+    await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  }
+}
+
 export async function installFrameSocket(page, fixture) {
   await page.addInitScript((nextFrame) => {
     let activeSocket = null;

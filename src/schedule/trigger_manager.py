@@ -15,6 +15,34 @@ class TriggerDecision:
     source: str = "unknown"
 
 
+_EVENT_ENTITY_KEYS = (
+    "uav_id", "contact_id", "intent_id", "task_id", "vessel_id", "ship_id",
+    "storm_id", "group_id", "region_id", "base_id", "target_id",
+    "handoff_id", "track_id", "stage",
+)
+
+
+def _describe_event(event: dict) -> str:
+    """One human-readable clause naming the event and its subject."""
+    etype = str(event.get("type", "unknown"))
+    if etype == "information_delta":
+        bits = []
+        if event.get("information_version") is not None:
+            bits.append(f"v{event['information_version']}")
+        bits.extend(str(code) for code in event.get("reason_codes") or ())
+        return f"{etype}({', '.join(bits)})" if bits else etype
+    for key in _EVENT_ENTITY_KEYS:
+        value = event.get(key)
+        if value:
+            return f"{etype}({value})"
+    return etype
+
+
+def _events_description(events) -> str:
+    """Join per-event clauses; duplicates collapse so the reason stays factual."""
+    return "、".join(dict.fromkeys(_describe_event(event) for event in events))
+
+
 class TriggerManager:
     def __init__(self, sm: StateManager):
         self._sm = sm
@@ -186,7 +214,7 @@ class TriggerManager:
             ))
             return TriggerDecision(
                 trigger_type="heavy",
-                reason=f"{heavy_count} heavy + {light_count} light events",
+                reason=_events_description(recent),
                 source="event",
                 affected_uavs=affected,
                 information_version=max(
@@ -204,7 +232,7 @@ class TriggerManager:
                        if e.get("uav_id", "") and e["type"] in light_types]
             return TriggerDecision(
                 trigger_type="light",
-                reason=f"{light_count} light events",
+                reason=_events_description(recent),
                 source="event",
                 affected_uavs=affected,
             )

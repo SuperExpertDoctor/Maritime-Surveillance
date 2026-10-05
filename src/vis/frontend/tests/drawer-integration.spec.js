@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { ensureDrawerOpen } from "./helpers/frameSocket.js";
 // Labeled fixture output; no route/socket mocks. Built React -> real FastAPI.
 test('five tabs render backend data, provider channels, and historical context', async ({ page, request }) => {
   const errors = [];
@@ -6,7 +7,7 @@ test('five tabs render backend data, provider channels, and historical context',
   const calls = (await (await request.get('/api/model-calls')).json()).calls;
   await page.goto('/');
   await expect(page.locator('.connection-state')).toContainText('实时连接');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   const drawer = page.getByRole('region', { name: '任务详情' });
   await expect(drawer.getByTestId('drawer-context')).toContainText('FIXTURE-drawer-integration');
   await drawer.locator('.timeline-item summary').first().click();

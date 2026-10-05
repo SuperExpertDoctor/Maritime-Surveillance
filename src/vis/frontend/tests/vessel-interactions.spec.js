@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { frameFixture, installFrameSocket } from './helpers/frameSocket.js';
+import { ensureDrawerOpen, frameFixture, installFrameSocket } from './helpers/frameSocket.js';
 import { drawPassiveEvidence } from '../src/renderer/layers.js';
 
 test('passive bearing envelope uses configured capability rather than a measured range', () => {
@@ -19,7 +19,7 @@ const vessel = { scenario_entity_id: 'vessel-ii', revision: 4, position: [12, 8]
 
 async function vesselRow(page) {
   if (!(await page.getByRole('tab', { name: '船舶状态' }).count())) {
-    await page.getByRole('button', { name: '切换任务详情面板' }).click();
+    await ensureDrawerOpen(page);
   }
   await page.getByRole('tab', { name: '船舶状态' }).click();
   return page.getByRole('row').filter({ hasText: 'vessel-ii' });

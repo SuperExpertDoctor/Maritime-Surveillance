@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { ensureDrawerOpen } from "./helpers/frameSocket.js";
 
 const VIEWPORTS = [
   { name: "desktop-1440", width: 1440, height: 900 },
@@ -307,7 +308,7 @@ test("live and replay dashboard acceptance", async ({ page }) => {
   await expect(page.locator(".transport-btn.primary")).toHaveAttribute("title", "暂停");
   await page.keyboard.press("Space");
 
-  await page.locator('.top-actions .icon-btn[aria-label="切换任务详情面板"]').click();
+  await ensureDrawerOpen(page);
   await expect(page.locator(".bottom-drawer")).toBeVisible();
   await page.locator(".drawer-tabs > button").nth(1).click();
   await expect(page.locator(".region-table")).toBeVisible();
