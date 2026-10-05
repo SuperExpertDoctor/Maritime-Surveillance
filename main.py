@@ -26,6 +26,9 @@ def _check_port_available(port: int) -> None:
     """Fail clearly on an occupied port; never terminate another process."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            # SO_REUSEADDR：界面「保存并重启仿真」通过 execv 整进程重启时，
+            # 旧进程刚断开的客户端连接还处于 TIME_WAIT，不加会误报端口占用。
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("0.0.0.0", port))
     except OSError as exc:
         raise RuntimeError(f"visualization port {port} is unavailable: {exc}") from exc
@@ -160,7 +163,9 @@ def main(
 
     if start_server:
         _check_port_available(port)
-        app = create_app(config, engine.allocator.sm, engine=engine)
+        app = create_app(
+            config, engine.allocator.sm, engine=engine, config_dir=config_path,
+        )
         app.state.total_steps = steps
         def run_server():
             uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
