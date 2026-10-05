@@ -26,7 +26,7 @@ test('five tabs render backend data, provider channels, and historical context',
   await expect(drawer.locator('tbody tr').first()).toBeVisible();
   await page.getByRole('button', { name: '回放', exact: true }).click();
   await page.getByLabel('选择回放文件').selectOption('FIXTURE-details.jsonl');
-  await expect(drawer.getByTestId('drawer-context')).toContainText('Historical replay');
+  await expect(drawer.getByTestId('drawer-context')).toContainText('历史回放');
   await drawer.getByRole('tab', { name: '时间线', exact: true }).click();
   await expect(drawer).not.toContainText('FIXTURE future event');
   await drawer.getByRole('tab', { name: '模型日志' }).click();

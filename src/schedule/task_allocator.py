@@ -738,7 +738,7 @@ class TaskAllocator:
             # Operator retry is deliberately decision-only: no ship, sensor,
             # UAV, fuel, information-field, or reviewer tick occurs here.
             self.sm.current_time = float(current_time)
-            decision = TriggerDecision("heavy", "operator_retry", source="retry")
+            decision = TriggerDecision("heavy", "操作员手动重试", source="retry")
         else:
             self.sm.step(current_time)
             if self.sm.last_information_delta is not None:

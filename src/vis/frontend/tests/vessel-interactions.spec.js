@@ -164,7 +164,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 375, height: 812
     }] });
     const row = page.locator('.intent-row');
     await expect(row).toContainText('覆盖未达标');
-    await expect(row).toContainText('search:focus:sector-delta-004');
+    await expect(row).toContainText('重点搜索sector-delta-004');
     await row.scrollIntoViewIfNeeded();
     const layoutCheck = await row.evaluate(node => {
       const box = node.getBoundingClientRect();

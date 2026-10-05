@@ -2,6 +2,7 @@ import { coordToPixel } from "./geometry";
 import { markerColor, UAV_STATUS_COLORS } from "./colors";
 import { informationCategory, uavDisplayState } from "./displayState";
 import { layoutLabels } from "./labelLayout";
+import { regionAnchor, regionDisplayName } from "./regionName";
 
 const FONT = '"Fira Code", "Microsoft YaHei", monospace';
 const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
@@ -320,25 +321,6 @@ function taskCells(region) {
   return cells;
 }
 
-function regionShortName(region) {
-  const id = String(region.id || "");
-  const tail = (prefix) => id.slice(prefix.length);
-  if (id.startsWith("partition:")) {
-    const [c0, r0] = tail("partition:").split(":");
-    return `分区${c0},${r0}`;
-  }
-  if (id.startsWith("search:")) {
-    const [c0, r0] = tail("search:").split(":");
-    return `搜索${c0},${r0}`;
-  }
-  if (id.startsWith("direction:")) {
-    return `定向${tail("direction:").replace(/^OBS-/, "").slice(-4)}`;
-  }
-  if (id.startsWith("investigation:")) {
-    return `调查${tail("investigation:").replace(/^EMITTER-/, "").replace(/^scenario-vessel-/, "船")}`;
-  }
-  return id.length > 14 ? `${id.slice(0, 14)}…` : id;
-}
 
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = null) {
   const labels = [];
@@ -359,12 +341,12 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
     const uavTag = uav ? `·${uav.id.replace("UAV-", "U")}` : "";
     const arrow = uav?.sar_look_direction === "left" ? "<" : ">";
     const fontSize = Math.max(8, Math.min(10, cellSize * 0.34));
-    const fullLabel = `${regionShortName(region)}${uavTag} ${Math.round(region.completion_pct || 0)}% ${arrow}`;
+    const fullLabel = `${regionDisplayName(region.id, regionAnchor(region))}${uavTag} ${Math.round(region.completion_pct || 0)}% ${arrow}`;
     ctx.font = `700 ${fontSize}px ${FONT}`;
     const labelCell = cells[0];
     if (labelCell) {
       const point = coordToPixel(labelCell[0], labelCell[1], cellSize, ox, oy);
-      const label = cellSize >= 14 ? fullLabel : regionShortName(region);
+      const label = cellSize >= 14 ? fullLabel : regionDisplayName(region.id, regionAnchor(region));
       const labelWidth = ctx.measureText(label).width + 8;
       const id = `search:${region.id}`;
       const cols = cells.map(([col]) => col);

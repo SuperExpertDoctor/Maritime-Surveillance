@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Clipboard, GripHorizontal, ListChecks, Map as MapIcon, Satellite, ScrollText, SlidersHorizontal, X } from "lucide-react";
 import VesselStatusTab from "./VesselStatusTab";
+import { errorName, regionAnchor, regionDisplayName, regionNameById, roleName, translateTriggerReason } from "../renderer/regionName";
 
 const TABS = [
   { label: "决策", icon: ListChecks },
@@ -15,6 +16,22 @@ const TRIGGERS = {
   initial: "首次部署（主动）",
   retry: "失败重试（主动）",
 };
+const SOURCE_NAMES = { llm: "模型", algorithm: "算法", runtime: "运行", system: "系统" };
+
+const REGION_STATUS_NAMES = {
+  active: "进行中",
+  pending: "待分配",
+  completed: "已完成",
+  stale: "已过期",
+  released: "已释放",
+  cancelled: "已取消",
+};
+const PRIORITY_NAMES = { high: "高", medium: "中", low: "低" };
+const COMPLETION_BASIS_NAMES = {
+  task_sar: "任务SAR",
+  legacy_observation: "观测历史",
+};
+
 const LOG_STATUSES = {
   started: "开始调用",
   retry: "重试",
@@ -88,8 +105,8 @@ export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions
         <button className="drawer-close" onClick={onToggle} aria-label="关闭任务详情" title="关闭"><X size={16} /></button>
       </div>
       <div className="drawer-content">
-        <small data-testid="drawer-context">{mode === "replay" ? "Historical replay" : "Active episode"} · {frame?.episode_id || "-"} · {frame?.sim_time_min ?? "-"} min</small>
-        {activeTab === 0 && <DecisionTab decisions={decisions} onSelectDecision={onSelectDecision} />}
+        <small data-testid="drawer-context">{mode === "replay" ? "历史回放" : "当前回合"} · {frame?.episode_id || "-"} · {frame?.sim_time_min ?? "-"} min</small>
+        {activeTab === 0 && <DecisionTab decisions={decisions} frame={frame} onSelectDecision={onSelectDecision} />}
         {activeTab === 1 && <RegionTab frame={frame} />}
         {activeTab === 2 && <LogTab logs={logs} error={logError} frame={frame} llm={llmCycle} mode={mode} />}
         {activeTab === 3 && <ParamsTab config={frame?.config_snapshot || config} error={mode === "replay" && !frame?.config_snapshot ? "该回放未记录参数快照" : configError} />}
@@ -101,7 +118,11 @@ export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions
   );
 }
 
-function DecisionTab({ decisions, onSelectDecision }) {
+function DecisionTab({ decisions, frame, onSelectDecision }) {
+  const regionName = regionNameById([
+    ...(frame?.search_regions || []),
+    ...(frame?.track_regions || []),
+  ]);
   return (
     <div className="decision-table-wrap">
       <table className="decision-table">
@@ -109,25 +130,25 @@ function DecisionTab({ decisions, onSelectDecision }) {
         <tbody>{decisions.map((event, index) => {
           const data = event.data || {};
           const assigned = data.assignments || [];
-          const selected = (data.selected_task_ids || []).join(", ");
-          const errorText = (data.errors || []).filter(Boolean).join("；")
-            || (data.failure_category ? `failure: ${data.failure_category}` : "");
+          const selected = (data.selected_task_ids || []).map(regionName).join("，");
+          const errorText = (data.errors || []).filter(Boolean).map(errorName).join("；")
+            || (data.failure_category ? `失败类别：${errorName(data.failure_category)}` : "");
           const outcome = data.status === "committed" && assigned.length
-            ? assigned.map((item) => `${item.task_id} → ${item.uav_id}`).join("；")
+            ? assigned.map((item) => `${regionName(item.task_id) || item.task_id} → ${item.uav_id}`).join("；")
             : `${selected ? `已选择 ${selected} · ` : ""}${data.status === "rejected" ? "分配未提交" : "未完成分配"}${errorText ? `：${errorText}` : ""}`;
           // 决策原因按触发来源取真实内容：事件触发写触发事件的描述，
           // 主动触发写模型的 think 内容；均缺失时如实说明失败情况，绝不放占位词。
           const isEvent = data.trigger_source === "event";
-          const reason = (isEvent ? data.trigger_reason : data.reason_content)
-            || (isEvent ? data.reason_content : data.trigger_reason)
+          const reason = (isEvent ? translateTriggerReason(data.trigger_reason) : data.reason_content)
+            || (isEvent ? data.reason_content : translateTriggerReason(data.trigger_reason))
             || (errorText ? `模型未产出有效决策：${errorText}` : "")
-            || TRIGGERS[data.trigger_source] || data.trigger_source || "";
+            || TRIGGERS[data.trigger_source] || data.trigger_source || "未知来源";
           const triggerNote = !isEvent && data.reason_content && data.trigger_reason
-            && data.trigger_reason !== data.reason_content ? `触发 · ${data.trigger_reason}` : "";
+            && data.trigger_reason !== data.reason_content ? `触发 · ${translateTriggerReason(data.trigger_reason)}` : "";
           return (
             <tr key={event.event_id || `${event.time}-${index}`} onClick={() => onSelectDecision?.(event)}>
               <td className="decision-time">{Number(data.time_min ?? event.time ?? 0).toFixed(0).padStart(3, "0")} min</td>
-              <td><span className={`trigger-label trigger-${data.trigger_source}`}>{TRIGGERS[data.trigger_source] || data.trigger_source || "unknown"}</span></td>
+              <td><span className={`trigger-label trigger-${data.trigger_source}`}>{TRIGGERS[data.trigger_source] || data.trigger_source || "未知"}</span></td>
               <td className="decision-reason">
                 <details onClick={(click) => click.stopPropagation()}><summary>{reason}</summary><div>{reason}</div></details>
                 {triggerNote && <small className="muted">{triggerNote}</small>}
@@ -144,15 +165,19 @@ function DecisionTab({ decisions, onSelectDecision }) {
 }
 
 function LogTab({ logs, error, frame, llm, mode }) {
+  const regionName = regionNameById([
+    ...(frame?.search_regions || []),
+    ...(frame?.track_regions || []),
+  ]);
   return (
     <div className="runtime-log-list" role="log" aria-label="算法运行日志">
       {error && <div className="runtime-log-error" role="status">{error}</div>}
       {logs.map((item) => (
         <div className={`runtime-log-row level-${item.level || "info"}`} key={item.id}>
           <time>{Number(item.sim_time_min ?? 0).toFixed(0).padStart(3, "0")} min</time>
-          <span className="log-source">{item.role || item.source || "runtime"}</span>
+          <span className="log-source">{roleName(item.role) || SOURCE_NAMES[item.source] || item.source || "运行"}</span>
           <strong>{LOG_STATUSES[item.status] || item.status}{item.attempt != null && ` · 第 ${item.attempt} 次`}</strong>
-          <span className="log-entity">{item.uav_id || item.task_id || item.failure_category || ""}</span>
+          <span className="log-entity">{item.uav_id || regionName(item.task_id) || errorName(item.failure_category) || ""}</span>
           {item.call_id && <span className="log-call-id" title={item.call_id}>{item.call_id}</span>}
         </div>
       ))}
@@ -171,13 +196,13 @@ function RegionTab({ frame }) {
   return (
     <div className="table-wrap">
       <table className="region-table">
-        <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>边界</th><th>优先级</th><th>信息素</th><th>价值</th><th>完成</th><th>执行单元</th></tr></thead>
+        <thead><tr><th>区域</th><th>类型</th><th>状态</th><th>边界</th><th>优先级</th><th>信息素</th><th>价值</th><th>完成</th><th>执行单元</th></tr></thead>
         <tbody>{rows.map((region) => (
           <tr key={`${region.displayType}-${region.id}`}>
-            <td><b>{region.id}</b></td><td>{region.displayType}</td><td>{region.status || "-"}</td><td className="mono">[{region.bbox?.join(", ")}]</td>
-            <td><span className={`priority ${region.priority || "high"}`}>{region.priority || "持续"}</span></td>
+            <td><b>{regionDisplayName(region.id, regionAnchor(region))}</b></td><td>{region.displayType}</td><td>{REGION_STATUS_NAMES[region.status] || region.status || "-"}</td><td className="mono">[{region.bbox?.join(", ")}]</td>
+            <td><span className={`priority ${region.priority || "high"}`}>{PRIORITY_NAMES[region.priority] || region.priority || "持续"}</span></td>
             <td>{region.avg_info == null ? "-" : Number(region.avg_info).toFixed(2)}</td><td>{region.info_value == null ? "-" : Number(region.info_value).toFixed(2)}</td>
-            <td>{region.completion_pct == null ? "-" : `${Math.round(region.completion_pct)}%${region.completion_basis ? ` (${region.completion_basis})` : ""}`}</td><td>{region.assigned_uav_id || "待分配"}</td>
+            <td>{region.completion_pct == null ? "-" : `${Math.round(region.completion_pct)}%${region.completion_basis ? ` (${COMPLETION_BASIS_NAMES[region.completion_basis] || region.completion_basis})` : ""}`}</td><td>{region.assigned_uav_id || "待分配"}</td>
           </tr>
         ))}</tbody>
       </table>
@@ -228,11 +253,11 @@ function ModelCallsTab({ frame, llm, mode }) {
   if (!call) return <EmptyState text={error || "本时段没有模型调用记录"} />;
   const latest = calls.at(-1);
   return <div>
-    {error && <small role="status">{error} · showing last available data</small>}
-    {calls.length > 0 && <label>Model call <select aria-label="Model call" value={call.call_id || ""} onChange={(event) => setSelected(event.target.value)}>
-      {[...calls].reverse().map((item) => <option key={item.call_id} value={item.call_id}>{item.role} · {item.sim_time_min} min · {item.call_id}</option>)}
+    {error && <small role="status">{error} · 显示最近一次可用数据</small>}
+    {calls.length > 0 && <label>模型调用 <select aria-label="模型调用" value={call.call_id || ""} onChange={(event) => setSelected(event.target.value)}>
+      {[...calls].reverse().map((item) => <option key={item.call_id} value={item.call_id}>{roleName(item.role)} · {item.sim_time_min} min · {item.call_id}</option>)}
     </select></label>}
-    <small>{mode === "replay" ? "Recorded at selected frame" : call === latest ? "Latest call in active episode" : "Historical call in active episode"}</small>
+    <small>{mode === "replay" ? "回放·所选帧的记录" : call === latest ? "当前回合最新调用" : "当前回合历史调用"}</small>
     <LLMTab llm={call} />
   </div>;
 }
@@ -246,16 +271,16 @@ function LLMTab({ llm }) {
   const reasoning = channels.filter((item) => item.kind === "external_provider_reasoning" && item.provenance === "external_api_response");
   const summaries = channels.filter((item) => item.kind === "public_provider_summary" && item.provenance === "external_api_response");
   const sections = [
-    ["Decision notes / rationale", llm.decision_summary || "无返回内容"],
-    ["External provider reasoning (think)", reasoning.length ? reasoning : "无返回内容"],
-    ["Public provider reasoning summary", summaries.length ? summaries : llm.public_reasoning_summary || "无返回内容"],
-    ["Response", llm.response ?? last.raw_output ?? last.response],
-    ["Validation", llm.validation ?? llm.validation_errors ?? last.errors],
-    ["Attempts", attempts],
+    ["决策说明 / 理由", llm.decision_summary || "无返回内容"],
+    ["外部模型推理（think）", reasoning.length ? reasoning : "无返回内容"],
+    ["公开推理摘要", summaries.length ? summaries : llm.public_reasoning_summary || "无返回内容"],
+    ["模型响应", llm.response ?? last.raw_output ?? last.response],
+    ["校验结果", llm.validation ?? llm.validation_errors ?? last.errors],
+    ["尝试记录", attempts],
   ];
   return <div className="llm-log">
-    <div className="llm-log-head"><div><span className={llm.success ? "success" : "failed"}>{llm.success ? "VALID" : llm.failure_category ? "FAILED" : "PENDING / UNKNOWN"}</span><strong>{llm.model}</strong></div><small>{attempts.length} attempts · {llm.role} · {llm.provider} · thinking: {llm.thinking_mode ?? "-"}</small></div>
-    <small>{llm.call_id} · snapshot: {llm.snapshot_id || "-"} · {llm.sim_time_min ?? "-"} min · {llm.failure_category}</small>
+    <div className="llm-log-head"><div><span className={llm.success ? "success" : "failed"}>{llm.success ? "有效" : llm.failure_category ? "失败" : "待定"}</span><strong>{llm.model}</strong></div><small>{attempts.length} 次尝试 · {roleName(llm.role)} · {llm.provider} · 思考：{llm.thinking_mode ?? "-"}</small></div>
+    <small>{llm.call_id} · 快照: {llm.snapshot_id || "-"} · {llm.sim_time_min ?? "-"} min · {llm.failure_category ? errorName(llm.failure_category) : ""}</small>
     <div className="llm-sections">{sections.map(([label, content], index) => <details key={label} open={index < 4}>
       <summary>{label}<button onClick={(event) => { event.preventDefault(); copy(content); }} aria-label={`复制 ${label}`}><Clipboard size={14} /></button></summary><pre>{text(content)}</pre>
     </details>)}</div>

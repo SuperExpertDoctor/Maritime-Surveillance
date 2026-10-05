@@ -21,21 +21,74 @@ _EVENT_ENTITY_KEYS = (
     "handoff_id", "track_id", "stage",
 )
 
+# 事件类型 → 中文名。决策原因直接展示给用户，禁止使用内部英文代号。
+_EVENT_NAMES = {
+    "contact_created": "新接触",
+    "contact_merged": "接触合并",
+    "contact_lost": "接触失联",
+    "assessment_changed": "评估更新",
+    "type_i_assessed": "I类船评估完成",
+    "type_ii_assessed": "II类船评估完成",
+    "type_i_released": "I类船解除",
+    "type_ii_confirmed": "II类船确认",
+    "resource_available": "资源空闲",
+    "mission_task_released": "任务释放",
+    "intent_changed": "重点区变更",
+    "intent_expired": "重点区过期",
+    "uav_returned": "无人机返航",
+    "target_found": "发现目标",
+    "target_lost": "目标丢失",
+    "lifecycle_completed": "轮换完成",
+    "target_departed": "目标驶离",
+    "storm_spawned": "风暴生成",
+    "storm_dissipated": "风暴消散",
+    "handoff_required": "需要交接",
+    "ais_transmission_changed": "AIS状态变更",
+    "surveillance_stage_changed": "侦察阶段变更",
+    "search_complete": "搜索完成",
+    "uav_refueled": "加油完成",
+    "base_capacity_full": "基地机位满",
+    "uav_fuel_low_warning": "油量不足预警",
+    "information_delta": "信息场更新",
+}
+
+# 信息场更新的 reason code → 中文名。
+_REASON_CODE_NAMES = {
+    "scan_sar": "SAR扫描",
+    "scan_search": "搜索扫描",
+    "scan_track": "跟踪扫描",
+    "scan_optical": "光电扫描",
+    "evasive_maneuver": "规避机动",
+    "passive_position": "被动定位",
+    "passive_bearing": "被动测向",
+    "ais_position": "AIS定位",
+    "type_ii_assessment": "II类评估",
+    "violation_assessment": "违规评估",
+    "handoff": "目标交接",
+    "evidence_expired": "证据过期",
+    "time_decay": "时间衰减",
+    "contact_created": "新接触",
+}
+
 
 def _describe_event(event: dict) -> str:
     """One human-readable clause naming the event and its subject."""
     etype = str(event.get("type", "unknown"))
+    name = _EVENT_NAMES.get(etype, etype)
     if etype == "information_delta":
         bits = []
         if event.get("information_version") is not None:
             bits.append(f"v{event['information_version']}")
-        bits.extend(str(code) for code in event.get("reason_codes") or ())
-        return f"{etype}({', '.join(bits)})" if bits else etype
+        bits.extend(
+            _REASON_CODE_NAMES.get(str(code), str(code))
+            for code in event.get("reason_codes") or ()
+        )
+        return f"{name}({', '.join(bits)})" if bits else name
     for key in _EVENT_ENTITY_KEYS:
         value = event.get(key)
         if value:
-            return f"{etype}({value})"
-    return etype
+            return f"{name}({value})"
+    return name
 
 
 def _events_description(events) -> str:
@@ -111,7 +164,7 @@ class TriggerManager:
             self._heavy_retry_at = None
             return TriggerDecision(
                 trigger_type="heavy",
-                reason=f"retry after {reason}",
+                reason=f"上次决策失败后重试({reason})",
                 source="retry",
             )
 
@@ -121,7 +174,7 @@ class TriggerManager:
         if self._sm.cycle == 0 and current_time > 0.0:
             return TriggerDecision(
                 trigger_type="heavy",
-                reason="initial fleet deployment",
+                reason="初始编队部署",
                 source="initial",
             )
 
@@ -130,7 +183,7 @@ class TriggerManager:
         if current_time >= cycle and current_time - self._last_heavy_time >= cycle:
             return TriggerDecision(
                 trigger_type="heavy",
-                reason=f"periodic {cycle}min cycle",
+                reason=f"周期性重规划(每{cycle}分钟)",
                 source="periodic",
             )
 

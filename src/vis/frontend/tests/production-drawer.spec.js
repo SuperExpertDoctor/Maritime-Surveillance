@@ -24,8 +24,8 @@ test('production WS/HTTP and five drawer tabs', async ({ page, request }, testIn
     await expect(drawer.locator('.drawer-content')).toBeVisible();
     if (label === '参数') await expect(drawer).toContainText('sea_area_km');
     if (label === '模型日志' && calls.length) {
-      await expect(drawer.getByLabel('Model call')).toBeVisible();
-      await drawer.getByLabel('Model call').selectOption(calls.at(-1).call_id);
+      await expect(drawer.getByLabel('模型调用')).toBeVisible();
+      await drawer.getByLabel('模型调用').selectOption(calls.at(-1).call_id);
       await expect(drawer).toContainText('External provider reasoning (think)');
       await expect(drawer).toContainText(calls.at(-1).call_id);
     }

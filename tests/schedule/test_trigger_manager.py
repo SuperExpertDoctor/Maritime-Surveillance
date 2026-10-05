@@ -36,7 +36,7 @@ def test_initial_deployment_triggers_heavy_without_waiting_for_periodic_cycle(sm
     decision = tm.check(1.0)
 
     assert decision.trigger_type == "heavy"
-    assert decision.reason == "initial fleet deployment"
+    assert decision.reason == "初始编队部署"
     assert decision.source == "initial"
 
 
@@ -49,7 +49,7 @@ def test_decision_failure_retries_after_one_simulation_minute(sm):
     assert tm.check(10.99).trigger_type == "none"
     decision = tm.check(11.0)
     assert decision.trigger_type == "heavy"
-    assert decision.reason == "retry after decision_deadline_exceeded"
+    assert decision.reason == "上次决策失败后重试(decision_deadline_exceeded)"
     assert decision.source == "retry"
     assert tm.check(11.0).trigger_type == "none"
 
@@ -79,7 +79,7 @@ def test_event_trigger_reason_describes_each_triggering_event(sm):
 
     assert decision.trigger_type == "heavy"
     assert decision.source == "event"
-    assert decision.reason == "uav_returned(UAV-3)、intent_changed(I0001)"
+    assert decision.reason == "无人机返航(UAV-3)、重点区变更(I0001)"
 
 
 def test_light_trigger_reason_names_the_light_event(sm):
@@ -89,7 +89,7 @@ def test_light_trigger_reason_names_the_light_event(sm):
     decision = tm.check(10.0)
 
     assert decision.trigger_type == "light"
-    assert decision.reason == "search_complete(UAV-1)"
+    assert decision.reason == "搜索完成(UAV-1)"
 
 
 @pytest.mark.parametrize(

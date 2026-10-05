@@ -40,7 +40,7 @@ test('stale model log HTTP response cannot hide newer pushed calls', async ({ pa
   const response = page.waitForResponse('**/api/model-calls?*');
   release();
   await response;
-  await expect(page.getByLabel('Model call').locator('option')).toHaveCount(2);
+  await expect(page.getByLabel('模型调用').locator('option')).toHaveCount(2);
   await expect(page.locator('.llm-log')).toContainText('NEW CALL');
 });
 
@@ -62,7 +62,7 @@ test('completed polled model call is not reverted by a pending frame snapshot', 
   await expect(page.locator('.llm-log')).toContainText('COMPLETED RESULT');
   await page.route('**/api/replay/list', route => route.fulfill({ json: { files: [] } }));
   await page.getByRole('button', { name: '回放', exact: true }).click();
-  await expect(page.getByRole('region', { name: '任务详情' })).toContainText('Historical replay · - · - min');
+  await expect(page.getByRole('region', { name: '任务详情' })).toContainText('历史回放 · - · - min');
   await page.getByRole('button', { name: '直播', exact: true }).click();
   await expect(page.locator('.connection-state')).toContainText('实时连接');
   await page.getByRole('tab', { name: '日志', exact: true }).click();

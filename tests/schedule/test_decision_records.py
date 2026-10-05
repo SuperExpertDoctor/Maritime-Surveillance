@@ -45,7 +45,7 @@ def test_skipped_model_selection_is_not_reported_as_failed_llm_call():
 def test_proactive_decision_prefers_provider_think_content():
     result = {
         "trigger_type": "heavy", "trigger_source": "periodic",
-        "trigger_reason": "periodic 60min cycle",
+        "trigger_reason": "周期性重规划(每60分钟)",
         "snapshot_id": "snap-9",
         "llm_cycle": {
             "call_id": "call-9",
@@ -64,18 +64,18 @@ def test_proactive_decision_prefers_provider_think_content():
     record = build_decision_record(result, None, applied=False, time_min=60)
 
     assert record["reason_content"] == "先比较候选区信息价值再分配"
-    assert record["trigger_reason"] == "periodic 60min cycle"
+    assert record["trigger_reason"] == "周期性重规划(每60分钟)"
 
 
 def test_event_trigger_reason_describes_the_triggering_events():
     result = {
         "trigger_type": "heavy", "trigger_source": "event",
-        "trigger_reason": "uav_returned(UAV-4)、intent_changed(I0001)",
+        "trigger_reason": "无人机返航(UAV-4)、重点区变更(I0001)",
         "snapshot_id": "snap-10",
         "llm_cycle": {"call_id": "call-10", "reason_content": "model note"},
     }
 
     record = build_decision_record(result, None, applied=False, time_min=90)
 
-    assert record["trigger_reason"] == "uav_returned(UAV-4)、intent_changed(I0001)"
+    assert record["trigger_reason"] == "无人机返航(UAV-4)、重点区变更(I0001)"
     assert record["reason_content"] == "model note"
