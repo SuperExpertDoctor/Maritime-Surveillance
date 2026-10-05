@@ -380,8 +380,8 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
     if (label.hidden) continue;
     const source = labelSources.get(label.id);
     if (!source) continue;
-    const hit = source.hitBox;
-    if (!hoverRect(hover, hit.x, hit.y, hit.width, hit.height)) continue;
+    // Task-region names are key labels: always visible (other entity
+    // captions stay hover-gated).
     ctx.save();
     ctx.strokeStyle = `${source.color}99`;
     ctx.lineWidth = 0.8;
@@ -1545,12 +1545,14 @@ export function drawLabels(
     const source = labels.find((item) => item.id === label.id);
     const style = styles.get(label.id);
     if (!source || !style) continue;
-    if (!style.selected) {
+    // UAV captions are key labels: always visible like selected entities.
+    const alwaysVisible = style.selected || label.id.startsWith("uav:");
+    if (!alwaysVisible) {
       const radius = Math.max(20, cellSize * 1.4);
       if (!hoverPoint(hover, label.anchor.x, label.anchor.y, radius)) continue;
     }
     ctx.save();
-    if (style.selected) {
+    if (alwaysVisible) {
       ctx.strokeStyle = `${style.color}B8`;
       ctx.lineWidth = 1;
       drawLabelLeader(ctx, label.anchor, label);
