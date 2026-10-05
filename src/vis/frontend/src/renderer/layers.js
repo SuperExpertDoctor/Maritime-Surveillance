@@ -324,13 +324,33 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
   const labels = [];
   const labelSources = new Map();
   for (const region of regions || []) {
+    // Dead regions (completed/stale) stay in the frame until a heavy replan
+    // drops them; skip them here so they cannot stack highlight blocks.
+    if (region.status !== "active") continue;
     const color = "#F59E0B";
     const cells = taskCells(region);
     const assigned = Boolean(region.assigned_uav_id);
-    ctx.fillStyle = `${color}${assigned ? "70" : "52"}`;
-    for (const [col, row] of cells) {
-      const point = coordToPixel(col, row, cellSize, ox, oy);
-      ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
+    if (assigned) {
+      // Highlight is reserved for regions a UAV is actively working.
+      ctx.fillStyle = `${color}70`;
+      for (const [col, row] of cells) {
+        const point = coordToPixel(col, row, cellSize, ox, oy);
+        ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
+      }
+    } else {
+      // Pending regions get only a thin dashed outline, not a highlight.
+      const [c0, r0, c1, r1] = region.bbox;
+      ctx.save();
+      ctx.strokeStyle = `${color}66`;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(
+        ox + c0 * cellSize + 1,
+        oy + r0 * cellSize + 1,
+        (c1 - c0) * cellSize - 2,
+        (r1 - r0) * cellSize - 2,
+      );
+      ctx.restore();
     }
     const uav = (uavs || []).find((item) => item.id === region.assigned_uav_id);
     const arrow = uav?.sar_look_direction === "left" ? "<" : ">";
@@ -377,8 +397,8 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
     if (label.hidden) continue;
     const source = labelSources.get(label.id);
     if (!source) continue;
-    const hit = source.hitBox;
-    if (!hoverRect(hover, hit.x, hit.y, hit.width, hit.height)) continue;
+    // Search-region names stay always visible (they are the task markers the
+    // operator cares about); other entity captions remain hover-gated.
     ctx.save();
     ctx.strokeStyle = `${source.color}99`;
     ctx.lineWidth = 0.8;

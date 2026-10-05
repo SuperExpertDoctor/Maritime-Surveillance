@@ -183,7 +183,10 @@ class TaskAllocator:
                 candidate
                 for candidate in candidates
                 if not (
-                    candidate.kind == "search"
+                    # direction_search bboxes dedupe too: an unfinished region
+                    # already scans the cells an OBS direction task would add,
+                    # so stacking them only overlaps highlight blocks.
+                    candidate.kind in {"search", "direction_search"}
                     and candidate.bbox is not None
                     and any(
                         _bbox_overlaps(candidate.bbox, region.bbox)
