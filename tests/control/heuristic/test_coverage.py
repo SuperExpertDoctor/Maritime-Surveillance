@@ -185,7 +185,13 @@ def test_coverage_uses_astar_before_enabling_sar(controller, observation):
 
     assert controller.navigator.plan_calls == 1
     assert controller.phase is CoveragePhase.TRANSIT_ASTAR
-    assert decision.command.sensor_mode is SensorMode.OFF
+    # En-route imaging commands SAR on the ferry leg; the executor still
+    # gates the aperture on heading/cross-track error, so the strip only
+    # collects once the aircraft settles onto a straight.
+    assert decision.command.sensor_mode is SensorMode.SAR
+    assert decision.command.sar_look_direction == "left"
+    assert decision.command.sar_scan_heading_rad is not None
+    assert decision.command.sar_scan_origin is not None
     assert decision.command.operation_mode is OperationMode.TRANSIT
 
 

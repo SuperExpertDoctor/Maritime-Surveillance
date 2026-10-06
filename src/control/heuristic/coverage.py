@@ -178,6 +178,9 @@ class CoverageController(HeuristicControllerBase):
         self._last_guidance: CoverageGuidance | None = None
         self._last_heading_error_deg: float | None = None
         self._last_cross_track_error_cells: float | None = None
+        # En-route imaging reference: fixed (origin, heading) per settled
+        # straight so the executor's aperture gate can open mid-leg.
+        self._en_route_scan_geometry: tuple[tuple[float, float], float] | None = None
 
     def reset(self, context: ControllerContext) -> None:
         super().reset(context)
@@ -212,6 +215,7 @@ class CoverageController(HeuristicControllerBase):
         self._stopped = False
         self._completion_event_emitted = False
         self._direction = None
+        self._en_route_scan_geometry = None
         bbox = task.region_bbox
         self._uncovered_cells = frozenset(
             (col, row)
@@ -267,9 +271,14 @@ class CoverageController(HeuristicControllerBase):
             )
             self._update_phase(observation, guidance)
         self._save_guidance_diagnostics(observation, guidance)
+        # En-route imaging: a transit leg is a ferry flight the stripmap
+        # would otherwise waste.  Command SAR during TRANSIT_ASTAR too; the
+        # executor only opens the aperture once heading and cross-track
+        # errors settle on a straight leg, so turns still gate it off.
+        en_route_scan = self.phase is CoveragePhase.TRANSIT_ASTAR
         sensor_mode = (
             SensorMode.SAR
-            if self.phase is CoveragePhase.SCANNING
+            if (self.phase is CoveragePhase.SCANNING or en_route_scan)
             and SensorMode.SAR in observation.action_mask.allowed_sensor_modes
             else SensorMode.OFF
         )
@@ -283,15 +292,42 @@ class CoverageController(HeuristicControllerBase):
         )
         if sensor_mode is SensorMode.SAR:
             scan_index = guidance.scan_segment_index
-            if scan_index is None:
+            if scan_index is not None:
+                swath = self.scan_swaths[scan_index]
+                command = replace(
+                    command,
+                    sar_look_direction=swath.look_direction,
+                    sar_scan_heading_rad=swath.heading,
+                    sar_scan_origin=swath.start,
+                )
+            elif en_route_scan:
+                # Route waypoints are dense along smooth curves, so leg
+                # boundaries churn faster than the aperture can form.
+                # Anchor the reference once, then re-anchor only when the
+                # aircraft is on a straight (turn rate ~0) whose direction
+                # diverges from the stored one — i.e. when a new leg has
+                # settled.  Turns keep the stale reference, which holds
+                # the executor's heading gate closed until the next
+                # straight begins.
+                pos = observation.self_state.position
+                head = observation.self_state.heading_rad
+                on_straight = abs(guidance.turn_rate_rad_min) <= 0.1
+                geom = self._en_route_scan_geometry
+                if geom is None or (
+                    on_straight
+                    and abs(_wrap_pi(head - geom[1]))
+                    > self.sar_heading_tolerance_rad
+                ):
+                    self._en_route_scan_geometry = (pos, head)
+                origin, desired_heading = self._en_route_scan_geometry
+                command = replace(
+                    command,
+                    sar_look_direction="left",
+                    sar_scan_heading_rad=desired_heading,
+                    sar_scan_origin=origin,
+                )
+            else:
                 raise RuntimeError("SAR enabled without an active scan swath")
-            swath = self.scan_swaths[scan_index]
-            command = replace(
-                command,
-                sar_look_direction=swath.look_direction,
-                sar_scan_heading_rad=swath.heading,
-                sar_scan_origin=swath.start,
-            )
         if self.phase is CoveragePhase.COMPLETED and not self._completion_event_emitted:
             self._completion_event_emitted = True
             return ControlDecision(
@@ -491,14 +527,16 @@ class CoverageController(HeuristicControllerBase):
             along_track_cells=self.sar_along_track_cells,
             bounds=bounds,
         )
+        coverage_route, coverage_scan_ranges, kept_swaths = (
+            self._assemble_coverage_route(
+                coverage,
+                observation.planning_obstacle_mask,
+            )
+        )
         # The navigator reaches the scan entry position, but its final heading
         # is only a transit tangent.  Let the first scan segment carry the
         # physical heading transition while the SAR gate remains closed.
-        transit[-1] = coverage.waypoints[0]
-        coverage_route, coverage_scan_ranges = self._assemble_coverage_route(
-            coverage,
-            observation.planning_obstacle_mask,
-        )
+        transit[-1] = coverage_route[0]
         route = tuple(transit) + coverage_route[1:]
         offset = len(transit) - 1
         scan_ranges = tuple(
@@ -508,7 +546,7 @@ class CoverageController(HeuristicControllerBase):
         self._set_route(
             route,
             scan_ranges,
-            coverage.swaths,
+            kept_swaths,
             observation.planning_obstacle_mask,
             observation.planning_map_version,
             progress_offset_cells=progress_offset_cells,
@@ -531,16 +569,34 @@ class CoverageController(HeuristicControllerBase):
         self,
         coverage: CoveragePath,
         obstacle_mask: object,
-    ) -> tuple[tuple[tuple[float, float, float], ...], tuple[tuple[int, int], ...]]:
+    ) -> tuple[
+        tuple[tuple[float, float, float], ...],
+        tuple[tuple[int, int], ...],
+        tuple,
+    ]:
         """Keep scan lines fixed while making Dubins connectors world-safe."""
         if not coverage.swaths or not coverage.waypoints:
             raise ValueError("coverage planner produced no route")
         avoider = ObstacleAvoider(max_iterations=1000, seed=17)
+        # A drifting storm can cover part of a region between the engine's
+        # commit-time check and this install.  Swaths whose scan leg crosses a
+        # blocked cell are dropped here instead of aborting the whole route:
+        # the aircraft still covers every reachable cell, and the missed cells
+        # are re-offered later by the sweep/investigation channels once the
+        # hazard moves on.  Only a region with zero flyable swaths is a real
+        # install failure.
+        safe_legs = []
+        for swath in coverage.swaths:
+            scan_line = self.planner.sample_scan_line(swath)
+            if avoider.is_path_safe(scan_line, obstacle_mask):
+                safe_legs.append((swath, scan_line))
+        if not safe_legs:
+            raise ValueError("coverage planner produced no obstacle-safe swaths")
         route: list[tuple[float, float, float]] = [coverage.waypoints[0]]
         scan_ranges: list[tuple[int, int]] = []
-        for index, swath in enumerate(coverage.swaths):
-            if index:
-                entry = (swath.start[0], swath.start[1], swath.heading)
+        for index, (swath, scan_line) in enumerate(safe_legs):
+            entry = (swath.start[0], swath.start[1], swath.heading)
+            if math.dist(route[-1][:2], entry[:2]) > 1e-6:
                 direct = DubinsPath.compute(
                     route[-1], entry, self.r_min, self.planner.sample_step
                 ).waypoints
@@ -559,12 +615,17 @@ class CoverageController(HeuristicControllerBase):
                             route[-1], entry, obstacle_mask, self.r_min
                         )
                 route.extend(tuple(pose) for pose in connector[1:])
+            else:
+                route[-1] = entry
 
-            scan_line = self.planner.sample_scan_line(swath)
             scan_start = len(route) - 1
             route.extend(tuple(pose) for pose in scan_line[1:])
             scan_ranges.append((scan_start, len(route) - 1))
-        return tuple(route), tuple(scan_ranges)
+        return (
+            tuple(route),
+            tuple(scan_ranges),
+            tuple(swath for swath, _scan_line in safe_legs),
+        )
 
     def _plan_transit_to_pose(
         self,
@@ -611,11 +672,11 @@ class CoverageController(HeuristicControllerBase):
             transit = self._plan_transit_to_pose(
                 (*observation.self_state.position, observation.self_state.heading_rad), entry, observation)
             coverage = CoveragePath(swaths=ordered, waypoints=[entry])
-            route, ranges = self._assemble_coverage_route(coverage, observation.planning_obstacle_mask)
+            route, ranges, kept = self._assemble_coverage_route(coverage, observation.planning_obstacle_mask)
             offset = len(transit) - 1
-            transit[-1] = entry
+            transit[-1] = route[0]
             self._set_route(tuple(transit) + route[1:],
-                tuple((offset + start, offset + end) for start, end in ranges), ordered,
+                tuple((offset + start, offset + end) for start, end in ranges), kept,
                 observation.planning_obstacle_mask, observation.planning_map_version,
                 progress_offset_cells=self.follower.progress_cells)
         except (CoverageRouteBlockedError, ValueError, RuntimeError):
@@ -921,6 +982,9 @@ class CoverageController(HeuristicControllerBase):
         self.planning_map_version = planning_map_version
         self._route_revision += 1
         self._route_status = "ready"
+        # A new route redraws the ferry legs: drop the cached en-route
+        # reference so it is re-anchored on the first settled straight.
+        self._en_route_scan_geometry = None
 
     def _update_phase(
         self, observation: ControlObservation, guidance: CoverageGuidance

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { frameFixture, installFrameSocket } from './helpers/frameSocket.js';
+import { ensureDrawerOpen, frameFixture, installFrameSocket } from './helpers/frameSocket.js';
 
 test('episode reset clears decision rows, runtime logs, and model call details', async ({ page }) => {
   await page.route('**/api/export/capabilities', route => route.fulfill({ json: { mp4: false } }));
@@ -25,7 +25,7 @@ test('episode reset clears decision rows, runtime logs, and model call details',
     llm_cycle: { model: 'FIXTURE', success: true, decision_summary: 'OLD CALL' },
   }));
   await page.goto('/');
-  await page.getByRole('button', { name: '切换任务详情面板' }).click();
+  await ensureDrawerOpen(page);
   const drawer = page.getByRole('region', { name: '任务详情' });
   await expect(drawer.locator('.decision-table tbody tr')).toContainText('OLD EPISODE DECISION');
   await drawer.getByRole('tab', { name: '日志', exact: true }).click();

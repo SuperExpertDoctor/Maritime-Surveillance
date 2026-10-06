@@ -15,3 +15,6 @@ src/vis/frontend/dist/
 src/vis/frontend/test-results/
 test-results/
 src/vis/frontend/playwright-report/
+
+# 界面「算法参数设置」运行时写入的覆盖配置
+configs/ui-overrides.yaml

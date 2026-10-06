@@ -1,6 +1,7 @@
 import { Bot, CircleX, Crosshair, MousePointer2, Plane, Radar, Ship, Waypoints } from "lucide-react";
 import { UAV_STATUS_COLORS } from "../renderer/colors";
 import { informationCategory, uavDisplayState } from "../renderer/displayState";
+import { regionNameById } from "../renderer/regionName";
 import ContactPanel from "./ContactPanel";
 import CoveragePanel from "./CoveragePanel";
 import IntentPanel from "./IntentPanel";
@@ -39,6 +40,7 @@ export default function RightSidebar({
   const contacts = frame?.contacts || [];
   const regions = frame?.search_regions || [];
   const tracks = frame?.track_regions || [];
+  const regionName = regionNameById([...regions, ...tracks]);
   const info = frame?.info_matrix || [];
   let scanned = 0;
   let total = 0;
@@ -154,7 +156,7 @@ export default function RightSidebar({
                 return (
                   <button key={uav.id} className={`uav-row ${isSelected ? "selected" : ""}`} onClick={() => onSelectUav?.(isSelected ? null : uav.id)} aria-pressed={isSelected}>
                     <span className="uav-plane" style={{ color }}><Plane size={16} /></span>
-                    <span className="uav-copy"><strong>{uav.id}</strong><small>{display.label} · {uav.assigned_region_id || "无任务"}</small></span>
+                    <span className="uav-copy"><strong>{uav.id}</strong><small>{display.label} · {uav.assigned_region_id ? regionName(uav.assigned_region_id) : "无任务"}</small></span>
                     <span className="fuel-gauge" style={{ "--fuel": `${fuel}%`, "--fuel-color": color }}><b>{Math.round(fuel)}</b></span>
                   </button>
                 );

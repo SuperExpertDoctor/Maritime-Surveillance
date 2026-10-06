@@ -265,6 +265,16 @@ class AppConfig:
     mission: MissionConfig
 
 
+def _deep_merge(base: dict, patch: dict) -> dict:
+    """把覆盖层合并进基础配置；嵌套映射递归合并，其余整体替换。"""
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 class ConfigLoader:
     @staticmethod
     def _dict_to_dataclass(d: dict, cls):
@@ -279,13 +289,32 @@ class ConfigLoader:
         def _read(name):
             return load_strict_yaml(os.path.join(base_path, name))
 
+        # 界面「算法参数设置」写入的覆盖层（configs/ui-overrides.yaml）。
+        # 按 section（uav / ship / mission）深合并进同名文件之上。
+        overrides_path = os.path.join(base_path, "ui-overrides.yaml")
+        overrides = (
+            load_strict_yaml(overrides_path)
+            if os.path.isfile(overrides_path)
+            else {}
+        )
+        if not isinstance(overrides, dict):
+            raise ValueError("ui-overrides.yaml: expected mapping")
+
+        def _overlay(data: dict, section: str) -> dict:
+            patch = overrides.get(section)
+            if patch is None:
+                return data
+            if not isinstance(patch, dict):
+                raise ValueError(f"ui-overrides.yaml: {section}: expected mapping")
+            return _deep_merge(dict(data), patch)
+
         env_data = _read("environment.yaml")
         grid_data = env_data.pop("grid")
         env_data["sea_area_km"] = tuple(env_data["sea_area_km"])
         env_data["base_position"] = tuple(env_data["base_position"])
         grid_data["resolution"] = tuple(grid_data["resolution"])
         llm_params_data = _read("llm_params.yaml")
-        mission_data = _read("mission.yaml")
+        mission_data = _overlay(_read("mission.yaml"), "mission")
         mission_fields = {
             "contact", "intent", "scheduling", "evolution", "activity",
             "evasion", "information_update", "coverage",
@@ -379,7 +408,9 @@ class ConfigLoader:
             ),
         )
 
-        ship_data = load_strict_yaml(ship_path) if ship_path is not None else _read("ship.yaml")
+        ship_data = load_strict_yaml(ship_path) if ship_path is not None else _overlay(
+            _read("ship.yaml"), "ship"
+        )
         ship_data["opponent_population"] = strict_dataclass(
             ship_data.get("opponent_population", {}),
             OpponentPopulationConfig,
@@ -424,7 +455,11 @@ class ConfigLoader:
                 "type_i/type_ii configuration"
             )
 
-        uav_data = _read("uav.yaml")
+        uav_data = _overlay(_read("uav.yaml"), "uav")
+        # 覆盖层一律使用新字段名 count_max；若基础文件仍是旧名 count，
+        # 以覆盖值为准并丢弃旧名，避免 "use count instead" 误报。
+        if "count_max" in overrides.get("uav", {}) and "count" in uav_data:
+            uav_data.pop("count")
         if "count" in uav_data:
             if "count_max" in uav_data:
                 raise ValueError("uav: use count instead of count_max")

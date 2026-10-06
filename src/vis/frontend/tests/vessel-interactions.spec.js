@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { frameFixture, installFrameSocket } from './helpers/frameSocket.js';
+import { ensureDrawerOpen, frameFixture, installFrameSocket } from './helpers/frameSocket.js';
 import { drawPassiveEvidence } from '../src/renderer/layers.js';
 
 test('passive bearing envelope uses configured capability rather than a measured range', () => {
@@ -19,7 +19,7 @@ const vessel = { scenario_entity_id: 'vessel-ii', revision: 4, position: [12, 8]
 
 async function vesselRow(page) {
   if (!(await page.getByRole('tab', { name: '船舶状态' }).count())) {
-    await page.getByRole('button', { name: '切换任务详情面板' }).click();
+    await ensureDrawerOpen(page);
   }
   await page.getByRole('tab', { name: '船舶状态' }).click();
   return page.getByRole('row').filter({ hasText: 'vessel-ii' });
@@ -164,7 +164,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 375, height: 812
     }] });
     const row = page.locator('.intent-row');
     await expect(row).toContainText('覆盖未达标');
-    await expect(row).toContainText('search:focus:sector-delta-004');
+    await expect(row).toContainText('重点搜索sector-delta-004');
     await row.scrollIntoViewIfNeeded();
     const layoutCheck = await row.evaluate(node => {
       const box = node.getBoundingClientRect();

@@ -296,6 +296,14 @@ class CoverageConfig:
     # Upper bound on how much of the desired coverage budget a selection may
     # excuse 1:1 with target-directed work; the rest must be real searches.
     target_diversion_max_fraction: float = 0.5
+    # Deterministic sweep backstop: due cells become pending searches even
+    # when the bounded model prompt never selects them.
+    sweep_enabled: bool = True
+    sweep_pending_max: int = 3
+    sweep_pending_ttl_min: float = 120.0
+    # Backoff before a search task released by a coverage-install fault is
+    # offered to the deterministic pending matcher again.
+    install_retry_cooldown_min: float = 10.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.windows_min, tuple):
@@ -333,6 +341,11 @@ class CoverageConfig:
             self.target_diversion_max_fraction,
             "coverage.target_diversion_max_fraction",
         )
+        _integer(self.sweep_pending_max, "coverage.sweep_pending_max", minimum=1)
+        _positive(self.sweep_pending_ttl_min, "coverage.sweep_pending_ttl_min")
+        if not isinstance(self.sweep_enabled, bool):
+            raise ValueError("coverage.sweep_enabled must be a bool")
+        _positive(self.install_retry_cooldown_min, "coverage.install_retry_cooldown_min")
 
 
 @dataclass(frozen=True)

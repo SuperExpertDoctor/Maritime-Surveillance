@@ -475,10 +475,29 @@ class UAVEntity:
                     self.sar_footprint = []
                     self.sar_aperture_track = []
                 return
-        self.status = "transit"
-        self.sensor_mode = "off"
-        self.sar_footprint = []
-        self._clear_sar_acquisition()
+        # Outside every planned swath leg the aircraft is ferrying between
+        # route segments (inbound transit and mid-region connectors).  A
+        # transit leg with a stable heading is still a valid stripmap
+        # geometry, so keep the aperture collecting: cells under the ferry
+        # path are banked as scanned instead of being pure repositioning
+        # overhead.
+        desired_heading = self.waypoints[route_index][2]
+        heading_error = abs(_wrap_pi(self.heading_rad - desired_heading))
+        self.sar_scan_heading_rad = desired_heading
+        self.sar_heading_error_deg = math.degrees(heading_error)
+        self.sar_imaging = (
+            heading_error <= self.sar_heading_tolerance_rad
+            and self.avoidance_level == 0
+        )
+        if self.sar_imaging:
+            self.sar_look_direction = "left"
+            self.sensor_mode = "sar"
+            self._append_sar_aperture_position()
+        else:
+            self.sensor_mode = "off"
+            self.sar_footprint = []
+            self.sar_aperture_track = []
+            self.sar_look_direction = None
 
     def _append_sar_aperture_position(self) -> None:
         """Keep only the recent, straight-line synthetic aperture path."""

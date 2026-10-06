@@ -1818,6 +1818,7 @@ class MissionScheduler:
             "episode_id", "snapshot_id", "sim_time_min", "memory_version",
             "system_prompt_bytes", "user_prompt_bytes", "input_text_bytes",
             "prompt_format_version", "configured_max_tokens", "initial_failure_category",
+            "provider_channels",
         ):
             if key in call:
                 interaction[key] = call[key]

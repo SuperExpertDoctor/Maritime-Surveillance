@@ -190,3 +190,45 @@ def test_pairing_paths_never_include_idle_learning_airframes(
         allocator._pair_available_regions([region])
 
     assert "UAV-1" not in captured_uav_ids
+
+
+def test_busy_resource_only_gets_strictly_higher_rank_edges(allocator):
+    """Same-rank task must not get a preemption edge onto a busy airframe."""
+    from src.mission.contracts import TaskCandidate, TaskRecord, UavResource
+
+    busy = UavResource(
+        "UAV-9", (15.0, 15.0), 0.0, 1.0, 200.0, "coverage",
+        "direction:OBS-old", 0, -100.0,
+    )
+    idle = UavResource(
+        "UAV-1", (15.0, 15.0), 0.0, 1.0, 200.0, "idle", None, 0, -100.0,
+    )
+    records = (
+        TaskRecord(
+            "direction:OBS-old", "direction_search", "executing",
+            (10, 10, 16, 16), None, (), "UAV-9", None, 0.0, 0.0, None, None,
+        ),
+    )
+    candidates = (
+        TaskCandidate(
+            "direction:OBS-new", "direction_search", (20, 20, 26, 26),
+            None, (), (), 0.0, "medium", 30.0, 5.0, 5.0,
+        ),
+        TaskCandidate(
+            "probe:c9", "probe", None, "contact-9", (), (), 0.0,
+            "high", 20.0, 9.0, 9.0,
+        ),
+    )
+    contacts = ()
+
+    edges = allocator._mission_edges(
+        candidates, (busy, idle), contacts, 0, active_tasks=records,
+    )
+    by_uav = {}
+    for edge in edges:
+        by_uav.setdefault(edge.uav_id, set()).add(edge.task_id)
+
+    # Busy airframe: only the strictly-higher-rank probe may attach.
+    assert by_uav.get("UAV-9") == {"probe:c9"} or "direction:OBS-new" not in by_uav.get("UAV-9", set())
+    # Idle airframe: unaffected.
+    assert "direction:OBS-new" in by_uav.get("UAV-1", set())

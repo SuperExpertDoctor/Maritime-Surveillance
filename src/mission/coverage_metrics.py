@@ -147,6 +147,7 @@ class CoverageMetrics:
             "currently_searchable_cells": current_count,
             "weather_blocked_cells": fixed_count - current_count,
             "ever_scanned_cells": ever_count,
+            "ever_scanned_area_km2": float(ever_count * self._area_per_cell),
             "cumulative_pct": fixed_pct,
             "unseen_pct": unseen_pct,
             "overdue_seen_pct": None if fixed_pct is None else fixed_pct - primary_pct,

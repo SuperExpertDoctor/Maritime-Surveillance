@@ -203,6 +203,13 @@ export default function CoveragePanel({ frame, connectionStatus = "connected", r
         <strong>{hasCoverage ? `${areaText(windowData.covered_area_km2)} / ${areaText(fixedArea)} km²` : "—"}</strong>
       </div>
 
+      <div className="coverage-area-row" title="累计被扫描过的区域占总面积比率，目标趋近100%">
+        <span>累计已扫占比</span>
+        <strong>{supported && finiteNumber(cumulative)
+          ? `${percentText(cumulative)}（${areaText(metrics.ever_scanned_area_km2)} km²）`
+          : "—"}</strong>
+      </div>
+
       <dl className="coverage-stat-grid">
         <div>
           <dt>从未搜索</dt>

@@ -184,10 +184,13 @@ def test_delete_releases_probe_track_handoff_and_preserves_evidence(scenario_fac
     assert sm.get_probe_session("probe-1") is None
     assert sm.get_track_region_for_group(contact_id) is None
     assert uav.target_group_id is None
-    # The released track binding is gone; the deterministic fallback may
-    # immediately retask the freed UAV onto coverage work, which is legal.
-    remaining_task = engine._coordinator_tasks.get(uav.id)
-    assert remaining_task is None or remaining_task.target_contact_id != contact_id
+    # The coverage sweep may immediately retask the freed airframe; it only
+    # must not stay bound to the deleted vessel's track.
+    remaining = engine._coordinator_tasks.get(uav.id)
+    assert remaining is None or (
+        remaining.task_type is OperationMode.COVERAGE
+        and remaining.target_contact_id is None
+    )
     assert engine._mission_task_records[task.task_id].finished_at_min is not None
     assert engine.handoff_manager.attempts()[0].state == "failed"
     assert engine.handoff_manager.evidence(handoff.handoff_id) == evidence

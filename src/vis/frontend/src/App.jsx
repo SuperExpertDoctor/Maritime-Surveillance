@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, Eye, EyeOff, Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind } from "lucide-react";
+import { Download, Eye, EyeOff, Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind, X } from "lucide-react";
 
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
+import MenuBar from "./components/MenuBar";
 import PlaybackBar from "./components/PlaybackBar";
 import RightSidebar from "./components/RightSidebar";
+import SettingsDialog from "./components/SettingsDialog";
 import useReplay from "./hooks/useReplay";
 import useMp4Export from "./hooks/useMp4Export";
 import useWebSocket from "./hooks/useWebSocket";
@@ -14,7 +16,7 @@ import useRuntimeLogs from "./hooks/useRuntimeLogs";
 export default function App() {
   const [mode, setMode] = useState("live");
   const [selectedUavId, setSelectedUavId] = useState(null);
-  const [drawerVisible, setDrawerVisible] = useState(false);
+  const [drawerVisible, setDrawerVisible] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [showScenario, setShowScenario] = useState(false);
@@ -26,6 +28,10 @@ export default function App() {
   const [selectedScenarioVesselId, setSelectedScenarioVesselId] = useState(null);
   const [vesselCommandStatus, setVesselCommandStatus] = useState(null);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartTimedOut, setRestartTimedOut] = useState(false);
   const mapExporterRef = useRef(null);
   const commandContext = useRef(null);
   const activeCommand = useRef(null);
@@ -288,8 +294,120 @@ export default function App() {
     error: "数据错误",
   }[live.status] || live.status;
 
+  // 保存配置 / 点「重启仿真」后：整个后端进程 execv 重启，这里轮询
+  // 直到服务恢复再整页刷新，拿到新配置下的全新回合。
+  useEffect(() => {
+    if (!restarting) return undefined;
+    let stopped = false;
+    setRestartTimedOut(false);
+    const startedAt = Date.now();
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const response = await fetch("/api/settings");
+        if (response.ok) {
+          window.location.reload();
+          return;
+        }
+      } catch (_) { /* 服务尚未起来 */ }
+      if (Date.now() - startedAt > 90000) {
+        setRestartTimedOut(true);
+        return;
+      }
+      setTimeout(poll, 1500);
+    };
+    const timer = setTimeout(poll, 2500);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [restarting]);
+
+  const restartSim = async () => {
+    if (mode === "replay" || restarting) return;
+    setRestarting(true);
+    try {
+      await fetch("/api/runtime/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch (_) { /* 进程重启时连接断开属正常 */ }
+  };
+
+  const sendRuntimeCommand = async (operation) => {
+    if (!frame?.episode_id) return;
+    try {
+      await fetch(`/api/runtime/${operation}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          episode_id: frame.episode_id,
+          command_id: `${operation}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        }),
+      });
+    } catch (_) { /* 命令回执会在帧里体现 */ }
+  };
+
+  const cycleTrailMode = () => setTrailMode((value) => {
+    if (value === "full") return "tail";
+    if (value === "tail") return "comet";
+    return "full";
+  });
+
+  const trailModeLabel = { full: "完整", tail: "渐变长尾", comet: "彗星拖尾" }[trailMode];
+
+  const menus = [
+    {
+      id: "file", label: "文件(F)", items: [
+        { id: "open-settings", label: "算法参数设置…", shortcut: "Ctrl+,", onClick: () => setSettingsOpen(true), disabled: readOnly },
+        "sep",
+        {
+          id: "export-mp4", label: "导出回放 MP4",
+          disabled: !(mode === "replay" && replay.selectedFile && mp4Export.available) || mp4Export.exporting,
+          onClick: mp4Export.exportMp4,
+        },
+        "sep",
+        { id: "restart", label: "重启仿真", shortcut: "Ctrl+R", onClick: restartSim, disabled: readOnly || restarting },
+      ],
+    },
+    {
+      id: "view", label: "视图(V)", items: [
+        { id: "grid", label: "网格", checked: showGrid, onClick: () => setShowGrid((v) => !v) },
+        { id: "scenario", label: "场景真值图层", checked: showScenario, onClick: () => setShowScenario((v) => !v) },
+        { id: "drawer", label: "任务详情面板", checked: drawerVisible, onClick: () => setDrawerVisible((v) => !v) },
+        { id: "sidebar", label: "编队状态面板", checked: sidebarOpen, onClick: () => setSidebarOpen((v) => !v) },
+        "sep",
+        { id: "trail", label: `UAV 轨迹模式：${trailModeLabel}`, onClick: cycleTrailMode },
+      ],
+    },
+    {
+      id: "run", label: "运行(R)", items: [
+        {
+          id: "retry", label: "重试模型决策", onClick: () => sendRuntimeCommand("retry"),
+          disabled: readOnly || frame?.runtime_status !== "paused_model",
+        },
+        {
+          id: "abort", label: "结束当前回合", danger: true,
+          onClick: () => sendRuntimeCommand("abort"),
+          disabled: readOnly || !frame?.episode_id || frame?.runtime_status === "finished",
+        },
+        "sep",
+        { id: "restart", label: "重启仿真", onClick: restartSim, disabled: readOnly || restarting },
+      ],
+    },
+    {
+      id: "settings", label: "设置(S)", items: [
+        { id: "open-settings", label: "算法参数设置…", shortcut: "Ctrl+,", onClick: () => setSettingsOpen(true), disabled: readOnly },
+      ],
+    },
+    {
+      id: "help", label: "帮助(H)", items: [
+        { id: "about", label: "关于本系统", onClick: () => setAboutOpen(true) },
+      ],
+    },
+  ];
+
   return (
     <main className={`app-layout ${mode === "replay" ? "replay-active" : ""}`}>
+      <MenuBar menus={menus} />
       <header className="top-bar">
         <div className="product-mark" aria-label="UAV 海上侦察任务控制台">
           <span className="mark-index">MC</span>
@@ -486,6 +604,45 @@ export default function App() {
         exportProgress={mp4Export.progress}
         exportError={mp4Export.error}
       />
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onRestarting={() => { setSettingsOpen(false); setRestarting(true); }}
+      />
+      {aboutOpen && (
+        <div className="settings-overlay" role="presentation" onMouseDown={(e) => {
+          if (e.target === e.currentTarget) setAboutOpen(false);
+        }}>
+          <div className="about-dialog" role="dialog" aria-modal="true" aria-label="关于本系统">
+            <div className="settings-head">
+              <h2>UAV 侦察态势监控</h2>
+              <button type="button" className="settings-close" onClick={() => setAboutOpen(false)} aria-label="关闭">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="about-text">
+              海上多无人机协同侦察仿真系统。支持直播态势、任务回放、人工重点区指定、
+              船舶增删与 AIS 切换，以及通过「算法参数设置」在线调整并重启仿真。
+            </p>
+          </div>
+        </div>
+      )}
+      {restarting && (
+        <div className="restart-overlay" role="alert" aria-live="assertive">
+          <div className="restart-card">
+            <div className="restart-spinner" aria-hidden="true" />
+            <strong>{restartTimedOut ? "重启超时" : "正在重启仿真…"}</strong>
+            <p>{restartTimedOut
+              ? "服务在 90 秒内未恢复，请检查后端进程日志后手动刷新页面。"
+              : "配置已保存，仿真进程正在用新配置重启，页面将在服务恢复后自动刷新。"}</p>
+            {restartTimedOut && (
+              <button type="button" className="btn ghost" onClick={() => window.location.reload()}>
+                手动刷新
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

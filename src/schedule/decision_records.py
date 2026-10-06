@@ -1,4 +1,23 @@
 """Public, JSON-ready outcome of one model allocation decision."""
+import json
+
+
+def _think_content(cycle: dict) -> str:
+    """External-provider reasoning (think) captured on the model call."""
+    parts = []
+    for channel in cycle.get("provider_channels") or ():
+        if not isinstance(channel, dict):
+            continue
+        if channel.get("kind") != "external_provider_reasoning":
+            continue
+        if channel.get("provenance") != "external_api_response":
+            continue
+        content = channel.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content.strip())
+        elif isinstance(content, (list, dict)) and content:
+            parts.append(json.dumps(content, ensure_ascii=False))
+    return "\n".join(parts)
 
 
 def build_decision_record(result: dict, batch, applied: bool, time_min: float) -> dict | None:
@@ -14,8 +33,15 @@ def build_decision_record(result: dict, batch, applied: bool, time_min: float) -
         "snapshot_id": result.get("snapshot_id"),
         "time_min": time_min,
         "trigger_source": result.get("trigger_source", "unknown"),
+        # For event triggers this is the description of the triggering events
+        # (e.g. "uav_returned(UAV-4)、intent_changed(I0001)"); for proactive
+        # triggers it says why the scheduler fired on its own.
         "trigger_reason": result.get("trigger_reason", ""),
-        "reason_content": cycle.get("reason_content", ""),
+        # The model's own reasoning: provider think channel first, then the
+        # reason text it attached to the answer.
+        "reason_content": _think_content(cycle) or cycle.get("reason_content", ""),
+        "errors": list(cycle.get("errors") or ()),
+        "failure_category": cycle.get("failure_category"),
         "selected_task_ids": list(result.get("selected_task_ids") or []),
         "assignments": assignments,
         "involved_uav_ids": sorted(set(cycle.get("affected_uav_ids") or ()) | {

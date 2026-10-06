@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 from src.control.common.contracts import (
@@ -26,6 +26,7 @@ from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
 from src.control.heuristic.base import (
     HeuristicControllerBase,
     RouteFollower,
+    _wrap_pi,
     next_route_index,
 )
 from src.control.heuristic.navigation import AStarNavigator, PathNotFoundError
@@ -35,6 +36,10 @@ from src.utils.track_orbit import LGVFTracker
 DEFAULT_ARRIVAL_TOLERANCE_CELLS = 0.05
 ROUTE_ORIGIN_POSITION_TOLERANCE_CELLS = 1e-6
 ROUTE_ORIGIN_HEADING_TOLERANCE_RAD = 1e-6
+# En-route SAR imaging mirrors the coverage controller: command SAR only
+# on settled straight legs and anchor the imaging geometry once per leg.
+EN_ROUTE_STRAIGHT_TURN_RATE_RAD_MIN = 0.1
+EN_ROUTE_SAR_HEADING_TOLERANCE_RAD = math.radians(2.0)
 
 
 @dataclass(frozen=True)
@@ -192,6 +197,7 @@ class ReturnToBaseController(HeuristicControllerBase):
         self._arrived = False
         self._reservation_released = False
         self._failure: NoSafeRecoveryPath | None = None
+        self._en_route_scan_geometry: tuple[tuple[float, float], float] | None = None
 
     @property
     def observation_spec(self) -> ObservationSpec:
@@ -257,6 +263,7 @@ class ReturnToBaseController(HeuristicControllerBase):
         self._arrived = False
         self._reservation_released = False
         self._failure = None
+        self._en_route_scan_geometry = None
 
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.recovery_plan is None:
@@ -272,9 +279,35 @@ class ReturnToBaseController(HeuristicControllerBase):
             SensorMode.OFF,
             OperationMode.RETURN,
         )
+        command = self._command_en_route_scan(command, observation)
         self._validate_command_modes(command, observation)
         self.is_complete(observation)
         return ControlDecision(command)
+
+    def _command_en_route_scan(
+        self, command: ControlCommand, observation: ControlObservation
+    ) -> ControlCommand:
+        """Image the strip below on settled straight recovery legs."""
+        if (
+            SensorMode.SAR not in observation.action_mask.allowed_sensor_modes
+            or abs(command.turn_rate_rad_min) > EN_ROUTE_STRAIGHT_TURN_RATE_RAD_MIN
+        ):
+            return command
+        position = observation.self_state.position
+        heading = observation.self_state.heading_rad
+        geometry = self._en_route_scan_geometry
+        if geometry is None or abs(
+            _wrap_pi(heading - geometry[1])
+        ) > EN_ROUTE_SAR_HEADING_TOLERANCE_RAD:
+            self._en_route_scan_geometry = (position, heading)
+        origin, desired_heading = self._en_route_scan_geometry
+        return replace(
+            command,
+            sensor_mode=SensorMode.SAR,
+            sar_look_direction="left",
+            sar_scan_heading_rad=desired_heading,
+            sar_scan_origin=origin,
+        )
 
     def is_complete(self, observation: ControlObservation) -> bool:
         if self.recovery_plan is None:
@@ -349,6 +382,7 @@ class ReturnToBaseController(HeuristicControllerBase):
         self.planning_map_version = observation.planning_map_version
         self._route_revision += 1
         self._route_status = "ready"
+        self._en_route_scan_geometry = None
 
     def _fail_recovery(
         self, observation: ControlObservation, reason: str

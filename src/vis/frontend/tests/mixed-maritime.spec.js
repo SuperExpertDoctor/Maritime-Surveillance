@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { frameFixture, installFrameSocket } from "./helpers/frameSocket.js";
+import { ensureDrawerOpen, frameFixture, installFrameSocket } from "./helpers/frameSocket.js";
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/export/capabilities', route => route.fulfill({ json: { mp4: false } }));
@@ -171,7 +171,7 @@ test("replay renders intent controls as read-only", async ({ page }) => {
   await expect(page.locator(".intent-panel .intent-form")).toHaveCount(0);
   await expect(page.locator('[aria-label="框选重点区"]')).toBeDisabled();
   await expect(page.getByRole("button", { name: "II 类船舶" })).toBeDisabled();
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole("tab", { name: "船舶状态" }).click();
   await expect(page.getByRole("switch", { name: "scenario-vessel-replay AIS" })).toBeDisabled();
 });
@@ -326,7 +326,7 @@ test("operator places a type-II vessel by click and deletes the selected scenari
   });
   await expect(page.getByRole("button", { name: "II 类船舶" })).toBeEnabled();
 
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole("tab", { name: "船舶状态" }).click();
   await page.getByRole("button", { name: "删除 scenario-vessel-9" }).click();
   await expect.poll(() => deleted).toContain("scenario-vessel-9");
@@ -371,7 +371,7 @@ test("type-II AIS control sends the current revision and waits for an authoritat
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole("tab", { name: "船舶状态" }).click();
   const disable = page.getByRole("switch", { name: "scenario-vessel-ii AIS" });
   await expect(disable).toBeChecked();
@@ -455,7 +455,7 @@ test("AIS revision conflict is visible and does not change the selected frame st
     });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole("tab", { name: "船舶状态" }).click();
   await page.getByRole("switch", { name: "scenario-vessel-conflict AIS" }).click();
   await expect(page.locator(".vessel-row-feedback")).toContainText("revision_conflict");

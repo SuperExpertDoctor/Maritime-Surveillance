@@ -133,6 +133,10 @@ def test_ship_and_mission_config_fields_match_design():
         "max_stall_replans",
         "max_consecutive_decision_failures",
         "target_diversion_max_fraction",
+        "sweep_enabled",
+        "sweep_pending_max",
+        "sweep_pending_ttl_min",
+        "install_retry_cooldown_min",
     )
     assert config.mission.activity.regulated_bboxes == ((8, 8, 22, 22),)
     assert config.mission.evasion.enabled is True
@@ -150,6 +154,9 @@ def test_coverage_configuration_defaults_and_explicit_values(tmp_path: Path):
     assert config.mission.coverage.align_timeout_min == 8.0
     assert config.mission.coverage.max_stall_replans == 2
     assert config.mission.coverage.max_consecutive_decision_failures == 3
+    assert config.mission.coverage.sweep_enabled is True
+    assert config.mission.coverage.sweep_pending_max == 3
+    assert config.mission.coverage.sweep_pending_ttl_min == 120.0
 
     config_dir = _copy_configs(tmp_path)
     mission_path = config_dir / "mission.yaml"
@@ -176,6 +183,10 @@ def test_coverage_configuration_defaults_and_explicit_values(tmp_path: Path):
         ("max_stall_replans", -1, "max_stall_replans"),
         ("max_consecutive_decision_failures", True, "max_consecutive_decision_failures"),
         ("max_consecutive_decision_failures", 0, "max_consecutive_decision_failures"),
+        ("sweep_enabled", 1, "sweep_enabled"),
+        ("sweep_pending_max", 0, "sweep_pending_max"),
+        ("sweep_pending_ttl_min", True, "sweep_pending_ttl_min"),
+        ("sweep_pending_ttl_min", 0, "sweep_pending_ttl_min"),
     ],
 )
 def test_coverage_configuration_rejects_invalid_values(

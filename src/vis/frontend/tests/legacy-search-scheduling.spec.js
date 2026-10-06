@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import { ensureDrawerOpen } from "./helpers/frameSocket.js";
 
 function evidenceDirectory(testInfo) {
   const directory = process.env.REPLAY_SCREENSHOT_DIR
@@ -84,7 +85,7 @@ test("legacy pending search keeps identity through replay and coverage panel", a
   });
   expect(canvasPixels).toBeGreaterThan(1000);
 
-  await page.getByRole("button", { name: "切换任务详情面板" }).click();
+  await ensureDrawerOpen(page);
   await page.getByRole("tab", { name: "区域" }).click();
   const regionRow = page.locator(".region-table tbody tr").filter({ hasText: transition.taskId });
   await expect(regionRow).toContainText(transition.before.region.assigned_uav_id);

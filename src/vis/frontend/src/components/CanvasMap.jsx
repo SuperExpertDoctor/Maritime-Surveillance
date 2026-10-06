@@ -44,6 +44,7 @@ const CanvasMap = forwardRef(function CanvasMap({
   const containerRef = useRef(null);
   const layoutRef = useRef({ cellSize: 20, offsetX: 0, offsetY: 0 });
   const hoverRef = useRef(null);
+  const hoverPixelRef = useRef(null);
   const [hovered, setHovered] = useState(false);
   const [hoverVersion, setHoverVersion] = useState(0);
   const prevFrameRef = useRef(null);
@@ -183,6 +184,7 @@ const CanvasMap = forwardRef(function CanvasMap({
         selectedContactId,
         selectedScenarioVesselId,
         hoverInfo,
+        hover: hoverPixelRef.current,
         selectedUavId,
         frameCount: phase,
         assets: mapAssets,
@@ -232,7 +234,8 @@ const CanvasMap = forwardRef(function CanvasMap({
           context.save();
           renderFrame(context, frames[index], {
             cellSize, offsetX, offsetY, mapBounds, legendBounds,
-            showGrid, showScenario, trailMode, hoverInfo: null, selectedUavId,
+            showGrid, showScenario, trailMode, hoverInfo: null, hover: null,
+            selectedUavId,
             selectedContactId,
             selectedScenarioVesselId,
             frameCount: index, assets: mapAssets,
@@ -258,13 +261,21 @@ const CanvasMap = forwardRef(function CanvasMap({
     if (!canvas || !frame) return;
     const rect = canvas.getBoundingClientRect();
     const { cellSize, offsetX, offsetY } = layoutRef.current;
+    const mousePoint = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
     const coord = pixelToCoord(
-      event.clientX - rect.left,
-      event.clientY - rect.top,
+      mousePoint.x,
+      mousePoint.y,
       cellSize,
       offsetX,
       offsetY,
     );
+    const insideMap = coord
+      && coord.col >= 0 && coord.col < 30
+      && coord.row >= 0 && coord.row < 30;
+    hoverPixelRef.current = insideMap ? mousePoint : null;
 
     const excluded = coord && frame.search_domain?.excluded_cells?.some(
       ([col, row]) => col === coord.col && row === coord.row,
@@ -351,6 +362,7 @@ const CanvasMap = forwardRef(function CanvasMap({
 
   const handleMouseLeave = useCallback(() => {
     hoverRef.current = null;
+    hoverPixelRef.current = null;
     setHovered(false);
     setHoverVersion((version) => version + 1);
   }, []);

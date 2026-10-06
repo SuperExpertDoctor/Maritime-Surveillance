@@ -131,3 +131,41 @@ def test_emergency_failure_releases_task_service_and_does_not_return_or_hold():
         if event["type"] == "emergency_failure"
     ]
     assert len(failures) == 1
+
+
+def test_coverage_install_fault_holds_position_and_cools_retry():
+    """A storm-blocked install must not fly the airframe home."""
+    engine, uav, task, generation = _coverage_fixture()
+    lease = engine.control_coordinator.current_lease(uav.id)
+    assert lease.owner is ControlOwner.HEURISTIC
+
+    engine._handle_control_fault(
+        uav, 3.0, ValueError("coverage planner produced no obstacle-safe swaths"), lease,
+    )
+
+    assert uav.status == "idle"
+    assert engine.control_coordinator.operation_mode(uav.id) is OperationMode.HOLDING
+    assert engine.control_coordinator.current_lease(uav.id).owner is ControlOwner.SYSTEM
+    record = engine._mission_task_records[task.task_id]
+    assert record.status == "approved"
+    assert record.assigned_uav_id is None
+    region = engine.allocator.sm.get_search_regions()[0]
+    assert region.status == "active"
+    assert region.assigned_uav_id is None
+    assert engine._coverage_install_cooldown[task.task_id] == (
+        3.0 + engine.config.mission.coverage.install_retry_cooldown_min
+    )
+    cooled = engine.allocator.build_pending_search_batch(
+        3.5,
+        active_tasks=tuple(
+            record
+            for record in engine._mission_task_records.values()
+            if engine._coverage_install_cooldown.get(
+                record.task_id, float("-inf")
+            )
+            <= 3.5
+        ),
+    )
+    assert cooled is None or all(
+        assignment.task_id != task.task_id for assignment in cooled.assignments
+    )

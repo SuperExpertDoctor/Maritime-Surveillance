@@ -11,10 +11,12 @@ import json
 import logging
 import math
 import os
+import sys
 import asyncio
 import shutil
 import subprocess
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -38,6 +40,11 @@ from src.vis.backend.runtime_journal import RuntimeJournal
 from src.vis.backend.replay_adapter import normalize_replay_frame
 from src.vis.backend.config_snapshot import configuration_snapshot
 from src.vis.backend.public_details import model_calls, public_frame, public_value
+from src.vis.backend.settings_schema import (
+    apply_overrides,
+    settings_payload,
+    validate_values,
+)
 
 OUTPUT_DIR = "outputs"
 _FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
@@ -171,6 +178,7 @@ def create_app(
     config: AppConfig,
     state_manager: StateManager,
     *,
+    config_dir: str = "configs",
     engine=None,
     intent_service=None,
     replay_mode: bool = False,
@@ -226,6 +234,8 @@ def create_app(
     app.state._replay_indexes = {}
     app.state.event_loop = None
     app.state.replay_mode = bool(replay_mode)
+    app.state.config_dir = config_dir
+    app.state.restart_requested_at = None
     app.state.intent_service = (
         intent_service
         if intent_service is not None
@@ -675,8 +685,88 @@ def create_app(
         cfg = app.state.config
         return JSONResponse(configuration_snapshot(cfg))
 
+    @app.get("/api/settings")
+    async def get_settings():
+        """算法参数设置：分组字段 + 当前生效值。"""
+        return JSONResponse(settings_payload(app.state.config))
+
+    @app.post("/api/settings")
+    async def post_settings(request: Request):
+        """校验并写入算法参数覆盖层，随后重启整个仿真进程。
+
+        校验失败返回 422 与逐字段中文错误（fields 映射）。成功返回
+        ``restarting: true``——进程会在响应发出后 execv 重启，前端只需
+        轮询直到服务恢复即可。
+        """
+        if app.state.replay_mode:
+            return _api_error("replay_readonly", "回放模式不允许修改配置", 409)
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        validation_error = _validate_body(body, {"values"}, {"values"})
+        if validation_error is not None:
+            return validation_error
+        values = body["values"]
+        if not isinstance(values, dict) or not values:
+            return _api_error("invalid_request", "values must be a non-empty object", 422)
+        errors = validate_values(values, app.state.config)
+        if errors:
+            return JSONResponse(
+                {"error_code": "invalid_settings", "fields": errors},
+                status_code=422,
+            )
+        try:
+            apply_overrides(values, app.state.config_dir)
+        except OSError as exc:
+            return _api_error("persist_failed", f"配置写入失败: {exc}", 500)
+        _schedule_process_restart(app)
+        return JSONResponse({"ok": True, "restarting": True})
+
+    @app.post("/api/settings/reset")
+    async def reset_settings(request: Request):
+        """删除覆盖层、恢复 configs/*.yaml 默认值，然后重启仿真。"""
+        if app.state.replay_mode:
+            return _api_error("replay_readonly", "回放模式不允许修改配置", 409)
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        from src.vis.backend.settings_schema import OVERRIDES_NAME
+
+        path = Path(app.state.config_dir) / OVERRIDES_NAME
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError as exc:
+            return _api_error("persist_failed", f"配置重置失败: {exc}", 500)
+        _schedule_process_restart(app)
+        return JSONResponse({"ok": True, "restarting": True})
+
+    @app.post("/api/runtime/restart")
+    async def restart_runtime(request: Request):
+        """按当前配置重启仿真进程（不修改配置）。"""
+        if app.state.replay_mode:
+            return _api_error("replay_readonly", "回放模式不支持重启", 409)
+        body, error = await _request_object(request)
+        if error is not None:
+            return error
+        _schedule_process_restart(app)
+        return JSONResponse({"ok": True, "restarting": True})
+
 
     return app
+
+
+def _schedule_process_restart(app: FastAPI) -> None:
+    """在响应发出后整进程 execv 重启，让新配置重新参与 episode 构建。"""
+    if app.state.restart_requested_at is not None:
+        return
+    app.state.restart_requested_at = True
+
+    def _reexec() -> None:
+        argv = [sys.executable, "-u", os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+        os.execv(sys.executable, argv)
+
+    threading.Timer(0.8, _reexec).start()
 
 
 def _api_error(error_code: str, message: str, status_code: int) -> JSONResponse:

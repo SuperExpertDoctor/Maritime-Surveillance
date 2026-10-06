@@ -54,6 +54,21 @@ _SEARCH_TASK_KINDS = frozenset({"search", "direction_search", "investigation"})
 _TARGET_TASK_KINDS = frozenset(
     {"probe", "track", "investigation", "direction_search"}
 )
+# Preemption is escalation-only: a busy airframe may be reassigned only to a
+# strictly higher-priority kind.  Same-rank reassignment just restarts the
+# transit leg and starves coverage (observed: search tasks ping-ponging
+# between airframes while the scan grid stayed at ~2% for 100+ minutes).
+_TASK_KIND_PRIORITY = {
+    "track": 5,
+    "probe": 4,
+    "investigation": 3,
+    "direction_search": 2,
+    "search": 1,
+}
+
+
+def _task_kind_priority(kind: str | None) -> int:
+    return _TASK_KIND_PRIORITY.get(kind or "", 0)
 _LOGGER = logging.getLogger(__name__)
 _CACHE_MISS = object()
 
@@ -168,7 +183,10 @@ class TaskAllocator:
                 candidate
                 for candidate in candidates
                 if not (
-                    candidate.kind == "search"
+                    # direction_search bboxes dedupe too: an unfinished region
+                    # already scans the cells an OBS direction task would add,
+                    # so stacking them only overlaps highlight blocks.
+                    candidate.kind in {"search", "direction_search"}
                     and candidate.bbox is not None
                     and any(
                         _bbox_overlaps(candidate.bbox, region.bbox)
@@ -198,6 +216,10 @@ class TaskAllocator:
             )
         )
         cooldown_min = self.mission_scheduler.reassignment_cooldown_min
+        max_candidate_priority = max(
+            (_task_kind_priority(candidate.kind) for candidate in candidates),
+            default=0,
+        )
         preemptible = tuple(sorted(
             resource.uav_id
             for resource in resources
@@ -207,6 +229,17 @@ class TaskAllocator:
             # invites selections that validation must reject, which becomes an
             # unrecoverable loop while a model pause freezes sim time.
             and not now - resource.last_reassigned_at_min < cooldown_min - 1e-9
+            # Advertising a busy aircraft as preemptible only makes sense when
+            # something can actually escalate onto it.  Without this the model
+            # shuffles same-rank work between airframes and restarts transit.
+            and _task_kind_priority(
+                (
+                    record.kind
+                    if (record := active_by_id.get(resource.current_task_id))
+                    is not None
+                    else "search"
+                )
+            ) < max_candidate_priority
         ))
         planning_map_version = int(self.sm.obstacle_version)
         edge_candidates = (
@@ -708,7 +741,7 @@ class TaskAllocator:
             # Operator retry is deliberately decision-only: no ship, sensor,
             # UAV, fuel, information-field, or reviewer tick occurs here.
             self.sm.current_time = float(current_time)
-            decision = TriggerDecision("heavy", "operator_retry", source="retry")
+            decision = TriggerDecision("heavy", "操作员手动重试", source="retry")
         else:
             self.sm.step(current_time)
             if self.sm.last_information_delta is not None:
@@ -1122,6 +1155,7 @@ class TaskAllocator:
                 or self.sm.is_uav_operational(record.assigned_uav_id)
             )
         }
+        active_kind_by_id = {record.task_id: record.kind for record in active_tasks}
         active_task_ids = set(active_candidates)
         tasks_by_id = {candidate.task_id: candidate for candidate in candidates}
         tasks_by_id.update(active_candidates)
@@ -1156,6 +1190,17 @@ class TaskAllocator:
                     )
                 ):
                     continue
+                if (
+                    resource.current_task_id is not None
+                    and resource.current_task_id != task.task_id
+                ):
+                    current_kind = active_kind_by_id.get(
+                        resource.current_task_id, "search"
+                    )
+                    if _task_kind_priority(task.kind) <= _task_kind_priority(
+                        current_kind
+                    ):
+                        continue
                 route_metrics = self._mission_route_metrics(
                     resource,
                     task,

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, Clock3, Focus, Pencil, Plus, RotateCcw, Send, Trash2, X } from "lucide-react";
+import { errorName, regionNameById, roleName } from "../renderer/regionName";
 
 const INITIAL_DRAFT = {
   label: "",
@@ -56,6 +57,13 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
   const statuses = useMemo(
     () => new Map((frame?.intent_statuses || []).map((status) => [status.intent_id, status])),
     [frame?.intent_statuses],
+  );
+  const regionName = useMemo(
+    () => regionNameById([
+      ...(frame?.search_regions || []),
+      ...(frame?.track_regions || []),
+    ]),
+    [frame?.search_regions, frame?.track_regions],
   );
 
   useEffect(() => {
@@ -256,11 +264,11 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
 
       {runtimeBlocked && (
         <div className="runtime-blocked" role="alert">
-          <div className="runtime-blocked-title"><AlertTriangle size={14} /><strong>模型暂停</strong><span>{frame.blocked_role || "unknown"}</span></div>
+          <div className="runtime-blocked-title"><AlertTriangle size={14} /><strong>模型暂停</strong><span>{roleName(frame.blocked_role) || "未知角色"}</span></div>
           <p>模型决策失败，当前进度已保留，仿真时钟暂停；单纯等待不会自动恢复。</p>
           {blockedCall?.success === false && <p>
-            已尝试 {failedAttempts.length} 次 · {blockedCall.failure_category || "请求未完成"}
-            {blockedErrors.length > 0 && `：${blockedErrors.join("；")}`}
+            已尝试 {failedAttempts.length} 次 · {errorName(blockedCall.failure_category) || "请求未完成"}
+            {blockedErrors.length > 0 && `：${blockedErrors.map(errorName).join("；")}`}
           </p>}
           <p>点击“重试”发起新一轮有限次自动重试，成功后从当前位置继续，无需重启回合。</p>
           {runtimeBusy && <p role="status">运行命令处理中，请等待结果。</p>}
@@ -312,7 +320,7 @@ export default function IntentPanel({ frame, readOnly = false, connectionStatus 
               <div className="intent-row-main"><span className={`intent-dot ${intent.priority || "medium"}`} /><strong>{intent.label || intent.intent_id}</strong><span className="intent-lifecycle">{LIFECYCLE_LABELS[intent.lifecycle] || intent.lifecycle}</span></div>
               <div className="intent-row-meta"><span className="mono">{intent.intent_id} · [{intent.bbox?.join(", ")}]</span><span>{status ? `${Math.round((status.coverage_ratio || 0) * 100)}% / ${Math.round((status.freshness_ratio || 0) * 100)}%` : "-"}</span></div>
               <div className="intent-row-meta"><span>{intent.mode === "maintain_freshness" ? "保持新鲜" : "优先搜索"} · 到期 {formatMinutes(intent.expires_at_min)}</span><span>{INTENT_STATUS_LABELS[status?.unmet_reason] || status?.unmet_reason || (status ? "满足" : "等待状态")}</span></div>
-              <div className="intent-row-meta intent-owner-tasks"><span>{status?.assigned_task_ids?.length ? `执行任务：${status.assigned_task_ids.join(", ")}` : "暂无执行任务"}</span></div>
+              <div className="intent-row-meta intent-owner-tasks"><span>{status?.assigned_task_ids?.length ? `执行任务：${status.assigned_task_ids.map(regionName).join("，")}` : "暂无执行任务"}</span></div>
               {!readOnly && intent.lifecycle === "active" && (
                 <div className="intent-row-actions"><button type="button" disabled={!canWrite || intentBusy} className="icon-btn compact-icon" onClick={() => beginEdit(intent)} aria-label={`编辑 ${intent.label || intent.intent_id}`} title="编辑"><Pencil size={13} /></button><button type="button" disabled={!canWrite || intentBusy} className="icon-btn compact-icon danger-icon" onClick={() => cancelIntent(intent)} aria-label={`取消 ${intent.label || intent.intent_id}`} title="取消"><Trash2 size={13} /></button></div>
               )}

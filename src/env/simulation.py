@@ -458,6 +458,8 @@ class SimulationEngine:
         self._retask_strike_limit = 3
         self._retask_strikes: dict[str, int] = {}
         self._last_retask_at: dict[str, float] = {}
+        self._sweep_pending_tasks: dict[str, float] = {}
+        self._coverage_install_cooldown: dict[str, float] = {}
         self._tracking_started_at: dict[str, float] = {}
         self._ais_tracking_started_at: dict[str, float] = {}
         self._ais_measurements: dict[str, list[tuple[float, float]]] = {}
@@ -1011,10 +1013,22 @@ class SimulationEngine:
             if state == "pending":
                 desired = replace(
                     record,
-                    status="approved",
+                    status=(
+                        record.status
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else "approved"
+                    ),
                     assigned_uav_id=None,
-                    finished_at_min=None,
-                    release_reason=reason,
+                    finished_at_min=(
+                        record.finished_at_min
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else None
+                    ),
+                    release_reason=(
+                        record.release_reason
+                        if record.status in {"completed", "cancelled", "blocked"}
+                        else reason
+                    ),
                 )
             else:
                 desired = replace(
@@ -1053,10 +1067,22 @@ class SimulationEngine:
         if state == "pending":
             desired = replace(
                 record,
-                status="approved",
+                status=(
+                    record.status
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else "approved"
+                ),
                 assigned_uav_id=None,
-                finished_at_min=None,
-                release_reason=reason,
+                finished_at_min=(
+                    record.finished_at_min
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else None
+                ),
+                release_reason=(
+                    record.release_reason
+                    if record.status in {"completed", "cancelled", "blocked"}
+                    else reason
+                ),
             )
         elif state == "executing":
             desired = replace(
@@ -1753,6 +1779,7 @@ class SimulationEngine:
             result = self.allocator.step(t)
             self._sync_assignments()
         else:
+            sweep_created = self._apply_coverage_sweep(t)
             pending_reassigned = self._apply_pending_search_reassignments(t)
             if pending_reassigned:
                 # Refresh the immutable snapshot after the atomic handoff so
@@ -1791,6 +1818,18 @@ class SimulationEngine:
                         "trigger_type": "light",
                         "action": "pending_searches_reassigned",
                         "assignments": pending_reassigned,
+                    }
+            if sweep_created:
+                result = {
+                    **result,
+                    "coverage_sweep_tasks": sweep_created,
+                }
+                if result.get("trigger_type") == "none":
+                    result = {
+                        **result,
+                        "trigger_type": "light",
+                        "action": "coverage_sweep_created",
+                        "assignments": 0,
                     }
             decision_record = build_decision_record(result, batch, assignment_applied, t)
             if decision_record is not None:
@@ -2302,9 +2341,13 @@ class SimulationEngine:
                             else None
                         ),
                     )
-                self.allocator.sm.mark_uav_reassigned(
-                    assignment.uav_id, self.clock.time,
-                )
+            # Every committed assignment starts a fresh no-bump window for
+            # the airframe: without this an aircraft freshly loaded with work
+            # stays advertised as preemptible and the next batch can bounce
+            # it back into transit before it ever reaches its region.
+            self.allocator.sm.mark_uav_reassigned(
+                assignment.uav_id, self.clock.time,
+            )
             if candidate.kind in _SEARCH_TASK_KINDS:
                 region = prepared_region
                 if region is None:
@@ -2435,11 +2478,165 @@ class SimulationEngine:
         self._publish_control_routes()
         return replace(batch, assignments=committed)
 
+    def _apply_coverage_sweep(self, current_time: float) -> int:
+        """Turn due cells into pending searches the model prompt cannot starve.
+
+        New ordinary-search work otherwise enters only through the bounded
+        model prompt window; low-value areas can starve indefinitely even
+        though legal rectangles exist. Pending searches created here reuse
+        the deterministic pending matcher (the same channel that hands off
+        unassigned searches after returns) instead of waiting on a model
+        selection, so every stale or never-scanned cell eventually receives
+        a tasked sweep.
+        """
+        sm = self.allocator.sm
+        metrics = getattr(sm, "coverage_metrics", None)
+        if metrics is None or self.allocator.uses_legacy_scheduler():
+            return 0
+        coverage_config = getattr(self.config.mission, "coverage", None)
+        if coverage_config is None or not coverage_config.sweep_enabled:
+            return 0
+        retired = self._retire_stale_sweep_tasks(
+            current_time, coverage_config.sweep_pending_ttl_min
+        )
+        if len(self._sweep_pending_tasks) >= coverage_config.sweep_pending_max:
+            return retired
+
+        last_sar = metrics.last_scan_matrix()
+        due = ~np.isfinite(last_sar) | (
+            last_sar <= current_time - coverage_config.primary_window_min
+        )
+
+        pool = self.allocator.extractor.extract_pool(sm)
+        existing_ids = {region.id for region in sm.get_search_regions()}
+        existing_ids.update(self._mission_task_records)
+        # Unassigned pending regions are not part of the extractor's occupied
+        # mask, so raw pool candidates may overlap unfinished work. The mission
+        # snapshot applies the same exclusion downstream; the sweep must too.
+        unfinished = [
+            region.bbox for region in sm.get_unfinished_search_regions()
+        ]
+        scored = []
+        for candidate in pool.candidates:
+            if candidate.bbox is None or candidate.task_id in existing_ids:
+                continue
+            x0, y0, x1, y1 = candidate.bbox
+            if any(
+                not (
+                    x1 <= other.col_start
+                    or other.col_end <= x0
+                    or y1 <= other.row_start
+                    or other.row_end <= y0
+                )
+                for other in unfinished
+            ):
+                continue
+            due_cells = int(due[x0:x1, y0:y1].sum())
+            if due_cells <= 0:
+                continue
+            scored.append((
+                -due_cells,
+                -float(candidate.unseen_fraction),
+                candidate.task_id,
+                candidate,
+            ))
+        if not scored:
+            return retired
+        scored.sort()
+        created = 0
+        slots = (
+            coverage_config.sweep_pending_max - len(self._sweep_pending_tasks)
+        )
+        for _, _, task_id, candidate in scored:
+            if created >= slots:
+                break
+            cx0, cy0, cx1, cy1 = candidate.bbox
+            if any(
+                not (
+                    cx1 <= other.col_start
+                    or other.col_end <= cx0
+                    or cy1 <= other.row_start
+                    or other.row_end <= cy0
+                )
+                for other in unfinished
+            ):
+                continue
+            region = Region(
+                task_id,
+                BBox(*candidate.bbox),
+                "search",
+                created_cycle=sm.cycle,
+            )
+            sm.set_search_regions([*sm.get_search_regions(), region])
+            self._mission_task_records[task_id] = TaskRecord(
+                task_id,
+                "search",
+                "approved",
+                tuple(candidate.bbox),
+                None,
+                (),
+                None,
+                None,
+                current_time,
+                None,
+                None,
+                None,
+            )
+            self._sweep_pending_tasks[task_id] = current_time
+            unfinished.append(BBox(*candidate.bbox))
+            x0, y0, x1, y1 = candidate.bbox
+            sm.add_event("coverage_sweep_task_created", {
+                "task_id": task_id,
+                "bbox": list(candidate.bbox),
+                "due_cells": int(due[x0:x1, y0:y1].sum()),
+            })
+            created += 1
+        return retired + created
+
+    def _retire_stale_sweep_tasks(
+        self, current_time: float, ttl_min: float
+    ) -> int:
+        """Retire sweep pendings that never produced a feasible assignment."""
+        sm = self.allocator.sm
+        retired = 0
+        for task_id, created_at in tuple(self._sweep_pending_tasks.items()):
+            record = self._mission_task_records.get(task_id)
+            if (
+                record is None
+                or record.status != "approved"
+                or record.assigned_uav_id is not None
+            ):
+                del self._sweep_pending_tasks[task_id]
+                continue
+            if current_time - created_at < ttl_min:
+                continue
+            self._set_search_task_projection(
+                task_id,
+                state="stale",
+                uav_id=None,
+                current_time=current_time,
+                reason="sweep_unmatched",
+            )
+            del self._sweep_pending_tasks[task_id]
+            sm.add_event("coverage_sweep_task_retired", {
+                "task_id": task_id,
+                "reason": "sweep_unmatched",
+                "age_min": round(current_time - created_at, 3),
+            })
+            retired += 1
+        return retired
+
     def _apply_pending_search_reassignments(self, current_time: float) -> int:
         """Install deterministic pending-search handoffs at one engine boundary."""
+        active_tasks = tuple(
+            record
+            for record in self._mission_task_records.values()
+            if self._coverage_install_cooldown.get(record.task_id, float("-inf"))
+            <= current_time
+        )
         batch = self.allocator.build_pending_search_batch(
             current_time,
-            active_tasks=tuple(self._mission_task_records.values()),
+            active_tasks=active_tasks,
         )
         if batch is None:
             return 0
@@ -2454,6 +2651,12 @@ class SimulationEngine:
                 for item in applied_batch.assignments
             ],
         })
+        # The deterministic matcher commits real assignments too: mark the
+        # same no-bump window the LLM commit path does, otherwise a freshly
+        # matched search airframe is instantly preemptible and ping-pongs
+        # between pending searches and escalation tasks.
+        for item in applied_batch.assignments:
+            self.allocator.sm.mark_uav_reassigned(item.uav_id, current_time)
         return len(applied_batch.assignments)
 
     def _prepare_red_decision(self, current_time: float) -> None:
@@ -2953,16 +3156,19 @@ class SimulationEngine:
                     reason,
                     uav_id=uav_id,
                 )
-            projection_state = (
-                "pending"
-                if preserve_search
-                else "completed"
-                if status == "completed"
-                else "stale"
-            )
             has_search_region = any(
                 item.id == task.task_id and item.type == "search"
                 for item in sm.get_search_regions()
+            )
+            # Preserving a search only makes sense while its region still
+            # exists; a region retired for tracking means the task's airspace
+            # is gone and the record must go terminal instead of pending.
+            projection_state = (
+                "pending"
+                if preserve_search and has_search_region
+                else "completed"
+                if status == "completed"
+                else "stale"
             )
             self._set_search_task_projection(
                 task.task_id,
@@ -3151,6 +3357,11 @@ class SimulationEngine:
             task_id=task.task_id,
         )
         self._coordinator_tasks[uav.id] = task
+        uav.status = "holding"
+        self._hold_started_at.setdefault(uav.id, current_time)
+        self.allocator.trigger_manager.notify_event(
+            "resource_available", time=current_time, uav_id=uav.id,
+        )
 
     def _record_search_completion_event(
         self,
@@ -3376,11 +3587,11 @@ class SimulationEngine:
             + candidate.reserve_cells
             + max_speed * self.clock.dt_min
         )
-        if (
-            not force
-            and not allow_reserved_bases
-            and uav.remaining_range_cells > threshold
-        ):
+        # The fuel gate must also hold on the reserved-base path.  Without it,
+        # a full fleet at capacity revokes every healthy work task each tick:
+        # the released task is re-matched instantly and revoked again, which
+        # lands another airframe and keeps every base full forever.
+        if not force and uav.remaining_range_cells > threshold:
             return False
 
         base = next(
@@ -3560,6 +3771,27 @@ class SimulationEngine:
             "uav_id": uav.id,
             "error": str(error),
         })
+        task = self.control_coordinator.active_task(uav.id)
+        if (
+            reason == "controller_fault"
+            and task is not None
+            and task.task_type is OperationMode.COVERAGE
+        ):
+            # A coverage-planning fault is transient by nature: storms drift,
+            # the same task becomes flyable minutes later, and sending the
+            # airframe home just shuffles the same unflyable task to the next
+            # airframe in the match.  Release the task back to pending and
+            # hold position instead; the airframe stays available for other
+            # work and a short cooldown stops a hot re-assign loop.
+            try:
+                self._promote_work_controller_to_holding(uav, current_time)
+                self._coverage_install_cooldown[task.task_id] = (
+                    current_time
+                    + self.config.mission.coverage.install_retry_cooldown_min
+                )
+                return
+            except Exception:
+                pass
         if self._is_recoverable_planning_fault(error):
             # The airframe is airworthy; the task, not the UAV, is lost. Keep
             # it on station so the next decision cycle can retask it instead
@@ -4726,7 +4958,22 @@ class SimulationEngine:
                 continue
 
             if uav.status == "returning":
-                self._set_return_route(uav, sm.current_time)
+                try:
+                    self._set_return_route(uav, sm.current_time)
+                except (RuntimeError, ValueError) as exc:
+                    error = (
+                        exc
+                        if isinstance(exc, NoSafeRecoveryPath)
+                        else NoSafeRecoveryPath(
+                            "none", sm.obstacle_version, str(exc),
+                        )
+                    )
+                    self._emit_no_safe_recovery_path(
+                        uav, sm.current_time, error,
+                    )
+                    self._enter_emergency_failure(
+                        uav, "no_safe_recovery_path", error,
+                    )
             elif uav.mission_kind in ("search",):
                 state = sm.get_uav(uav.id)
                 region = regions.get(state.assigned_region_id if state else None)
@@ -4842,7 +5089,10 @@ class SimulationEngine:
     def _update_sensors_and_detections(self, current_time: float) -> None:
         sm = self.allocator.sm
         for uav in self.uavs:
-            if uav.status == "searching" and uav.sar_imaging:
+            # En-route imaging keeps sar_imaging on during stable-heading
+            # transit legs, so the gate is the aperture flag rather than the
+            # "searching" status label.
+            if uav.sar_imaging and uav.sar_look_direction is not None:
                 footprint = uav.sar_sensor.compute_swath_footprint(
                     uav.float_position,
                     uav.heading_rad,
@@ -5418,7 +5668,19 @@ class SimulationEngine:
             return
 
         entities = {entity.id: entity for entity in self.uavs}
-        for _, assigned_uav_id in retired:
+        for region, assigned_uav_id in retired:
+            # Retiring the region removes the task's projection surface. The
+            # surviving task record must not stay pending without a region or
+            # the mission-state invariant reports a projection mismatch.
+            if region.id in self._mission_task_records:
+                self._set_search_task_projection(
+                    region.id,
+                    state="stale",
+                    uav_id=None,
+                    current_time=current_time,
+                    reason="search_region_retired_for_tracking",
+                    allow_missing_region=True,
+                )
             if not assigned_uav_id:
                 continue
             self.allocator.sm.clear_uav_assignment(assigned_uav_id)
@@ -5436,6 +5698,16 @@ class SimulationEngine:
                     current_time,
                     {"reason": "search_region_retired"},
                 )
+                # A retired region is not a reason to land the airframe: the
+                # fleet needs every fueled aircraft for coverage.  Park it in
+                # system holding so the scheduler can re-task it immediately;
+                # the next mission assignment comes from the global scheduler,
+                # exactly as the old return path intended but without the
+                # round trip to base.  Entities with no controller lease fall
+                # back to the retask/recovery paths.
+                if self.control_coordinator.has_controller(entity.id):
+                    self._promote_work_controller_to_holding(entity, current_time)
+                    continue
                 if self._hold_for_retask(
                     entity, current_time, "search_region_retired"
                 ):
@@ -5517,7 +5789,19 @@ class SimulationEngine:
                 else:
                     region.assigned_uav_id = None
 
-        self._set_return_route(uav, current_time)
+        try:
+            self._set_return_route(uav, current_time)
+        except (RuntimeError, ValueError) as exc:
+            error = (
+                exc
+                if isinstance(exc, NoSafeRecoveryPath)
+                else NoSafeRecoveryPath(
+                    "none", sm.obstacle_version, str(exc),
+                )
+            )
+            self._emit_no_safe_recovery_path(uav, current_time, error)
+            self._enter_emergency_failure(uav, "no_safe_recovery_path", error)
+            return
         sm.clear_uav_assignment(uav.id)
         sm.update_uav_status(uav.id, "returning", uav.position, fuel_remaining_pct=uav.fuel_remaining_pct)
         self.allocator.trigger_manager.notify_event(
@@ -5624,9 +5908,11 @@ class SimulationEngine:
             self._holding_base_by_uav.pop(uav.id, None)
             uav.plan_return(path)
             return
-        raise RuntimeError(
+        raise NoSafeRecoveryPath(
+            "none",
+            self.allocator.sm.obstacle_version,
             f"no land recovery base has a safe return path for {uav.id}: "
-            + "; ".join(errors)
+            + "; ".join(errors),
         )
 
     def _base_maintenance_load(
