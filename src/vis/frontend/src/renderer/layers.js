@@ -347,6 +347,9 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
       }
       continue;
     }
+    // 只显示激活中的子任务区（已有 UAV 执行）；规划好但尚未派机的
+    // pending 区域不上图——区域数与可覆盖 UAV 数一一对应。
+    if (!region.assigned_uav_id) continue;
     const color = "#F59E0B";
     // 覆盖任务区按旧版栅格高亮还原：taskCells 逐格填充、边缘随机挖格、
     // 不画矩形外框；色度统一不随新鲜度变化——统计指标只在侧栏。
@@ -426,18 +429,18 @@ export function drawIntents(ctx, intents, statuses, cellSize, ox, oy, hover = nu
     if (!(c1 > c0 && r1 > r0)) continue;
     const status = statusById.get(intent.intent_id);
     const lifecycle = intent.lifecycle || "active";
-    const color = lifecycle === "expired"
-      ? "#64748B"
-      : lifecycle === "cancelled" ? "#94A3B8" : "#7C3AED";
+    // 只画当前生效的重点区：撤销/过期即从地图消失，历史列表由底栏承担。
+    if (lifecycle !== "active") continue;
+    const color = "#7C3AED";
     const point = coordToPixel(c0, r0, cellSize, ox, oy);
     const width = (c1 - c0) * cellSize;
     const height = (r1 - r0) * cellSize;
     ctx.save();
-    ctx.fillStyle = lifecycle === "active" ? "rgba(124, 58, 237, .10)" : "rgba(100, 116, 139, .07)";
+    ctx.fillStyle = "rgba(124, 58, 237, .10)";
     ctx.fillRect(point.x, point.y, width, height);
     ctx.strokeStyle = color;
-    ctx.lineWidth = lifecycle === "active" ? 1.8 : 1;
-    ctx.setLineDash(lifecycle === "active" ? [5, 3] : [2, 4]);
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash([5, 3]);
     ctx.strokeRect(point.x + 1, point.y + 1, Math.max(0, width - 2), Math.max(0, height - 2));
     ctx.restore();
     const coverage = status ? Math.round((status.coverage_ratio || 0) * 100) : null;

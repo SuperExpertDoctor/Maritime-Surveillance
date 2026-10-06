@@ -22,6 +22,14 @@ reference contacts. The server retains the complete legal graph and exact costs.
 HARD CONSTRAINTS
 Select only visible candidate IDs. Each selected task requires a distinct
 eligible UAV; selected_task_ids are simultaneous, not a sequential queue.
+Coverage search is paired one-to-one: the number of newly selected ordinary
+search tasks must not exceed the count of UAVs currently able to execute
+coverage search (available_uav_ids minus capacity committed to selected
+contact work). Each selected search pairs with exactly one distinct available
+UAV; never plan or select a search sub-region without a free UAV to fly it —
+unstaffed regions are invalid, not backlog. When fewer searches than
+required_new_search_count can be staffed, select the best subset and report
+the shortfall in defer_reason or notes instead of over-planning.
 Respect remaining range, generations, current task ownership, contact state,
 intent status, feasibility, and explicit preemption policy.
 pending_search_task_ids are retained work, not new model candidates;
