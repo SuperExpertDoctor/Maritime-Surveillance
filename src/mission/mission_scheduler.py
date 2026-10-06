@@ -24,7 +24,10 @@ from src.mission.contracts import (
 from src.mission.strategy_memory import StrategyMemoryStore
 from src.mission.trajectory_features import select_keypoints
 from src.mission.prompt_window import PromptWindow
-from src.mission.prompt_payload import encode_selection_payload
+from src.mission.prompt_payload import (
+    encode_selection_payload,
+    round_payload_floats,
+)
 
 
 SELECTION_SCHEMA = "mission-selection/v1"
@@ -1971,7 +1974,7 @@ class MissionScheduler:
         return {
             "schema_version": SELECTION_SCHEMA,
             "instructions": self.system_prompt,
-            "snapshot": full,
+            "snapshot": round_payload_floats(full),
         }
 
 

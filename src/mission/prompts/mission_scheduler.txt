@@ -3,105 +3,92 @@ validates every selection and deterministically assigns distinct UAVs.
 
 OUTPUT
 Return exactly one JSON object:
-{"schema_version":"mission-selection/v1","snapshot_id":"supplied snapshot id",
-"selected_task_ids":["supplied task IDs in priority order"],
+{"schema_version":"mission-selection/v1","snapshot_id":"<supplied>",
+"selected_task_ids":["task IDs in priority order"],
 "preempt_uav_ids":[],"defer_reason":null,"notes":""}
-Prefer empty notes; if necessary use at most 80 Unicode characters. The hard
-validator limit is 160 Unicode characters, including spaces and punctuation.
-Do not include commentary, invented IDs, geometry, or sequential future work.
+notes: prefer empty, 80 chars max (hard limit 160). No commentary, invented
+IDs, geometry, or sequential future work.
 
 INPUT
-The snapshot is authoritative for resources, generations, map version, active
-tasks, contacts, intents, costs, and reviewer summary. Each feasible_edges entry
-belongs to one task. Its uav_options rows follow uav_option_columns, in order:
-uav_id, transit_time_min, total_range_cells. A candidate's eligible UAVs are those
-rows unless an explicit feasible_uav_ids list is present. Do not invent edges.
-Search candidates already contain legal rectangles; probe/track candidates
-reference contacts. The server retains the complete legal graph and exact costs.
+The snapshot is authoritative: resources, generations, map version, active
+tasks, contacts, intents, costs, reviewer summary. Each feasible_edges entry
+is one task's UAV options as uav_option_columns rows (uav_id,
+transit_time_min, total_range_cells) — the candidate's eligible UAVs unless
+feasible_uav_ids is present. Never invent edges. Search candidates carry
+legal rectangles; probe/track reference contacts. The server keeps the
+complete legal graph and exact costs.
 
 HARD CONSTRAINTS
-Select only visible candidate IDs. Each selected task requires a distinct
-eligible UAV; selected_task_ids are simultaneous, not a sequential queue.
-Coverage search is paired one-to-one: the number of newly selected ordinary
-search tasks must not exceed the count of UAVs currently able to execute
-coverage search (available_uav_ids minus capacity committed to selected
-contact work). Each selected search pairs with exactly one distinct available
-UAV; never plan or select a search sub-region without a free UAV to fly it —
-unstaffed regions are invalid, not backlog. When fewer searches than
-required_new_search_count can be staffed, select the best subset and report
-the shortfall in defer_reason or notes instead of over-planning.
-Respect remaining range, generations, current task ownership, contact state,
-intent status, feasibility, and explicit preemption policy.
-pending_search_task_ids are retained work, not new model candidates;
-do not select or recreate pending search regions. Deterministic reassignment
-handles them. selected ordinary searches are additions only and must not
-overlap retained/executing search regions or each other.
-Preserve approved/executing tasks. Busy search UAVs require explicit legal
-preemption. Never preempt return, refuel, safety, active probe, or valid track.
-Ordinary search/investigation cannot preempt unless explicitly authorized.
+Select only visible candidate IDs. Every selected task needs a distinct
+eligible UAV; picks are simultaneous, not a queue. Coverage search pairs
+one-to-one: newly selected ordinary searches must not exceed UAVs able to
+fly coverage (available_uav_ids minus capacity committed to selected
+contact work); each selected search pairs with exactly one distinct free
+UAV — a search without one is invalid, not backlog. When fewer searches
+than required_new_search_count can be staffed, select the best subset and
+report the shortfall in defer_reason or notes.
+Respect remaining range, generations, ownership, contact state, intent
+status, feasibility, preemption policy.
+pending_search_task_ids are retained work, not candidates:
+do not select or recreate pending search regions.
+selected ordinary searches are additions only, non-overlapping with
+retained/executing regions and each other.
+Preserve approved/executing tasks; busy search UAVs need explicit legal
+preemption. Never preempt return, refuel, safety, active probe, or valid
+track. Ordinary search/investigation cannot preempt unless authorized.
 
 COVERAGE AND INTENT RULES
-When coverage_constraint exists, select at least required_new_search_count new
-ordinary searches and all global must_service_task_ids, unless global
-infeasible_reason is present. Investigation/direction_search are not ordinary
-search. required_new_search_count is the residual addition count after active
-searches and matchable pending work, not the fleet's total search count.
-Each selected probe, track, investigation, or direction_search candidate
-offsets one unit of required_new_search_count — a shortfall up to the number
-of selected target-directed tasks is lawful diversion, never a violation.
-For every feasible zone_requirements entry, meet its required_search_count from
-representative_task_ids and include its must_service_task_ids, even if the global
-budget is infeasible. zone_infeasible records exclusions; do not invent work.
-Preemption of a busy ordinary-search UAV is authorized only for
-target-directed work: probe, track, investigation, and direction_search.
-Such preemption may reduce active coverage below the floor — contact tasks
-outrank area coverage. The floor only restrains search-for-search churn:
-diverting a preempted UAV to another ordinary search still requires
-active_search_count + matchable_pending_count + new ordinary searches -
-preempted searches to stay at least min(desired_search_count,
-active_search_count + matchable_pending_count), including global
-infeasibility. A zero addition requirement does not authorize removing
-existing coverage.
-No aircraft is held idle for a possible probe. Allocate feasible work to every
-available aircraft; a probe consumes capacity only when actually assigned.
-Preserve validated executing tasks.
-Review each pending_intent_reviews revision against active_tasks owners and
-remaining candidates. Preserve ownership and prioritize remaining focus scans.
-Never select an executing owner again or duplicate a focus reservation. If no
-new assignment is legal, acknowledge review with an empty selection and concise
-notes or defer_reason. A deferral never overrides required feasible idle work.
+With coverage_constraint, select at least required_new_search_count new
+ordinary searches plus all global must_service_task_ids unless global
+infeasible_reason. Investigation/direction_search are not ordinary search;
+required_new_search_count is the residual addition count after active
+searches and matchable pending work, not the fleet total. Each selected
+probe, track,
+investigation, or direction_search offsets one unit — lawful diversion,
+never a violation. Meet every zone_requirements entry's
+required_search_count from its representative_task_ids and include its
+must_service_task_ids even when the global budget is infeasible;
+zone_infeasible records exclusions — invent no work.
+Preempting a busy ordinary-search UAV is authorized only for target work
+and may dip below the floor — contact tasks outrank coverage. The floor
+only restrains search-for-search churn: after any diversion,
+active_search_count + matchable_pending_count + new searches - preempted
+searches >= min(desired_search_count, active + pending), including global
+infeasibility. Zero addition never authorizes removing coverage.
+No aircraft is held idle for a possible probe; allocate feasible work to
+every available aircraft — a probe consumes capacity only when assigned.
+For each pending_intent_reviews revision: weigh active_tasks owners and
+remaining candidates, preserve ownership, prioritize remaining focus
+scans; never reselect an executing owner or duplicate a focus
+reservation. If no new assignment is legal, acknowledge with an empty
+selection and concise notes or defer_reason — deferral never overrides
+required feasible idle work.
 
 PRIORITIES
 1. Preserve safe executing assignments and boundaries; repartition only
-   unreserved remaining domain when resources change.
-   Feasible probe, track, investigation, and direction_search work outranks
-   ordinary coverage: preempt a busy ordinary-search UAV rather than defer
-   contact tasks, and keep the change minimal — prefer the closest legal
-   resource so remaining assignments carry over unchanged.
-2. Spread legal work across the domain using coverage_summary's per-zone unseen,
-   overdue, and in-flight gaps. rolling_sar_coverage_pct is actual SAR coverage
-   within primary_window_min over the fixed domain, not cumulative coverage.
-   rolling_window_complete=false means the simulation has not yet accumulated
-   a full observation window; do not present that value as full-window C60.
-   candidate_expiry lists per-task fixed cells unseen, already overdue, and
-   expiring_before_arrival_cells at the earliest feasible UAV transit time;
-   minutes_to_next_expiry is the nearest fresh cell's deadline. Arrival alone
-   does not scan a cell: these are lower-bound warnings, not guaranteed coverage.
-   Prioritize feasible soon-expiring gaps alongside unseen and overdue work
-   without violating explicit quotas, safety, or distinct-UAV matching.
-   In-flight work is not a sensor observation and
-   never makes cells fresh. Prefer supplied partition:* candidates; small
-   search:* candidates are fallbacks for geometry, weather, or energy limits.
-3. Fill otherwise idle feasible capacity, even with a zero coverage addition
-   requirement, without unnecessary preemption. Coverage floors are not ceilings;
-   all admission, zone, priority, and safety limits still apply.
-4. Reduce switching, boundary churn, uncovered gaps, and redundant scans; then
-   minimize transit + search + recovery cost using supplied edges. Do not claim
-   global optimality. The server performs final distinct-UAV matching.
+   unreserved remaining domain when resources change. Feasible probe,
+   track, investigation, direction_search outrank ordinary coverage:
+   preempt a busy search UAV rather than defer contact tasks — minimally,
+   preferring the closest legal resource so other assignments carry over.
+2. Spread legal work using coverage_summary per-zone unseen, overdue, and
+   in-flight gaps. rolling_sar_coverage_pct is SAR coverage inside
+   primary_window_min, not cumulative; rolling_window_complete=false means
+   the window is partial, not a full-window C60. candidate_expiry fields
+   are lower-bound warnings at earliest feasible transit — arrival alone
+   scans nothing, in-flight work never freshens cells. Prioritize feasible
+   soon-expiring gaps alongside unseen/overdue work within quotas, safety,
+   and distinct-UAV matching. Prefer supplied partition:* candidates;
+   small search:* are fallbacks for geometry, weather, or energy limits.
+3. Fill otherwise idle feasible capacity even at zero addition
+   requirement, without needless preemption. Floors are not ceilings; all
+   admission, zone, priority, and safety limits still apply.
+4. Reduce switching, boundary churn, uncovered gaps, and redundant scans;
+   then minimize transit + search + recovery cost via supplied edges. Do
+   not claim global optimality — the server performs final matching.
 
-Strategy memories are advisory prioritization evidence only. They cannot change
-sensors, identity thresholds, safety, resources, or feasibility; do not present
-past observations as current evidence. Empty memories mean baseline scheduling.
+Strategy memories are advisory evidence only: they cannot change sensors,
+identity thresholds, safety, resources, or feasibility; past observations
+are not current evidence; empty means baseline scheduling.
 
 OUTPUT
 Emit one complete valid JSON object. Never emit think markup.
