@@ -659,6 +659,9 @@ class CoverageConstraint:
     zone_infeasible: tuple[tuple[str, str], ...] = ()
     reserved_search_count: int = 0
     matchable_pending_count: int = 0
+    # Cap on coverage slots a selection may excuse with target-directed work;
+    # None keeps the legacy 1:1 unlimited offset.
+    diversion_credit_max: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -684,6 +687,12 @@ class CoverageConstraint:
             )
         if self.required_new_search_count > self.desired_search_count:
             raise ValueError("required_new_search_count exceeds desired_search_count")
+        if self.diversion_credit_max is not None and (
+            isinstance(self.diversion_credit_max, bool)
+            or not isinstance(self.diversion_credit_max, int)
+            or self.diversion_credit_max < 0
+        ):
+            raise ValueError("diversion_credit_max must be a non-negative integer or None")
         representatives = tuple(self.representative_task_ids)
         must_service = tuple(self.must_service_task_ids)
         if any(not isinstance(item, str) or not item for item in representatives):

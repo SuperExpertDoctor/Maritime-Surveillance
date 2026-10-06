@@ -125,6 +125,16 @@ class UAVConfig:
     freshness_patrol_start_min: float = 120.0
     freshness_patrol_count: int = 5
     freshness_patrol_coverage_threshold_pct: float = 80.0
+    # Cap on simultaneous transit legs to base for deferrable rotation
+    # reasons; fuel/reserve triggers always return immediately.
+    max_concurrent_returns: int = 4
+    # Staggered fuel-rotation: each airframe carries its own fuel threshold
+    # inside [rotation_threshold_min_pct, rotation_threshold_max_pct] so
+    # sorties end at different mileage points instead of one synchronized
+    # return wave.  The trigger is deferrable like lifecycle rotations.
+    rotation_stagger_enabled: bool = True
+    rotation_threshold_min_pct: float = 0.15
+    rotation_threshold_max_pct: float = 0.45
 
     @property
     def count(self) -> int:
@@ -220,6 +230,7 @@ class SafetyControlConfig:
     max_speed_fraction: float = 1.2
     reserve_range_cells: float = 4.0
     max_invalid_commands: int = 3
+    replan_lookahead_min: float = 30.0
 
 
 @dataclass(frozen=True)

@@ -62,6 +62,10 @@ coverage:
   align_timeout_min: 8.0
   max_stall_replans: 2
   max_consecutive_decision_failures: 3
+  # At most this fraction of the desired coverage budget may be excused by
+  # contact-directed work (probe/track/investigation); the remainder must be
+  # real coverage selections or validation fails.
+  target_diversion_max_fraction: 0.5
   # Deterministic coverage sweep: turn stale/never-scanned cells into pending
   # searches so low-value areas cannot starve behind the model prompt window.
   sweep_enabled: true
