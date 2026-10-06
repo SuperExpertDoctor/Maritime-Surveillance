@@ -46,10 +46,15 @@ class ThreatGate:
     Substeps feed swept minima; the next main frame reads the retained state.
     """
 
-    def __init__(self, config: ShipConfig):
+    def __init__(self, config: ShipConfig, kernel=None):
         self.config = config
         self._ships: dict[str, _GateState] = {}
         self._episode_revision = 0
+        self._kernel = kernel
+
+    def attach_kernel(self, kernel) -> None:
+        """Late-bind the shared kernel used for the unified event stream."""
+        self._kernel = kernel
 
     @property
     def episode_revision(self) -> int:
@@ -81,13 +86,27 @@ class ThreatGate:
             or (previous_state == "recovering" and gate.state == "normal")
         ):
             self._episode_revision += 1
+        if self._kernel is not None and previous_state != gate.state:
+            cause = (
+                "unsurveilled"
+                if (vessel_class != "type_ii" or not surveilled)
+                else "uav_proximity"
+            )
+            self._kernel.emit_transition(
+                "threat", ship_id, previous_state, gate.state, now_min, cause,
+                revision=self._episode_revision,
+            )
         return gate.state
 
     def observe_swept_distance(
         self, ship_id: str, vessel_class: VesselClass,
         min_distance_cells: float, now_min: float,
+        surveilled: bool = True,
     ) -> None:
-        self.update(ship_id, vessel_class, min_distance_cells, now_min)
+        self.update(
+            ship_id, vessel_class, min_distance_cells, now_min,
+            surveilled=surveilled,
+        )
 
     def remove_ship(self, ship_id: str) -> None:
         """Forget runtime gate state for a vessel removed from the episode."""

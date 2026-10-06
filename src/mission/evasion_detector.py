@@ -138,6 +138,23 @@ class EvasionDetector:
         self.config = config
         self.cell_size_km = float(cell_size_km)
         self._states: dict[str, _TrackState] = {}
+        self._kernel = None
+
+    def attach_kernel(self, kernel) -> None:
+        """Late-bind the shared kernel used for the unified event stream."""
+        self._kernel = kernel
+
+    def _emit_episode(self, mmsi: str, new: str, at_min: float, cause: str) -> None:
+        if self._kernel is None:
+            return
+        prior = self._kernel.state_or_none("evasion", mmsi)
+        previous = prior.state if prior is not None else None
+        if previous == new:
+            return
+        self._kernel.emit_transition(
+            "evasion", mmsi, previous, new, at_min, cause,
+            revision=(prior.revision + 1 if prior is not None else 0),
+        )
 
     def evaluate(
         self,
@@ -178,6 +195,10 @@ class EvasionDetector:
                 state.clear_since_min = evaluation_now
             if (state.clear_since_min is not None
                     and evaluation_now - state.clear_since_min >= self.config.rearm_clear_min):
+                if state.episode_id is not None:
+                    self._emit_episode(
+                        str(mmsi), "cleared", evaluation_now, "rearm_clear"
+                    )
                 state.episode_id = None
                 state.candidate_hits = 0
             state.last_evaluated_min = evaluation_now
@@ -185,6 +206,10 @@ class EvasionDetector:
 
         if (state.clear_since_min is not None
                 and evaluation_now - state.clear_since_min >= self.config.rearm_clear_min):
+            if state.episode_id is not None:
+                self._emit_episode(
+                    str(mmsi), "cleared", evaluation_now, "rearm_clear"
+                )
             state.episode_id = None
             state.candidate_hits = 0
         state.clear_since_min = None
@@ -196,6 +221,9 @@ class EvasionDetector:
             digest = hashlib.sha256(f"{mmsi}:{now:.9f}".encode("ascii")).hexdigest()[:16]
             state.episode_id = f"evasion-{digest}"
             episode_started = True
+            self._emit_episode(
+                str(mmsi), "confirmed", now, "evasion_confirmed"
+            )
         else:
             episode_started = False
         position, covariance = details

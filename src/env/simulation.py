@@ -263,6 +263,7 @@ class SimulationEngine:
             config.mission.evasion,
             cell_size_km=config.grid.cell_size_km,
         )
+        self.evasion_detector.attach_kernel(self.state_kernel)
         self._ais_history: dict[str, list[tuple[float, tuple[float, float], str]]] = defaultdict(list)
         self._ais_force_refresh_ids: set[str] = set()
         self._vessel_contact_ids: dict[str, set[str]] = defaultdict(set)
@@ -435,6 +436,7 @@ class SimulationEngine:
             config.ship,
             threat_gate=ThreatGate(config.ship),
         )
+        self.red_commander.threat_gate.attach_kernel(self.state_kernel)
         self.contact_assessor = ContactAssessor(
             gateway=self.allocator.llm_client.gateway,
             config=config.mission.contact,
@@ -1901,6 +1903,14 @@ class SimulationEngine:
                 self.region_signatures.append(signature)
         elif result["trigger_type"] == "light":
             self.light_triggers += 1
+        prior_cycle = self.state_kernel.state_or_none("scheduler", "decision_cycle")
+        self.state_kernel.emit_transition(
+            "scheduler", "decision_cycle",
+            prior_cycle.state if prior_cycle is not None else None,
+            f"{result['trigger_type']}_trigger", t,
+            str(result.get("reason") or result.get("skip_reason") or "cycle"),
+            revision=self.heavy_triggers + self.light_triggers,
+        )
         self._detect_and_resolve_path_conflicts(t)
         self._observe_evaluation(t)
         self._record_statuses()
@@ -2779,6 +2789,19 @@ class SimulationEngine:
                     })
                 else:
                     self._maneuver_provenance.pop(ship.id, None)
+        if self._installed_red_plan_id != plan_id:
+            if self._installed_red_plan_id is not None:
+                self.state_kernel.emit_transition(
+                    "blue_plan", self._installed_red_plan_id,
+                    "installed",
+                    "superseded" if plan_id is not None else "ended",
+                    current_time, "red_commander_decide",
+                )
+            if plan_id is not None:
+                self.state_kernel.emit_transition(
+                    "blue_plan", plan_id, None, "installed",
+                    current_time, "red_commander_decide",
+                )
         self._installed_red_plan_id = plan_id
 
     def _step_controlled_uav(self, uav: UAVEntity, current_time: float) -> bool:
@@ -6795,6 +6818,55 @@ class SimulationEngine:
             history = self.status_history[uav.id]
             if history[-1] != uav.status:
                 history.append(uav.status)
+            self._emit_uav_canonical(uav)
+
+    _TARGET_TASK_TYPES = frozenset({"probe", "track"})
+    _RETURN_TASK_TYPES = frozenset({"return", "holding"})
+    _CANONICAL_HOME_RADIUS_CELLS = 3.0
+
+    def _uav_near_home(self, uav: UAVEntity) -> bool:
+        base_col, base_row = uav.home_base_grid
+        return math.hypot(
+            uav.position.col - base_col, uav.position.row - base_row
+        ) <= self._CANONICAL_HOME_RADIUS_CELLS
+
+    def _canonical_uav_state(self, uav: UAVEntity) -> str:
+        """Collapse every low-level mode into the canonical UAV states.
+
+        Mirrors renderer/displayState.js: 覆盖搜索=search, 跟踪目标=tracking,
+        返航基地=returning; 坠毁=crashed is a terminal marker, not a state.
+        """
+        if uav.id in self._emergency_failures or uav.status == "failed":
+            return "crashed"
+        snapshot = self.allocator.sm.get_control_route(uav.id)
+        if snapshot is not None:
+            route = snapshot.route
+            if route.status == "cleared":
+                return "tracking" if uav.status == "tracking" else "search"
+            if route.task_type in self._TARGET_TASK_TYPES:
+                return "tracking"
+            if route.task_type in self._RETURN_TASK_TYPES:
+                return "returning" if self._uav_near_home(uav) else "search"
+            return "search"
+        if uav.status == "tracking":
+            return "tracking"
+        if uav.status in ("returning", "refueling"):
+            return "returning"
+        if uav.status == "holding" and self._uav_near_home(uav):
+            return "returning"
+        return "search"
+
+    def _emit_uav_canonical(self, uav: UAVEntity) -> None:
+        canonical = self._canonical_uav_state(uav)
+        prior = self.state_kernel.state_or_none("uav", uav.id)
+        previous = prior.state if prior is not None else None
+        if previous == canonical:
+            return
+        self.state_kernel.emit_transition(
+            "uav", uav.id, previous, canonical, self.clock.time,
+            "canonical_eval",
+            revision=(prior.revision + 1 if prior is not None else 0),
+        )
 
 
 __all__ = ["SimulationEngine"]

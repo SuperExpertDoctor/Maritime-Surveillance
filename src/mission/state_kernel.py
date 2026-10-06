@@ -215,6 +215,9 @@ class StateKernel:
         and one clock.
         """
         now = _time(at_min)
+        self._states.setdefault(domain, {})[entity_id] = EntityState(
+            domain, entity_id, new_state, revision, now, cause_id
+        )
         return self._record(
             domain, entity_id, previous_state, new_state, revision, now, cause_id
         )
@@ -223,6 +226,11 @@ class StateKernel:
 
     def state(self, domain: str, entity_id: str) -> EntityState:
         return self._states[domain][entity_id]
+
+    def state_or_none(
+        self, domain: str, entity_id: str
+    ) -> EntityState | None:
+        return self._states.get(domain, {}).get(entity_id)
 
     def facts(self, domain: str, entity_id: str) -> Mapping[str, Fact]:
         return self._facts.get(domain, {}).get(entity_id, {})
@@ -289,3 +297,13 @@ __all__ = [
     "StateKernel",
     "StateTransition",
 ]
+
+# Domains converged onto the unified stream so far:
+#   surveillance  — fact-driven rule (probing/tracking/detected/undetected)
+#   contact       — lifecycle adapter (created/pending/confirmed/lost/...)
+#   intent        — operator lifecycle adapter (active/cancelled/expired)
+#   threat        — ThreatGate hysteresis adapter (normal/evasive/recovering)
+#   uav           — canonical three-state adapter (search/tracking/returning)
+#   evasion       — episode adapter (confirmed/cleared)
+#   scheduler     — trigger adapter (light_trigger/heavy_trigger cycles)
+#   blue_plan     — red-commander plan adapter (installed/superseded/ended)
