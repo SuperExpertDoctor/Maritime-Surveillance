@@ -4,7 +4,7 @@ import { informationCategory, uavDisplayState } from "./displayState";
 import { layoutLabels } from "./labelLayout";
 import { isCoverageRegionId, regionLetterId } from "./regionName";
 
-const FONT = '"Fira Code", "Microsoft YaHei", monospace';
+const FONT = '"Noto Sans Mono CJK SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", "Fira Code", "Microsoft YaHei", "PingFang SC", monospace';
 const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
 
 function gridCenter(col, row, cellSize, ox, oy) {
@@ -324,6 +324,7 @@ function taskCells(region) {
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = null) {
   const labels = [];
   const labelSources = new Map();
+  const kindCounters = {};
   for (const region of regions || []) {
     // 只显示当前生效的区域划分：completed/stale 的历史区域与
     // 定向/核查/交接等目标导向扫描不占地图色块，仅留细虚线提示。
@@ -763,6 +764,19 @@ export function drawPaths(ctx, uavs, cellSize, ox, oy, selectedId, baseCenters) 
         ctx.arc(lastPt.x, lastPt.y, 1.8 * cellSize, 0, Math.PI * 2);
         ctx.stroke();
       }
+      ctx.restore();
+    }
+
+    // ── Hold loiter ring (awaiting retask / base slot) ────────────
+    if (uav.status === "holding" && uav.position?.length >= 2) {
+      ctx.save();
+      ctx.strokeStyle = isSelected ? "rgba(217, 119, 6, .75)" : "rgba(217, 119, 6, .38)";
+      ctx.lineWidth = isSelected ? 1.4 : 0.8;
+      ctx.setLineDash([3, 4]);
+      const c = gridCenter(uav.position[0], uav.position[1], cellSize, ox, oy);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 1.2 * cellSize, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.restore();
     }
 

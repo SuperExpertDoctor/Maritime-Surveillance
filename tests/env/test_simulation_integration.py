@@ -418,7 +418,7 @@ def test_return_route_skips_base_with_full_reserved_maintenance_capacity():
     busiest = engine.bases[0]
     uav.position = busiest.position
     uav.heading_rad = engine._inward_heading(busiest.position)
-    for assigned in engine.uavs[1:4]:
+    for assigned in engine.uavs[1 : 1 + busiest.capacity]:
         engine._return_base_by_uav[assigned.id] = busiest
 
     engine._set_return_route(uav, 10.0)
@@ -434,7 +434,7 @@ def test_range_reserve_uses_available_base_when_nearest_base_is_full():
     uav.heading_rad = math.radians(75.0)
     uav.fuel_remaining_pct = 0.216
     nearest = engine.bases[0]
-    for assigned in engine.uavs[1:4]:
+    for assigned in engine.uavs[1 : 1 + nearest.capacity]:
         engine._return_base_by_uav[assigned.id] = nearest
     engine.control_coordinator.start_work(
         uav.id,

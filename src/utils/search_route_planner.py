@@ -30,6 +30,7 @@ class SearchRouteRequest:
     direction: str | None = None
     seed: int = 17
     along_track_cells: float | None = None
+    allow_fallback: bool = True
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,32 @@ def _path_in_bounds(path: tuple[Pose, ...] | list[Pose], shape: tuple[int, int])
         0 <= math.floor(pose[0]) < cols and 0 <= math.floor(pose[1]) < rows
         for pose in path
     )
+
+
+def _nearest_free_point(point: Pose, mask: np.ndarray) -> Pose | None:
+    """Project a blocked pose onto the nearest free cell centre, keeping heading."""
+    col0, row0 = int(math.floor(point[0])), int(math.floor(point[1]))
+    cols, rows = mask.shape
+    best: tuple[float, float, float] | None = None
+    max_radius = max(cols, rows)
+    for radius in range(1, max_radius + 1):
+        for dcol in range(-radius, radius + 1):
+            for drow in (-radius, radius):
+                col, row = col0 + dcol, row0 + drow
+                if 0 <= col < cols and 0 <= row < rows and not mask[col, row]:
+                    dist = math.hypot(dcol, drow)
+                    if best is None or dist < best[0]:
+                        best = (dist, col + 0.5, row + 0.5)
+        for drow in range(-radius + 1, radius):
+            for dcol in (-radius, radius):
+                col, row = col0 + dcol, row0 + drow
+                if 0 <= col < cols and 0 <= row < rows and not mask[col, row]:
+                    dist = math.hypot(dcol, drow)
+                    if best is None or dist < best[0]:
+                        best = (dist, col + 0.5, row + 0.5)
+        if best is not None:
+            return (best[1], best[2], point[2])
+    return None
 
 
 def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
@@ -73,7 +100,16 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
         return SearchRoutePlan(request.uav_id, (), 0, (), 0)
 
     avoider = ObstacleAvoider(max_iterations=1000, seed=request.seed)
-    path: list[Pose] = [tuple(map(float, request.start_pose))]
+    start = tuple(map(float, request.start_pose))
+    if avoider._blocked(start, mask):
+        # A drifting hazard can cover the airframe between assignment and
+        # install.  Teleporting the route origin to the nearest free cell
+        # keeps the task flyable instead of faulting the whole plan.
+        projected = _nearest_free_point(start, mask)
+        if projected is None:
+            raise RuntimeError("no free cell exists to project the route start onto")
+        start = projected
+    path: list[Pose] = [start]
     scan_ranges: list[tuple[int, int, str]] = []
     transit_end_index = 0
 
@@ -94,12 +130,18 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
             connector = direct
         else:
             try:
-                connector = avoider.plan_path(path[-1], entry, mask, request.r_min)
+                connector = avoider.plan_path(
+                    path[-1], entry, mask, request.r_min,
+                    allow_fallback=request.allow_fallback,
+                )
             except RuntimeError:
                 connector = ObstacleAvoider(
                     max_iterations=2400,
                     seed=request.seed + 31 + index * 101,
-                ).plan_path(path[-1], entry, mask, request.r_min)
+                ).plan_path(
+                    path[-1], entry, mask, request.r_min,
+                    allow_fallback=request.allow_fallback,
+                )
         first_leg = not scan_ranges
         path.extend(connector[1:])
         if first_leg:

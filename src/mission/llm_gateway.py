@@ -7,6 +7,7 @@ import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Callable
@@ -85,6 +86,9 @@ class ProviderOutput(str):
         return instance
 
 
+_TRANSPORT_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="llm-transport")
+
+
 class OpenAICompatibleTransport:
     """Existing LongCat route through the OpenAI-compatible chat API."""
 
@@ -127,7 +131,20 @@ class OpenAICompatibleTransport:
         if thinking in {"enabled", "disabled"}:
             kwargs["extra_body"] = {"thinking": {"type": thinking}}
         try:
-            response = client.chat.completions.create(**kwargs)
+            if timeout_seconds is None:
+                response = client.chat.completions.create(**kwargs)
+            else:
+                # A wedged or byte-trickling provider socket can outlive the
+                # per-read timeout; bound the whole call on a pooled worker
+                # and close the client to abort the in-flight request.
+                future = _TRANSPORT_POOL.submit(client.chat.completions.create, **kwargs)
+                try:
+                    response = future.result(timeout=float(timeout_seconds))
+                except FuturesTimeoutError:
+                    client.close()
+                    raise TimeoutError(
+                        f"provider transport exceeded {float(timeout_seconds):.1f}s"
+                    )
             choice = response.choices[0]
             usage = getattr(response, "usage", None)
             metadata = {

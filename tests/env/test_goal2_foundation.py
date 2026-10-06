@@ -11,12 +11,12 @@ from src.schedule.datatypes import BBox, GridCoord, Region
 from src.vis.backend.frame_builder import build_frame
 
 
-def test_default_engine_has_two_left_mainland_bases_with_three_refuelling_slots_each():
+def test_default_engine_has_two_left_mainland_bases_with_five_refuelling_slots_each():
     config = ConfigLoader.load()
     engine = SimulationEngine(config, seed=19)
 
     assert len(engine.bases) == 2
-    assert all(base.capacity == 3 for base in engine.bases)
+    assert all(base.capacity == 5 for base in engine.bases)
     assert all(engine.land_mask[base.position.col, base.position.row] for base in engine.bases)
     assert math.dist(engine.bases[0].position, engine.bases[1].position) >= config.environment.base_min_distance_cells
 
@@ -154,7 +154,7 @@ def test_frame_exposes_two_bases_and_reset_scenario_metadata():
     )
 
     assert len(frame["bases"]) == 2
-    assert [base["capacity"] for base in frame["bases"]] == [3, 3]
+    assert [base["capacity"] for base in frame["bases"]] == [5, 5]
     assert len(frame["uavs"][0]["trail"]) == MAX_VISUAL_TRAIL_POINTS
     assert frame["scenario_seed"] == 43
     assert frame["reset_generation"] == 1
@@ -276,7 +276,9 @@ def test_moving_track_region_retires_newly_overlapping_search(monkeypatch):
     engine._resolve_search_track_conflicts(5.0)
 
     assert engine.allocator.sm.get_search_regions() == []
-    assert redirected == [(searcher.id, 5.0)]
+    # A retired search parks the searcher for retasking; it does not fly home.
+    assert redirected == []
+    assert searcher.status == "idle"
 
 
 def test_tracker_return_keeps_only_last_observed_contact_for_handoff():
@@ -389,6 +391,7 @@ def test_base_capacity_sends_fourth_arrival_to_holding_then_refuels():
     config = ConfigLoader.load()
     config.uav.refuel_time_min = 3
     config.environment.base_count = 1
+    config.environment.base_capacity = 3
     engine = SimulationEngine(config, seed=11)
     base = engine.base
     uavs = engine.uavs[:4]

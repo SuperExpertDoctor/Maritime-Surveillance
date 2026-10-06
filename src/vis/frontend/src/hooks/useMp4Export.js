@@ -43,7 +43,7 @@ export default function useMp4Export(replay, mapExporterRef) {
         onProgress: (value) => setProgress(15 + Math.round(value * 75)),
       });
       setProgress(92);
-      const response = await fetch("/api/export/mp4", {
+      const response = await fetch(`/api/export/mp4?file=${encodeURIComponent(filename)}`, {
         method: "POST",
         headers: { "Content-Type": "video/webm" },
         body: webm,
