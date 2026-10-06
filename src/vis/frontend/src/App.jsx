@@ -90,6 +90,10 @@ export default function App() {
   }, [editingAllowed]);
 
   useEffect(() => {
+    if (mode === "replay") setDrawerVisible(true);
+  }, [mode]);
+
+  useEffect(() => {
     if (mode !== "live" || !live.frame) return;
     const keyContext = `${live.frame.episode_id}|${live.frame.reset_generation}`;
     const changed = eventContext.current !== keyContext;
