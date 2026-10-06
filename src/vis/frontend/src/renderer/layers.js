@@ -332,18 +332,18 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
       continue;
     }
     const color = "#F59E0B";
-    // 覆盖任务区是一整块几何区域（互斥切块），不做格级染色：
-    // 扫描进度/新鲜度只进统计面板，区域本体按 bbox 平铺填充 + 统一外框。
+    // 覆盖任务区按栅格逐格高亮（保留原有视觉风格）：区域内每格
+    // 一个统一色块，不随新鲜度/扫描进度变化——统计指标只在侧栏。
     const [c0, r0, c1, r1] = region.bbox || [];
     if (!Number.isFinite(c0)) continue;
     const assigned = Boolean(region.assigned_uav_id);
-    ctx.fillStyle = `${color}${assigned ? "2e" : "22"}`;
-    ctx.fillRect(
-      ox + c0 * cellSize,
-      oy + r0 * cellSize,
-      (c1 - c0) * cellSize,
-      (r1 - r0) * cellSize,
-    );
+    ctx.fillStyle = `${color}${assigned ? "70" : "52"}`;
+    for (let col = c0; col < c1; col += 1) {
+      for (let row = r0; row < r1; row += 1) {
+        const point = coordToPixel(col, row, cellSize, ox, oy);
+        ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
+      }
+    }
     // 划分成员之间不允许重叠：统一画外框强调切块边界。
     const bounds = { minCol: c0, maxCol: c1 - 1, minRow: r0, maxRow: r1 - 1 };
     ctx.strokeStyle = "rgba(180, 83, 9, .85)";
