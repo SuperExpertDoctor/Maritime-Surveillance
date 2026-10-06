@@ -1,13 +1,23 @@
-"""Source-derived progressive surveillance state for environment vessels."""
+"""Source-derived progressive surveillance state for environment vessels.
+
+The registry is now a thin adapter over ``StateKernel``: observation
+sources are facts on the ``obs:<source>`` channel, the vessel class is a
+``vessel_class`` fact pinned at registration, and ``_SurveillanceRule`` is
+the domain rule that derives the stage. Public semantics are unchanged —
+same revision behaviour, same error types, same snapshot shape.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
 from typing import Literal
 
+from src.mission.state_kernel import Derivation, EntityState, Fact, StateKernel
+
 
 SurveillanceStage = Literal["undetected", "detected", "probing", "tracking"]
 
+_DOMAIN = "surveillance"
 _PRIORITY = {"undetected": 0, "detected": 1, "probing": 2, "tracking": 3}
 _SOURCE_STAGE = {
     "sar": "detected",
@@ -26,13 +36,37 @@ class SurveillanceState:
     cause_id: str
 
 
+class _SurveillanceRule:
+    domain = _DOMAIN
+
+    def evaluate(self, entity_id, facts, prior, now_min):
+        vessel_class = facts.get("vessel_class")
+        if vessel_class is not None and vessel_class.value == "type_i":
+            return Derivation("undetected", "type_i_pinned")
+        active = {
+            channel[4:]: fact
+            for channel, fact in facts.items()
+            if channel.startswith("obs:") and fact.value is True
+        }
+        if not active:
+            return Derivation("undetected", "sources_cleared")
+        source = max(
+            active,
+            key=lambda item: (_PRIORITY[_SOURCE_STAGE[item]], item),
+        )
+        return Derivation(_SOURCE_STAGE[source], active[source].source_id)
+
+
 class SurveillanceStageRegistry:
     """Derive one stage from the active observation sources for each vessel."""
 
-    def __init__(self) -> None:
+    def __init__(self, kernel: StateKernel | None = None) -> None:
+        self._kernel = kernel if kernel is not None else StateKernel()
+        if not self._kernel.has_rule(_DOMAIN):
+            self._kernel.register_rule(_SurveillanceRule())
+        # Registration order index keeps snapshot/derive behaviour identical
+        # to the pre-kernel store (entities are always registered before use).
         self._classes: dict[str, str] = {}
-        self._facts: dict[str, dict[str, tuple[bool, str]]] = {}
-        self._states: dict[str, SurveillanceState] = {}
 
     def register(
         self, ship_id: str, vessel_class: str, now_min: float,
@@ -42,13 +76,20 @@ class SurveillanceStageRegistry:
         if vessel_class not in {"type_i", "type_ii"}:
             raise ValueError("vessel_class must be type_i or type_ii")
         self._time(now_min)
-        if ship_id in self._states:
-            return self._states[ship_id]
+        if ship_id in self._classes:
+            return self._entity(self._kernel.state(_DOMAIN, ship_id))
         self._classes[ship_id] = vessel_class
-        self._facts[ship_id] = {}
-        state = SurveillanceState(ship_id, "undetected", 0, float(now_min), "register")
-        self._states[ship_id] = state
-        return state
+        entity = self._kernel.register_entity(
+            _DOMAIN,
+            ship_id,
+            "undetected",
+            now_min,
+            "register",
+            facts=(
+                Fact(_DOMAIN, ship_id, "vessel_class", vessel_class, float(now_min), "register"),
+            ),
+        )
+        return self._entity(entity)
 
     def set_fact(
         self,
@@ -58,7 +99,7 @@ class SurveillanceStageRegistry:
         now_min: float,
         cause_id: str,
     ) -> SurveillanceState | None:
-        if ship_id not in self._states:
+        if ship_id not in self._classes:
             raise KeyError(ship_id)
         if source not in _SOURCE_STAGE:
             return None
@@ -69,45 +110,29 @@ class SurveillanceStageRegistry:
         self._time(now_min)
         if not isinstance(cause_id, str) or not cause_id:
             raise ValueError("cause_id must be a non-empty string")
-        previous_fact = self._facts[ship_id].get(source)
-        current_fact = (active, cause_id)
-        if previous_fact == current_fact:
-            return None
-        if active:
-            self._facts[ship_id][source] = current_fact
-        else:
-            self._facts[ship_id].pop(source, None)
-        previous = self._states[ship_id]
-        stage, selected_source, selected_cause = self._derive(ship_id)
-        if stage == previous.stage and selected_cause == previous.cause_id:
-            return None
-        state = SurveillanceState(
-            ship_id,
-            stage,
-            previous.revision + 1,
-            float(now_min),
-            selected_cause,
+        entity = self._kernel.ingest(
+            _DOMAIN, ship_id, f"obs:{source}", active, now_min, cause_id,
         )
-        self._states[ship_id] = state
-        return state
+        if entity is None:
+            return None
+        return self._entity(entity)
 
     def remove(self, ship_id: str) -> None:
         self._classes.pop(ship_id, None)
-        self._facts.pop(ship_id, None)
-        self._states.pop(ship_id, None)
+        self._kernel.remove(_DOMAIN, ship_id)
 
     def snapshot(self, ship_id: str) -> SurveillanceState:
-        return self._states[ship_id]
+        return self._entity(self._kernel.state(_DOMAIN, ship_id))
 
-    def _derive(self, ship_id: str) -> tuple[SurveillanceStage, str | None, str]:
-        active = self._facts[ship_id]
-        if not active:
-            return "undetected", None, "sources_cleared"
-        source = max(
-            active,
-            key=lambda item: (_PRIORITY[_SOURCE_STAGE[item]], item),
+    @staticmethod
+    def _entity(entity: EntityState) -> SurveillanceState:
+        return SurveillanceState(
+            entity.entity_id,
+            entity.state,
+            entity.revision,
+            entity.changed_at_min,
+            entity.cause_id,
         )
-        return _SOURCE_STAGE[source], source, active[source][1]
 
     @staticmethod
     def _time(value: object) -> float:

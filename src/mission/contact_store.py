@@ -11,6 +11,7 @@ import math
 
 from src.env.ais_signal import AISSignal
 from src.mission.config import ContactConfig
+from src.mission.state_kernel import StateKernel
 from src.mission.contracts import (
     Assessment,
     ContactAssessment,
@@ -25,9 +26,11 @@ from src.mission.contracts import (
 
 class ContactStore:
     def __init__(self, config: ContactConfig, *, cell_size_km: float,
-                 ais_uncertainty_cells: float = 0.05):
+                 ais_uncertainty_cells: float = 0.05,
+                 kernel: StateKernel | None = None):
         if not math.isfinite(cell_size_km) or cell_size_km <= 0:
             raise ValueError("cell_size_km must be positive and finite")
+        self._kernel = kernel
         self.config = config
         self.cell_size_km = cell_size_km
         self.ais_uncertainty_cells = ais_uncertainty_cells
@@ -46,6 +49,10 @@ class ContactStore:
         self._dimension_evidence: dict[str, dict[str, EvidenceRecord]] = {}
         self._counter = 0
         self._now = 0.0
+
+    def attach_kernel(self, kernel: StateKernel) -> None:
+        """Late-bind a shared kernel when the store is built before it."""
+        self._kernel = kernel
 
     @property
     def aliases(self) -> dict[str, str]:
@@ -233,7 +240,7 @@ class ContactStore:
             estimated_position_cells=tuple(position.position_cells),
             estimated_velocity_cells_min=velocity,
         )
-        self._contacts[contact_id] = updated
+        self._store(updated, cause="position_ingest")
         self._passive_position_ids[position.position_id] = contact_id
         bursts = self._passive_bursts.setdefault(contact_id, {})
         bursts[position.burst_id] = position.observed_at_min
@@ -290,12 +297,27 @@ class ContactStore:
     def _event(self, event_type: str, **data) -> None:
         self._events.append({"type": event_type, **data})
 
+    def _store(self, contact: ContactSnapshot, *, cause: str) -> None:
+        """Single write path: records lifecycle changes into the kernel."""
+        previous = self._contacts.get(contact.contact_id)
+        if self._kernel is not None and (
+            previous is None or previous.state != contact.state
+        ):
+            self._kernel.emit_transition(
+                "contact", contact.contact_id,
+                previous.state if previous else None, contact.state,
+                self._now, cause,
+                revision=contact.revision,
+            )
+        self._contacts[contact.contact_id] = contact
+
     def _create(self, position, timestamp, mmsi=None) -> str:
         self._counter += 1
         cid = f"C{self._counter:04d}"
-        self._contacts[cid] = ContactSnapshot(
+        self._store(ContactSnapshot(
             cid, 0, "lost", "unknown", mmsi, timestamp, timestamp,
-            tuple(position), None, 0.0, None, None, None, None, timestamp, ())
+            tuple(position), None, 0.0, None, None, None, None, timestamp, ()),
+            cause="contact_created")
         return cid
 
     @staticmethod
@@ -481,7 +503,7 @@ class ContactStore:
                     state=("cleared" if c.vessel_class == "type_i" else "pending")
                     if c.state == "lost" and self._now - sample.observed_at_min <= self.config.stale_after_min
                     else c.state)
-        self._contacts[c.contact_id] = self._estimate(c)
+        self._store(self._estimate(c), cause="sample_ingest")
         return True
 
     def _trim(self, samples) -> tuple[ObservationSample, ...]:
@@ -536,7 +558,7 @@ class ContactStore:
                          samples=self._trim(tuple(replace(s, contact_id=aid) for s in (*a.samples, *v.samples))))
         if merged.vessel_class == "type_i":
             merged = replace(merged, state="cleared", assigned_uav_id=None, active_probe_id=None)
-        self._contacts[aid] = self._estimate(merged)
+        self._store(self._estimate(merged), cause="merge")
         del self._contacts[vid]
         # Fold the merged contact's dimension evidence into the survivor so
         # pre-merge radiation/motion facts still count toward its assessment.
@@ -554,9 +576,9 @@ class ContactStore:
         expired = []
         for c in self.list_snapshots():
             c = replace(c, samples=self._trim(c.samples))
-            self._contacts[c.contact_id] = c
+            self._store(c, cause="sample_trim")
             if c.state not in ("lost", "departed") and now_min - c.last_seen_min > self.config.stale_after_min:
-                self._contacts[c.contact_id] = replace(c, state="lost", assigned_uav_id=None, active_probe_id=None)
+                self._store(replace(c, state="lost", assigned_uav_id=None, active_probe_id=None), cause="stale_expire")
                 self._confirmations.pop(c.contact_id, None)
                 expired.append(c.contact_id)
                 self._event("contact_lost", contact_id=c.contact_id, observed_at_min=now_min,
@@ -578,8 +600,9 @@ class ContactStore:
         if any(other.contact_id != c.contact_id and other.assigned_uav_id == uav_id
                for other in self.list_snapshots()):
             raise ValueError("UAV already reserved")
-        self._contacts[c.contact_id] = replace(c, assigned_uav_id=uav_id, active_probe_id=probe_id,
-                                              state="approaching" if probe_id else "tracking")
+        self._store(replace(c, assigned_uav_id=uav_id, active_probe_id=probe_id,
+                            state="approaching" if probe_id else "tracking"),
+                    cause="reserve")
 
     def transition_reservation(
         self,
@@ -595,10 +618,13 @@ class ContactStore:
             or c.active_probe_id != expected_probe_id
         ):
             raise ValueError("reservation owner or probe does not match")
-        self._contacts[c.contact_id] = replace(
-            c,
-            active_probe_id=new_probe_id,
-            state="approaching" if new_probe_id else "tracking",
+        self._store(
+            replace(
+                c,
+                active_probe_id=new_probe_id,
+                state="approaching" if new_probe_id else "tracking",
+            ),
+            cause="reservation_transition",
         )
 
     def release(self, contact_id: str, now_min: float, reason: str) -> None:
@@ -610,8 +636,9 @@ class ContactStore:
         cooldown = (now_min + self.config.probe_retry_cooldown_min
                     if reason in ("timeout", "probe_timeout", "approach_timeout")
                     else c.next_probe_not_before_min)
-        self._contacts[c.contact_id] = replace(c, state=state, assigned_uav_id=None,
-                                              active_probe_id=None, next_probe_not_before_min=cooldown)
+        self._store(replace(c, state=state, assigned_uav_id=None,
+                            active_probe_id=None, next_probe_not_before_min=cooldown),
+                    cause="release")
         self._event("contact_released", contact_id=c.contact_id, uav_id=c.assigned_uav_id,
                     probe_id=c.active_probe_id, reason=reason)
 
@@ -627,7 +654,7 @@ class ContactStore:
         """Restore a reservation snapshot after a pre-commit failure."""
         snapshots, event_count = state
         for contact_id, snapshot in snapshots:
-            self._contacts[contact_id] = snapshot
+            self._store(snapshot, cause="reservation_restore")
         del self._events[event_count:]
 
     def apply_assessment(self, assessment: Assessment) -> None:
@@ -668,7 +695,7 @@ class ContactStore:
                         next_probe_not_before_min=assessment.assessed_at_min + self.config.type_i_recheck_cooldown_min)
         elif assessment.vessel_class == "type_ii":
             c = replace(c, state="tracking")
-        self._contacts[c.contact_id] = c
+        self._store(c, cause="assessment")
         if assessment.vessel_class in ("type_i", "type_ii"):
             event_prefix = assessment.vessel_class
             self._event(
@@ -747,7 +774,7 @@ class ContactStore:
         updated = replace(contact, **update_fields)
         if assessment.activity == "confirmed_violation":
             updated = replace(updated, state="tracking")
-        self._contacts[updated.contact_id] = updated
+        self._store(updated, cause="dimension_assessment")
         self._event(
             "assessment_changed",
             contact_id=updated.contact_id,

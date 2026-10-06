@@ -9,6 +9,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from src.mission.contracts import Intent, IntentStatus
+from src.mission.state_kernel import StateKernel
 
 
 _CREATE_FIELDS = {
@@ -41,6 +42,7 @@ class IntentStore:
         self,
         searchable_mask: np.ndarray,
         config: Any | None = None,
+        kernel: StateKernel | None = None,
     ) -> None:
         mask = np.asarray(searchable_mask, dtype=bool)
         if mask.ndim != 2 or not mask.size:
@@ -54,6 +56,7 @@ class IntentStore:
         self._freshness_threshold = float(getattr(config, "freshness_threshold", 0.7))
         self._intents: dict[str, Intent] = {}
         self._next_id = 1
+        self._kernel = kernel
 
     def create(self, data: dict, now_min: float) -> Intent:
         now = _finite_nonnegative(now_min, "now_min")
@@ -73,6 +76,7 @@ class IntentStore:
         )
         self._intents[intent.intent_id] = intent
         self._next_id += 1
+        self._emit(intent.intent_id, None, "active", intent.revision, now, "operator_create")
         return intent
 
     def update(
@@ -108,6 +112,7 @@ class IntentStore:
             **fields,
         )
         self._intents[intent_id] = updated
+        self._emit(intent_id, "active", "active", updated.revision, now, "operator_update")
         return updated
 
     def cancel(self, intent_id: str, expected_revision: int, now_min: float) -> Intent:
@@ -115,6 +120,7 @@ class IntentStore:
         intent = self._current_active(intent_id, expected_revision)
         cancelled = replace(intent, revision=intent.revision + 1, lifecycle="cancelled")
         self._intents[intent_id] = cancelled
+        self._emit(intent_id, "active", "cancelled", cancelled.revision, now_min, "operator_cancel")
         return cancelled
 
     def expire(self, now_min: float) -> tuple[Intent, ...]:
@@ -125,6 +131,7 @@ class IntentStore:
                 intent = replace(intent, lifecycle="expired")
                 self._intents[intent_id] = intent
                 expired.append(intent)
+                self._emit(intent_id, "active", "expired", intent.revision, now, "time_expiry")
         return tuple(expired)
 
     def active(self) -> tuple[Intent, ...]:
@@ -201,6 +208,21 @@ class IntentStore:
                                           candidate_list, actionable),
             ))
         return tuple(statuses)
+
+    def _emit(
+        self,
+        intent_id: str,
+        previous: str | None,
+        new: str,
+        revision: int,
+        at_min: float,
+        cause: str,
+    ) -> None:
+        if self._kernel is not None:
+            self._kernel.emit_transition(
+                "intent", intent_id, previous, new, at_min, cause,
+                revision=revision,
+            )
 
     def _current_active(self, intent_id: str, expected_revision: int) -> Intent:
         if not isinstance(intent_id, str) or intent_id not in self._intents:

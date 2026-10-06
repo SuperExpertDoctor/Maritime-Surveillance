@@ -92,7 +92,7 @@ def test_suspected_violation_commits_below_terminal_confidence_gate():
     assert updated.vessel_class == "unknown"
 
 
-def test_suspected_contact_is_track_candidate_but_probe_wins():
+def test_suspected_unclassified_contact_is_not_a_track_candidate():
     store = _store()
     contact_id = store.ingest_passive_position(_position("POS-1", "B-1", 1.0))
     store.ingest_passive_position(_position("POS-2", "B-2", 2.0))
@@ -104,15 +104,15 @@ def test_suspected_contact_is_track_candidate_but_probe_wins():
     )
     contact = store.snapshot(contact_id)
 
-    assert TaskCatalog._is_track_candidate(contact)
+    # Tracking is reserved for confirmed type_ii targets: a suspicious but
+    # unclassified contact keeps going through probe for identification.
+    assert not TaskCatalog._is_track_candidate(contact)
     assert TaskCatalog._is_probe_candidate(contact, now=2.0)
 
-    # Probe cooldown blocks the probe path; the track path must still open.
     from dataclasses import replace
 
-    cooled = replace(contact, next_probe_not_before_min=30.0)
-    assert not TaskCatalog._is_probe_candidate(cooled, now=2.0)
-    assert TaskCatalog._is_track_candidate(cooled)
+    as_type_ii = replace(contact, vessel_class="type_ii")
+    assert TaskCatalog._is_track_candidate(as_type_ii)
 
 
 def test_evasion_plus_radiation_confirms_violation():

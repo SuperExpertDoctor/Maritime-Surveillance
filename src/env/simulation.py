@@ -97,6 +97,7 @@ from src.mission.intent_commands import (
     RuntimeCommandQueue,
 )
 from src.mission.intent_store import IntentStore, attach_intent_owners
+from src.mission.state_kernel import StateKernel
 from src.mission.mission_scheduler import actionable_edges
 from src.mission.vessel_commands import VesselCommandQueue, VesselCommandResult
 from src.mission.trajectory_features import advance_probe, build_features
@@ -235,8 +236,14 @@ class SimulationEngine:
         self.allocator.sm.configure_coverage_service(
             self._intent_searchable_mask(),
         )
+        # Unified state kernel: all entity lifecycle changes flow through one
+        # Fact -> Rule -> EntityState -> StateTransition pathway.
+        self.state_kernel = StateKernel()
+        self.state_kernel.subscribe(self._record_state_transition)
+        self.allocator.sm.contacts.attach_kernel(self.state_kernel)
         self.intents = IntentStore(
             self._intent_searchable_mask(), config.mission.intent,
+            kernel=self.state_kernel,
         )
         self.intent_commands = IntentCommandQueue(
             config.mission.intent.mutation_queue_limit,
@@ -415,7 +422,9 @@ class SimulationEngine:
         self._ship_position_history: dict[str, list[tuple[float, tuple[float, float]]]] = {
             ship.id: [(0.0, ship.float_position)] for ship in self.ships
         }
-        self.surveillance_stages = SurveillanceStageRegistry()
+        self.surveillance_stages = SurveillanceStageRegistry(
+            kernel=self.state_kernel,
+        )
         for ship in self.ships:
             self.surveillance_stages.register(
                 ship.id, ship.vessel_class, 0.0,
@@ -885,6 +894,20 @@ class SimulationEngine:
         )
         self._next_scenario_vessel_number += 1
         return vessel
+
+    def _record_state_transition(self, transition) -> None:
+        """Bridge kernel transitions into the unified event stream."""
+        self.allocator.sm.add_event(
+            "state_transition",
+            {
+                "domain": transition.domain,
+                "entity_id": transition.entity_id,
+                "previous_state": transition.previous_state,
+                "state": transition.state,
+                "revision": transition.revision,
+                "cause_id": transition.cause_id,
+            },
+        )
 
     def _set_surveillance_fact(
         self,
@@ -2688,10 +2711,14 @@ class SimulationEngine:
                 (math.dist(ship.float_position, uav.float_position)
                  for uav in self.uavs), default=math.inf,
             )
-            self.red_commander.threat_gate.update(
-                ship.id, ship.vessel_class, minimum_distance, current_time
-            )
             stage = self.surveillance_stages.snapshot(ship.id).stage
+            self.red_commander.threat_gate.update(
+                ship.id,
+                ship.vessel_class,
+                minimum_distance,
+                current_time,
+                surveilled=stage in ("probing", "tracking"),
+            )
             ships.append(
                 RedShipSnapshot(
                     ship_id=ship.id,
@@ -2707,7 +2734,7 @@ class SimulationEngine:
             if (
                 not ship.departed
                 and ship.vessel_class == "type_ii"
-                and stage in ("detected", "probing", "tracking")
+                and stage in ("probing", "tracking")
             ):
                 active_signature.append((ship.id, stage))
         snapshot = RedSnapshot(

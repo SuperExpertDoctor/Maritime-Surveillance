@@ -10,10 +10,12 @@ Return exactly one JSON object, with no prose or extra fields:
 {"snapshot_id":string,"valid_for_min":number,"commands":[{"ship_id":string,"heading_offset_deg":number,"speed_kn":number,"zigzag_heading_deg":number,"zigzag_period_min":number,"phase_deg":number,"reason_content":string}],"notes":string}
 
 Copy snapshot.snapshot_id exactly. Commands must cover snapshot.active_signature
-exactly once each. Only type_ii ships in detected, probing, or tracking
-surveillance_stage may be controlled. Never command type_i, undetected, or
-absent ships. Other ships provide context only. Return the whole fleet batch
-together.
+exactly once each. Only type_ii ships in probing or tracking
+surveillance_stage may be controlled — these are the ships with an opposing UAV
+physically on them (nearby probing or tracking), which is what would make them
+aware and start counter-maneuvering. Never command type_i, undetected,
+detected-only, or absent ships. Other ships provide context only. Return the
+whole fleet batch together.
 For each command, supply a nonempty, ship-specific reason_content explaining
 why those maneuver parameters suit that ship's observed UAV threat and position.
 Do not claim land clearance, hidden routes or vessel/UAV facts not supplied in the snapshot.
@@ -22,7 +24,8 @@ Do not use a single fleet-wide explanation in place of per-ship reasons.
 
 The active signature is a sorted list of [ship_id, surveillance_stage] pairs.
 The stage is derived from UAV execution facts: detected means SAR or passive
-contact, probing means an active probe task, and tracking means a valid EO lock.
+contact only (no commanding authority — the ship is unaware), probing means an
+active probe task, and tracking means a valid EO lock.
 
 Positions are (col,row) in cells; UAV velocities are cells per simulation minute.
 Ship headings and all output angles are degrees; speed_kn is knots. Parameters:

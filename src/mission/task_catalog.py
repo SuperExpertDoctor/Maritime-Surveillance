@@ -139,12 +139,10 @@ class TaskCatalog:
 
     @staticmethod
     def _is_track_candidate(contact: ContactSnapshot) -> bool:
+        # Track only true targets: confirmed type_ii vessels. Suspicious but
+        # unclassified contacts go through probe first, then escalate.
         return (
-            (
-                contact.vessel_class == "type_ii"
-                or getattr(contact, "activity", "unknown")
-                in {"suspected_violation", "confirmed_violation"}
-            )
+            contact.vessel_class == "type_ii"
             and contact.state not in {"cleared", "lost", "departed"}
             and contact.assigned_uav_id is None
             and contact.active_probe_id is None

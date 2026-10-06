@@ -4,87 +4,61 @@ export function informationCategory(value, grid = {}) {
   return value >= white ? "white" : value >= gray ? "gray" : "black";
 }
 
-const TASK_PHASES = {
-  coverage: {
-    transit: { label: "飞往搜索区", tone: "transit", phase: "coverage_transit" },
-    transit_astar: { label: "飞往搜索区", tone: "transit", phase: "coverage_transit" },
-    align_scan: { label: "搜索扫描", tone: "search", phase: "coverage_scan" },
-    scanning: { label: "搜索扫描", tone: "search", phase: "coverage_scan" },
-    completed: { label: "待命", tone: "idle", phase: "idle" },
-  },
-  probe: {
-    near: { label: "近距观察", tone: "observe", phase: "probe_near" },
-    closing: { label: "近距观察", tone: "observe", phase: "probe_near" },
-    awaiting_assessment: { label: "等待研判", tone: "assessment", phase: "probe_assessment" },
-    finished: { label: "待命", tone: "idle", phase: "idle" },
-  },
-  track: {
-    approach_astar: { label: "接近跟踪", tone: "approach", phase: "track_approach" },
-    orbit_entry: { label: "接近跟踪", tone: "approach", phase: "track_approach" },
-    tracking: { label: "持续跟踪", tone: "track", phase: "track_active" },
-    lost: { label: "待命", tone: "idle", phase: "idle" },
-    completed: { label: "待命", tone: "idle", phase: "idle" },
-  },
-  return: {
-    return: { label: "返航", tone: "return", phase: "return" },
-    transit: { label: "返航", tone: "return", phase: "return" },
-  },
-  holding: {
-    holding: { label: "等待降落", tone: "holding", phase: "holding" },
-  },
+// Canonical UAV operating states — the algorithm only allows three:
+// 覆盖搜索 (coverage search, including the idle/transit pool), 跟踪目标
+// (all contact-directed work: probing and tracking), 返航基地 (return leg,
+// landing queue, refueling). A crashed airframe is a terminal marker, not
+// an operating state.
+const CANONICAL = {
+  search: { label: "覆盖搜索", tone: "search", phase: "coverage" },
+  tracking: { label: "跟踪目标", tone: "track", phase: "tracking" },
+  returning: { label: "返航基地", tone: "return", phase: "returning" },
+  crashed: { label: "坠毁", tone: "failed", phase: "crashed" },
 };
 
-const LEGACY_STATUS = {
-  idle: { label: "待命", tone: "idle", phase: "idle" },
-  transit: { label: "飞往搜索区", tone: "transit", phase: "coverage_transit" },
-  searching: { label: "搜索扫描", tone: "search", phase: "coverage_scan" },
-  tracking: { label: "持续跟踪", tone: "track", phase: "track_active" },
-  returning: { label: "返航", tone: "return", phase: "return" },
-  holding: { label: "等待降落", tone: "holding", phase: "holding" },
-  refueling: { label: "加油", tone: "refuel", phase: "refuel" },
-};
+const TARGET_TASK_TYPES = new Set(["probe", "track"]);
+const RETURN_TASK_TYPES = new Set(["return", "holding"]);
 
-function phaseResult(taskType, phase) {
-  return TASK_PHASES[taskType]?.[phase] || null;
-}
-
-// A hold far from home base is a retask loiter, not a landing queue.
-function holdingDisplayState(uav) {
+function nearHomeBase(uav) {
   const pos = uav.position;
   const home = uav.home_base_grid;
   if (pos?.length >= 2 && home?.length >= 2) {
-    const dist = Math.hypot(pos[0] - home[0], pos[1] - home[1]);
-    if (dist > 3) return { label: "等待任务", tone: "holding", phase: "holding" };
+    return Math.hypot(pos[0] - home[0], pos[1] - home[1]) <= 3;
   }
-  return { label: "等待降落", tone: "holding", phase: "holding" };
+  return true;
 }
 
-function probeDisplayState(taskVisual) {
-  if (taskVisual.phase === "baseline") {
-    return taskVisual.observation_started
-      ? { label: "基线观察", tone: "observe", phase: "probe_baseline" }
-      : { label: "接近调查", tone: "approach", phase: "probe_approach" };
-  }
-  return phaseResult("probe", taskVisual.phase)
-    || { label: "接近调查", tone: "approach", phase: "probe_approach" };
-}
-
-/** Return the one display state shared by map, sidebar, and details. */
+/** Return the one canonical display state shared by map, sidebar, details. */
 export function uavDisplayState(uav = {}) {
   if (uav.operational_status === "failed") {
-    return { label: "故障停用", tone: "failed", phase: "failed" };
+    return CANONICAL.crashed;
   }
   const taskVisual = uav.task_visual;
   if (taskVisual && taskVisual.route_source !== "none") {
     if (taskVisual.route_status === "cleared") {
-      return { label: "待命", tone: "idle", phase: "idle" };
+      return uav.status === "tracking" ? CANONICAL.tracking : CANONICAL.search;
     }
-    if (taskVisual.task_type === "probe") return probeDisplayState(taskVisual);
-    const mapped = phaseResult(taskVisual.task_type, taskVisual.phase);
-    if (mapped) return mapped;
+    if (TARGET_TASK_TYPES.has(taskVisual.task_type)) {
+      return CANONICAL.tracking;
+    }
+    if (RETURN_TASK_TYPES.has(taskVisual.task_type)) {
+      // A hold far from home base is a retask loiter — still in the
+      // coverage fleet, not a landing queue.
+      if (taskVisual.task_type === "holding" && !nearHomeBase(uav)) {
+        return CANONICAL.search;
+      }
+      return CANONICAL.returning;
+    }
+    return CANONICAL.search;
   }
-  if (uav.status === "holding") return holdingDisplayState(uav);
-  return LEGACY_STATUS[uav.status] || LEGACY_STATUS.idle;
+  if (uav.status === "tracking") return CANONICAL.tracking;
+  if (uav.status === "returning" || uav.status === "refueling") {
+    return CANONICAL.returning;
+  }
+  if (uav.status === "holding" && nearHomeBase(uav)) {
+    return CANONICAL.returning;
+  }
+  return CANONICAL.search;
 }
 
 export function taskDisplayLabel(uav) {

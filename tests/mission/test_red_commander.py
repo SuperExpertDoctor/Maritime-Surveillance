@@ -122,7 +122,7 @@ def snapshot(snapshot_id="S1", now=0.0, active=("V1", "V2")):
         red.RedShipSnapshot(
             ship_id=ship_id,
             vessel_class=vessel_class,
-            surveillance_stage="detected" if ship_id in active else "undetected",
+            surveillance_stage="probing" if ship_id in active else "undetected",
             position_cells=(float(i), 4.0),
             heading_deg=30.0, speed_kn=18.0, normal_tangent_deg=20.0,
             ais_enabled=True,
@@ -134,7 +134,7 @@ def snapshot(snapshot_id="S1", now=0.0, active=("V1", "V2")):
     return red.RedSnapshot(
         snapshot_id=snapshot_id, sim_time_min=now, ships=ships,
         uavs=(("U1", (2.0, 4.0), (-1.0, 0.0)),),
-        active_signature=tuple(sorted((ship_id, "detected") for ship_id in active)),
+        active_signature=tuple(sorted((ship_id, "probing") for ship_id in active)),
         land_mask_version=1,
     )
 
@@ -188,7 +188,7 @@ def test_two_targets_in_one_frame_receive_one_centralized_plan(scripted_transpor
     assert len(transport.calls) == len(gateway.call_log) == 1
     assert transport.calls[0]["role"] == "red_commander"
     context = json.loads(transport.calls[0]["messages"][1]["content"])
-    assert context["snapshot"]["active_signature"] == [["V1", "detected"], ["V2", "detected"]]
+    assert context["snapshot"]["active_signature"] == [["V1", "probing"], ["V2", "probing"]]
     assert len(context["snapshot"]["ships"]) == 4
     assert context["snapshot"]["uavs"] == [["U1", [2.0, 4.0], [-1.0, 0.0]]]
     assert commander.installation.plan is plan
@@ -625,12 +625,13 @@ def test_blocked_same_snapshot_can_be_retried_after_resume(scripted_transport, s
 
 
 @pytest.mark.parametrize("mutation", [
+    lambda s: replace(s, active_signature=(("V1", "tracking"),)),
+    lambda s: replace(s, active_signature=(("V1", "tracking"), ("V2", "tracking"), ("V2", "tracking"))),
+    lambda s: replace(s, active_signature=(("V1", "tracking"), ("V2", "tracking"), ("C1", "tracking"))),
+    lambda s: replace(s, active_signature=(("V1", "tracking"), ("V2", "tracking"), ("V3", "tracking"))),
+    lambda s: replace(s, active_signature=(("V1", "tracking"), ("V2", "tracking"), ("departed", "tracking"))),
+    lambda s: replace(s, active_signature=(("V1", "tracking"), ("V2", ["tracking"]))),
     lambda s: replace(s, active_signature=(("V1", "detected"),)),
-    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("V2", "detected"))),
-    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("C1", "detected"))),
-    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("V3", "detected"))),
-    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", "detected"), ("departed", "detected"))),
-    lambda s: replace(s, active_signature=(("V1", "detected"), ("V2", ["detected"]))),
     lambda s: replace(s, ships=(*s.ships, s.ships[0])),
     lambda s: replace(s, ships=(replace(s.ships[0], vessel_class="type_i"), *s.ships[1:])),
     lambda s: replace(s, ships=(replace(s.ships[0], surveillance_stage="invalid"), *s.ships[1:])),

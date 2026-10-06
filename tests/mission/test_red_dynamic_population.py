@@ -23,7 +23,7 @@ def red_module():
     return red_commander
 
 
-def ship(ship_id, stage="detected", vessel_class="type_ii"):
+def ship(ship_id, stage="probing", vessel_class="type_ii"):
     red = red_module()
     return red.RedShipSnapshot(
         ship_id=ship_id,
@@ -37,7 +37,7 @@ def ship(ship_id, stage="detected", vessel_class="type_ii"):
     )
 
 
-def snapshot(snapshot_id="S1", now=0.0, active=(('V1', 'detected'),)):
+def snapshot(snapshot_id="S1", now=0.0, active=(('V1', 'probing'),)):
     red = red_module()
     ships = tuple(ship(ship_id, stage=stage) for ship_id, stage in active)
     return red.RedSnapshot(
@@ -77,8 +77,8 @@ def commander(responses):
 
 
 def test_stage_change_bypasses_periodic_reuse():
-    first = snapshot(active=(('V1', 'detected'),))
-    second = snapshot("S2", 1.0, (('V1', 'probing'),))
+    first = snapshot(active=(('V1', 'probing'),))
+    second = snapshot("S2", 1.0, (('V1', 'tracking'),))
     commander_instance, transport = commander([
         plan_payload("S1", first.active_signature),
         plan_payload("S2", second.active_signature),
@@ -94,10 +94,10 @@ def test_stage_change_bypasses_periodic_reuse():
 
 def test_response_must_exactly_cover_dynamic_signature():
     current = snapshot(
-        active=(('V1', 'detected'), ('V2', 'tracking')),
+        active=(('V1', 'probing'), ('V2', 'tracking')),
     )
     commander_instance, _transport = commander([
-        plan_payload("S1", (('V1', 'detected'),)),
+        plan_payload("S1", (('V1', 'probing'),)),
     ] * 3)
 
     with pytest.raises(red_module().RedDecisionBlocked, match="active_signature"):
@@ -111,11 +111,11 @@ def test_only_active_type_ii_stages_enter_signature_and_output_has_no_trajectory
         sim_time_min=0.0,
         ships=(
             ship("V1", "undetected"),
-            ship("V2", "detected"),
+            ship("V2", "probing"),
             ship("V3", "undetected", "type_i"),
         ),
         uavs=(),
-        active_signature=(("V2", "detected"),),
+        active_signature=(("V2", "probing"),),
         land_mask_version=1,
     )
     commander_instance, transport = commander([

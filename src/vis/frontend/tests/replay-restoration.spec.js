@@ -18,22 +18,27 @@ function screenshotPath(testInfo, name) {
   return evidencePath(testInfo, `${name}.png`);
 }
 
-test("approaching probe is not displayed as acquired tracking", async ({ page }) => {
+test("UAV display collapses to the three canonical states", async ({ page }) => {
   await page.goto("/");
-  const state = await page.evaluate(async () => {
+  const states = await page.evaluate(async () => {
     const { uavDisplayState } = await import("/src/renderer/displayState.js");
-    return uavDisplayState({
-      status: "tracking",
-      operation_mode: "probe",
-      sensor_mode: "off",
-      task_visual: {
-        task_type: "probe",
-        phase: "baseline",
-        observation_started: false,
-      },
-    });
+    return {
+      probe: uavDisplayState({
+        status: "tracking",
+        task_visual: { task_type: "probe", phase: "baseline", route_source: "controller" },
+      }),
+      coverage: uavDisplayState({
+        status: "searching",
+        task_visual: { task_type: "coverage", phase: "scanning", route_source: "controller" },
+      }),
+      returning: uavDisplayState({ status: "returning" }),
+      crashed: uavDisplayState({ operational_status: "failed", status: "searching" }),
+    };
   });
-  expect(state).toEqual({ label: "接近调查", tone: "approach", phase: "probe_approach" });
+  expect(states.probe.label).toBe("跟踪目标");
+  expect(states.coverage.label).toBe("覆盖搜索");
+  expect(states.returning.label).toBe("返航基地");
+  expect(states.crashed.label).toBe("坠毁");
 });
 
 test("label layout is deterministic, bounded, and priority aware", async ({ page }) => {

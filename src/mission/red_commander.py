@@ -59,10 +59,11 @@ class ThreatGate:
     def update(
         self, ship_id: str, vessel_class: VesselClass,
         min_distance_cells: float, now_min: float,
+        surveilled: bool = True,
     ) -> str:
         gate = self._ships.setdefault(ship_id, _GateState())
         previous_state = gate.state
-        if vessel_class != "type_ii":
+        if vessel_class != "type_ii" or not surveilled:
             gate.state, gate.clear_since_min = "normal", None
         elif gate.state == "normal":
             if min_distance_cells < self.config.detect_uav_radius_cells:
@@ -181,7 +182,7 @@ def _validate_snapshot(snapshot: RedSnapshot) -> None:
         ship_ids.append(ship.ship_id)
         if (
             ship.vessel_class == "type_ii"
-            and ship.surveillance_stage in ("detected", "probing", "tracking")
+            and ship.surveillance_stage in ("probing", "tracking")
         ):
             eligible.append((ship.ship_id, ship.surveillance_stage))
     signature = []
@@ -190,7 +191,7 @@ def _validate_snapshot(snapshot: RedSnapshot) -> None:
             not isinstance(item, tuple)
             or len(item) != 2
             or not _identifier(item[0])
-            or item[1] not in ("detected", "probing", "tracking")
+            or item[1] not in ("probing", "tracking")
         ):
             raise RedDecisionBlocked("invalid red active_signature")
         signature.append(item)

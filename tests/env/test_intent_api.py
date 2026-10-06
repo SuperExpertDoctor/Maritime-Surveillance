@@ -306,7 +306,7 @@ def test_bounded_red_retries_pause_until_manual_retry_and_resume_in_place():
     engine = SimulationEngine(ConfigLoader.load(), seed=42,
                               llm_gateway=LLMGateway(transport=transport))
     target = next(ship for ship in engine.ships if ship.vessel_class == 'type_ii')
-    engine.surveillance_stages.set_fact(target.id, 'sar', True, 0.0, 'test-retry')
+    engine.surveillance_stages.set_fact(target.id, 'probe', True, 0.0, 'test-retry')
     episode = engine.episode_id
     positions = [ship.float_position for ship in engine.ships]
     app = create_app(engine.config, engine.allocator.sm, engine=engine)
