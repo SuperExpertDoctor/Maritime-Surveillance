@@ -32,6 +32,17 @@ from src.mission.contracts import (
 from src.control.common.contracts import UavRouteSnapshot
 
 
+def _region_letter(index: int) -> str:
+    """Map a monotonic sequence index to A…Z, AA, AB… for map labels."""
+    letters = ""
+    n = index
+    while True:
+        letters = chr(65 + n % 26) + letters
+        n = n // 26 - 1
+        if n < 0:
+            return letters
+
+
 _OPERATION_BY_STATUS = {
     "idle": "idle",
     "transit": "transit",
@@ -74,6 +85,7 @@ class StateManager:
             for index in range(config.uav.count)
         ]
         self._search_regions: list[Region] = []
+        self._search_display_id_seq = 0
         self._track_regions: list[Region] = []
         self._track_region_counter = 0
         self._previous_search_regions: list[Region] = []
@@ -354,9 +366,19 @@ class StateManager:
     def set_search_regions(self, regions: list[Region]) -> None:
         self._previous_search_regions = list(self._search_regions)
         self._search_regions = regions
+        self._ensure_search_display_ids()
 
     def get_search_regions(self) -> list[Region]:
+        self._ensure_search_display_ids()
         return self._search_regions
+
+    def _ensure_search_display_ids(self) -> None:
+        """Assign a stable map letter (A/B/C…) to each new search region."""
+        for region in self._search_regions:
+            if region.type != "search" or region.display_id:
+                continue
+            region.display_id = _region_letter(self._search_display_id_seq)
+            self._search_display_id_seq += 1
 
     def get_active_search_regions(self) -> list[Region]:
         return [region for region in self._search_regions if region.status == "active"]

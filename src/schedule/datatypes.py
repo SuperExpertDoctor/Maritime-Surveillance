@@ -34,6 +34,9 @@ class Region:
     created_cycle: int = 0
     target_group_id: Optional[str] = None
     completion_basis: str = "legacy_observation"
+    # 地图显示用字母代号（A/B/C…），由 StateManager 在区域首次入列时分配，
+    # 生命周期内固定、不回收，便于画面/侧栏/日志互相索引。
+    display_id: str = ""
 
 
 @dataclass

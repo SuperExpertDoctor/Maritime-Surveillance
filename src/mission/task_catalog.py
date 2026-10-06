@@ -37,6 +37,16 @@ _SEARCH_TASK_KINDS = {"search", "direction_search", "investigation"}
 _PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
+def _bboxes_overlap(left, right) -> bool:
+    """Half-open (c0, r0, c1, r1) rectangle overlap."""
+    return not (
+        left[2] <= right[0]
+        or right[2] <= left[0]
+        or left[3] <= right[1]
+        or right[3] <= left[1]
+    )
+
+
 class TaskCatalog:
     """Maintain the complete stable candidate queue for one episode."""
 
@@ -454,6 +464,36 @@ class TaskCatalog:
                         self._finite(previous.get(name), 0.0),
                         self._finite(item.get(name), 0.0),
                     )
+        # 重点区/事件优先由任务区域划分覆盖：当某个 partition:* 划分候选已与
+        # 某 active intent 重叠时，丢弃与该 intent 重叠的小型 search: 补丁候选
+        # （几何/禁飞导致无 partition 可覆盖时，补丁候选仍保留作为兜底）。
+        active_intent_boxes = [
+            tuple(intent.bbox)
+            for intent in intents
+            if getattr(intent, "lifecycle", "active") == "active"
+            and self._bbox(intent.bbox) is not None
+        ]
+        if active_intent_boxes:
+            covered_intents = set()
+            for item in merged.values():
+                if not str(item.get("task_id", "")).startswith("partition:"):
+                    continue
+                for index, intent_box in enumerate(active_intent_boxes):
+                    if _bboxes_overlap(item["bbox"], intent_box):
+                        covered_intents.add(index)
+            if covered_intents:
+                merged = {
+                    bbox: item
+                    for bbox, item in merged.items()
+                    if not (
+                        item.get("kind", "search") == "search"
+                        and not str(item.get("task_id", "")).startswith("partition:")
+                        and any(
+                            _bboxes_overlap(item["bbox"], active_intent_boxes[index])
+                            for index in covered_intents
+                        )
+                    )
+                }
         return tuple(merged.values())
 
     def _resource_ids(self, state, now: float):

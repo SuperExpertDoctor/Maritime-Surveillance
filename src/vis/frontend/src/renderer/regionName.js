@@ -41,7 +41,58 @@ export function regionDisplayName(id, anchor = null) {
 
 export function regionNameById(regions) {
   const byId = new Map((regions || []).map((region) => [region.id, region]));
-  return (id) => regionDisplayName(id, regionAnchor(byId.get(id)));
+  return (id) => {
+    const region = byId.get(id);
+    const name = regionDisplayName(id, regionAnchor(region));
+    const letter = regionLetterId(region);
+    return letter ? `${letter} ${name}` : name;
+  };
+}
+
+// 任务区域字母代号：地图上只标 A/B/C… 简称，内部任务 id 仍唯一。
+// 优先用后端正 display_id；旧回放数据没有 display_id 时按首次出现顺序补字母，
+// 同一次会话内字母稳定（不回收到其他区域）。
+const _letterByRegionId = new Map();
+let _letterSequence = 0;
+
+function _letterForIndex(index) {
+  let n = index;
+  let letters = "";
+  do {
+    letters = String.fromCharCode(65 + (n % 26)) + letters;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return letters;
+}
+
+export function regionLetterId(region) {
+  if (!region) return "";
+  const supplied = String(region.display_id || "").trim();
+  if (supplied) return supplied;
+  const id = String(region.id || "");
+  if (!id) return "";
+  if (!_letterByRegionId.has(id)) {
+    _letterByRegionId.set(id, _letterForIndex(_letterSequence));
+    _letterSequence += 1;
+  }
+  return _letterByRegionId.get(id);
+}
+
+export function resetRegionLetters() {
+  _letterByRegionId.clear();
+  _letterSequence = 0;
+}
+
+// 区域 id 是否属于"区域覆盖搜索"划分成员（地图上占色块的划分单元）。
+// 定向侦察/核查/交接等目标导向扫描不属于划分，另行弱化显示。
+export function isCoverageRegionId(id) {
+  const raw = String(id || "");
+  return (
+    raw.startsWith("partition:") ||
+    raw.startsWith("search:") ||
+    raw.startsWith("fragment:") ||
+    /^S\d+$/.test(raw)
+  );
 }
 
 // 事件类型 → 中文名（与后端 trigger_manager._EVENT_NAMES 同步）。

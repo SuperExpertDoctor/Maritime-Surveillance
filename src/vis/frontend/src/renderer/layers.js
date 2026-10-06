@@ -2,7 +2,7 @@ import { coordToPixel } from "./geometry";
 import { markerColor, UAV_STATUS_COLORS } from "./colors";
 import { informationCategory, uavDisplayState } from "./displayState";
 import { layoutLabels } from "./labelLayout";
-import { regionAnchor, regionDisplayName } from "./regionName";
+import { isCoverageRegionId, regionLetterId } from "./regionName";
 
 const FONT = '"Fira Code", "Microsoft YaHei", monospace';
 const GROUP_COLORS = ["#0891B2", "#D97706", "#65A30D"];
@@ -306,53 +306,67 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase, hover = n
   }
 }
 
-function taskCells(region) {
-  if (Array.isArray(region.cells) && region.cells.length) return region.cells;
-  const [c0, r0, c1, r1] = region.bbox;
-  const seed = [...String(region.id || "S")].reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  const cells = [];
-  for (let col = c0; col < c1; col += 1) {
-    for (let row = r0; row < r1; row += 1) {
-      const edgeDistance = Math.min(col - c0, c1 - 1 - col, row - r0, r1 - 1 - row);
-      const carveEdge = edgeDistance === 0 && (col * 13 + row * 7 + seed) % 5 === 0;
-      if (!carveEdge) cells.push([col, row]);
-    }
-  }
-  return cells;
-}
-
-
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = null) {
   const labels = [];
   const labelSources = new Map();
   for (const region of regions || []) {
-    // Dead regions (completed/stale) stay in the frame until a heavy replan
-    // drops them; skip them here so they cannot stack highlight blocks.
-    if (region.status !== "active") continue;
-    const color = "#F59E0B";
-    const cells = taskCells(region);
-    const assigned = Boolean(region.assigned_uav_id);
-    ctx.fillStyle = `${color}${assigned ? "70" : "52"}`;
-    for (const [col, row] of cells) {
-      const point = coordToPixel(col, row, cellSize, ox, oy);
-      ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
+    // 只显示当前生效的区域划分：completed/stale 的历史区域与
+    // 定向/核查/交接等目标导向扫描不占地图色块，仅留细虚线提示。
+    // status 缺失（旧回放/直接调用）按 active 处理。
+    if (region.status && region.status !== "active") continue;
+    if (!isCoverageRegionId(region.id)) {
+      const [dc0, dr0, dc1, dr1] = region.bbox || [];
+      if (Number.isFinite(dc0)) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(190, 18, 60, .4)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 4]);
+        ctx.strokeRect(
+          ox + dc0 * cellSize + 1.5,
+          oy + dr0 * cellSize + 1.5,
+          Math.max(2, (dc1 - dc0) * cellSize - 3),
+          Math.max(2, (dr1 - dr0) * cellSize - 3),
+        );
+        ctx.restore();
+      }
+      continue;
     }
+    const color = "#F59E0B";
+    // 覆盖任务区是一整块几何区域（互斥切块），不做格级染色：
+    // 扫描进度/新鲜度只进统计面板，区域本体按 bbox 平铺填充 + 统一外框。
+    const [c0, r0, c1, r1] = region.bbox || [];
+    if (!Number.isFinite(c0)) continue;
+    const assigned = Boolean(region.assigned_uav_id);
+    ctx.fillStyle = `${color}${assigned ? "2e" : "22"}`;
+    ctx.fillRect(
+      ox + c0 * cellSize,
+      oy + r0 * cellSize,
+      (c1 - c0) * cellSize,
+      (r1 - r0) * cellSize,
+    );
+    // 划分成员之间不允许重叠：统一画外框强调切块边界。
+    const bounds = { minCol: c0, maxCol: c1 - 1, minRow: r0, maxRow: r1 - 1 };
+    ctx.strokeStyle = "rgba(180, 83, 9, .85)";
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(
+      ox + c0 * cellSize + 0.7,
+      oy + r0 * cellSize + 0.7,
+      (c1 - c0) * cellSize - 1.4,
+      (r1 - r0) * cellSize - 1.4,
+    );
     const uav = (uavs || []).find((item) => item.id === region.assigned_uav_id);
     const uavTag = uav ? `·${uav.id.replace("UAV-", "U")}` : "";
-    const arrow = uav?.sar_look_direction === "left" ? "<" : ">";
+    const letter = regionLetterId(region) || "?";
     const fontSize = Math.max(8, Math.min(10, cellSize * 0.34));
-    const fullLabel = `${regionDisplayName(region.id, regionAnchor(region))}${uavTag} ${Math.round(region.completion_pct || 0)}% ${arrow}`;
+    const fullLabel = `${letter}${uavTag} ${Math.round(region.completion_pct || 0)}%`;
     ctx.font = `700 ${fontSize}px ${FONT}`;
-    const labelCell = cells[0];
-    if (labelCell) {
-      const point = coordToPixel(labelCell[0], labelCell[1], cellSize, ox, oy);
-      const label = cellSize >= 14 ? fullLabel : regionDisplayName(region.id, regionAnchor(region));
+    const point = coordToPixel(c0, r0, cellSize, ox, oy);
+    {
+      const label = cellSize >= 14 ? fullLabel : letter;
       const labelWidth = ctx.measureText(label).width + 8;
       const id = `search:${region.id}`;
-      const cols = cells.map(([col]) => col);
-      const rows = cells.map(([, row]) => row);
-      const minX = ox + Math.min(...cols) * cellSize;
-      const minY = oy + Math.min(...rows) * cellSize;
+      const minX = ox + bounds.minCol * cellSize;
+      const minY = oy + bounds.minRow * cellSize;
       labels.push({
         id,
         anchor: { x: point.x + cellSize / 2, y: point.y + cellSize / 2 },
@@ -367,8 +381,8 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
         hitBox: {
           x: minX,
           y: minY,
-          width: (Math.max(...cols) - Math.min(...cols) + 1) * cellSize,
-          height: (Math.max(...rows) - Math.min(...rows) + 1) * cellSize,
+          width: (bounds.maxCol - bounds.minCol + 1) * cellSize,
+          height: (bounds.maxRow - bounds.minRow + 1) * cellSize,
         },
       });
     }
@@ -1070,13 +1084,6 @@ export function drawSensorFootprints(ctx, uavs, cellSize, ox, oy, phase = 0) {
     if (hasSarBeam) {
       drawSarBeam(ctx, uav, cellSize, ox, oy, phase);
     }
-    if (uav.sar_imaging) {
-      ctx.fillStyle = "rgba(6, 182, 212, .16)";
-      for (const [col, row] of uav.sar_footprint || []) {
-        const point = coordToPixel(col, row, cellSize, ox, oy);
-        ctx.fillRect(point.x + 1, point.y + 1, cellSize - 2, cellSize - 2);
-      }
-    }
     if (uav.sensor_mode === "eo") drawEoBeam(ctx, uav, cellSize, ox, oy, phase);
   }
 }
@@ -1575,8 +1582,7 @@ export function drawLabels(
 export function drawTransparencyLegend(ctx, bounds) {
   if (!bounds || bounds.width < 128) return;
   const swatches = [
-    { color: "#D97706", label: "TASK CELLS" },
-    { color: "#0F766E", label: "FRESH SAR" },
+    { color: "#F59E0B", label: "COVERAGE REGION A-Z" },
     { color: "#0891B2", label: "SAR APERTURE / SWATH", shape: "strip" },
     { color: "#D97706", label: "EO / IR FOV", shape: "cone" },
     { color: "#DC2626", label: "NO-FLY STORM" },
@@ -1680,8 +1686,8 @@ export function renderFrame(ctx, frame, options = {}) {
   const baseCenters = buildBaseCenters(bases, resolvedMapBounds);
   drawBackground(ctx, width, height, cellSize, offsetX, offsetY, resolvedMapBounds, assets);
   if (frame) {
-    drawHeatmap(ctx, frame.info_matrix, frame.value_matrix, cellSize, offsetX, offsetY, frame.config_snapshot?.grid);
-    drawTransparencyOverlay(ctx, frame.info_matrix, cellSize, offsetX, offsetY);
+    // 信息矩阵/新鲜度是任务统计指标，不渲染成格底亮度；
+    // 覆盖历史由任务区域与传感器几何足迹表达，不再逐格染色累积。
     drawOceanTexture(ctx, cellSize, offsetX, offsetY);
     drawGridLines(ctx, cellSize, offsetX, offsetY, showGrid);
     drawSearchDomain(ctx, frame.search_domain, cellSize, offsetX, offsetY);

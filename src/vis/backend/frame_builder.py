@@ -523,6 +523,7 @@ def build_frame(state: StateManager, cycle: int, config: AppConfig,
     for r in state.get_search_regions():
         search_regions.append({
             "id": r.id,
+            "display_id": getattr(r, "display_id", ""),
             "bbox": [r.bbox.col_start, r.bbox.row_start, r.bbox.col_end, r.bbox.row_end],
             "type": r.type,
             "status": r.status,
