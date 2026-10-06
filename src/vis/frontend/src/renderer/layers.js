@@ -306,6 +306,21 @@ export function drawObstacles(ctx, obstacles, cellSize, ox, oy, phase, hover = n
   }
 }
 
+function taskCells(region) {
+  if (Array.isArray(region.cells) && region.cells.length) return region.cells;
+  const [c0, r0, c1, r1] = region.bbox;
+  const seed = [...String(region.id || "S")].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  const cells = [];
+  for (let col = c0; col < c1; col += 1) {
+    for (let row = r0; row < r1; row += 1) {
+      const edgeDistance = Math.min(col - c0, c1 - 1 - col, row - r0, r1 - 1 - row);
+      const carveEdge = edgeDistance === 0 && (col * 13 + row * 7 + seed) % 5 === 0;
+      if (!carveEdge) cells.push([col, row]);
+    }
+  }
+  return cells;
+}
+
 export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = null) {
   const labels = [];
   const labelSources = new Map();
@@ -332,28 +347,18 @@ export function drawSearchRegions(ctx, regions, uavs, cellSize, ox, oy, hover = 
       continue;
     }
     const color = "#F59E0B";
-    // 覆盖任务区按栅格逐格高亮（保留原有视觉风格）：区域内每格
-    // 一个统一色块，不随新鲜度/扫描进度变化——统计指标只在侧栏。
+    // 覆盖任务区按旧版栅格高亮还原：taskCells 逐格填充、边缘随机挖格、
+    // 不画矩形外框；色度统一不随新鲜度变化——统计指标只在侧栏。
     const [c0, r0, c1, r1] = region.bbox || [];
     if (!Number.isFinite(c0)) continue;
+    const cells = taskCells(region);
     const assigned = Boolean(region.assigned_uav_id);
     ctx.fillStyle = `${color}${assigned ? "70" : "52"}`;
-    for (let col = c0; col < c1; col += 1) {
-      for (let row = r0; row < r1; row += 1) {
-        const point = coordToPixel(col, row, cellSize, ox, oy);
-        ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
-      }
+    for (const [col, row] of cells) {
+      const point = coordToPixel(col, row, cellSize, ox, oy);
+      ctx.fillRect(point.x + 1, point.y + 1, Math.max(1, cellSize - 2), Math.max(1, cellSize - 2));
     }
-    // 划分成员之间不允许重叠：统一画外框强调切块边界。
     const bounds = { minCol: c0, maxCol: c1 - 1, minRow: r0, maxRow: r1 - 1 };
-    ctx.strokeStyle = "rgba(180, 83, 9, .85)";
-    ctx.lineWidth = 1.4;
-    ctx.strokeRect(
-      ox + c0 * cellSize + 0.7,
-      oy + r0 * cellSize + 0.7,
-      (c1 - c0) * cellSize - 1.4,
-      (r1 - r0) * cellSize - 1.4,
-    );
     const uav = (uavs || []).find((item) => item.id === region.assigned_uav_id);
     const uavTag = uav ? `·${uav.id.replace("UAV-", "U")}` : "";
     const letter = regionLetterId(region) || "?";
