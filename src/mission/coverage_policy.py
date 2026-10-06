@@ -633,7 +633,7 @@ def build_coverage_constraint(
         diversion_credit_max=(
             None
             if diversion_max_fraction is None
-            else int(math.ceil(desired * float(diversion_max_fraction)))
+            else int(math.floor(desired * float(diversion_max_fraction)))
         ),
     )
 

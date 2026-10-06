@@ -167,9 +167,13 @@ def _archive_export(mp4_path: Path, replay_file: str) -> Path | None:
         run_dir = source.parent
     run_dir.mkdir(parents=True, exist_ok=True)
     archived_jsonl = run_dir / source.name
-    if archived_jsonl.resolve() != source:
+    if archived_jsonl.resolve() != source and not archived_jsonl.exists():
         shutil.copy2(source, archived_jsonl)
     target = run_dir / f"{archived_jsonl.stem}.mp4"
+    suffix = 1
+    while target.exists():
+        target = run_dir / f"{archived_jsonl.stem}-{suffix}.mp4"
+        suffix += 1
     shutil.copy2(mp4_path, target)
     return target
 

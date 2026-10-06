@@ -19,6 +19,13 @@ class FrameLogger:
             if filename is None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"simulation_{timestamp}.jsonl"
+                # Concurrent runs can share the same second-precision label;
+                # claim the first free name so a later run never clobbers
+                # an earlier recording.
+                suffix = 1
+                while os.path.exists(os.path.join(output_dir, filename)):
+                    filename = f"simulation_{timestamp}-{suffix}.jsonl"
+                    suffix += 1
             self._path = os.path.join(output_dir, filename)
         self._count: int = 0
 

@@ -3486,14 +3486,35 @@ class SimulationEngine:
         ]
         if not alternates:
             return False
+        observations = tuple(
+            BaseObservation(
+                base.id, tuple(map(float, base.position)), base.capacity,
+                self._base_maintenance_load(base, exclude_uav_id=uav.id),
+            ) for base in alternates
+        )
         try:
-            self._set_return_route(uav, self.clock.time)
+            candidates = RecoveryPlanner().evaluate(
+                uav.pose, uav.remaining_range_cells, observations,
+                self.allocator.sm.obstacle_mask, self.allocator.sm.obstacle_version,
+                uav.R_min, self.config.control.safety.reserve_range_cells,
+            )
         except (RuntimeError, ValueError):
+            return False
+        if not candidates:
+            return False
+        # The SYSTEM RETURN task in the work controller still points at the
+        # full base: swap controller plan, entity waypoints and the base
+        # reservation to the alternate in one step.
+        try:
+            base = self._install_checked_return(
+                uav, self.clock.time, candidates[0], alternates,
+            )
+        except Exception:
             return False
         self.allocator.sm.add_event("base_diverted", {
             "uav_id": uav.id,
             "from_base_id": full_base.id,
-            "to_base_id": self._return_base_by_uav[uav.id].id,
+            "to_base_id": base.id,
         })
         return True
 
@@ -6134,6 +6155,15 @@ class SimulationEngine:
 
     def _resume_queued_landing(self, uav: UAVEntity, current_time: float) -> None:
         """Install a checked return before releasing an airborne landing queue."""
+        if not self._available_recovery_bases(exclude_uav_id=uav.id):
+            # Every maintenance slot is reserved: a capacity wait, not an
+            # unsafe route.  Keep the airframe holding — the caller's timeout
+            # window re-offers it once a slot frees — instead of failing a
+            # healthy aircraft for a temporary shortage.
+            self.allocator.sm.add_event("landing_capacity_wait", {
+                "uav_id": uav.id,
+            })
+            return
         bases = tuple(
             BaseObservation(
                 base.id, tuple(map(float, base.position)), base.capacity,
@@ -6160,7 +6190,31 @@ class SimulationEngine:
             return
 
         candidate = candidates[0]
-        base = next(base for base in self.bases if base.id == candidate.base.base_id)
+        try:
+            base = self._install_checked_return(
+                uav, current_time, candidate, self.bases,
+            )
+        except Exception as exc:
+            self._enter_emergency_failure(uav, "controller_fault", exc)
+            return
+        self.allocator.sm.add_event("holding_released", {
+            "uav_id": uav.id, "base_id": base.id,
+        })
+
+    def _install_checked_return(
+        self,
+        uav: UAVEntity,
+        current_time: float,
+        candidate,
+        bases_pool,
+    ) -> BaseStation:
+        """Install a validated SYSTEM RETURN task + entity route for `candidate`.
+
+        Keeps the coordinator's recovery plan, the entity waypoints and the
+        base reservation pointing at the same base atomically; rolls the
+        reservation back and re-raises when the controller rejects the task.
+        """
+        base = next(b for b in bases_pool if b.id == candidate.base.base_id)
         reservation_id = f"{uav.id}:return:{self._return_reservation_sequence}"
         plan = RecoveryPlan(
             base.id, candidate.base.position, reservation_id, candidate.path,
@@ -6176,19 +6230,16 @@ class SimulationEngine:
                     uav.id, task, current_time=current_time,
                 )
                 self._coordinator_tasks[uav.id] = task
-        except Exception as exc:
+        except Exception:
             if previous is None:
                 self._return_base_by_uav.pop(uav.id, None)
             else:
                 self._return_base_by_uav[uav.id] = previous
-            self._enter_emergency_failure(uav, "controller_fault", exc)
-            return
+            raise
         self._return_reservation_sequence += 1
         self._holding_base_by_uav.pop(uav.id, None)
         uav.plan_return(plan.path)
-        self.allocator.sm.add_event("holding_released", {
-            "uav_id": uav.id, "base_id": base.id,
-        })
+        return base
 
     def _process_holding_timeouts(self, current_time: float) -> None:
         """Send a stranded mid-map hold home instead of orbiting indefinitely.

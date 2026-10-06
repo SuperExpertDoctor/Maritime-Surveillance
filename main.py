@@ -298,6 +298,12 @@ def main(
         if source.is_file() and source.resolve().parent == Path("outputs").resolve():
             run_dir.mkdir(parents=True, exist_ok=True)
             target = run_dir / source.name
+            # Second-precision labels collide when two runs start in the same
+            # second; never overwrite an existing recording.
+            suffix = 1
+            while target.exists():
+                target = run_dir / f"{source.stem}-{suffix}{source.suffix}"
+                suffix += 1
             source.replace(target)
             output_path = str(target)
     except OSError as exc:
