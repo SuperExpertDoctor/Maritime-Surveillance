@@ -825,29 +825,32 @@ export function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode
       continue;
     }
 
-    // ── Mode: comet ── filled tapered shape, wide at UAV, point at tail
+    // ── Mode: comet ── filled tapered shape, wide at UAV, point at tail.
+    // 只取最近一段轨迹：旧路径彻底消失，不在图上常驻。
     if (trailMode === "comet") {
+      const pts = trail.slice(-40); // 最近 40 个轨迹点 ≈ 40 仿真分钟
+      if (pts.length < 2) { ctx.restore(); continue; }
       const maxHalfWidth = cellSize * (uav.id === selectedId ? 0.52 : 0.30);
       const maxAlpha = uav.id === selectedId ? 0.48 : 0.26;
       // Build polygon vertices from tail to head along left edge,
       // then back along right edge.
       const left = [];
       const right = [];
-      for (let i = 0; i < trail.length; i += 1) {
-        const t = i / Math.max(1, trail.length - 1); // 0→tail  1→head
+      for (let i = 0; i < pts.length; i += 1) {
+        const t = i / Math.max(1, pts.length - 1); // 0→tail  1→head
         const halfW = Math.max(0.2, maxHalfWidth * t * t); // quadratic taper
         let dx = 0, dy = 0;
-        if (i < trail.length - 1) {
-          dx = trail[i + 1][0] - trail[i][0];
-          dy = trail[i + 1][1] - trail[i][1];
+        if (i < pts.length - 1) {
+          dx = pts[i + 1][0] - pts[i][0];
+          dy = pts[i + 1][1] - pts[i][1];
         } else if (i > 0) {
-          dx = trail[i][0] - trail[i - 1][0];
-          dy = trail[i][1] - trail[i - 1][1];
+          dx = pts[i][0] - pts[i - 1][0];
+          dy = pts[i][1] - pts[i - 1][1];
         }
         const len = Math.hypot(dx, dy) || 1;
         const px = -dy / len * halfW;
         const py = dx / len * halfW;
-        const pt = gridCenter(trail[i][0], trail[i][1], cellSize, ox, oy);
+        const pt = gridCenter(pts[i][0], pts[i][1], cellSize, ox, oy);
         left.push({ x: pt.x + px, y: pt.y + py, t });
         right.push({ x: pt.x - px, y: pt.y - py, t });
       }
@@ -870,15 +873,15 @@ export function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode
       ctx.strokeStyle = color;
       ctx.lineWidth = Math.max(0.5, cellSize * (uav.id === selectedId ? 0.12 : 0.07));
       ctx.beginPath();
-      trail.forEach(([col, row], index) => {
+      pts.forEach(([col, row], index) => {
         const pt = gridCenter(col, row, cellSize, ox, oy);
         if (index === 0) ctx.moveTo(pt.x, pt.y);
         else ctx.lineTo(pt.x, pt.y);
       });
       ctx.stroke();
       // Glow head dot
-      if (trail.length) {
-        const head = trail[trail.length - 1];
+      if (pts.length) {
+        const head = pts[pts.length - 1];
         const h = gridCenter(head[0], head[1], cellSize, ox, oy);
         ctx.globalAlpha = headAlpha * 1.5;
         ctx.fillStyle = "#FFFFFF";
@@ -890,7 +893,7 @@ export function drawUavTrails(ctx, uavs, cellSize, ox, oy, selectedId, trailMode
       continue;
     }
 
-    // ── Mode: tail (default) ── gradient-width line, last 72 points
+    // ── Mode: tail ── gradient-width line, last 72 points
     const start = Math.max(1, trail.length - 72);
     for (let index = start; index < trail.length; index += 1) {
       const previous = gridCenter(trail[index - 1][0], trail[index - 1][1], cellSize, ox, oy);
@@ -1689,7 +1692,7 @@ export function renderFrame(ctx, frame, options = {}) {
     assets,
     mapBounds,
     legendBounds,
-    trailMode = "tail",
+    trailMode = "comet",
     selectedContactId,
     showScenario = false,
     selectedScenarioVesselId,

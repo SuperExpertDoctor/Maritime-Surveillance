@@ -28,7 +28,7 @@ const CanvasMap = forwardRef(function CanvasMap({
   onSelectUav,
   showGrid = false,
   showScenario = false,
-  trailMode = "tail",
+  trailMode = "comet",
   selectionMode = false,
   onSelectionCommit,
   onSelectContact,

@@ -20,7 +20,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [showScenario, setShowScenario] = useState(false);
-  const [trailMode, setTrailMode] = useState("tail");
+  const [trailMode, setTrailMode] = useState("comet");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedBBox, setSelectedBBox] = useState(null);
   const [selectedContactId, setSelectedContactId] = useState(null);
