@@ -4806,6 +4806,19 @@ class SimulationEngine:
         for event in events:
             if event["type"] == "duplicate_task_cancelled":
                 uav = next(u for u in self.uavs if u.id == event["uav_id"])
+                # A stale cancellation names the airframe an old probe once
+                # held; it may already fly unrelated work. Only strip a
+                # binding that still points at the cancelled contact.
+                canonical = sm.resolve_contact_id(event["contact_id"])
+                task = self.control_coordinator.active_task(uav.id)
+                if task is not None and task.target_contact_id:
+                    bound = sm.resolve_contact_id(task.target_contact_id)
+                elif uav.target_group_id:
+                    bound = sm.resolve_contact_id(uav.target_group_id)
+                else:
+                    bound = None
+                if bound != canonical:
+                    continue
                 uav.target_group_id = None
                 sm.clear_uav_assignment(uav.id)
                 self._tracking_started_at.pop(uav.id, None)

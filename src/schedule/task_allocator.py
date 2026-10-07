@@ -196,7 +196,6 @@ class TaskAllocator:
             )
         prompt_window = self._coverage_prompt_window(candidates, now)
         resources = self._mission_resources()
-        available = tuple(sorted(uav.id for uav in self.sm.get_available_uavs()))
         active_records = tuple(
             record
             for record in attach_intent_owners(active_tasks, published_intents)
@@ -204,6 +203,20 @@ class TaskAllocator:
             if record.assigned_uav_id is None
             or self.sm.is_uav_operational(record.assigned_uav_id)
         )
+        # A bound airframe is never "available": a stale release can leave its
+        # live state idle while a record still names it, and advertising it
+        # lets the deterministic matcher bind a second search (the
+        # uav_bound_to_multiple_searches invariant violation).
+        bound_uav_ids = {
+            record.assigned_uav_id
+            for record in active_records
+            if record.assigned_uav_id is not None
+        }
+        available = tuple(sorted(
+            uav.id
+            for uav in self.sm.get_available_uavs()
+            if uav.id not in bound_uav_ids
+        ))
         active_by_id = {record.task_id: record for record in active_records}
         pending_search_task_ids = tuple(
             region.id
