@@ -63,12 +63,32 @@ class RouteFollower:
             action_spec.max_speed_cells_min,
         )
         position = observation.self_state.position
+        heading = observation.self_state.heading_rad
         arrival_radius = max(speed * dt_min, 0.05)
+        turn_rate_bound = max(
+            abs(action_spec.min_turn_rate_rad_min),
+            abs(action_spec.max_turn_rate_rad_min),
+        )
+        turn_radius = speed / turn_rate_bound if turn_rate_bound > 0.0 else 0.0
+        # A waypoint already behind the nose and inside the tightest turn
+        # circle is unreachable: pursuing it commands a hairpin the airframe
+        # cannot complete, orbiting the follower in place forever.  Skip it
+        # and pursue the next point on the same route.
+        overshot_radius = 2.0 * turn_radius + arrival_radius
         while self._index < len(self._poses) - 1:
             target = self._poses[self._index + 1]
-            if math.dist(position, target[:2]) > arrival_radius:
-                break
-            self._index += 1
+            delta_col = target[0] - position[0]
+            delta_row = target[1] - position[1]
+            distance = math.hypot(delta_col, delta_row)
+            if distance <= arrival_radius:
+                self._index += 1
+                continue
+            if distance <= overshot_radius:
+                bearing = math.atan2(delta_row, delta_col)
+                if abs(_wrap_pi(bearing - heading)) > math.pi / 2:
+                    self._index += 1
+                    continue
+            break
 
         target = self._poses[min(self._index + 1, len(self._poses) - 1)]
         delta_col = target[0] - position[0]
