@@ -181,7 +181,7 @@ class StateManager:
         uav = self.get_uav(uav_id)
         return bool(
             uav is not None
-            and getattr(uav, "operational_status", "available") != "failed"
+            and getattr(uav, "operational_status", "available") == "available"
             and getattr(uav, "status", "idle") != "failed"
         )
 

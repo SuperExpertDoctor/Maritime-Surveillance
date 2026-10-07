@@ -134,46 +134,56 @@ def _airborne_landing_queue():
     return engine, uav, base
 
 
-def test_impossible_queued_return_fails_airframe_without_crashing_mission():
+def test_impossible_queued_return_parks_for_retry_without_failing():
     engine, uav, base = _airborne_landing_queue()
     engine.obstacle_mask[:] = True
     engine.allocator.sm.obstacle_mask[:] = True
     before = uav.float_position
     engine._process_refuelling(0.)
-    assert engine._emergency_failures[uav.id] == "no_safe_recovery_path"
-    assert uav.status == "failed"
+    assert uav.id not in engine._emergency_failures
+    assert uav.status == "holding"
     assert uav.float_position == before
     assert uav.id not in engine._holding_base_by_uav
     assert uav.id not in engine._return_base_by_uav
+    event_types = [e["type"] for e in engine.allocator.sm.get_recent_events(0.)]
+    assert "recovery_wait" in event_types
+    assert "emergency_failure" not in event_types
     assert base.refuel_count == 0
 
 
-def test_queued_return_requires_route_plus_fuel_reserve():
+def test_queued_return_without_fuel_reserve_lands_on_relaxed_gate():
+    from src.control.common.contracts import OperationMode
+
     engine, uav, base = _airborne_landing_queue()
     engine.config = replace(engine.config, control=replace(engine.config.control,
         safety=replace(engine.config.control.safety,
                        reserve_range_cells=uav.remaining_range_cells + 1.)))
     engine._process_refuelling(0.)
-    assert engine._emergency_failures[uav.id] == "no_safe_recovery_path"
-    assert uav.status == "failed"
+    # No route fits fuel+reserve: relax the fuel gate once and land on fumes
+    # at the nearest reachable base rather than fail the airframe.
+    assert uav.id not in engine._emergency_failures
+    assert engine.control_coordinator.operation_mode(uav.id) is OperationMode.RETURN
+    assert uav.id in engine._return_base_by_uav
+    event_types = [e["type"] for e in engine.allocator.sm.get_recent_events(0.)]
+    assert "recovery_relaxed_fuel" in event_types
     assert base.refuel_count == 0
 
 
-def test_queued_return_install_rejection_cleans_reservations_without_teleport(monkeypatch):
+def test_queued_return_install_rejection_parks_for_retry_without_teleport(monkeypatch):
     engine, uav, base = _airborne_landing_queue()
     before = uav.float_position
 
     def reject(*args, **kwargs):
-        assert uav.status == "holding"
-        assert engine._holding_base_by_uav[uav.id] is base
         raise RuntimeError("return install rejected")
 
     monkeypatch.setattr(engine.control_coordinator, "assign_system_task", reject)
     engine._process_refuelling(0.)
-    assert engine._emergency_failures[uav.id] == "controller_fault"
-    assert uav.status == "failed"
+    assert uav.id not in engine._emergency_failures
+    assert uav.status == "holding"
     assert uav.float_position == before
     assert uav.id not in engine._holding_base_by_uav
     assert uav.id not in engine._return_base_by_uav
-    assert engine.control_coordinator.active_task(uav.id) is None
+    event_types = [e["type"] for e in engine.allocator.sm.get_recent_events(0.)]
+    assert "recovery_wait" in event_types
+    assert "emergency_failure" not in event_types
     assert base.refuel_count == 0

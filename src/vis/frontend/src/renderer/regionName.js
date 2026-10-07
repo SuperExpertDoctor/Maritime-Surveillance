@@ -125,6 +125,10 @@ const EVENT_NAMES = {
   base_capacity_full: "基地机位满",
   uav_fuel_low_warning: "油量不足预警",
   information_delta: "信息场更新",
+  no_safe_recovery_path: "无安全返航航线",
+  recovery_wait: "返航待机重试",
+  recovery_relaxed_fuel: "放宽油量返航",
+  landing_capacity_wait: "等待基地机位",
 };
 
 const TRIGGER_REASON_NAMES = {

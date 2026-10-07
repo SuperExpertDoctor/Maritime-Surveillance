@@ -280,8 +280,8 @@ def default_obstacles(
             storms.append(Thunderstorm(
                 center,
                 size,
-                # Cells/min: at 10 km/cell, resultant drift is at most 8.5 km/h.
-                (rng.uniform(-0.01, 0.01), rng.uniform(-0.01, 0.01)),
+                # Static storm cells: thunderstorms no longer drift.
+                (0.0, 0.0),
                 rng.choice([-1.0, rng.uniform(90.0, 240.0)]),
                 rng.uniform(0.3, 1.0),
                 f"storm-{index + 1}",

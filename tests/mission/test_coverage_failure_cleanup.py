@@ -97,40 +97,40 @@ def test_failed_uav_is_not_a_scheduler_resource_or_task_edge():
     assert failed.id not in task.feasible_uav_ids
 
 
-def test_emergency_failure_releases_task_service_and_does_not_return_or_hold():
+def test_recovery_wait_park_releases_task_service_and_never_fails():
     engine, uav, task, generation = _coverage_fixture()
     old_position = uav.float_position
 
-    engine._enter_emergency_failure(
-        uav, "no_safe_recovery_path", RuntimeError("blocked")
-    )
-    engine._enter_emergency_failure(
-        uav, "no_safe_recovery_path", RuntimeError("duplicate")
-    )
+    engine._park_for_recovery_retry(uav, 0.0, "no_safe_recovery_path")
+    engine._park_for_recovery_retry(uav, 0.0, "no_safe_recovery_path")
 
     state = engine.allocator.sm.get_uav(uav.id)
     record = engine._mission_task_records[task.task_id]
-    assert state.operational_status == "failed"
-    assert state.failure_reason == "no_safe_recovery_path"
-    assert uav.status == "failed"
+    assert state.operational_status == "recovery_wait"
+    assert uav.status == "holding"
     assert uav.float_position == old_position
     assert record.status == "approved"
     assert record.assigned_uav_id is None
-    assert engine.control_coordinator.controller(uav.id) is None
-    assert engine.control_coordinator.active_task(uav.id) is None
+    assert engine.control_coordinator.controller(uav.id) is not None
+    assert engine.control_coordinator.operation_mode(uav.id) is OperationMode.HOLDING
     assert engine.control_coordinator.current_lease(uav.id).owner is ControlOwner.SYSTEM
-    assert engine.control_coordinator.route_snapshot(uav.id).route.status == "cleared"
+    assert uav.id not in engine._emergency_failures
+    assert not engine.allocator.sm.is_uav_operational(uav.id)
     region = engine.allocator.sm.get_search_regions()[0]
     assert region.status == "active"
     assert region.assigned_uav_id is None
     assert engine.allocator.sm.coverage_service.progress(
         task.task_id, generation, uav_id=uav.id,
     ) is not None
-    failures = [
+    waits = [
         event for event in engine.allocator.sm.get_recent_events(0.0)
-        if event["type"] == "emergency_failure"
+        if event["type"] == "recovery_wait"
     ]
-    assert len(failures) == 1
+    assert len(waits) == 2
+    assert not any(
+        event["type"] == "emergency_failure"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )
 
 
 def test_coverage_install_fault_holds_position_and_cools_retry():
@@ -143,7 +143,7 @@ def test_coverage_install_fault_holds_position_and_cools_retry():
         uav, 3.0, ValueError("coverage planner produced no obstacle-safe swaths"), lease,
     )
 
-    assert uav.status == "idle"
+    assert uav.status == "holding"
     assert engine.control_coordinator.operation_mode(uav.id) is OperationMode.HOLDING
     assert engine.control_coordinator.current_lease(uav.id).owner is ControlOwner.SYSTEM
     record = engine._mission_task_records[task.task_id]

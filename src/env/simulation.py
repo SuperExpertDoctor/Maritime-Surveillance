@@ -2814,8 +2814,10 @@ class SimulationEngine:
         if lease.owner in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
             try:
                 self._maybe_revoke_for_range(uav, current_time)
-            except NoSafeRecoveryPath as exc:
-                self._enter_emergency_failure(uav, "no_safe_recovery_path", exc)
+            except NoSafeRecoveryPath:
+                self._park_for_recovery_retry(
+                    uav, current_time, "no_safe_recovery_path",
+                )
                 return False
             lease = self.control_coordinator.current_lease(uav.id)
 
@@ -2836,7 +2838,9 @@ class SimulationEngine:
                 and self.control_coordinator.operation_mode(uav.id)
                 is OperationMode.RETURN
             ):
-                self._enter_emergency_failure(uav, "no_safe_recovery_path", exc)
+                self._park_for_recovery_retry(
+                    uav, current_time, "no_safe_recovery_path",
+                )
                 return False
             self._handle_control_fault(uav, current_time, exc, lease)
             return False
@@ -3820,7 +3824,7 @@ class SimulationEngine:
     ) -> None:
         """Recover work-controller faults through the same reservation transaction."""
         if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
-            self._enter_emergency_failure(uav, "controller_fault", error)
+            self._park_for_recovery_retry(uav, current_time, "controller_fault")
             return
         reason = (
             "invalid_command_limit"
@@ -3870,11 +3874,9 @@ class SimulationEngine:
                 return
         try:
             self._request_recovery_return(uav, current_time, reason)
-        except NoSafeRecoveryPath as recovery_error:
-            self._enter_emergency_failure(
-                uav,
-                "no_safe_recovery_path",
-                recovery_error,
+        except NoSafeRecoveryPath:
+            self._park_for_recovery_retry(
+                uav, current_time, "no_safe_recovery_path",
             )
 
     _PLANNING_FAULT_MARKERS = (
@@ -4118,10 +4120,10 @@ class SimulationEngine:
     ) -> None:
         """Detach every mission binding from an airborne UAV.
 
-        Used both by the emergency-failure path (followed by a permanent
-        freeze) and by the retask path (the airframe stays flyable and is
-        promoted to system holding so the next decision cycle can assign it
-        fresh work instead of paying a base round trip).
+        Used both by the recovery-wait park (the airframe holds airborne
+        until a landing route exists) and by the retask path (it stays
+        flyable and is promoted to system holding so the next decision
+        cycle can assign it fresh work instead of paying a base round trip).
         """
         sm = self.allocator.sm
         active_task = self.control_coordinator.active_task(uav.id)
@@ -4282,58 +4284,55 @@ class SimulationEngine:
         uav.last_applied_command = None
         uav.last_safety_interventions = ()
 
-    def _enter_emergency_failure(
-        self, uav: UAVEntity, reason: str, error: Exception
+    def _park_for_recovery_retry(
+        self, uav: UAVEntity, current_time: float, reason: str
     ) -> None:
-        """Freeze one airframe and release every mission binding it owned."""
-        if uav.id in self._emergency_failures:
-            return
+        """Park an airframe in a SYSTEM hold until a landing route exists.
 
-        current_time = float(self.clock.time)
-        sm = self.allocator.sm
+        Storm cells and full bases can transiently leave no checked recovery
+        path. Airframes never fail: they release their mission bindings,
+        orbit in place under a SYSTEM holding task, and the holding-timeout
+        loop re-offers a landing route every window until one is installed.
+        """
         self._release_mission_bindings(uav, current_time, reason)
-        uav.request_active_mode("standby")
-        uav.sensor_mode = "off"
-
-        self._emergency_failures[uav.id] = reason
-        self._outcome_evaluator.invalidate(reason)
-        lease = self.control_coordinator.quarantine_uav(
-            uav.id, current_time=current_time, reason=reason,
-        )
-        self._publish_control_routes()
-        uav.status = "failed"
-        state = sm.get_uav(uav.id)
+        self._return_base_by_uav.pop(uav.id, None)
+        self._holding_base_by_uav.pop(uav.id, None)
+        if self.control_coordinator.has_controller(uav.id):
+            lease = self.control_coordinator.current_lease(uav.id)
+            try:
+                if lease.owner is ControlOwner.SYSTEM:
+                    task = ControlTask(
+                        f"holding:{uav.id}:{current_time}",
+                        OperationMode.HOLDING,
+                    )
+                    self.control_coordinator.assign_system_task(
+                        uav.id, task, current_time=current_time,
+                    )
+                    self._coordinator_tasks[uav.id] = task
+                else:
+                    task = ControlTask(
+                        f"holding:{uav.id}:{current_time}",
+                        OperationMode.HOLDING,
+                    )
+                    self.control_coordinator.promote_to_system_holding(
+                        uav.id,
+                        current_time=current_time,
+                        task_id=task.task_id,
+                    )
+                    self._coordinator_tasks[uav.id] = task
+            except Exception:
+                uav.start_holding(uav.position)
+        else:
+            uav.start_holding(uav.position)
+        uav.status = "holding"
+        self._hold_started_at[uav.id] = current_time
+        state = self.allocator.sm.get_uav(uav.id)
         if state is not None:
-            state.operational_status = "failed"
-            state.failure_reason = reason
-            sm.update_uav_status(
-                uav.id,
-                "failed",
-                uav.position,
-                fuel_remaining_pct=uav.fuel_remaining_pct,
-                heading_deg=uav.heading_deg,
-                sensor_mode="off",
-            )
-            sm.update_uav_control(
-                uav.id,
-                self.control_coordinator.configured_mode(uav.id).value,
-                lease.owner.value,
-                OperationMode.IDLE.value,
-                lease.generation,
-                False,
-            )
-
-        self.allocator.trigger_manager.notify_event(
-            "emergency_failure",
-            time=current_time,
-            uav_id=uav.id,
-            reason=reason,
-            error=str(error),
-        )
-        self.allocator.sm.add_event("emergency_failure", {
+            state.operational_status = "recovery_wait"
+        self.allocator.sm.add_event("recovery_wait", {
             "uav_id": uav.id,
             "reason": reason,
-            "error": str(error),
+            "fuel_remaining_pct": round(uav.fuel_remaining_pct, 4),
         })
 
     def _queue_control_event(
@@ -4509,7 +4508,7 @@ class SimulationEngine:
             self._replan_conflicting_routes()
 
     def _spawn_thunderstorm(self, obstacles) -> Thunderstorm | None:
-        """Restore the configured moving-storm density after dissipation."""
+        """Restore the configured storm density after dissipation."""
         cols, rows = self.config.grid.resolution
         for _ in range(200):
             size = self.rng.randint(1, 2)
@@ -4521,8 +4520,8 @@ class SimulationEngine:
             candidate = Thunderstorm(
                 center=center,
                 size=size,
-                # Match initial storms: slow drift relative to ships and UAVs.
-                move_vector=(self.rng.uniform(-0.01, 0.01), self.rng.uniform(-0.01, 0.01)),
+                # Static storm cells: thunderstorms no longer drift.
+                move_vector=(0.0, 0.0),
                 lifetime=self.rng.choice((-1.0, self.rng.uniform(90.0, 240.0))),
                 intensity=self.rng.uniform(0.3, 1.0),
                 id=f"storm-{self._next_storm_id}",
@@ -5065,8 +5064,8 @@ class SimulationEngine:
                     self._emit_no_safe_recovery_path(
                         uav, sm.current_time, error,
                     )
-                    self._enter_emergency_failure(
-                        uav, "no_safe_recovery_path", error,
+                    self._park_for_recovery_retry(
+                        uav, sm.current_time, "no_safe_recovery_path",
                     )
             elif uav.mission_kind in ("search",):
                 state = sm.get_uav(uav.id)
@@ -5831,14 +5830,13 @@ class SimulationEngine:
                         current_time,
                         "lifecycle_or_task_return",
                     )
-                except NoSafeRecoveryPath as exc:
-                    self._enter_emergency_failure(
-                        uav,
-                        "no_safe_recovery_path",
-                        exc,
+                except NoSafeRecoveryPath:
+                    self._park_for_recovery_retry(
+                        uav, current_time, "no_safe_recovery_path",
                     )
                 return
         self._release_mission_targets(uav, current_time, release_marker=True)
+        sm = self.allocator.sm
 
         try:
             self._set_return_route(uav, current_time)
@@ -5851,7 +5849,9 @@ class SimulationEngine:
                 )
             )
             self._emit_no_safe_recovery_path(uav, current_time, error)
-            self._enter_emergency_failure(uav, "no_safe_recovery_path", error)
+            self._park_for_recovery_retry(
+                uav, current_time, "no_safe_recovery_path",
+            )
             return
         sm.clear_uav_assignment(uav.id)
         sm.update_uav_status(uav.id, "returning", uav.position, fuel_remaining_pct=uav.fuel_remaining_pct)
@@ -6207,16 +6207,34 @@ class SimulationEngine:
                 uav.R_min, self.config.control.safety.reserve_range_cells,
             )
             if not candidates:
+                # Every checked route exceeds the remaining range. Landing on
+                # fumes at the nearest reachable base beats orbiting forever,
+                # so relax the fuel gate once — geometry still gates the pick.
+                # evaluate() rejects non-finite ranges, hence the huge bound.
+                candidates = RecoveryPlanner().evaluate(
+                    uav.pose, 1e6, bases,
+                    self.allocator.sm.obstacle_mask,
+                    self.allocator.sm.obstacle_version,
+                    uav.R_min, self.config.control.safety.reserve_range_cells,
+                )
+                if candidates:
+                    self.allocator.sm.add_event("recovery_relaxed_fuel", {
+                        "uav_id": uav.id,
+                        "base_id": candidates[0].base.base_id,
+                    })
+            if not candidates:
                 raise NoSafeRecoveryPath(
                     "none", self.allocator.sm.obstacle_version,
-                    "no queued return has a safe route within fuel reserve",
+                    "no queued return has a geometrically safe route",
                 )
         except (RuntimeError, ValueError) as exc:
             error = exc if isinstance(exc, NoSafeRecoveryPath) else NoSafeRecoveryPath(
                 "none", self.allocator.sm.obstacle_version, str(exc),
             )
             self._emit_no_safe_recovery_path(uav, current_time, error)
-            self._enter_emergency_failure(uav, "no_safe_recovery_path", error)
+            # No usable route right now: stay airborne and let the
+            # holding-timeout loop re-offer a landing every window.
+            self._park_for_recovery_retry(uav, current_time, error.reason)
             return
 
         candidate = candidates[0]
@@ -6224,8 +6242,10 @@ class SimulationEngine:
             base = self._install_checked_return(
                 uav, current_time, candidate, self.bases,
             )
-        except Exception as exc:
-            self._enter_emergency_failure(uav, "controller_fault", exc)
+        except Exception:
+            self._park_for_recovery_retry(
+                uav, current_time, "return_install_fault",
+            )
             return
         self.allocator.sm.add_event("holding_released", {
             "uav_id": uav.id, "base_id": base.id,
@@ -6269,6 +6289,9 @@ class SimulationEngine:
         self._return_reservation_sequence += 1
         self._holding_base_by_uav.pop(uav.id, None)
         uav.plan_return(plan.path)
+        state = self.allocator.sm.get_uav(uav.id)
+        if state is not None and state.operational_status == "recovery_wait":
+            state.operational_status = "available"
         return base
 
     def _process_holding_timeouts(self, current_time: float) -> None:
@@ -6832,8 +6855,14 @@ class SimulationEngine:
             return "tracking"
         if uav.status in ("returning", "refueling"):
             return "returning"
-        if uav.status == "holding" and self._uav_near_home(uav):
-            return "returning"
+        if uav.status == "holding":
+            state = self.allocator.sm.get_uav(uav.id)
+            parked_for_landing = (
+                state is not None
+                and state.operational_status == "recovery_wait"
+            )
+            if parked_for_landing or self._uav_near_home(uav):
+                return "returning"
         return "search"
 
     def _emit_uav_canonical(self, uav: UAVEntity) -> None:

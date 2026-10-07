@@ -86,12 +86,21 @@ def test_full_alternate_retains_holding_fallback(monkeypatch):
     assert engine.bases[1].occupancy == 1
 
 
-def test_diversion_fails_closed_when_fuel_cannot_cover_path_and_reserve(monkeypatch):
+def test_diversion_parks_and_retries_when_fuel_cannot_cover_path_and_reserve(monkeypatch):
     engine, uav, _ = _returning_engine(monkeypatch)
     uav.fuel_remaining_pct = 4.5 / (uav.remaining_range_cells / uav.fuel_remaining_pct)
     engine._step_controlled_uav(uav, 1.)
-    assert engine._emergency_failures[uav.id] == 'no_safe_recovery_path'
+    assert uav.id not in engine._emergency_failures
+    assert uav.status == 'holding'
     assert uav.id not in engine._return_base_by_uav
+    assert engine.control_coordinator.operation_mode(uav.id) is OperationMode.HOLDING
+    assert not engine.allocator.sm.is_uav_operational(uav.id)
+    # The holding-timeout loop re-offers a landing; the relaxed-fuel fallback
+    # then installs a return to the nearest reachable base.
+    engine._hold_started_at.pop(uav.id, None)
+    engine._resume_queued_landing(uav, 1.)
+    assert engine.control_coordinator.operation_mode(uav.id) is OperationMode.RETURN
+    assert uav.id in engine._return_base_by_uav
 
 
 def test_diversion_rolls_back_reservation_if_install_rejected(monkeypatch):
