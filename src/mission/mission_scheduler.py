@@ -328,11 +328,6 @@ def _is_preemptible(
     )
 
 
-def _task_kind(task_id: str, candidates: dict[str, TaskCandidate], active: dict[str, TaskRecord]):
-    task = active.get(task_id) or candidates.get(task_id)
-    return task.kind if task is not None else None
-
-
 def _edge_usable(
     edge: FeasibleEdge,
     task_id: str,

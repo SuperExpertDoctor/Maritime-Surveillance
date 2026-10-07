@@ -16,7 +16,6 @@ from src.env.obstacle import Island
 from src.env.ship_navigation import MotionDynamics, MotionState, ShipNavigator, ShipRoute
 from src.env.emitter import RadarEmitter
 from src.mission.contracts import VesselClass, ship_rng_manifest
-from src.schedule.config_loader import allocate_population
 from src.schedule.datatypes import GridCoord
 
 if TYPE_CHECKING:

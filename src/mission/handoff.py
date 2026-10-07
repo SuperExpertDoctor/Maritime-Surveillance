@@ -210,7 +210,7 @@ class HandoffManager:
         self, contact_id: str, at_min: float, reason: str,
     ) -> tuple[HandoffAttempt, ...]:
         """Fail all live handoffs for a removed or invalidated contact."""
-        at = _time(at_min, "at_min")
+        _time(at_min, "at_min")
         if not isinstance(reason, str) or not reason:
             raise ValueError("reason must be a non-empty string")
         failed = []

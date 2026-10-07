@@ -103,8 +103,6 @@ def decode_selection_payload(payload: dict) -> dict:
     columns = snapshot.pop("uav_option_columns")
     if columns != list(UAV_OPTION_COLUMNS):
         raise ValueError("unsupported UAV option columns")
-    snapshot.pop("uav_index", None)
-    snapshot.pop("task_index", None)
     _fatten_samples(snapshot)
     eligibility = {}
     for edge in snapshot.get("feasible_edges", []):

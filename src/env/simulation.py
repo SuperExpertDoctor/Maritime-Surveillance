@@ -41,7 +41,6 @@ from src.control.common.contracts import (
     CoverageExecutionConfig,
     OperationMode,
     RecoveryPlan,
-    SensorMode,
 )
 from src.control.common.coordinator import (
     ControlCoordinator,
@@ -84,7 +83,7 @@ from src.mission.contracts import (
     VesselCommand,
 )
 from src.mission.contact_assessor import ContactAssessor
-from src.mission.coverage_service import CoverageCompletion, CoverageService
+from src.mission.coverage_service import CoverageCompletion
 from src.mission.evasion_detector import EvasionDetector
 from src.mission.handoff import HandoffManager
 from src.mission.outcome_evaluator import (
@@ -4052,7 +4051,14 @@ class SimulationEngine:
             )
         return attempt
 
-    def _prepare_return_state(self, uav: UAVEntity, current_time: float) -> None:
+    def _release_mission_targets(
+        self,
+        uav: UAVEntity,
+        current_time: float,
+        *,
+        release_marker: bool,
+    ) -> None:
+        """Detach tracking and search bindings before a return or abort."""
         sm = self.allocator.sm
         self._freshness_patrol_uavs.discard(uav.id)
         self._search_started_at.pop(uav.id, None)
@@ -4065,7 +4071,7 @@ class SimulationEngine:
             self._require_handoff(uav, report, current_time)
             track = sm.get_track_region_for_group(group_id)
             if track is not None and track.assigned_uav_id == uav.id:
-                sm.release_track_region(track.id, uav.id, create_marker=True)
+                sm.release_track_region(track.id, uav.id, create_marker=release_marker)
                 self.allocator.trigger_manager.notify_event(
                     "target_lost",
                     time=current_time,
@@ -4099,6 +4105,10 @@ class SimulationEngine:
                     )
                 else:
                     region.assigned_uav_id = None
+
+    def _prepare_return_state(self, uav: UAVEntity, current_time: float) -> None:
+        self._release_mission_targets(uav, current_time, release_marker=True)
+        sm = self.allocator.sm
         sm.clear_uav_assignment(uav.id)
         uav.status = "returning"
         uav.sensor_mode = "off"
@@ -5798,8 +5808,6 @@ class SimulationEngine:
         self,
         uav: UAVEntity,
         current_time: float,
-        *,
-        release_marker: bool = True,
     ) -> None:
         if self.control_coordinator.has_controller(uav.id):
             lease = self.control_coordinator.current_lease(uav.id)
@@ -5817,48 +5825,7 @@ class SimulationEngine:
                         exc,
                     )
                 return
-        sm = self.allocator.sm
-        self._freshness_patrol_uavs.discard(uav.id)
-        self._search_started_at.pop(uav.id, None)
-        self._tracking_started_at.pop(uav.id, None)
-        self._ais_tracking_started_at.pop(uav.id, None)
-        self._ais_measurements.pop(uav.id, None)
-        if uav.target_group_id:
-            report = sm.get_target_report(uav.target_group_id)
-            self._require_handoff(uav, report, current_time)
-            track = sm.get_track_region_for_group(uav.target_group_id)
-            if track is not None and track.assigned_uav_id == uav.id:
-                sm.release_track_region(track.id, uav.id, create_marker=release_marker)
-                self.allocator.trigger_manager.notify_event(
-                    "target_lost", time=current_time, uav_id=uav.id,
-                    group_id=uav.target_group_id,
-                )
-                sm.add_event("target_lost", {
-                    "uav_id": uav.id,
-                    "group_id": uav.target_group_id,
-                })
-                if report is not None:
-                    sm.add_event("target_handoff_report", {
-                        "uav_id": uav.id,
-                        "contact_id": report.contact_id,
-                        "position": report.position,
-                        "observed_at": report.observed_at,
-                    })
-            if report is not None:
-                sm.release_contact_reservation(uav.target_group_id, uav.id, current_time, "uav_return")
-        for region in sm.get_search_regions():
-            if region.assigned_uav_id == uav.id:
-                record = self._mission_task_records.get(region.id)
-                if record is None or record.kind == "search":
-                    self._set_search_task_projection(
-                        region.id,
-                        state="pending",
-                        uav_id=None,
-                        current_time=current_time,
-                        reason="uav_return",
-                    )
-                else:
-                    region.assigned_uav_id = None
+        self._release_mission_targets(uav, current_time, release_marker=True)
 
         try:
             self._set_return_route(uav, current_time)
