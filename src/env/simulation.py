@@ -2873,6 +2873,14 @@ class SimulationEngine:
         lease = self.control_coordinator.current_lease(uav.id)
         if not self.control_coordinator.has_controller(uav.id):
             return False
+        state = self.allocator.sm.get_uav(uav.id)
+        if state is not None and state.operational_status == "recovery_wait":
+            # A parked airframe does not run controller ticks: it holds
+            # wherever it was left — including cells the safety layer cannot
+            # clear — while the holding-timeout loop retries a landing route
+            # on its own clock.  Stepping it would fault every tick and
+            # re-park forever without ever reaching the retry window.
+            return False
 
         if lease.owner in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
             try:
@@ -3887,6 +3895,10 @@ class SimulationEngine:
     ) -> None:
         """Recover work-controller faults through the same reservation transaction."""
         if lease.owner not in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
+            state = self.allocator.sm.get_uav(uav.id)
+            if state is not None and state.operational_status == "recovery_wait":
+                # Already parked: the retry loop owns this airframe now.
+                return
             self._park_for_recovery_retry(uav, current_time, "controller_fault")
             return
         reason = (
@@ -4388,7 +4400,11 @@ class SimulationEngine:
         else:
             uav.start_holding(uav.position)
         uav.status = "holding"
-        self._hold_started_at[uav.id] = current_time
+        # Keep the first park timestamp: repeated faults while parked must
+        # not push the retry window further out.  The timeout loop pops the
+        # entry before each landing attempt, so a failed retry naturally
+        # opens a fresh window on the next park.
+        self._hold_started_at.setdefault(uav.id, current_time)
         state = self.allocator.sm.get_uav(uav.id)
         if state is not None:
             state.operational_status = "recovery_wait"

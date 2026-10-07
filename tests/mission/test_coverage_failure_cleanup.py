@@ -206,6 +206,42 @@ def test_probe_timeout_releases_record_bound_to_swapped_airframe():
     )
 
 
+def test_parked_recovery_wait_uav_skips_control_ticks_and_keeps_window():
+    """A parked airframe must not fault-and-repark every tick: control
+    ticks are skipped and the retry window keeps its original start."""
+    engine, uav, task, generation = _coverage_fixture()
+    engine._park_for_recovery_retry(uav, 0.0, "no_safe_recovery_path")
+    engine._park_for_recovery_retry(uav, 1.0, "controller_fault")
+    assert engine._hold_started_at[uav.id] == 0.0
+
+    waits_before = sum(
+        event["type"] == "recovery_wait"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )
+    assert engine._step_controlled_uav(uav, 2.0) is False
+    waits_after = sum(
+        event["type"] == "recovery_wait"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )
+    assert waits_after == waits_before
+
+
+def test_control_fault_on_parked_uav_does_not_repark():
+    """A further fault while parked leaves the retry loop in charge — no
+    fresh recovery_wait event and no reset of the window."""
+    engine, uav, task, generation = _coverage_fixture()
+    engine._park_for_recovery_retry(uav, 0.0, "no_safe_recovery_path")
+    lease = engine.control_coordinator.current_lease(uav.id)
+
+    engine._handle_control_fault(uav, 1.0, RuntimeError("boom"), lease)
+
+    assert engine._hold_started_at[uav.id] == 0.0
+    assert sum(
+        event["type"] == "recovery_wait"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    ) == 1
+
+
 def test_coverage_install_fault_holds_position_and_cools_retry():
     """A storm-blocked install must not fly the airframe home."""
     engine, uav, task, generation = _coverage_fixture()
