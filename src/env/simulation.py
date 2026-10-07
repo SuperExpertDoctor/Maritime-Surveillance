@@ -1803,6 +1803,7 @@ class SimulationEngine:
             result = self.allocator.step(t)
             self._sync_assignments()
         else:
+            self._release_stale_task_bindings(t)
             sweep_created = self._apply_coverage_sweep(t)
             pending_reassigned = self._apply_pending_search_reassignments(t)
             if pending_reassigned:
@@ -1921,6 +1922,7 @@ class SimulationEngine:
         if self.runtime_status != "paused_model":
             return
         if self.blocked_role == "decision_maker":
+            self._release_stale_task_bindings(self.clock.time)
             result, batch = self.allocator.mission_step(
                 self.clock.time,
                 active_tasks=tuple(self._mission_task_records.values()),
@@ -2657,6 +2659,67 @@ class SimulationEngine:
             })
             retired += 1
         return retired
+
+    def _release_stale_task_bindings(self, current_time: float) -> int:
+        """Release records that bind a grounded airframe to work it is not running.
+
+        Task records close through _close_mission_task, which is invoked for
+        the coordinator's *active* task.  When the active task is swapped or
+        dropped without a release (e.g. a probe session that outlives a
+        return-to-base swap), the orphaned record keeps naming the airframe
+        and the availability gate excludes it from the schedulable pool
+        forever — a grounded, fully-fuelled aircraft that can never be
+        re-tasked.  Only grounded or held airframes are reconciled: an
+        airborne mismatch can be a transient mid-installation state and
+        must not release live work.
+        """
+        sm = self.allocator.sm
+        released = 0
+        for record_id, record in tuple(self._mission_task_records.items()):
+            if (
+                record.status not in {"approved", "executing"}
+                or record.assigned_uav_id is None
+            ):
+                continue
+            uav_id = record.assigned_uav_id
+            uav = next(
+                (item for item in self.uavs if item.id == uav_id), None
+            )
+            if uav is None or uav.status not in {"idle", "holding"}:
+                continue
+            active = self.control_coordinator.active_task(uav_id)
+            if active is not None and active.task_id == record.task_id:
+                continue
+            if record.kind == "search":
+                self._set_search_task_projection(
+                    record.task_id,
+                    state="pending",
+                    uav_id=None,
+                    current_time=current_time,
+                    reason="stale_binding",
+                    allow_missing_region=True,
+                )
+            self._mission_task_records[record_id] = replace(
+                record,
+                status="blocked",
+                assigned_uav_id=None,
+                finished_at_min=current_time,
+                release_reason="stale_binding",
+            )
+            self.allocator.trigger_manager.notify_event(
+                "mission_task_released", time=current_time,
+                uav_id=uav_id, task_id=record.task_id,
+            )
+            sm.add_event("mission_task_released", {
+                "task_id": record.task_id,
+                "uav_id": uav_id,
+                "status": "blocked",
+                "reason": "stale_binding",
+                "contact_id": record.contact_id,
+                "probe_id": None,
+            })
+            released += 1
+        return released
 
     def _apply_pending_search_reassignments(self, current_time: float) -> int:
         """Install deterministic pending-search handoffs at one engine boundary."""
@@ -5378,6 +5441,47 @@ class SimulationEngine:
                         "reason": probe.completed_reason or "probe_timeout",
                     },
                 )
+        # A probe session can outlive the coordinator task that spawned it:
+        # the airframe may have swapped to a return/holding task before the
+        # session timed out, so the close above finds no matching active
+        # task.  Any record still binding that airframe to this contact
+        # must close here too — otherwise the availability gate treats the
+        # airframe as bound and it can never be re-tasked.
+        for record_id, record in tuple(self._mission_task_records.items()):
+            if (
+                record.assigned_uav_id != probe.uav_id
+                or record.status not in {"approved", "executing"}
+                or record.contact_id is None
+                or (task is not None and record.task_id == task.task_id)
+            ):
+                continue
+            try:
+                same_contact = sm.resolve_contact_id(
+                    record.contact_id
+                ) == sm.resolve_contact_id(probe.contact_id)
+            except KeyError:
+                same_contact = False
+            if not same_contact:
+                continue
+            self._mission_task_records[record_id] = replace(
+                record,
+                status="blocked",
+                assigned_uav_id=None,
+                finished_at_min=current_time,
+                release_reason=probe.completed_reason or "probe_timeout",
+            )
+            self.allocator.trigger_manager.notify_event(
+                "mission_task_released", time=current_time,
+                uav_id=probe.uav_id, task_id=record.task_id,
+            )
+            sm.add_event("mission_task_released", {
+                "task_id": record.task_id,
+                "uav_id": probe.uav_id,
+                "status": "blocked",
+                "reason": probe.completed_reason or "probe_timeout",
+                "contact_id": record.contact_id,
+                "probe_id": probe.probe_id,
+            })
         if sm.get_probe_session(probe.probe_id) is not None:
             sm.clear_probe_session(probe.probe_id)
         for vessel_id in self._vessel_ids_for_contact(probe.contact_id):

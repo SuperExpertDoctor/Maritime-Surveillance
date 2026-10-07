@@ -5,7 +5,7 @@ import numpy as np
 from src.control.common.contracts import ControlTask, ControlOwner, OperationMode
 from src.env.base_station import BaseStation
 from src.env.simulation import SimulationEngine
-from src.mission.contracts import TaskRecord
+from src.mission.contracts import ContactSnapshot, ProbeSession, TaskRecord
 from src.mission.llm_gateway import ModelResult
 from src.mission.task_catalog import TaskCatalog
 from src.schedule.config_loader import ConfigLoader
@@ -129,6 +129,79 @@ def test_recovery_wait_park_releases_task_service_and_never_fails():
     assert len(waits) == 2
     assert not any(
         event["type"] == "emergency_failure"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )
+
+
+def test_stale_binding_on_grounded_uav_is_released_and_retaskable():
+    """A record that names a grounded airframe it is not running must not
+    keep that airframe out of the schedulable pool."""
+    engine = _engine()
+    uav = engine.uavs[0]
+    assert uav.status == "idle"
+    engine._mission_task_records["probe-leaked"] = TaskRecord(
+        "probe-leaked", "probe", "executing", None, "C0007", (),
+        uav.id, "fixture", 0.0, 0.0, None, None,
+    )
+
+    released = engine._release_stale_task_bindings(5.0)
+
+    assert released == 1
+    record = engine._mission_task_records["probe-leaked"]
+    assert record.status == "blocked"
+    assert record.assigned_uav_id is None
+    assert record.release_reason == "stale_binding"
+    assert any(
+        event["type"] == "mission_task_released"
+        and event["data"]["task_id"] == "probe-leaked"
+        and event["data"]["reason"] == "stale_binding"
+        for event in engine.allocator.sm.get_recent_events(0.0)
+    )
+    assert uav.id in {
+        item.id for item in engine.allocator.sm.get_available_uavs()
+    }
+
+
+def test_release_stale_task_bindings_keeps_matching_active_task():
+    """Grounded or not, a record whose task the coordinator is still
+    running is a live binding and must survive the sweep."""
+    engine, uav, task, _generation = _coverage_fixture()
+    uav.status = "idle"
+
+    assert engine._release_stale_task_bindings(0.0) == 0
+    record = engine._mission_task_records[task.task_id]
+    assert record.status == "executing"
+    assert record.assigned_uav_id == uav.id
+
+
+def test_probe_timeout_releases_record_bound_to_swapped_airframe():
+    """A probe session that outlives a return/holding swap must close the
+    orphaned record it left bound to the airframe."""
+    engine = _engine()
+    uav = engine.uavs[0]
+    engine._mission_task_records["probe-orphan"] = TaskRecord(
+        "probe-orphan", "probe", "executing", None, "C0007", (),
+        uav.id, "fixture", 0.0, 0.0, None, None,
+    )
+    contact = ContactSnapshot(
+        "C0007", 1, "queued", "unknown", None, 0.0, 1.0,
+        (5.0, 5.0), None, 0.5, uav.id, "P0001", None, None, 0.0, (),
+    )
+    probe = ProbeSession(
+        "P0001", "C0007", uav.id, "finished",
+        0.0, 0.0, 0.0, (), (), 0.0, "approach_timeout",
+    )
+
+    engine._finish_probe_session(contact, probe, 5.0)
+
+    record = engine._mission_task_records["probe-orphan"]
+    assert record.status == "blocked"
+    assert record.assigned_uav_id is None
+    assert record.release_reason == "approach_timeout"
+    assert any(
+        event["type"] == "mission_task_released"
+        and event["data"]["task_id"] == "probe-orphan"
+        and event["data"]["probe_id"] == "P0001"
         for event in engine.allocator.sm.get_recent_events(0.0)
     )
 
