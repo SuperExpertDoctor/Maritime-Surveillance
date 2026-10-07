@@ -104,10 +104,14 @@ class SafetyEnvelope:
         applied = replace(command, turn_rate_rad_min=turn_rate, speed_cells_min=speed)
         forecasts = self._forecast_masks(observation, dt_min)
         if not self._can_escape_after(applied, observation, dt_min, forecasts):
-            applied = self._safe_candidate(
+            applied, relaxed = self._safe_candidate(
                 command, turn_rate, observation, dt_min, forecasts
             )
             interventions.append(SafetyIntervention("motion_corrected"))
+            if relaxed:
+                interventions.append(
+                    SafetyIntervention("escape_contract_relaxed")
+                )
 
         if applied.sensor_mode is SensorMode.SAR and (
             # En-route imaging allows TRANSIT/RETURN legs to collect too;
@@ -182,13 +186,38 @@ class SafetyEnvelope:
         observation: ControlObservation,
         dt_min: float,
         forecasts: list[np.ndarray],
-    ) -> ControlCommand:
+    ) -> tuple[ControlCommand, bool]:
+        for candidate in self._candidate_commands(command, requested_turn):
+            if self._can_escape_after(candidate, observation, dt_min, forecasts):
+                return candidate, False
+        # Wedged cells happen next to boundaries and storm edges: the full
+        # escape-turn contract can reject every command even though a
+        # physically free next step still exists.  Airframes never fail —
+        # relax to single-step legality, preferring the direction with the
+        # longest open runway, so the aircraft can creep back to clear
+        # space instead of freezing forever.
+        best = None
+        best_depth = 0
+        for candidate in self._candidate_commands(command, requested_turn):
+            depth = self._legal_continuation_depth(
+                candidate, observation, dt_min, forecasts
+            )
+            if depth > best_depth:
+                best, best_depth = candidate, depth
+        if best is not None:
+            return best, True
+        raise UnsafeControlState("no collision-free legal control candidate")
+
+    def _candidate_commands(
+        self, command: ControlCommand, requested_turn: float
+    ) -> tuple[ControlCommand, ...]:
         candidate_turns = (
             requested_turn,
             self._action_spec.max_turn_rate_rad_min,
             self._action_spec.min_turn_rate_rad_min,
             0.0,
         )
+        candidates = []
         for turn_rate, candidate_speed in (
             (turn, speed)
             for speed in (
@@ -202,14 +231,75 @@ class SafetyEnvelope:
                 self._action_spec.min_turn_rate_rad_min,
                 self._action_spec.max_turn_rate_rad_min,
             )
-            candidate = replace(
-                command,
-                turn_rate_rad_min=legal_turn,
-                speed_cells_min=candidate_speed,
+            candidates.append(
+                replace(
+                    command,
+                    turn_rate_rad_min=legal_turn,
+                    speed_cells_min=candidate_speed,
+                )
             )
-            if self._can_escape_after(candidate, observation, dt_min, forecasts):
-                return candidate
-        raise UnsafeControlState("no collision-free legal control candidate")
+        return tuple(candidates)
+
+    def _legal_continuation_depth(
+        self,
+        command: ControlCommand,
+        observation: ControlObservation,
+        dt_min: float,
+        forecasts: list[np.ndarray],
+    ) -> int:
+        """Deepest collision-free rollout the command opens up.
+
+        Roll the candidate once, then try each bounded escape manoeuvre
+        (hold a turn for a duration, then run straight) — the same shape
+        the strict contract uses, minus its end-of-runway turn-clearance
+        gate.  0 means the command's first step is already illegal.
+        """
+        state = observation.self_state
+        first = self._advance_pose(
+            (*state.position, state.heading_rad),
+            command.speed_cells_min,
+            command.turn_rate_rad_min,
+            0,
+            dt_min,
+            forecasts,
+        )
+        if first is None:
+            return 0
+        best = 1
+        for turn in (
+            self._action_spec.max_turn_rate_rad_min,
+            self._action_spec.min_turn_rate_rad_min,
+        ):
+            if not turn:
+                continue
+            turn_steps = math.ceil(math.pi / (abs(turn) * dt_min))
+            for escape_speed in (
+                self._action_spec.min_speed_cells_min,
+                self._action_spec.max_speed_cells_min,
+            ):
+                for duration in (
+                    0,
+                    math.ceil(turn_steps / 2),
+                    turn_steps,
+                    2 * turn_steps,
+                ):
+                    pose = first
+                    depth = 1
+                    for index in range(1, len(forecasts) - 1):
+                        pose = self._advance_pose(
+                            pose,
+                            escape_speed,
+                            turn if index <= duration else 0.0,
+                            index,
+                            dt_min,
+                            forecasts,
+                        )
+                        if pose is None:
+                            break
+                        depth += 1
+                    if depth > best:
+                        best = depth
+        return best
 
     def _forecast_masks(
         self, observation: ControlObservation, dt_min: float
@@ -274,21 +364,9 @@ class SafetyEnvelope:
         """
 
         def advance(pose, speed, turn, index):
-            col, row, heading = pose
-            mid = heading + turn * dt_min / 2
-            end = (
-                col + speed * dt_min * math.cos(mid),
-                row + speed * dt_min * math.sin(mid),
-                heading + turn * dt_min,
+            return self._advance_pose(
+                pose, speed, turn, index, dt_min, forecasts
             )
-            if any(
-                self._cell_blocked(c, r, forecasts[index])
-                for c, r in self._traversed_cells(col, row, *end[:2])
-            ):
-                return None
-            if self._point_blocked(*end[:2], forecasts[index + 1]):
-                return None
-            return end
 
         state = observation.self_state
         first = advance(
@@ -341,6 +419,32 @@ class SafetyEnvelope:
                         ):
                             return True
         return False
+
+    def _advance_pose(
+        self,
+        pose: tuple[float, float, float],
+        speed: float,
+        turn: float,
+        index: int,
+        dt_min: float,
+        forecasts: list[np.ndarray],
+    ) -> tuple[float, float, float] | None:
+        """One midpoint-dynamics step, or None when it clips a blocked cell."""
+        col, row, heading = pose
+        mid = heading + turn * dt_min / 2
+        end = (
+            col + speed * dt_min * math.cos(mid),
+            row + speed * dt_min * math.sin(mid),
+            heading + turn * dt_min,
+        )
+        if any(
+            self._cell_blocked(c, r, forecasts[index])
+            for c, r in self._traversed_cells(col, row, *end[:2])
+        ):
+            return None
+        if self._point_blocked(*end[:2], forecasts[index + 1]):
+            return None
+        return end
 
     def _has_boundary_turn_clearance(
         self,

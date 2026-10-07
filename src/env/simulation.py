@@ -6,7 +6,7 @@ import random
 import time
 import hashlib
 from uuid import uuid4
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
@@ -4627,9 +4627,58 @@ class SimulationEngine:
                 for other in obstacles
             ):
                 continue
+            if not self._uavs_keep_escape_corridor(candidate, obstacles):
+                continue
             self._next_storm_id += 1
             return candidate
         return None
+
+    def _uavs_keep_escape_corridor(self, candidate, obstacles) -> bool:
+        """A spawned storm must never strand an airframe.
+
+        Storms are static once spawned, so a candidate that buries a UAV
+        inside its safety margin — or seals the last corridor home — would
+        freeze that airframe forever: it cannot legally move and the trap
+        never lifts.  Every airborne UAV must still be able to reach some
+        base through free cells with the candidate added.
+        """
+        mask = obstacle_grid_mask(
+            [*obstacles, candidate],
+            self.config.grid.resolution,
+            self.config.environment.storm_safety_margin_cells,
+            include_islands=True,
+        )
+        base_cells = {
+            (int(base.position.col), int(base.position.row)) for base in self.bases
+        }
+        for uav in self.uavs:
+            cell = tuple(int(value) for value in uav.float_position)
+            if cell in base_cells:
+                continue
+            if mask[cell] or not self._cell_reaches_bases(mask, cell, base_cells):
+                return False
+        return True
+
+    @staticmethod
+    def _cell_reaches_bases(mask, start, base_cells) -> bool:
+        cols, rows = mask.shape
+        seen = {start}
+        pending = deque((start,))
+        while pending:
+            col, row = pending.popleft()
+            if (col, row) in base_cells:
+                return True
+            for dcol, drow in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                ncol, nrow = col + dcol, row + drow
+                if (
+                    0 <= ncol < cols
+                    and 0 <= nrow < rows
+                    and (ncol, nrow) not in seen
+                    and not mask[ncol, nrow]
+                ):
+                    seen.add((ncol, nrow))
+                    pending.append((ncol, nrow))
+        return False
 
     def _update_ships(self, current_time: float) -> None:
         islands = [item for item in self.obstacles if isinstance(item, Island)]

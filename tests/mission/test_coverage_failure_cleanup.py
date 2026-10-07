@@ -242,6 +242,30 @@ def test_control_fault_on_parked_uav_does_not_repark():
     ) == 1
 
 
+def test_storm_spawn_never_strands_an_airframe():
+    """A spawned storm must not bury an airborne UAV in its safety margin
+    nor seal its last corridor to a base — static storms make such traps
+    permanent."""
+    from src.env.obstacle import Thunderstorm
+
+    engine = _engine()
+    uav = engine.uavs[0]
+    uav._col, uav._row = 15.5, 10.5
+    obstacles = list(engine.obstacles)
+
+    buried = Thunderstorm(
+        center=(16.0, 11.0), size=2, move_vector=(0.0, 0.0),
+        lifetime=-1.0, intensity=0.5, id="storm-x",
+    )
+    assert not engine._uavs_keep_escape_corridor(buried, obstacles)
+
+    far = Thunderstorm(
+        center=(25.0, 25.0), size=1, move_vector=(0.0, 0.0),
+        lifetime=-1.0, intensity=0.5, id="storm-y",
+    )
+    assert engine._uavs_keep_escape_corridor(far, obstacles)
+
+
 def test_coverage_install_fault_holds_position_and_cools_retry():
     """A storm-blocked install must not fly the airframe home."""
     engine, uav, task, generation = _coverage_fixture()

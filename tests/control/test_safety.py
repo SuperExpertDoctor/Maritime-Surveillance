@@ -427,6 +427,34 @@ def test_safety_raises_when_no_legal_collision_free_candidate_exists(setup):
         envelope.apply(command, observation, dt_min=1.0)
 
 
+def test_relaxed_contract_returns_legal_step_when_full_contract_fails():
+    """When every candidate fails the full escape contract but a legal
+    step still exists, the envelope emits the deepest legal command
+    instead of freezing the airframe."""
+    spec = ActionSpec(-0.32, 0.32, 0.16, 0.32)
+    envelope = SafetyEnvelope(spec)
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[14:17, 1] = True
+    mask[16, 0] = True
+    observation = make_observation(
+        position=(15.5, 0.6), heading_rad=0.0, obstacle_mask=mask,
+    )
+    command = ControlCommand(0.0, 0.3, SensorMode.OFF, OperationMode.TRANSIT)
+
+    result = envelope.apply(command, observation, dt_min=1.0)
+
+    kinds = {item.kind for item in result.interventions}
+    assert "escape_contract_relaxed" in kinds
+    assert "motion_corrected" in kinds
+
+    uav = _replay_aircraft((15.5, 0.6), 0.0)
+    applied = result.applied_command
+    uav.apply_motion(applied.turn_rate_rad_min, applied.speed_cells_min, 1.0)
+    xy = uav.float_position
+    assert all(0 <= value < 30 for value in xy)
+    assert not mask[int(xy[0]), int(xy[1])]
+
+
 def _replay_aircraft(position, heading):
     from src.env.uav_entity import UAVEntity
     from src.schedule.datatypes import GridCoord
@@ -541,12 +569,13 @@ def test_live_drifting_storm_approaches_do_not_strand_aircraft(
     assert corrected > 0
 
 
-def test_safety_rejects_boundary_pose_without_room_to_turn(setup):
+def test_safety_relaxes_boundary_pose_without_room_to_turn(setup):
     envelope, _ = setup
     observation = make_observation(position=(4.9, 2.5))
     command = ControlCommand(0.0, 0.1, SensorMode.OFF, OperationMode.TRANSIT)
-    with pytest.raises(UnsafeControlState):
-        envelope.apply(command, observation, 1.0)
+    result = envelope.apply(command, observation, 1.0)
+    kinds = {item.kind for item in result.interventions}
+    assert "escape_contract_relaxed" in kinds
 
 
 def test_storm_forecast_matches_raster_margin_and_boundary_reflection():
