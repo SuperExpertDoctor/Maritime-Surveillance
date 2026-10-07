@@ -15,6 +15,7 @@ are internalized.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import math
 from typing import Callable, Mapping, Protocol, Sequence
@@ -250,6 +251,24 @@ class StateKernel:
         self._states.get(domain, {}).pop(entity_id, None)
 
     # -- internals ---------------------------------------------------------
+
+    def __deepcopy__(self, memo):
+        """Snapshots must not clone live wiring.
+
+        Subscribers are bound methods of the owning engine: copying them
+        pulls the engine's lock-holding object graph into the frame
+        snapshot and crashes on ``_thread.RLock``. The copy keeps rules,
+        facts, states and the transition log; its subscriber list restarts
+        empty because the live engine rewires delivery on its own kernel,
+        never on the copy.
+        """
+        clone = type(self)()
+        memo[id(self)] = clone
+        clone._rules = deepcopy(self._rules, memo)
+        clone._facts = deepcopy(self._facts, memo)
+        clone._states = deepcopy(self._states, memo)
+        clone._transitions = deepcopy(self._transitions, memo)
+        return clone
 
     def _record(
         self,
