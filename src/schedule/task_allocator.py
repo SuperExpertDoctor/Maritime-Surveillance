@@ -1401,6 +1401,9 @@ class TaskAllocator:
                         seed=17,
                         along_track_cells=0.8,
                         allow_fallback=False,
+                        start_heading_free=(
+                            str(resource.operation).lower() == "idle"
+                        ),
                     )
                 )
                 path = tuple(path_plan.path)

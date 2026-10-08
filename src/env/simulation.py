@@ -6813,6 +6813,9 @@ class SimulationEngine:
             allow_revisit=allow_revisit or coverage_pct >= 80.0,
             direction=direction,
             seed=self.seed + numeric_id * 997,
+            # A grounded airframe can pivot before takeoff: its parked
+            # heading must not veto every departure connector.
+            start_heading_free=uav.status == "idle",
         )
 
     def _apply_search_route_plan(

@@ -31,6 +31,7 @@ class SearchRouteRequest:
     seed: int = 17
     along_track_cells: float | None = None
     allow_fallback: bool = True
+    start_heading_free: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,36 @@ def _nearest_free_point(point: Pose, mask: np.ndarray) -> Pose | None:
     return None
 
 
+def _reorient_grounded_start(
+    start: Pose,
+    swaths,
+    mask: np.ndarray,
+    request: SearchRouteRequest,
+    avoider: ObstacleAvoider,
+) -> Pose:
+    """Return ``start`` with a departure heading that can legally leave.
+
+    Candidates are tried cheapest-first: the stored heading, then the
+    bearing to the first swath entry, then fan-out offsets around that
+    bearing.  A heading wins when the direct Dubins connector to the
+    first swath entry is collision-free; the in-loop RRT* fallback still
+    covers whatever this cheap probe cannot.
+    """
+    x, y = start[0], start[1]
+    first = swaths[0]
+    entry = (first.start[0], first.start[1], first.heading)
+    bearing = math.atan2(first.start[1] - y, first.start[0] - x)
+    candidates = [start[2], bearing]
+    for delta_deg in (45, -45, 90, -90, 135, -135, 180):
+        candidates.append(bearing + math.radians(delta_deg))
+    for heading in candidates:
+        candidate = (x, y, heading)
+        direct = DubinsPath.compute(candidate, entry, request.r_min, 0.2).waypoints
+        if avoider.is_path_safe(direct, mask):
+            return candidate
+    return start
+
+
 def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
     """Build a complete obstacle-safe Dubins/SAR route from a state snapshot."""
     bbox = BBox(*request.bbox)
@@ -109,6 +140,11 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
         if projected is None:
             raise RuntimeError("no free cell exists to project the route start onto")
         start = projected
+    if request.start_heading_free:
+        # A grounded airframe can pivot before takeoff — its parked heading
+        # must not veto every departure arc (e.g. facing the border from a
+        # coastal base).  Keep the stored heading when it already works.
+        start = _reorient_grounded_start(start, swaths, mask, request, avoider)
     path: list[Pose] = [start]
     scan_ranges: list[tuple[int, int, str]] = []
     transit_end_index = 0

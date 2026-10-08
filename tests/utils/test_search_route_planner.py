@@ -113,3 +113,40 @@ def test_search_route_all_blocked_legs_returns_empty_plan():
 
     assert plan.scanned_swath_count == 0
     assert plan.scan_ranges == ()
+
+
+def test_search_route_grounded_start_heading_does_not_veto_departure():
+    """A grounded airframe can pivot before takeoff: parked heading 196°
+    at a coastal base vetoes every departure arc, but with
+    start_heading_free the planner reorients the start and still plans."""
+    mask = np.zeros((30, 30), dtype=bool)
+    locked = SearchRouteRequest(
+        uav_id="UAV-9",
+        start_pose=(1.0, 11.0, np.radians(196.4)),
+        bbox=(13, 6, 21, 17),
+        swath_width=3.0,
+        r_min=1.7,
+        obstacle_mask=mask,
+        unscanned_mask=np.zeros((30, 30), dtype=bool),
+        allow_revisit=True,
+        seed=42,
+    )
+    assert plan_search_route(locked).scanned_swath_count == 0
+
+    free = SearchRouteRequest(
+        uav_id="UAV-9",
+        start_pose=(1.0, 11.0, np.radians(196.4)),
+        bbox=(13, 6, 21, 17),
+        swath_width=3.0,
+        r_min=1.7,
+        obstacle_mask=mask,
+        unscanned_mask=np.zeros((30, 30), dtype=bool),
+        allow_revisit=True,
+        seed=42,
+        start_heading_free=True,
+    )
+    plan = plan_search_route(free)
+    assert plan.scanned_swath_count > 0
+    assert plan.path[0][:2] == (1.0, 11.0)
+    assert plan.path[0][2] != locked.start_pose[2]
+    assert ObstacleAvoider().is_path_safe(plan.path, mask)
