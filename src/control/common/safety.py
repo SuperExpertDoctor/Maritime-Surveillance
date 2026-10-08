@@ -193,17 +193,26 @@ class SafetyEnvelope:
         # Wedged cells happen next to boundaries and storm edges: the full
         # escape-turn contract can reject every command even though a
         # physically free next step still exists.  Airframes never fail —
-        # relax to single-step legality, preferring the direction with the
-        # longest open runway, so the aircraft can creep back to clear
-        # space instead of freezing forever.
+        # relax to single-step legality so the aircraft can creep back to
+        # clear space instead of freezing forever.  Straight flight wins
+        # over turning whenever a straight rollout is legal: usable
+        # airframes must keep covering or transiting, never circle in
+        # place, so turning escapes are only a last resort against walls.
         best = None
-        best_depth = 0
+        best_key = None
         for candidate in self._candidate_commands(command, requested_turn):
             depth = self._legal_continuation_depth(
                 candidate, observation, dt_min, forecasts
             )
-            if depth > best_depth:
-                best, best_depth = candidate, depth
+            if depth <= 0:
+                continue
+            key = (
+                abs(candidate.turn_rate_rad_min) <= 1e-6,
+                depth,
+                -abs(candidate.turn_rate_rad_min),
+            )
+            if best_key is None or key > best_key:
+                best, best_key = candidate, key
         if best is not None:
             return best, True
         raise UnsafeControlState("no collision-free legal control candidate")

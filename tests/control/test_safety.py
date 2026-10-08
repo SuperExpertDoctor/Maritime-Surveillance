@@ -455,6 +455,33 @@ def test_relaxed_contract_returns_legal_step_when_full_contract_fails():
     assert not mask[int(xy[0]), int(xy[1])]
 
 
+def test_relaxed_contract_prefers_straight_flight_over_deeper_turns():
+    """A boundary-hugging airframe must keep sliding straight while that
+    is legal instead of grabbing the deepest turn — turn-deepest picks
+    were drawing circle arcs along coasts and storm walls."""
+    spec = ActionSpec(-0.32, 0.32, 0.16, 0.32)
+    envelope = SafetyEnvelope(spec)
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[14:22, 1] = True  # wall to the south blocks the strict turn contract
+    mask[20, 0] = True  # shallow dead-end straight ahead
+    observation = make_observation(
+        position=(18.5, 0.5), heading_rad=0.0, obstacle_mask=mask,
+    )
+    command = ControlCommand(0.0, 0.3, SensorMode.OFF, OperationMode.TRANSIT)
+
+    result = envelope.apply(command, observation, dt_min=1.0)
+
+    kinds = {item.kind for item in result.interventions}
+    assert "escape_contract_relaxed" in kinds
+    applied = result.applied_command
+    assert abs(applied.turn_rate_rad_min) <= 1e-6
+    uav = _replay_aircraft((18.5, 0.5), 0.0)
+    uav.apply_motion(applied.turn_rate_rad_min, applied.speed_cells_min, 1.0)
+    xy = uav.float_position
+    assert all(0 <= value < 30 for value in xy)
+    assert not mask[int(xy[0]), int(xy[1])]
+
+
 def _replay_aircraft(position, heading):
     from src.env.uav_entity import UAVEntity
     from src.schedule.datatypes import GridCoord

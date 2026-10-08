@@ -910,6 +910,12 @@ class SimulationEngine:
             },
         )
 
+    def _vessel_stage(self, vessel_id: str) -> str:
+        try:
+            return self.surveillance_stages.snapshot(vessel_id).stage
+        except KeyError:
+            return "undetected"
+
     def _set_surveillance_fact(
         self,
         vessel_id: str,
@@ -2218,6 +2224,15 @@ class SimulationEngine:
                     return False
                 if candidate.kind == "probe" and contact.vessel_class != "unknown":
                     return False
+                # A contact already bitten by a live track task must never
+                # re-enter the probe pipeline — re-probing it churns the
+                # stage between tracking and probing and burns an airframe
+                # on a target that is already owned.
+                if candidate.kind == "probe" and any(
+                    self._vessel_stage(vessel_id) == "tracking"
+                    for vessel_id in self._vessel_ids_for_contact(contact_id)
+                ):
+                    continue
                 handoff = next(
                     (
                         item
@@ -2413,6 +2428,15 @@ class SimulationEngine:
                     target_group_id=task.target_contact_id,
                     fuel_remaining_pct=uav.fuel_remaining_pct,
                 )
+                # The track task itself pins the vessel's stage at tracking
+                # so EO-lock dropouts cannot demote it into probe churn.
+                for vessel_id in self._vessel_ids_for_contact(
+                    task.target_contact_id
+                ):
+                    self._set_surveillance_fact(
+                        vessel_id, "track", True,
+                        self.clock.time, task.task_id,
+                    )
             else:
                 uav._mission_kind = "probe"
                 uav.status = "transit"
@@ -3323,6 +3347,11 @@ class SimulationEngine:
                     and sm.resolve_contact_id(session.contact_id) == contact_id
                 ):
                     sm.clear_probe_session(session.probe_id)
+                    for vessel_id in self._vessel_ids_for_contact(contact_id):
+                        self._set_surveillance_fact(
+                            vessel_id, "probe", False,
+                            current_time, session.probe_id,
+                        )
                 if not preserve_contact and not replacement_targets_contact:
                     expected_probe = (
                         task.probe_id
@@ -3342,6 +3371,18 @@ class SimulationEngine:
                     sm.release_track_region(
                         track.id, source_uav_id=uav_id, create_marker=False
                     )
+                if task.task_type is OperationMode.TRACK and not (
+                    active is not None
+                    and active.task_type is OperationMode.TRACK
+                    and active.target_contact_id is not None
+                    and sm.resolve_contact_id(active.target_contact_id)
+                    == contact_id
+                ):
+                    for vessel_id in self._vessel_ids_for_contact(contact_id):
+                        self._set_surveillance_fact(
+                            vessel_id, "track", False,
+                            current_time, task.task_id,
+                        )
 
         if owns_active:
             sm.clear_uav_assignment(uav_id)
@@ -5413,6 +5454,10 @@ class SimulationEngine:
                 contact = sm.contacts.snapshot(probe.contact_id)
             except KeyError:
                 sm.clear_probe_session(probe.probe_id)
+                for vessel_id in self._vessel_ids_for_contact(probe.contact_id):
+                    self._set_surveillance_fact(
+                        vessel_id, "probe", False, current_time, probe.probe_id,
+                    )
                 continue
             advanced = advance_probe(
                 probe,

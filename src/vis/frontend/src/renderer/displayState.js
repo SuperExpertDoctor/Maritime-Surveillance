@@ -33,6 +33,11 @@ export function uavDisplayState(uav = {}) {
   if (uav.operational_status === "failed") {
     return CANONICAL.crashed;
   }
+  // A parked recovery-retry airframe is waiting to fly home — its only
+  // legal outward state is 返航基地, no matter where it is parked.
+  if (uav.operational_status === "recovery_wait") {
+    return CANONICAL.returning;
+  }
   const taskVisual = uav.task_visual;
   if (taskVisual && taskVisual.route_source !== "none") {
     if (taskVisual.route_status === "cleared") {

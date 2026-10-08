@@ -266,6 +266,26 @@ def test_storm_spawn_never_strands_an_airframe():
     assert engine._uavs_keep_escape_corridor(far, obstacles)
 
 
+def test_live_track_pins_vessel_stage_for_probe_gate():
+    """The probe-commit gate reads the vessel stage through the same
+    mapping the track install writes — a tracked vessel must resolve to
+    'tracking' so the contact can never re-enter the probe pipeline."""
+    engine = _engine()
+    ship = next(s for s in engine.ships if s.vessel_class == "type_ii")
+    engine._vessel_contact_ids[ship.id] = (
+        *engine._vessel_contact_ids.get(ship.id, ()),
+        "C0007",
+    )
+
+    engine._set_surveillance_fact(ship.id, "track", True, 0.0, "T-1")
+
+    assert any(
+        engine._vessel_stage(vessel_id) == "tracking"
+        for vessel_id in engine._vessel_ids_for_contact("C0007")
+    )
+    assert engine._vessel_stage("Ship-does-not-exist") == "undetected"
+
+
 def test_coverage_install_fault_holds_position_and_cools_retry():
     """A storm-blocked install must not fly the airframe home."""
     engine, uav, task, generation = _coverage_fixture()

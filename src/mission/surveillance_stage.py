@@ -23,6 +23,10 @@ _SOURCE_STAGE = {
     "sar": "detected",
     "passive": "detected",
     "probe": "probing",
+    # A live track task pins the stage even when the EO link flaps:
+    # the aircraft still owns the target, so brief sensor dropouts must
+    # not demote it back to probing and restart the probe pipeline.
+    "track": "tracking",
     "eo_lock": "tracking",
 }
 

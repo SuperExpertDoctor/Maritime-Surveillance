@@ -290,6 +290,21 @@ def test_release_event_preserves_reservation_owner_before_clearing(store):
     assert store.snapshot(cid).active_probe_id is None
 
 
+@pytest.mark.parametrize("reason", ["target_lost", "sensor_blocked"])
+def test_loss_releases_back_off_probe_retry(store, reason):
+    # A contact whose probe lost it must cool down too — without the
+    # backoff it is re-offered instantly and airframes churn
+    # probe-lost-reprobe around a stale position estimate.
+    cid = store.ingest_visual(visual())
+    store.reserve(cid, "UAV-1", "P0001")
+
+    store.release(cid, 10.0, reason)
+
+    assert store.snapshot(cid).next_probe_not_before_min == pytest.approx(
+        10.0 + store.config.probe_retry_cooldown_min
+    )
+
+
 def test_reservation_snapshot_restores_contact_and_event_log(store):
     cid = store.ingest_visual(visual())
     state = store.capture_reservation_state([cid])

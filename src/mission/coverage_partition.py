@@ -15,9 +15,12 @@ def partition_search_mask(
 ) -> tuple[tuple[int, int, int, int], ...]:
     """Cover free space with about one compact rectangle per search aircraft.
 
-    Obstacles can require more rectangles than aircraft. In that case retain
-    the largest components for this dispatch; smaller residuals stay in the
-    ordinary candidate pool for later sorties. Never include a blocked cell.
+    Every free cell must end up inside exactly one partition: when obstacles
+    fragment the mask into more components than there are aircraft, residual
+    pieces are merged into their nearest neighbouring partition instead of
+    being dropped. A merged partition may enclose a few blocked cells — the
+    route planner skips them — and only cells that cannot be merged without
+    overlapping another partition fall back to the ordinary candidate pool.
     """
     remaining = np.asarray(mask, dtype=bool).copy()
     if remaining.ndim != 2 or slots < 0:
@@ -64,7 +67,7 @@ def partition_search_mask(
         boxes = [box for box in bounded if min_area <= _area(box) <= max_area]
         boxes.sort(key=lambda b: (-_area(b), b))
         if len(boxes) >= slots:
-            return tuple(sorted(boxes[:slots]))
+            return _merge_to_slots(boxes, slots)
         while len(boxes) < slots:
             choices = [i for i, box in enumerate(boxes) if _area(box) >= 2 * min_area]
             if not choices:
@@ -75,7 +78,8 @@ def partition_search_mask(
                 break
             boxes[index:index + 1] = parts
         return tuple(sorted(boxes))
-    boxes = boxes[:slots]
+    if len(boxes) > slots:
+        return _merge_to_slots(boxes, slots)
     counts = [1] * len(boxes)
     while sum(counts) < slots:
         choices = [i for i, b in enumerate(boxes) if counts[i] < _area(b)]
@@ -92,6 +96,57 @@ def partition_search_mask(
 def _area(box):
     x0, y0, x1, y1 = box
     return (x1 - x0) * (y1 - y0)
+
+
+def _intersects(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _union_rect(a, b):
+    return (
+        min(a[0], b[0]), min(a[1], b[1]),
+        max(a[2], b[2]), max(a[3], b[3]),
+    )
+
+
+def _merge_to_slots(boxes, slots):
+    """Fold surplus partitions into their nearest neighbour.
+
+    The union rectangle keeps every free cell inside a partition while
+    preserving disjointness; a fragment that cannot join any neighbour
+    without overlapping a third partition is dropped back to the
+    ordinary candidate pool — strictly better than before, where every
+    surplus component was dropped unconditionally.
+    """
+    boxes = [tuple(box) for box in boxes]
+    while len(boxes) > slots:
+        index = min(
+            range(len(boxes)),
+            key=lambda i: (_area(boxes[i]), boxes[i]),
+        )
+        target = None
+        target_key = None
+        for other, box in enumerate(boxes):
+            if other == index:
+                continue
+            union = _union_rect(boxes[index], box)
+            if any(
+                _intersects(union, boxes[j])
+                for j in range(len(boxes))
+                if j not in (index, other)
+            ):
+                continue
+            key = (_area(union) - _area(box) - _area(boxes[index]), -other)
+            if target_key is None or key < target_key:
+                target, target_key = other, key
+        if target is None:
+            boxes.pop(index)
+            continue
+        merged = _union_rect(boxes[index], boxes[target])
+        boxes = [
+            box for j, box in enumerate(boxes) if j not in (index, target)
+        ] + [merged]
+    return tuple(sorted(boxes))
 
 
 def _split(box, count):

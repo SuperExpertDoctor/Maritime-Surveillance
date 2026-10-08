@@ -17,6 +17,21 @@ def test_stage_is_derived_from_active_uav_facts():
     assert stages.snapshot("Ship-2").stage == "probing"
 
 
+def test_live_track_task_pins_stage_through_eo_lock_dropout():
+    # A track task still binds the contact: brief EO-lock flaps must not
+    # demote the vessel back to probing and restart the probe pipeline.
+    stages = SurveillanceStageRegistry()
+    stages.register("Ship-2", "type_ii", 0.0)
+    stages.set_fact("Ship-2", "sar", True, 1.0, "OBS-1")
+    stages.set_fact("Ship-2", "track", True, 2.0, "T-1")
+    stages.set_fact("Ship-2", "eo_lock", True, 3.0, "EO-1")
+    assert stages.snapshot("Ship-2").stage == "tracking"
+    stages.set_fact("Ship-2", "eo_lock", False, 4.0, "EO-LOST")
+    assert stages.snapshot("Ship-2").stage == "tracking"
+    stages.set_fact("Ship-2", "track", False, 5.0, "T-1-END")
+    assert stages.snapshot("Ship-2").stage == "detected"
+
+
 def test_type_i_and_ais_are_not_surveillance_sources():
     stages = SurveillanceStageRegistry()
     stages.register("Ship-1", "type_i", 0.0)

@@ -437,7 +437,16 @@ class ReturnToBaseController(HeuristicControllerBase):
 
 
 class SystemHoldingController(HeuristicControllerBase):
-    """Emit an observation-safe fixed-wing holding orbit under SYSTEM owner."""
+    """Sweep a small local survey box under SYSTEM owner instead of orbiting.
+
+    Airframes waiting on the next task are still usable: circling a point
+    is forbidden, so the hold point becomes the centre of a compact
+    serpentine patch and the airframe keeps scanning it until a real task
+    lands.  Only when the local box has no free cells at all does the
+    controller fall back to the old fixed-wing orbit (a pocketed airframe
+    still cannot legally park mid-air, so the orbit remains as the last
+    resort rather than freezing or crashing).
+    """
 
     def __init__(
         self,
@@ -448,12 +457,16 @@ class SystemHoldingController(HeuristicControllerBase):
         orbit_radius_cells: float = 2.0,
         nominal_speed_cells_min: float | None = None,
         r_min: float = 1.0,
+        sweep_half_cols: int = 3,
+        sweep_half_rows: int = 2,
     ) -> None:
         if not all(
             math.isfinite(value) and value > 0.0
             for value in (orbit_radius_cells, r_min)
         ):
             raise ValueError("holding radii must be finite and positive")
+        if sweep_half_cols < 1 or sweep_half_rows < 1:
+            raise ValueError("sweep extents must be positive")
         speed = (
             action_spec.max_speed_cells_min
             if nominal_speed_cells_min is None
@@ -469,8 +482,13 @@ class SystemHoldingController(HeuristicControllerBase):
             max(float(speed), action_spec.min_speed_cells_min),
             action_spec.max_speed_cells_min,
         )
+        self.sweep_half_cols = int(sweep_half_cols)
+        self.sweep_half_rows = int(sweep_half_rows)
         self.task: ControlTask | None = None
         self.orbit_center: tuple[float, float] | None = None
+        self._sweep_poses: tuple[Pose, ...] = ()
+        self._sweep: RouteFollower | None = None
+        self._sweep_revision = 0
         self._stopped = False
         self._safety = SafetyEnvelope(action_spec)
 
@@ -505,10 +523,73 @@ class SystemHoldingController(HeuristicControllerBase):
         )
         self.task = task
         self._stopped = False
+        self._sweep_poses = self._plan_local_sweep(
+            position, observation.planning_obstacle_mask
+        )
+        self._sweep = (
+            RouteFollower(self._sweep_poses)
+            if len(self._sweep_poses) >= 2
+            else None
+        )
+        self._sweep_revision += 1
+
+    def _plan_local_sweep(
+        self,
+        position: Sequence[float],
+        mask: object,
+    ) -> tuple[Pose, ...]:
+        """Serpentine endpoints over a free-cell box centred on the hold point."""
+        if mask is None:
+            return ()
+        cols, rows = mask.shape
+        cx, cy = math.floor(position[0]), math.floor(position[1])
+        legs = []
+        for row in range(
+            max(0, cy - self.sweep_half_rows),
+            min(rows - 1, cy + self.sweep_half_rows) + 1,
+        ):
+            run: list[int] = []
+            best_run: list[int] = []
+            for col in range(
+                max(0, cx - self.sweep_half_cols),
+                min(cols - 1, cx + self.sweep_half_cols) + 1,
+            ):
+                if not mask[col, row]:
+                    run.append(col)
+                else:
+                    if len(run) > len(best_run):
+                        best_run = run
+                    run = []
+            if len(run) > len(best_run):
+                best_run = run
+            if len(best_run) >= 2:
+                legs.append((best_run[0] + 0.5, best_run[-1] + 0.5, row + 0.5))
+        poses: list[Pose] = []
+        forward = True
+        for col_min, col_max, y in legs:
+            start_col, end_col = (col_min, col_max) if forward else (col_max, col_min)
+            heading = 0.0 if forward else math.pi
+            poses.append((start_col, y, heading))
+            poses.append((end_col, y, heading))
+            forward = not forward
+        return tuple(poses)
 
     def act(self, observation: ControlObservation) -> ControlDecision:
         if self.task is None or self.orbit_center is None:
             raise RuntimeError("start_task must be called before act")
+        if self._sweep is not None:
+            if self._sweep.is_complete:
+                # Fly the same patch back and forth — still covering it,
+                # just starting from the far end.
+                self._sweep = RouteFollower(tuple(reversed(self._sweep_poses)))
+            requested = self._sweep.next_command(
+                observation,
+                self._action_spec,
+                SensorMode.OFF,
+                OperationMode.HOLDING,
+            )
+            safe = self._safety.apply(requested, observation, observation.dt_min)
+            return ControlDecision(safe.applied_command)
         turn_rate, speed = self.tracker.compute_guidance(
             _current_pose(observation),
             self.orbit_center,
@@ -540,14 +621,15 @@ class SystemHoldingController(HeuristicControllerBase):
             status = "cleared"
         else:
             status = "guidance_only"
+        poses = self._sweep.poses if self._sweep is not None else ()
         return ControlRouteSnapshot(
             task.task_id if task is not None else None,
             OperationMode.HOLDING.value,
             OperationMode.HOLDING.value,
             None,
-            (),
-            0,
-            0,
+            poses,
+            self._sweep.index if self._sweep is not None else 0,
+            self._sweep_revision,
             None,
             status,
         )

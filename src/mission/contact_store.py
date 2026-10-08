@@ -633,8 +633,12 @@ class ContactStore:
         if c.assigned_uav_id is None and c.active_probe_id is None:
             return
         state = c.state if c.state in ("cleared", "lost", "departed") else "pending"
+        # A probe that loses its target must back off too: re-offering the
+        # contact immediately bounces airframes into endless probe-lost-
+        # reprobe churn around a position estimate that no longer tracks.
         cooldown = (now_min + self.config.probe_retry_cooldown_min
-                    if reason in ("timeout", "probe_timeout", "approach_timeout")
+                    if reason in ("timeout", "probe_timeout", "approach_timeout",
+                                  "target_lost", "sensor_blocked")
                     else c.next_probe_not_before_min)
         self._store(replace(c, state=state, assigned_uav_id=None,
                             active_probe_id=None, next_probe_not_before_min=cooldown),

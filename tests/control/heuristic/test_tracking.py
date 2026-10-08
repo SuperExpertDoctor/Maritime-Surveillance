@@ -1197,7 +1197,7 @@ def test_return_rejects_an_invalid_replan_and_clears_the_blocked_route(
     assert controller.reservation_id == "reservation-1"
 
 
-def test_system_holding_emits_safety_checked_fixed_wing_orbit_until_stopped(
+def test_system_holding_sweeps_local_patch_safely_until_stopped(
     action_spec, observation
 ):
     tracker = TrackerSpy(turn_rate=0.0, speed=1.0)
@@ -1225,17 +1225,18 @@ def test_system_holding_emits_safety_checked_fixed_wing_orbit_until_stopped(
     first = controller.act(holding)
     second = controller.act(holding)
 
+    # The parked airframe surveys a small local patch — it must not
+    # orbit a fixed point, and the orbit tracker stays unused.
+    assert len(controller.route_snapshot().route) >= 4
+    assert tracker.guidance_arguments == []
     assert first.command.operation_mode is OperationMode.HOLDING
     assert first.command.sensor_mode is SensorMode.OFF
-    assert first.command.speed_cells_min == action_spec.min_speed_cells_min
     assert not controller._safety._motion_blocked(
         first.command, holding, holding.dt_min
     )
     assert second.command.operation_mode is OperationMode.HOLDING
     assert controller.lease_owner is ControlOwner.SYSTEM
     assert not controller.is_complete(holding)
-    assert tracker.guidance_arguments[0][1] == (10.0, 12.0)
-    assert len(tracker.guidance_arguments) == 2
 
 
 def test_system_holding_route_snapshot_is_explicitly_guidance_only(
@@ -1255,7 +1256,7 @@ def test_system_holding_route_snapshot_is_explicitly_guidance_only(
     assert snapshot.task_id == "H1"
     assert snapshot.task_type == OperationMode.HOLDING.value
     assert snapshot.phase == OperationMode.HOLDING.value
-    assert snapshot.route == ()
+    assert snapshot.route == tuple(controller._sweep.poses)
     assert snapshot.status == "guidance_only"
 
 

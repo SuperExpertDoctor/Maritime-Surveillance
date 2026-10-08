@@ -37,6 +37,21 @@ def test_weather_holes_never_become_task_area():
     assert partition_search_mask(mask, 0) == ()
 
 
+def test_fragmented_mask_merges_residuals_into_nearest_partition():
+    """More free components than aircraft must not silently drop area:
+    the surplus fragments merge into the nearest surviving partition so
+    the union still covers the whole searchable mask."""
+    mask = np.zeros((30, 30), dtype=bool)
+    for col in (2, 8, 14, 20, 26):
+        mask[col:col + 2, 5:9] = True  # five detached 2x4 islands
+    boxes = partition_search_mask(mask, 3)
+
+    assert len(boxes) == 3
+    union = _union(mask.shape, boxes)
+    np.testing.assert_array_equal(union & mask, mask)
+    assert partition_search_mask(mask, 3) == boxes
+
+
 def test_bounded_partitions_keep_clear_weather_areas_without_oversized_boxes():
     mask = np.ones((30, 30), dtype=bool)
     mask[12:17, 8:13] = False
