@@ -135,13 +135,20 @@ def plan_search_route(request: SearchRouteRequest) -> SearchRoutePlan:
                     allow_fallback=request.allow_fallback,
                 )
             except RuntimeError:
-                connector = ObstacleAvoider(
-                    max_iterations=2400,
-                    seed=request.seed + 31 + index * 101,
-                ).plan_path(
-                    path[-1], entry, mask, request.r_min,
-                    allow_fallback=request.allow_fallback,
-                )
+                try:
+                    connector = ObstacleAvoider(
+                        max_iterations=2400,
+                        seed=request.seed + 31 + index * 101,
+                    ).plan_path(
+                        path[-1], entry, mask, request.r_min,
+                        allow_fallback=request.allow_fallback,
+                    )
+                except RuntimeError:
+                    # One unreachable swath must not veto the rest of the
+                    # region — same policy as blocked scan legs above: skip
+                    # it, cover the reachable swaths, and let the missed
+                    # cells be re-offered later.
+                    continue
         first_leg = not scan_ranges
         path.extend(connector[1:])
         if first_leg:

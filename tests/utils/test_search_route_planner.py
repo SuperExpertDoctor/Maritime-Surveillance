@@ -69,6 +69,31 @@ def test_search_route_skips_blocked_scan_legs_instead_of_failing():
     assert ObstacleAvoider().is_path_safe(plan.path, obstacle_mask)
 
 
+def test_search_route_skips_unreachable_swaths_instead_of_failing():
+    """A swath whose entry RRT* cannot reach must not veto the whole
+    region — the reachable swaths are still served."""
+    obstacle_mask = np.zeros((30, 30), dtype=bool)
+    # Storm-margin wall immediately NW of the region: some swath entries
+    # are unreachable by Dubins connectors.
+    obstacle_mask[15:19, 18:23] = True
+    request = SearchRouteRequest(
+        uav_id="UAV-1",
+        start_pose=(1.5, 11.5, 0.0),
+        bbox=(19, 22, 24, 27),
+        swath_width=1.2,
+        r_min=0.5,
+        obstacle_mask=obstacle_mask,
+        unscanned_mask=np.ones((30, 30), dtype=bool),
+        allow_revisit=False,
+        seed=42,
+    )
+
+    plan = plan_search_route(request)
+
+    assert plan.scanned_swath_count > 0
+    assert ObstacleAvoider().is_path_safe(plan.path, obstacle_mask)
+
+
 def test_search_route_all_blocked_legs_returns_empty_plan():
     obstacle_mask = np.zeros((30, 30), dtype=bool)
     obstacle_mask[3:14, 3:14] = True
