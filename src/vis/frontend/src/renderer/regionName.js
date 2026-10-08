@@ -128,6 +128,7 @@ const EVENT_NAMES = {
   no_safe_recovery_path: "无安全返航航线",
   recovery_wait: "返航待机重试",
   recovery_relaxed_fuel: "放宽油量返航",
+  recovery_reoriented: "转向后重新返航",
   landing_capacity_wait: "等待基地机位",
 };
 

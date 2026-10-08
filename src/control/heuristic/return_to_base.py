@@ -106,6 +106,7 @@ class RecoveryPlanner:
         reserve_cells: float,
         *,
         allow_reserved_bases: bool = False,
+        start_heading_free: bool = False,
     ) -> tuple[RecoveryCandidate, ...]:
         if not math.isfinite(remaining_range_cells) or remaining_range_cells < 0.0:
             raise ValueError("remaining_range_cells must be finite and non-negative")
@@ -119,38 +120,42 @@ class RecoveryPlanner:
         for base in bases:
             if not allow_reserved_bases and base.reserved_load >= base.capacity:
                 continue
-            try:
-                planned = self.navigator.plan_grid(
-                    start_pose,
-                    {tuple(map(float, base.position))},
-                    planning_obstacle_mask,
-                    r_min,
-                    planning_map_version,
+            for pose in _departure_poses(
+                start_pose, base.position, start_heading_free
+            ):
+                try:
+                    planned = self.navigator.plan_grid(
+                        pose,
+                        {tuple(map(float, base.position))},
+                        planning_obstacle_mask,
+                        r_min,
+                        planning_map_version,
+                    )
+                except PathNotFoundError:
+                    continue
+                try:
+                    path = _normalise_route(planned)
+                except ValueError:
+                    continue
+                if not _poses_match(path[0], pose):
+                    continue
+                if not _poses_match(path[-1], base.position):
+                    continue
+                if recovery_route_blocked(path, planning_obstacle_mask):
+                    continue
+                actual_length = path_length_cells(path)
+                if actual_length + reserve_cells > remaining_range_cells:
+                    continue
+                candidates.append(
+                    RecoveryCandidate(
+                        base,
+                        path,
+                        actual_length,
+                        float(reserve_cells),
+                        planning_map_version,
+                    )
                 )
-            except PathNotFoundError:
-                continue
-            try:
-                path = _normalise_route(planned)
-            except ValueError:
-                continue
-            if not _poses_match(path[0], start_pose):
-                continue
-            if not _poses_match(path[-1], base.position):
-                continue
-            if recovery_route_blocked(path, planning_obstacle_mask):
-                continue
-            actual_length = path_length_cells(path)
-            if actual_length + reserve_cells > remaining_range_cells:
-                continue
-            candidates.append(
-                RecoveryCandidate(
-                    base,
-                    path,
-                    actual_length,
-                    float(reserve_cells),
-                    planning_map_version,
-                )
-            )
+                break
         return tuple(
             sorted(
                 candidates,
@@ -648,6 +653,36 @@ def _current_pose(observation: ControlObservation) -> Pose:
         *tuple(map(float, observation.self_state.position)),
         float(observation.self_state.heading_rad),
     )
+
+
+def _departure_poses(
+    start_pose: Pose,
+    base_position: Sequence[float],
+    heading_free: bool,
+) -> tuple[Pose, ...]:
+    """Departure poses to try: stored heading, then pivoted takes-offs.
+
+    A stopped airframe (parked hold or grounded) has no ground roll
+    locking its heading — when the stored heading faces a wall the
+    departure arc is unplanable under it, so probe bearings toward the
+    base plus fan offsets until a geometrically safe departure exists.
+    """
+    stored = (start_pose[0], start_pose[1], start_pose[2])
+    if not heading_free:
+        return (stored,)
+    bearing = math.atan2(
+        float(base_position[1]) - start_pose[1],
+        float(base_position[0]) - start_pose[0],
+    )
+    poses = [stored]
+    for offset_deg in (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0):
+        heading = _wrap_pi(bearing + math.radians(offset_deg))
+        candidate = (start_pose[0], start_pose[1], heading)
+        if all(
+            abs(_wrap_pi(heading - pose[2])) > 1e-6 for pose in poses
+        ):
+            poses.append(candidate)
+    return tuple(poses)
 
 
 def _normalise_route(path: Sequence[Sequence[float]]) -> tuple[Pose, ...]:

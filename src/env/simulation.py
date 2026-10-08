@@ -6435,6 +6435,38 @@ class SimulationEngine:
                         "uav_id": uav.id,
                         "base_id": candidates[0].base.base_id,
                     })
+            parked = (
+                (state := self.allocator.sm.get_uav(uav.id)) is not None
+                and state.operational_status == "recovery_wait"
+            )
+            if not candidates and parked:
+                # A parked airframe is already stopped: its stored heading
+                # must not veto every departure when it faces a wall.
+                # Re-probe with a pivoted take-off heading.
+                candidates = RecoveryPlanner().evaluate(
+                    uav.pose, uav.remaining_range_cells, bases,
+                    self.allocator.sm.obstacle_mask,
+                    self.allocator.sm.obstacle_version,
+                    uav.R_min, self.config.control.safety.reserve_range_cells,
+                    start_heading_free=True,
+                )
+                if not candidates:
+                    candidates = RecoveryPlanner().evaluate(
+                        uav.pose, 1e6, bases,
+                        self.allocator.sm.obstacle_mask,
+                        self.allocator.sm.obstacle_version,
+                        uav.R_min,
+                        self.config.control.safety.reserve_range_cells,
+                        start_heading_free=True,
+                    )
+                if candidates:
+                    self.allocator.sm.add_event("recovery_reoriented", {
+                        "uav_id": uav.id,
+                        "base_id": candidates[0].base.base_id,
+                        "heading_deg": round(
+                            math.degrees(candidates[0].path[0][2]) % 360.0, 1
+                        ),
+                    })
             if not candidates:
                 raise NoSafeRecoveryPath(
                     "none", self.allocator.sm.obstacle_version,
@@ -6478,6 +6510,16 @@ class SimulationEngine:
         reservation back and re-raises when the controller rejects the task.
         """
         base = next(b for b in bases_pool if b.id == candidate.base.base_id)
+        state = self.allocator.sm.get_uav(uav.id)
+        if (
+            state is not None
+            and state.operational_status == "recovery_wait"
+            and candidate.path
+        ):
+            # A parked airframe is stopped: when the checked plan was
+            # produced under a free take-off heading, pivot the airframe
+            # to that departure heading so its first step is legal.
+            uav.heading_rad = candidate.path[0][2]
         reservation_id = f"{uav.id}:return:{self._return_reservation_sequence}"
         plan = RecoveryPlan(
             base.id, candidate.base.position, reservation_id, candidate.path,

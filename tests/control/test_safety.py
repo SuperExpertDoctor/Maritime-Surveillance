@@ -633,3 +633,35 @@ def test_storm_forecast_matches_raster_margin_and_boundary_reflection():
         expected = current | obstacle_grid_mask([storm], (30, 30), 1.0)
         np.testing.assert_array_equal(forecast, expected)
     np.testing.assert_array_equal(observation.planning_obstacle_mask, current)
+
+
+def test_relaxed_contract_prefers_clearance_keeping_candidates():
+    """Ranking must prefer candidates whose rollout keeps a boundary
+    turn-clearance pose: depth alone walks an airframe into a border
+    pocket it can never leave (v10 UAV-3 south-edge trap)."""
+    spec = ActionSpec(-0.32, 0.32, 0.16, 0.32)
+    envelope = SafetyEnvelope(spec)
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[16:19, 1:4] = True  # storm margin east, mirroring storm-1
+    observation = make_observation(
+        position=(15.5, 0.45),
+        heading_rad=math.radians(250.0),
+        obstacle_mask=mask,
+    )
+    forecasts = envelope._forecast_masks(observation, 1.0)
+
+    straight_depth, straight_clearance = envelope._continuation_outlook(
+        ControlCommand(0.0, 0.16, SensorMode.OFF, OperationMode.TRANSIT),
+        observation,
+        1.0,
+        forecasts,
+    )
+    turn_depth, turn_clearance = envelope._continuation_outlook(
+        ControlCommand(-0.32, 0.16, SensorMode.OFF, OperationMode.TRANSIT),
+        observation,
+        1.0,
+        forecasts,
+    )
+
+    assert straight_depth > 0 and not straight_clearance
+    assert turn_depth > 0 and turn_clearance

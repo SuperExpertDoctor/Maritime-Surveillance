@@ -201,12 +201,13 @@ class SafetyEnvelope:
         best = None
         best_key = None
         for candidate in self._candidate_commands(command, requested_turn):
-            depth = self._legal_continuation_depth(
+            depth, retains_clearance = self._continuation_outlook(
                 candidate, observation, dt_min, forecasts
             )
             if depth <= 0:
                 continue
             key = (
+                retains_clearance,
                 abs(candidate.turn_rate_rad_min) <= 1e-6,
                 depth,
                 -abs(candidate.turn_rate_rad_min),
@@ -249,19 +250,23 @@ class SafetyEnvelope:
             )
         return tuple(candidates)
 
-    def _legal_continuation_depth(
+    def _continuation_outlook(
         self,
         command: ControlCommand,
         observation: ControlObservation,
         dt_min: float,
         forecasts: list[np.ndarray],
-    ) -> int:
-        """Deepest collision-free rollout the command opens up.
+    ) -> tuple[int, bool]:
+        """(legal rollout depth, boundary turn-clearance retained).
 
-        Roll the candidate once, then try each bounded escape manoeuvre
-        (hold a turn for a duration, then run straight) — the same shape
-        the strict contract uses, minus its end-of-runway turn-clearance
-        gate.  0 means the command's first step is already illegal.
+        Deepest collision-free rollout the command opens up — the same
+        shape the strict contract uses, minus its end-of-runway
+        turn-clearance gate — plus whether any pose on that rollout
+        still leaves a feasible turn back.  A rollout that stays legal
+        but loses every clearance pose walks the airframe into a pocket
+        it can never leave (e.g. hugging a boundary face-first), so the
+        relaxed tier ranks it below continuations that keep a way out.
+        0 depth means the command's first step is already illegal.
         """
         state = observation.self_state
         first = self._advance_pose(
@@ -273,7 +278,20 @@ class SafetyEnvelope:
             forecasts,
         )
         if first is None:
-            return 0
+            return 0, False
+        backups = tuple(
+            turn
+            for turn in (
+                self._action_spec.min_turn_rate_rad_min,
+                self._action_spec.max_turn_rate_rad_min,
+            )
+            if turn
+        )
+        final_mask = forecasts[-1]
+        retains_clearance = any(
+            self._has_boundary_turn_clearance(first, backup, dt_min, final_mask)
+            for backup in backups
+        )
         best = 1
         for turn in (
             self._action_spec.max_turn_rate_rad_min,
@@ -306,9 +324,15 @@ class SafetyEnvelope:
                         if pose is None:
                             break
                         depth += 1
+                        retains_clearance = retains_clearance or any(
+                            self._has_boundary_turn_clearance(
+                                pose, backup, dt_min, final_mask
+                            )
+                            for backup in backups
+                        )
                     if depth > best:
                         best = depth
-        return best
+        return best, retains_clearance
 
     def _forecast_masks(
         self, observation: ControlObservation, dt_min: float

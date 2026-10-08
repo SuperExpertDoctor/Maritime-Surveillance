@@ -13,13 +13,16 @@ from src.control.common.contracts import (
     ControlOwner,
     ControlMode,
     OperationMode,
+    BaseObservation,
     RecoveryPlan,
     SensorMode,
     UAVObservation,
 )
 from src.control.heuristic.return_to_base import (
+    RecoveryPlanner,
     ReturnToBaseController,
     SystemHoldingController,
+    recovery_route_blocked,
 )
 
 
@@ -201,3 +204,30 @@ def test_system_holding_no_sweep_holds_straight_or_parks_never_orbits(holding):
 
     with pytest.raises(UnsafeControlState):
         holding.act(observation)
+
+
+def test_recovery_planner_heading_free_pivots_parked_departure():
+    """A parked airframe facing a border wall gets no departure under its
+    stored heading; heading-free probing must find a pivoted take-off
+    (v10 UAV-3 south-edge trap)."""
+    mask = np.zeros((30, 30), dtype=bool)
+    mask[16:19, 1:4] = True  # storm-1 margin approximation
+    bases = (
+        BaseObservation("Base-1", (1.0, 11.0), 4, 0),
+        BaseObservation("Base-2", (1.0, 25.0), 4, 0),
+    )
+    pose = (15.88, 0.12, math.radians(279.2))
+
+    locked = RecoveryPlanner().evaluate(
+        pose, 100.0, bases, mask, 1, 1.0, 0.5
+    )
+    assert locked == ()
+
+    free = RecoveryPlanner().evaluate(
+        pose, 100.0, bases, mask, 1, 1.0, 0.5, start_heading_free=True
+    )
+    assert free
+    best = free[0]
+    assert best.path[0][:2] == (15.88, 0.12)
+    assert abs((best.path[0][2] - pose[2] + math.pi) % (2 * math.pi) - math.pi) > 1e-6
+    assert not recovery_route_blocked(best.path, mask)
