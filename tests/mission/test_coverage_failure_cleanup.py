@@ -206,9 +206,10 @@ def test_probe_timeout_releases_record_bound_to_swapped_airframe():
     )
 
 
-def test_parked_recovery_wait_uav_skips_control_ticks_and_keeps_window():
-    """A parked airframe must not fault-and-repark every tick: control
-    ticks are skipped and the retry window keeps its original start."""
+def test_parked_recovery_wait_uav_ticks_without_repark_or_window_reset():
+    """A parked airframe still ticks its SYSTEM holding controller so it
+    can fly out of a pocket, but any fault must hit the parked guard —
+    no re-park, no fresh event, and the retry window keeps its start."""
     engine, uav, task, generation = _coverage_fixture()
     engine._park_for_recovery_retry(uav, 0.0, "no_safe_recovery_path")
     engine._park_for_recovery_retry(uav, 1.0, "controller_fault")
@@ -218,12 +219,16 @@ def test_parked_recovery_wait_uav_skips_control_ticks_and_keeps_window():
         event["type"] == "recovery_wait"
         for event in engine.allocator.sm.get_recent_events(0.0)
     )
-    assert engine._step_controlled_uav(uav, 2.0) is False
+    engine._step_controlled_uav(uav, 2.0)
+    engine._step_controlled_uav(uav, 3.0)
     waits_after = sum(
         event["type"] == "recovery_wait"
         for event in engine.allocator.sm.get_recent_events(0.0)
     )
     assert waits_after == waits_before
+    assert engine._hold_started_at[uav.id] == 0.0
+    state = engine.allocator.sm.get_uav(uav.id)
+    assert state.operational_status == "recovery_wait"
 
 
 def test_control_fault_on_parked_uav_does_not_repark():

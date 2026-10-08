@@ -2897,15 +2897,14 @@ class SimulationEngine:
         lease = self.control_coordinator.current_lease(uav.id)
         if not self.control_coordinator.has_controller(uav.id):
             return False
-        state = self.allocator.sm.get_uav(uav.id)
-        if state is not None and state.operational_status == "recovery_wait":
-            # A parked airframe does not run controller ticks: it holds
-            # wherever it was left — including cells the safety layer cannot
-            # clear — while the holding-timeout loop retries a landing route
-            # on its own clock.  Stepping it would fault every tick and
-            # re-park forever without ever reaching the retry window.
-            return False
-
+        # A parked (recovery_wait) airframe still runs its SYSTEM holding
+        # controller: near a border or inside a storm pocket the safety
+        # envelope may still have legal steps, and flying them (straight
+        # legs / local sweeps) is how the airframe works itself back into
+        # recovery-reachable space between retry windows.  When truly
+        # contained every act() raises UnsafeControlState and
+        # _handle_control_fault's parked guard returns early — no re-park
+        # churn, no event spam, and the retry window keeps its clock.
         if lease.owner in (ControlOwner.HEURISTIC, ControlOwner.LEARNING):
             try:
                 self._maybe_revoke_for_range(uav, current_time)
