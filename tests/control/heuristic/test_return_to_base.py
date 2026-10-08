@@ -182,12 +182,12 @@ def test_system_holding_sweeps_a_local_box_instead_of_orbiting(holding):
     assert decision.command.sensor_mode is SensorMode.OFF
 
 
-def test_system_holding_falls_back_to_orbit_when_no_free_patch(holding):
-    # No contiguous free run in the local box: the controller keeps the
-    # orbit fallback rather than commanding nothing.
-    mask = np.zeros((30, 30), dtype=bool)
-    checker = (np.indices((10, 10)).sum(axis=0) % 2) == 0
-    mask[10:20, 10:20] = ~checker  # isolated single cells — no run of 2
+def test_system_holding_no_sweep_holds_straight_or_parks_never_orbits(holding):
+    # A pocketed airframe must not orbit: with no sweepable patch it
+    # holds a straight minimum-speed leg, and if every first step is
+    # illegal the safety envelope parks it — never a circle.
+    mask = np.ones((30, 30), dtype=bool)
+    mask[15, 15] = False  # only the airframe's own cell is free
     observation = make_observation(
         position=(15.5, 15.5),
         obstacle_mask=mask,
@@ -197,3 +197,7 @@ def test_system_holding_falls_back_to_orbit_when_no_free_patch(holding):
     holding.start_task(ControlTask("H1", OperationMode.HOLDING), observation)
 
     assert holding.route_snapshot().route == ()
+    from src.control.common.safety import UnsafeControlState
+
+    with pytest.raises(UnsafeControlState):
+        holding.act(observation)

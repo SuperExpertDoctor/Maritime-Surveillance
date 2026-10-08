@@ -22,7 +22,11 @@ from src.control.common.contracts import (
     SensorMode,
     StopReason,
 )
-from src.control.common.safety import InvalidControlCommand, SafetyEnvelope
+from src.control.common.safety import (
+    InvalidControlCommand,
+    SafetyEnvelope,
+    UnsafeControlState,
+)
 from src.control.heuristic.base import (
     HeuristicControllerBase,
     RouteFollower,
@@ -442,10 +446,10 @@ class SystemHoldingController(HeuristicControllerBase):
     Airframes waiting on the next task are still usable: circling a point
     is forbidden, so the hold point becomes the centre of a compact
     serpentine patch and the airframe keeps scanning it until a real task
-    lands.  Only when the local box has no free cells at all does the
-    controller fall back to the old fixed-wing orbit (a pocketed airframe
-    still cannot legally park mid-air, so the orbit remains as the last
-    resort rather than freezing or crashing).
+    lands.  Only when the local box cannot even form a two-cell leg does
+    the controller fall back to a straight minimum-speed hold — never an
+    orbit; if even that first step is illegal the safety envelope raises
+    UnsafeControlState and the airframe parks instead of drawing circles.
     """
 
     def __init__(
@@ -590,18 +594,22 @@ class SystemHoldingController(HeuristicControllerBase):
             )
             safe = self._safety.apply(requested, observation, observation.dt_min)
             return ControlDecision(safe.applied_command)
-        turn_rate, speed = self.tracker.compute_guidance(
-            _current_pose(observation),
-            self.orbit_center,
-            self.orbit_radius_cells,
-            self.nominal_speed_cells_min,
-        )
+        # No sweepable patch: hold a straight minimum-speed leg, and when
+        # even that first step is illegal park immediately — the relaxed
+        # escape tier could otherwise accept an in-cell spin, which is
+        # still circling and forbidden.
         requested = ControlCommand(
-            float(turn_rate),
-            float(speed),
+            0.0,
+            self._action_spec.min_speed_cells_min,
             SensorMode.OFF,
             OperationMode.HOLDING,
         )
+        if self._safety._motion_blocked(
+            requested, observation, observation.dt_min
+        ):
+            raise UnsafeControlState(
+                "holding airframe has no straight legal step"
+            )
         safe = self._safety.apply(requested, observation, observation.dt_min)
         return ControlDecision(safe.applied_command)
 
