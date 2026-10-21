@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  ArrowDown, ArrowUpRight, Check, ChevronRight, LoaderCircle,
-  Shield, Square, X,
+  ArrowDown, ArrowRight, ArrowUpRight, Check, ChevronRight, ClipboardList,
+  Flag, Lightbulb, LoaderCircle, RotateCw, Shield, Square, Timer, User, X,
+  Zap,
 } from "lucide-react";
 
 const STATUS = {
@@ -137,8 +138,22 @@ function planTypeLabel(plan) {
   return KIND_LABELS[plan.kind] || plan.kind || "计划";
 }
 
+const TRIGGER_META = {
+  event: { icon: <Zap size={12} />, cls: "event" },
+  periodic: { icon: <Timer size={12} />, cls: "periodic" },
+  retry: { icon: <RotateCw size={12} />, cls: "retry" },
+  initial: { icon: <Flag size={12} />, cls: "initial" },
+  human: { icon: <User size={12} />, cls: "human" },
+};
+
 function TriggerSection({ trigger }) {
-  return <span>{TRIGGER_LABELS[trigger] || "周期性LLM触发"}</span>;
+  const meta = TRIGGER_META[trigger] || TRIGGER_META.periodic;
+  return (
+    <span className={`trigger-badge trigger-${meta.cls}`}>
+      {meta.icon}
+      {TRIGGER_LABELS[trigger] || "周期性LLM触发"}
+    </span>
+  );
 }
 
 function PlanTemplate({ plan }) {
@@ -149,14 +164,21 @@ function PlanTemplate({ plan }) {
   const regionCount = summary.search_region_count;
   return (
     <div className="plan-template">
-      <section>
-        <h4>任务分配方案</h4>
+      <section className="pt-plan">
+        <header className="pt-head">
+          <ClipboardList size={13} />
+          <h4>任务分配方案</h4>
+          {assignments.length ? (
+            <span className="pt-count">{assignments.length} 项配对</span>
+          ) : null}
+        </header>
         {assignments.length ? (
           <ul className="plan-assignments">
             {assignments.map((row, i) => (
               <li key={i}>
-                <strong>{row.uav_id}</strong>
-                <span> → {row.desc}</span>
+                <span className="uav-chip">{row.uav_id}</span>
+                <ArrowRight size={11} className="uav-arrow" />
+                <span className="task-desc">{row.desc}</span>
                 <small>{row.task_id}</small>
               </li>
             ))}
@@ -165,21 +187,32 @@ function PlanTemplate({ plan }) {
           <p>选中任务：{selected.join("、")}</p>
         ) : null}
         {preempted.length ? (
-          <p>抢占 UAV：{preempted.join("、")}（撤下原任务转派新任务）</p>
+          <p className="plan-preempt">
+            <RotateCw size={11} />
+            抢占 UAV：{preempted.join("、")}（撤下原任务转派新任务）
+          </p>
         ) : null}
         {regionCount != null ? <p>新规划搜索子区域 {regionCount} 个</p> : null}
-        {summary.notes ? <p>{summary.notes}</p> : null}
+        {summary.notes ? <p className="plan-notes">{summary.notes}</p> : null}
         {!assignments.length && !selected.length && regionCount == null && !preempted.length ? (
           <p>{planTypeLabel(plan)}</p>
         ) : null}
       </section>
-      <section>
-        <h4>制定方案的原因</h4>
-        <Markdown remarkPlugins={[remarkGfm]}>{plan.decision_reason || ""}</Markdown>
+      <section className="pt-reason">
+        <header className="pt-head">
+          <Lightbulb size={13} />
+          <h4>制定方案的原因</h4>
+        </header>
+        <div className="reason-body">
+          <Markdown remarkPlugins={[remarkGfm]}>{plan.decision_reason || ""}</Markdown>
+        </div>
       </section>
-      <section>
-        <h4>触发方式</h4>
-        <p><TriggerSection trigger={plan.trigger} /></p>
+      <section className="pt-trigger">
+        <header className="pt-head">
+          <Zap size={13} />
+          <h4>触发方式</h4>
+        </header>
+        <TriggerSection trigger={plan.trigger} />
       </section>
     </div>
   );
