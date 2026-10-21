@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Bot, CheckCircle2, Send, ShieldCheck, UserRound, XCircle } from "lucide-react";
+import Markdown from "./Markdown";
 
 const MODE_LABELS = { request: "请求审批", assisted: "辅助自动", full: "完全自动" };
 const DELIVERY_LABELS = { steer: "steer(打断当前推理)", followUp: "followUp(排队跟进)" };
@@ -64,13 +65,13 @@ export default function ConversationPanel({ agent, events, messages, plans, read
               {message.delivery && <small>{message.delivery}</small>}
               {message.status && message.status !== "completed" && <small>{message.status}</small>}
             </header>
-            <p>{message.text}</p>
+            <Markdown text={message.text} />
           </article>
         ))}
         {pendingPlans.map((plan) => (
           <article key={plan.plan_id} className="agent-message plan-card">
             <header><ShieldCheck size={13} /><span>待审批计划</span><small>{plan.kind}</small></header>
-            <p>{plan.decision_reason || "模型提交了任务分配计划，等待人工确认。"}</p>
+            <Markdown text={plan.decision_reason || "模型提交了任务分配计划，等待人工确认。"} />
             <dl className="plan-summary">
               <div><dt>选中任务</dt><dd>{(plan.summary?.selected_task_ids || []).join("、") || `区域 ${plan.summary?.search_region_count ?? "-"} 个`}</dd></div>
               {plan.summary?.preempt_uav_ids?.length > 0 && <div><dt>抢占 UAV</dt><dd>{plan.summary.preempt_uav_ids.join("、")}</dd></div>}
