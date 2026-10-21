@@ -21,8 +21,11 @@ Operator-facing (frontend LeftSidebar):
 from __future__ import annotations
 
 import logging
+import os
+import re
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -45,6 +48,8 @@ def build_agent_router(
     tools: ToolsPort,
     *,
     worker_token: str = "",
+    skills_dir: str | os.PathLike = "harness/agent/skills",
+    agent_md_path: str | os.PathLike | None = None,
 ) -> APIRouter:
     """Create the adapter router; all state lives in ``broker``."""
     router = APIRouter()
@@ -111,6 +116,7 @@ def build_agent_router(
             str(data.get("run_id") or ""),
             str(data.get("episode_id") or ""),
             acknowledged,
+            model=str(data.get("model") or ""),
         )
 
     @router.post("/internal/agent/event")
@@ -235,16 +241,104 @@ def build_agent_router(
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             return _error("invalid_message")
         delivery = data.get("delivery", "followUp")
+        annotation = data.get("annotation")
+        if annotation is not None:
+            if (not isinstance(annotation, dict)
+                    or not isinstance(annotation.get("message_id"), str)
+                    or not isinstance(annotation.get("quote"), str)
+                    or len(annotation["quote"]) > 2000):
+                return _error("invalid_annotation")
+            annotation = {
+                "message_id": annotation["message_id"][:160],
+                "quote": annotation["quote"][:2000],
+            }
         try:
-            job = broker.queue_human(text, delivery)
+            job = broker.queue_human(text, delivery, annotation)
         except ValueError as exc:
             return _error(str(exc))
         return {"run_id": job.run_id, "status": job.status}
+
+    # --------------------------------------------------------------
+    # Skills: distilled SKILL.md files the PI worker loads at start;
+    # operators may inspect and hand-edit them from the skills panel.
+    # --------------------------------------------------------------
+    _SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
+
+    # AGENT.md lives in the algorithm dir and styles every scheduling
+    # decision; surface it in the skills view as a first-class editable doc.
+    _agent_md = Path(agent_md_path) if agent_md_path else None
+    AGENT_DOC_NAME = "AGENT.md"
+
+    def _skill_file(name: str) -> Path | None:
+        if name == AGENT_DOC_NAME and _agent_md is not None:
+            return _agent_md
+        if not _SKILL_NAME.match(name):
+            return None
+        root = Path(skills_dir).resolve()
+        target = (root / name / "SKILL.md").resolve()
+        return target if root in target.parents else None
+
+    def _skill_description(text: str) -> str:
+        match = re.search(r'^description:\s*["\']?(.*?)["\']?\s*$', text, re.M)
+        return match.group(1)[:200] if match else ""
+
+    @router.get("/api/skills")
+    async def list_skills():
+        root = Path(skills_dir)
+        skills = []
+        if _agent_md is not None and _agent_md.is_file():
+            text = _agent_md.read_text(encoding="utf-8", errors="replace")
+            skills.append({
+                "name": AGENT_DOC_NAME,
+                "description": "任务分配风格指导（人工维护，注入每次调度决策）",
+                "updated_at": _agent_md.stat().st_mtime,
+            })
+        if root.is_dir():
+            for child in sorted(root.iterdir()):
+                doc = child / "SKILL.md"
+                if child.is_dir() and doc.is_file():
+                    text = doc.read_text(encoding="utf-8", errors="replace")
+                    skills.append({
+                        "name": child.name,
+                        "description": _skill_description(text),
+                        "updated_at": doc.stat().st_mtime,
+                    })
+        return {"skills": skills}
+
+    @router.get("/api/skills/{name}")
+    async def get_skill(name: str):
+        target = _skill_file(name)
+        if target is None or not target.is_file():
+            return _error("skill_not_found", 404)
+        return {"name": name, "content": target.read_text(encoding="utf-8", errors="replace")}
+
+    @router.put("/api/skills/{name}")
+    async def save_skill(name: str, request: Request):
+        data = await _json(request)
+        if isinstance(data, JSONResponse):
+            return data
+        content = data.get("content")
+        if not isinstance(content, str) or not content.strip() or len(content) > 200_000:
+            return _error("invalid_skill_content")
+        target = _skill_file(name)
+        if target is None:
+            return _error("skill_not_found", 404)
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return {"name": name, "saved": True}
 
     @router.get("/api/pi-agent/plans")
     @router.get("/api/plans")
     async def pending_plans():
         return {"plans": broker.pending_plans()}
+
+    @router.post("/api/pi-agent/jobs/{run_id}/cancel")
+    async def cancel_job(run_id: str):
+        cancelled = broker.cancel(run_id)
+        if not cancelled:
+            return _error("job_not_cancellable", 409)
+        return {"cancelled": cancelled}
 
     @router.post("/api/plans/{plan_id}/approve")
     async def approve_plan(plan_id: str, request: Request):
@@ -261,7 +355,7 @@ def build_agent_router(
         try:
             plan = broker.decide_plan(
                 plan_id,
-                approved=approved,
+                decision="approve_once" if approved else "reject",
                 comment=str(data.get("comment") or "") if isinstance(data, dict) else "",
             )
         except ValueError as exc:
@@ -292,12 +386,13 @@ def build_agent_router(
         data = await _json(request)
         if isinstance(data, JSONResponse):
             return data
-        if data.get("decision") not in ("approve", "reject"):
+        if data.get("decision") not in (
+                "approve", "approve_once", "approve_session", "reject", "adjust"):
             return _error("invalid_decision")
         try:
             plan = broker.decide_plan(
                 plan_id,
-                approved=data["decision"] == "approve",
+                decision=data["decision"],
                 comment=str(data.get("comment") or ""),
             )
         except ValueError as exc:

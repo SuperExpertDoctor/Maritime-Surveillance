@@ -219,6 +219,8 @@ def main(
             agent_broker,
             MissionToolsPort(agent_broker, engine.allocator.mission_scheduler),
             worker_token=worker_token,
+            skills_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "harness", "agent", "skills"),
+            agent_md_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "schedule", "AGENT.md"),
         )
         agent_state_fn = agent_broker.state_frame
 

@@ -125,30 +125,33 @@ def render_skill(metrics: TrajectoryMetrics) -> tuple[str, str]:
     ) or "- （决策日志未记录理由字段）"
     body = f"""---
 name: {name}
-description: "Successful multi-UAV selection trajectory: {metrics.decisions_succeeded}/{metrics.decisions_total} decisions committed, coverage {metrics.coverage_pct:.1f}%, sustained tracking {metrics.track_hold_min:.1f}min. Use when a similar candidate mix ({kinds}) appears."
+description: "候选混合类型（{kinds}）出现时的任务选择策略：已验证 {metrics.decisions_succeeded}/{metrics.decisions_total} 次决策提交，覆盖率 {metrics.coverage_pct:.1f}%，持续跟踪 {metrics.track_hold_min:.1f}min。"
 ---
 
-# Reusable Selection Trajectory — {metrics.episode_id}
+# 任务选择经验 — {metrics.episode_id}
 
-Derived from a real episode whose decisions validated and committed. Treat as
-guidance, not authority: re-run `validate_selection` for the current snapshot.
+本 skill 由真实回合中通过校验并生效的决策轨迹凝练而成，是经验参考而非
+硬性规则：使用前务必对当前态势重新执行 `validate_selection` 校验。
 
-## Outcome Metrics
+## 什么时候使用
 
-- decision success rate: {metrics.success_rate:.0%} ({metrics.decisions_succeeded}/{metrics.decisions_total})
-- rolling coverage: {metrics.coverage_pct:.1f}%
-- longest sustained tracking hold: {metrics.track_hold_min:.1f}min
-- task kinds exercised: {kinds}
+候选任务包含 {kinds} 等类型、且编队需要在覆盖值班与查证跟踪之间分配时。
 
-## What Worked
+## 策略是什么
+
+1. 先调用 `get_mission_snapshot` 拉取当前态势，与本轨迹的候选混合类型对比——类型与覆盖约束相近时才套用。
+2. 保持相同的选择姿态：覆盖任务优先保底，存续中的跟踪任务尽量不打断，只在明显更优时才抢占。
+3. 提交前必须 `validate_selection` 预校验；其他回合的指标不能让当前非法选择变合法。
+
+## 使用后的预期效果
+
+- 决策成功率约 {metrics.success_rate:.0%}（{metrics.decisions_succeeded}/{metrics.decisions_total} 次提交通过校验并生效）
+- 滚动覆盖率约 {metrics.coverage_pct:.1f}%
+- 可持续跟踪时长约 {metrics.track_hold_min:.1f}min
+
+## 事实证据
 
 {reasons}
-
-## How to Reuse
-
-1. Call `get_mission_snapshot`; compare this episode's candidate mix to the current one — apply only if kinds and coverage constraints rhyme.
-2. Prefer the same selection posture (coverage duty first, preserve viable tracking, preempt only for clearly better work).
-3. Always dry-run `validate_selection`; metrics from another episode do not make an invalid current selection valid.
 """
     return name, body
 

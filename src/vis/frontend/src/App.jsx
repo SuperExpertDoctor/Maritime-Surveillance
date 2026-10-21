@@ -5,6 +5,7 @@ import ActivityBar from "./components/ActivityBar";
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
 import LeftPanel from "./components/LeftPanel";
+import SkillsPanel from "./components/SkillsPanel";
 import MenuBar from "./components/MenuBar";
 import PlaybackBar from "./components/PlaybackBar";
 import SettingsDialog from "./components/SettingsDialog";
@@ -528,6 +529,11 @@ export default function App() {
         </div>
       </header>
 
+      {activePanel === "skills" ? (
+        <div className="map-area skills-area">
+          <SkillsPanel readOnly={readOnly} />
+        </div>
+      ) : (
       <CanvasMap
         ref={mapExporterRef}
         frame={frame}
@@ -554,10 +560,12 @@ export default function App() {
         mapMode={activePanel === "assignment" ? "assignment" : "live"}
         assignments={agentSocket.assignments}
       />
+      )}
       <ActivityBar activePanel={activePanel} onSelect={setActivePanel} />
       <LeftPanel
-        panel={activePanel}
+        panel={activePanel === "skills" ? null : activePanel}
         onClose={() => setActivePanel(null)}
+        onPreviewPlan={() => setActivePanel("assignment")}
         fleet={{
           frame,
           selectedUavId,

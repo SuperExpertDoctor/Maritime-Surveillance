@@ -12,8 +12,10 @@ export default function useAgentSocket(enabled) {
     agent: null,
     messages: [],
     plans: [],
+    jobs: [],
     assignments: [],
     events: [],
+    simTimeMin: 0,
   });
   const retryCount = useRef(0);
 
@@ -53,8 +55,10 @@ export default function useAgentSocket(enabled) {
           agent: frame.agent || null,
           messages: (frame.messages || []).slice(-MAX_MESSAGES),
           plans: frame.plans || [],
+          jobs: frame.jobs || [],
           assignments: frame.assignments || [],
           events: (frame.events || []).slice(-MAX_EVENTS),
+          simTimeMin: frame.sim_time_min || 0,
         });
         return;
       }

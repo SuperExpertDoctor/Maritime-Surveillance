@@ -863,7 +863,7 @@ class TaskAllocator:
                 getattr(self.scheduler_port, "deadline_budget_seconds", 0.0),
             )
         )
-        self.scheduler_port.begin_decision(decision_deadline)
+        self.scheduler_port.begin_decision(decision_deadline, trigger=decision.source)
         batch = self.mission_scheduler.decide(
             snapshot,
             deadline_monotonic=decision_deadline,

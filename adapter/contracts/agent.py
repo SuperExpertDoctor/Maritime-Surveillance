@@ -62,6 +62,8 @@ class FeedbackItem(BaseModel):
     text: str
     delivery: Literal["steer", "followUp"] = "followUp"
     attempt: int = 1
+    # Operator quote-annotation: {"message_id", "quote"} captured in the UI.
+    annotation: dict | None = None
 
 
 class AgentJobDTO(BaseModel):
@@ -74,6 +76,8 @@ class AgentJobDTO(BaseModel):
     text: str = ""
     status: JobStatus = "queued"
     created_at_min: float = 0.0
+    # Wake reason class: event | periodic | retry | initial | human.
+    trigger: str = ""
     feedback: tuple[FeedbackItem, ...] = ()
     accepted_feedback: tuple[FeedbackItem, ...] = ()
     coalesced_count: int = 0
@@ -95,6 +99,8 @@ class AgentMessageDTO(BaseModel):
     delivery_status: str | None = None
     feedback_id: str | None = None
     plan_id: str | None = None
+    # Quote-annotation carried from the operator composer.
+    annotation: dict | None = None
 
 
 class AgentPlanDTO(BaseModel):
@@ -114,6 +120,23 @@ class AgentPlanDTO(BaseModel):
     decided_at_min: float = 0.0
     decided_by: str = ""
     decision_comment: str = ""
+    # Trigger that woke the job (event | periodic | retry | initial).
+    trigger: str = ""
+    # Why this plan needs human approval: human_required | risk_threshold.
+    reason: str = ""
+    # Deterministic risk score 0..1 surfaced on the approval card.
+    risk: float | None = None
+    # UAV ids the plan touches.
+    members: tuple[str, ...] = ()
+    # Coverage bbox [x1, y1, x2, y2] in grid cells the plan spans.
+    execution_domain: tuple[float, float, float, float] | None = None
+    domain_policy: str = ""
+    fallback: str = ""
+    # approve_once | approve_session | adjust (set on human decision).
+    approval_scope: str = ""
+    # Sim-clock seconds for the approval countdown.
+    created_at_s: float = 0.0
+    expires_at_s: float | None = None
 
 
 class AgentStatusDTO(BaseModel):

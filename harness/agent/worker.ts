@@ -96,7 +96,7 @@ function heartbeatRun(job: Job, signal?: AbortSignal): Promise<void> {
   heartbeatTask = heartbeatTask.then(async () => {
     if (activeJob !== job) return;
     const ids = feedback?.acknowledgedIds() || [];
-    const response = await request("/internal/agent/heartbeat", { run_id: job.run_id, episode_id: job.episode_id, acknowledged_feedback_ids: ids }, signal);
+    const response = await request("/internal/agent/heartbeat", { run_id: job.run_id, episode_id: job.episode_id, acknowledged_feedback_ids: ids, model: model.id }, signal);
     feedback?.confirmAcknowledged(ids);
     if (response.cancel) throw new Error("run_cancelled");
     if (session?.isStreaming) await feedback?.deliver(response.feedback);

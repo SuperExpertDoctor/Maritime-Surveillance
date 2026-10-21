@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from adapter.broker import AgentBroker, AgentJob
@@ -121,13 +123,19 @@ class HarnessSchedulerPort(SchedulerPort):
         *,
         llm_client=None,
         timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS,
+        agent_md_path: str | os.PathLike | None = None,
     ) -> None:
         self.broker = broker
         self.scheduler = scheduler
         self.llm_client = llm_client
+        self.agent_md_path = (
+            Path(agent_md_path) if agent_md_path
+            else Path(__file__).resolve().parent.parent / "src" / "schedule" / "AGENT.md"
+        )
         self.timeout_seconds = max(30.0, float(timeout_seconds))
         self._last_failure_category: str | None = None
         self._pending_deadline: float | None = None
+        self._pending_trigger: str = ""
 
     @property
     def last_failure_category(self) -> str | None:
@@ -137,8 +145,9 @@ class HarnessSchedulerPort(SchedulerPort):
     def deadline_budget_seconds(self) -> float:
         return self.timeout_seconds
 
-    def begin_decision(self, deadline_monotonic: float | None) -> None:
+    def begin_decision(self, deadline_monotonic: float | None, trigger: str = "") -> None:
         self._pending_deadline = deadline_monotonic
+        self._pending_trigger = trigger
 
     def _await(self, job: AgentJob, deadline_monotonic: float) -> dict | None:
         """Block until the job resolves or the deadline expires."""
@@ -168,6 +177,16 @@ class HarnessSchedulerPort(SchedulerPort):
     # frozen snapshot back on demand via get_mission_snapshot.
     external = True
 
+    def _system_prompt(self, base: str) -> str:
+        """Append the operator-maintained AGENT.md style guide (live re-read)."""
+        try:
+            guide = self.agent_md_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return base
+        if not guide:
+            return base
+        return f"{base}\n\n# 人工风格指导（AGENT.md）\n\n{guide}"
+
     def provide_selection(self, snapshot, payload: dict) -> dict | None:
         """Enqueue the mission-selection job; None on failure or timeout."""
         self._last_failure_category = None
@@ -191,10 +210,11 @@ class HarnessSchedulerPort(SchedulerPort):
             "重量触发：为当前态势做出任务选择（mission-selection/v1）",
             source="scheduler",
             payload={
-                "system_prompt": self.scheduler.system_prompt,
+                "system_prompt": self._system_prompt(self.scheduler.system_prompt),
                 "delta": delta,
             },
             deadline_monotonic=deadline,
+            trigger=self._pending_trigger,
         )
         job.runtime.internal_snapshot = snapshot
         job.runtime.selection_payload = payload
@@ -221,9 +241,10 @@ class HarnessSchedulerPort(SchedulerPort):
             JOB_KIND_LEGACY_PLAN,
             "搜索区规划：按态势输出 search_regions 方案",
             source="scheduler",
-            payload={"system_prompt": system_prompt, "user_prompt": user_prompt},
+            payload={"system_prompt": self._system_prompt(system_prompt), "user_prompt": user_prompt},
             validators={"plan": validate_plan},
             deadline_monotonic=deadline,
+            trigger=self._pending_trigger,
         )
         result = self._await(job, deadline)
         success = isinstance(result, dict) and isinstance(result.get("search_regions"), list)
@@ -478,6 +499,7 @@ class MissionToolsPort(ToolsPort):
             self.broker.autonomy_mode == "full"
             or (self.broker.autonomy_mode == "assisted" and not risky)
         )
+        domain = self._assignment_domain(selection, job)
         plan = self.broker.submit_plan(
             job,
             kind=job.kind,
@@ -490,6 +512,16 @@ class MissionToolsPort(ToolsPort):
             },
             decision_reason=reason,
             auto_approve=auto,
+            trigger=job.trigger,
+            reason="risk_threshold" if risky else "human_required",
+            risk=0.75 if risky else 0.2,
+            members=domain["members"],
+            execution_domain=domain["domain"],
+            domain_policy=(
+                f"选中 {len(selection.get('selected_task_ids') or ())} 个任务"
+                f" / 抢占 {len(selection.get('preempt_uav_ids') or ())} 架 UAV"
+            ),
+            fallback="审批拒绝或过期后维持现有任务分配，不执行本计划",
         )
         if auto:
             self._publish_assignments(selection, job)
@@ -523,6 +555,7 @@ class MissionToolsPort(ToolsPort):
             self.broker.autonomy_mode == "assisted"
             and len(payload["search_regions"]) <= 8
         )
+        regions_domain = self._regions_domain(payload["search_regions"])
         plan = self.broker.submit_plan(
             job,
             kind=job.kind,
@@ -530,6 +563,13 @@ class MissionToolsPort(ToolsPort):
                      "notes": payload["notes"]},
             decision_reason=reason,
             auto_approve=auto,
+            trigger=job.trigger,
+            reason="risk_threshold" if len(payload["search_regions"]) > 8 else "human_required",
+            risk=0.6 if len(payload["search_regions"]) > 8 else 0.2,
+            members=(),
+            execution_domain=regions_domain,
+            domain_policy=f"新规划 {len(payload['search_regions'])} 个搜索子区域",
+            fallback="审批拒绝或过期后沿用既有搜索区域划分",
         )
         result = {**payload, "plan_id": plan.plan_id}
         job.runtime.result = result
@@ -562,14 +602,14 @@ class MissionToolsPort(ToolsPort):
             for task_id in selection.get("selected_task_ids") or ()
         )
 
-    def _publish_assignments(self, selection: dict, job: AgentJob) -> None:
-        """Project the committed selection into AssignmentView rows."""
+    def _selection_rows(self, selection: dict, job: AgentJob) -> list[dict]:
+        """Deterministic pairing -> AssignmentView-shaped rows."""
         snapshot = job.runtime.internal_snapshot
         if snapshot is None:
-            return
+            return []
         parsed, _ = _selection_object(selection)
         if parsed is None:
-            return
+            return []
         visible = frozenset(
             c.get("task_id")
             for c in (job.runtime.selection_payload or {})
@@ -579,7 +619,7 @@ class MissionToolsPort(ToolsPort):
         pairing = self.scheduler.pair_selected_tasks(parsed, snapshot,
                                                      visible_task_ids=visible)
         if not pairing.is_valid:
-            return
+            return []
         candidates = {
             c.task_id: c for c in getattr(snapshot, "candidates", ())
         }
@@ -597,7 +637,42 @@ class MissionToolsPort(ToolsPort):
                 "center": list(center) if center else None,
                 "target_id": getattr(candidate, "contact_id", None),
             })
-        self.broker.set_assignments(rows)
+        return rows
+
+    def _assignment_domain(self, selection: dict, job: AgentJob) -> dict:
+        """Plan members (assigned UAVs) + merged bbox of all touched areas."""
+        rows = self._selection_rows(selection, job)
+        boxes = [tuple(r["bbox"]) for r in rows if r.get("bbox")]
+        centers = [tuple(r["center"]) for r in rows if r.get("center")]
+        domain = None
+        if boxes or centers:
+            xs1 = [b[0] for b in boxes] + [c[0] for c in centers]
+            ys1 = [b[1] for b in boxes] + [c[1] for c in centers]
+            xs2 = [b[2] for b in boxes] + [c[0] for c in centers]
+            ys2 = [b[3] for b in boxes] + [c[1] for c in centers]
+            domain = (min(xs1), min(ys1), max(xs2), max(ys2))
+        members = tuple(sorted({r["uav_id"] for r in rows if r.get("uav_id")}))
+        return {"members": members, "domain": domain}
+
+    @staticmethod
+    def _regions_domain(search_regions: list) -> tuple | None:
+        boxes = [
+            tuple(r["bbox"]) for r in search_regions
+            if isinstance(r, dict) and isinstance(r.get("bbox"), (list, tuple))
+            and len(r["bbox"]) == 4
+        ]
+        if not boxes:
+            return None
+        return (
+            min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes),
+        )
+
+    def _publish_assignments(self, selection: dict, job: AgentJob) -> None:
+        """Project the committed selection into AssignmentView rows."""
+        rows = self._selection_rows(selection, job)
+        if rows:
+            self.broker.set_assignments(rows)
 
     def _tool_get_action_status(self, params: dict, job: AgentJob) -> dict:
         action_id = str(params.get("action_id") or "")

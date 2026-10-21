@@ -10,7 +10,7 @@ const TITLES = {
 };
 
 // 左侧折叠面板宿主：数据栏 / 对话栏 / 任务分配栏，由 ActivityBar 切换。
-export default function LeftPanel({ panel, onClose, fleet, agent }) {
+export default function LeftPanel({ panel, onClose, fleet, agent, onPreviewPlan }) {
   if (!panel) return null;
   const title = TITLES[panel] || TITLES.data;
   return (
@@ -23,11 +23,9 @@ export default function LeftPanel({ panel, onClose, fleet, agent }) {
         {panel === "data" && <FleetPanel {...fleet} />}
         {panel === "agent" && (
           <ConversationPanel
-            agent={agent.agent}
-            events={agent.events}
-            messages={agent.messages}
-            plans={agent.plans}
+            agent={agent}
             readOnly={fleet.readOnly}
+            onPreviewPlan={onPreviewPlan}
           />
         )}
         {panel === "assignment" && (

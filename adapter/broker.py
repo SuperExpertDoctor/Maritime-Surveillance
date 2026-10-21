@@ -105,6 +105,9 @@ class AgentBroker:
         self.last_heartbeat: float | None = None
         self.last_job_finished_monotonic: float | None = None
         self._assignment_view: list[dict] = []
+        # "本会话允许同类操作": one grant per kind+domain, recorded on
+        # approve_session and cleared when the autonomy mode changes.
+        self._session_grants: list[dict] = []
 
     # ------------------------------------------------------------------
     # Messages / plans
@@ -125,6 +128,7 @@ class AgentBroker:
                     "delivery_status": fields.get("delivery_status"),
                     "feedback_id": fields.get("feedback_id"),
                     "plan_id": fields.get("plan_id"),
+                    "annotation": fields.get("annotation"),
                 }
                 self.messages.append(message)
             text = fields.get("text")
@@ -133,17 +137,17 @@ class AgentBroker:
                     message["text"] = (message["text"] + text)[-_MAX_MESSAGE_CHARS * 3:]
                 else:
                     message["text"] = text[:_MAX_MESSAGE_CHARS * 3]
-            for key in ("status", "delivery_status", "plan_id", "model", "delivery", "feedback_id"):
+            for key in ("status", "delivery_status", "plan_id", "model", "delivery", "feedback_id", "annotation"):
                 if fields.get(key) is not None:
                     message[key] = fields[key]
             self.messages = self.messages[-_MAX_MESSAGES:]
             return dict(message)
 
-    def append_operator_message(self, text: str, delivery: str, job: AgentJob, feedback_id: str | None) -> dict:
+    def append_operator_message(self, text: str, delivery: str, job: AgentJob, feedback_id: str | None, annotation: dict | None = None) -> dict:
         message = self.upsert_message(
             _identifier("message"), role="user", text=text, run_id=job.run_id,
             status="queued" if job.status == "running" else "completed",
-            delivery=delivery, feedback_id=feedback_id,
+            delivery=delivery, feedback_id=feedback_id, annotation=annotation,
         )
         self.hub.emit(WsAgentEvent(type="agent_message", payload={"message": message}))
         return message
@@ -160,6 +164,7 @@ class AgentBroker:
         payload: dict | None = None,
         validators: dict[str, Callable] | None = None,
         deadline_monotonic: float | None = None,
+        trigger: str = "",
     ) -> AgentJob:
         """Post one agent job; material jobs coalesce by kind."""
         with self.lock:
@@ -190,6 +195,7 @@ class AgentBroker:
                 text=text[:_MAX_MESSAGE_CHARS],
                 status="queued",
                 created_at_min=self.sim_time_fn(),
+                trigger=trigger,
                 payload=payload or {},
             )
             job.runtime.validators = validators or {}
@@ -207,7 +213,7 @@ class AgentBroker:
             self._publish_state()
             return job
 
-    def queue_human(self, text: str, delivery: str) -> AgentJob:
+    def queue_human(self, text: str, delivery: str, annotation: dict | None = None) -> AgentJob:
         """Operator input: attaches as feedback to a running job, else queues."""
         text = str(text or "").strip()
         if not text:
@@ -220,13 +226,16 @@ class AgentBroker:
             if running is not None:
                 if len(running.feedback) + len(running.accepted_feedback) >= _MAX_FEEDBACK_PER_RUN:
                     raise ValueError("feedback_queue_full")
-                item = FeedbackItem(id=_identifier("feedback"), text=text[:_MAX_MESSAGE_CHARS], delivery=delivery)
+                item = FeedbackItem(
+                    id=_identifier("feedback"), text=text[:_MAX_MESSAGE_CHARS],
+                    delivery=delivery, annotation=annotation,
+                )
                 running.feedback = (*running.feedback, item)
-                self.append_operator_message(text, delivery, running, item.id)
+                self.append_operator_message(text, delivery, running, item.id, annotation)
                 self._publish_state()
                 return running
-        job = self.enqueue(JOB_KIND_OPERATOR, text, source="human")
-        self.append_operator_message(text, delivery, job, None)
+        job = self.enqueue(JOB_KIND_OPERATOR, text, source="human", trigger="human")
+        self.append_operator_message(text, delivery, job, None, annotation)
         return job
 
     # ------------------------------------------------------------------
@@ -261,6 +270,7 @@ class AgentBroker:
         with self.lock:
             now = time.monotonic()
             self.expire_leases(now)
+            self._expire_plans()
             self.last_heartbeat = now
             running = next((j for j in self.jobs if j.status == "running"), None)
             if running is not None:
@@ -300,9 +310,11 @@ class AgentBroker:
             raise ValueError("run_not_active")
         return job
 
-    def heartbeat(self, run_id: str, episode_id: str, acknowledged_ids: list[str]) -> dict:
+    def heartbeat(self, run_id: str, episode_id: str, acknowledged_ids: list[str], model: str = "") -> dict:
         with self.lock:
             self.last_heartbeat = time.monotonic()
+            if model:
+                self.agent["model"] = model[:80]
             try:
                 job = self.active_run(run_id, episode_id)
             except ValueError:
@@ -412,6 +424,8 @@ class AgentBroker:
             raise ValueError("invalid_autonomy_mode")
         with self.lock:
             self.autonomy_mode = mode
+            # Session grants die with the mode they were issued under.
+            self._session_grants = []
             self.hub.emit(WsAgentEvent(
                 type="autonomy_mode",
                 payload={"mode": mode},
@@ -419,6 +433,13 @@ class AgentBroker:
             self.hub.record_milestone("autonomy_mode_changed", {"mode": mode})
             self._publish_state()
             return self.autonomy_mode
+
+    def _grant_covers(self, kind: str, domain: tuple | None) -> bool:
+        """A session grant covers a new plan when kind and domain match."""
+        return any(
+            grant["kind"] == kind and grant["domain"] == (domain or ())
+            for grant in self._session_grants
+        )
 
     def submit_plan(
         self,
@@ -428,9 +449,22 @@ class AgentBroker:
         summary: dict,
         decision_reason: str,
         auto_approve: bool | None = None,
+        trigger: str = "",
+        reason: str = "",
+        risk: float | None = None,
+        members: tuple[str, ...] = (),
+        execution_domain: tuple[float, float, float, float] | None = None,
+        domain_policy: str = "",
+        fallback: str = "",
+        expires_in_s: float = 600.0,
     ) -> AgentPlanDTO:
         """Register a submitted plan; the caller decides auto-approval."""
+        sim_now_s = self.sim_time_fn() * 60.0
         auto = self.autonomy_mode == "full" if auto_approve is None else auto_approve
+        decided_by = "autonomy" if auto else ""
+        if not auto and self._grant_covers(kind, execution_domain):
+            auto = True
+            decided_by = "session_grant"
         plan = AgentPlanDTO(
             plan_id=_identifier("plan"),
             run_id=job.run_id,
@@ -442,7 +476,17 @@ class AgentBroker:
             summary=summary,
             created_at_min=self.sim_time_fn(),
             decided_at_min=self.sim_time_fn() if auto else 0.0,
-            decided_by="autonomy" if auto else "",
+            decided_by=decided_by,
+            trigger=trigger,
+            reason=reason,
+            risk=risk,
+            members=members,
+            execution_domain=execution_domain,
+            domain_policy=domain_policy,
+            fallback=fallback,
+            approval_scope="approve_session" if decided_by == "session_grant" else "",
+            created_at_s=sim_now_s,
+            expires_at_s=sim_now_s + expires_in_s,
         )
         self.plans[plan.plan_id] = plan
         self.hub.emit(WsAgentEvent(type="plan_event", payload={"plan": plan.model_dump()}))
@@ -453,18 +497,47 @@ class AgentBroker:
         self._publish_state()
         return plan
 
-    def decide_plan(self, plan_id: str, approved: bool, comment: str = "") -> AgentPlanDTO:
+    def _expire_plans(self) -> None:
+        """Rejection/expiry is final — sweep pending plans past their window."""
+        sim_now_s = self.sim_time_fn() * 60.0
+        for plan_id, plan in list(self.plans.items()):
+            if (plan.status == "pending_approval" and plan.expires_at_s is not None
+                    and sim_now_s >= plan.expires_at_s):
+                updated = plan.model_copy(update={
+                    "status": "expired", "decided_at_min": self.sim_time_fn(),
+                    "decided_by": "timeout",
+                })
+                self.plans[plan_id] = updated
+                self.hub.emit(WsAgentEvent(type="plan_event", payload={"plan": updated.model_dump()}))
+
+    def decide_plan(self, plan_id: str, decision: str = "approve_once", comment: str = "") -> AgentPlanDTO:
+        """Human decision: approve_once | approve_session | reject | adjust."""
+        if decision in ("approve", "approved"):
+            decision = "approve_once"
+        if decision not in ("approve_once", "approve_session", "reject", "adjust"):
+            raise ValueError("invalid_decision")
+        if decision == "adjust" and not str(comment or "").strip():
+            raise ValueError("comment_required")
+        with self.lock:
+            self._expire_plans()
         plan = self.plans.get(plan_id)
         if plan is None:
             raise ValueError("plan_not_found")
         if plan.status != "pending_approval":
             raise ValueError("plan_not_pending")
+        approved = decision in ("approve_once", "approve_session")
+        scope = decision if decision != "reject" else ""
         self.plans[plan_id] = plan.model_copy(update={
             "status": "approved" if approved else "rejected",
             "decided_at_min": self.sim_time_fn(),
             "decided_by": "operator",
             "decision_comment": str(comment or "")[:500],
+            "approval_scope": scope,
         })
+        if decision == "approve_session":
+            self._session_grants = [
+                g for g in self._session_grants if g["kind"] != plan.kind
+            ] + [{"kind": plan.kind, "domain": plan.execution_domain or ()}]
         updated = self.plans[plan_id]
         job = next((j for j in self.jobs if j.run_id == updated.run_id), None)
         if job is not None:
@@ -486,6 +559,8 @@ class AgentBroker:
         return updated
 
     def pending_plans(self) -> list[dict]:
+        with self.lock:
+            self._expire_plans()
         return [p.model_dump() for p in self.plans.values() if p.status == "pending_approval"]
 
     def plan_status(self, plan_id: str) -> dict | None:
@@ -520,11 +595,13 @@ class AgentBroker:
 
     def state_frame(self) -> dict:
         with self.lock:
+            self._expire_plans()
             return {
                 "type": "agent_state",
                 "agent": {**self.agent, "autonomy_mode": self.autonomy_mode},
                 "queued": sum(j.status == "queued" for j in self.jobs),
                 "episode_id": self.episode_id_fn(),
+                "sim_time_min": self.sim_time_fn(),
                 "messages": list(self.messages),
                 "plans": [p.model_dump() for p in self.plans.values()][-30:],
                 "jobs": [j.model_dump(exclude={"payload"}) for j in self.jobs][-_MAX_JOBS:],
