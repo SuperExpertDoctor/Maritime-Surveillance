@@ -145,20 +145,31 @@ function PlanTemplate({ plan }) {
   const summary = plan.summary || {};
   const selected = summary.selected_task_ids || [];
   const preempted = summary.preempt_uav_ids || [];
+  const assignments = summary.assignments || [];
   const regionCount = summary.search_region_count;
   return (
     <div className="plan-template">
       <section>
         <h4>任务分配方案</h4>
-        {selected.length ? (
+        {assignments.length ? (
+          <ul className="plan-assignments">
+            {assignments.map((row, i) => (
+              <li key={i}>
+                <strong>{row.uav_id}</strong>
+                <span> → {row.desc}</span>
+                <small>{row.task_id}</small>
+              </li>
+            ))}
+          </ul>
+        ) : selected.length ? (
           <p>选中任务：{selected.join("、")}</p>
         ) : null}
         {preempted.length ? (
-          <p>抢占 UAV：{preempted.join("、")}</p>
+          <p>抢占 UAV：{preempted.join("、")}（撤下原任务转派新任务）</p>
         ) : null}
         {regionCount != null ? <p>新规划搜索子区域 {regionCount} 个</p> : null}
         {summary.notes ? <p>{summary.notes}</p> : null}
-        {!selected.length && regionCount == null && !preempted.length ? (
+        {!assignments.length && !selected.length && regionCount == null && !preempted.length ? (
           <p>{planTypeLabel(plan)}</p>
         ) : null}
       </section>

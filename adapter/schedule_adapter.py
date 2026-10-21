@@ -506,6 +506,7 @@ class MissionToolsPort(ToolsPort):
             summary={
                 "selected_task_ids": list(selection.get("selected_task_ids") or ()),
                 "preempt_uav_ids": list(selection.get("preempt_uav_ids") or ()),
+                "assignments": domain["assignments"],
                 "notes": selection.get("notes", ""),
                 "snapshot_id": selection.get("snapshot_id"),
                 "risky": risky,
@@ -652,7 +653,27 @@ class MissionToolsPort(ToolsPort):
             ys2 = [b[3] for b in boxes] + [c[1] for c in centers]
             domain = (min(xs1), min(ys1), max(xs2), max(ys2))
         members = tuple(sorted({r["uav_id"] for r in rows if r.get("uav_id")}))
-        return {"members": members, "domain": domain}
+        kind_labels = {
+            "probe": "查证接触", "investigate": "查证接触", "track": "持续跟踪",
+            "search": "区域搜索", "coverage": "区域覆盖", "partition": "分区覆盖",
+        }
+        assignments = []
+        for row in rows:
+            target = row.get("target_id")
+            bbox = row.get("bbox")
+            kind_cn = kind_labels.get(row.get("kind"), "执行任务")
+            if target:
+                desc = f"查证接触 {target}"
+            elif bbox:
+                x1, y1, x2, y2 = (int(v) for v in bbox)
+                desc = f"{kind_cn} ({x1},{y1})–({x2},{y2})"
+            else:
+                desc = f"{kind_cn} {row['task_id']}"
+            assignments.append({
+                "uav_id": row.get("uav_id"), "task_id": row.get("task_id"),
+                "desc": desc,
+            })
+        return {"members": members, "domain": domain, "assignments": assignments}
 
     @staticmethod
     def _regions_domain(search_regions: list) -> tuple | None:

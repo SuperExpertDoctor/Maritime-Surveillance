@@ -2992,3 +2992,8 @@ button {
 }
 .skills-editor:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .skills-dirty-hint { padding: 4px 14px; color: var(--warning); font-size: 11px; }
+
+/* Readable plan assignment rows */
+.plan-assignments { margin: 4px 0; padding-left: 0; list-style: none; }
+.plan-assignments li { padding: 1px 0; font-size: 12px; }
+.plan-assignments li small { margin-left: 6px; color: var(--text-muted); font: 10px ui-monospace, monospace; }
