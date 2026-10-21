@@ -591,6 +591,13 @@ class AgentBroker:
             "plan_id": plan_id, "approved": approved, "comment": comment,
         })
         self._publish_state()
+        if not approved and str(comment or "").strip():
+            # Feed the rejection comment back to the agent so the next turn can
+            # actually revise the plan instead of re-proposing the same choice.
+            try:
+                self.queue_human(f"审批退回意见（计划 {plan_id}）：{str(comment).strip()}", "steer")
+            except ValueError:
+                pass
         return updated
 
     def pending_plans(self) -> list[dict]:
