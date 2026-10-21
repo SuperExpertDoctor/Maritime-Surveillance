@@ -3021,3 +3021,5 @@ button {
 .trigger-retry { color: #f0a0ff; background: rgba(240,160,255,0.12); border: 1px solid rgba(240,160,255,0.35); }
 .trigger-initial { color: #9fe8b6; background: rgba(120,220,150,0.12); border: 1px solid rgba(120,220,150,0.35); }
 .trigger-human { color: #c9b8ff; background: rgba(180,160,255,0.14); border: 1px solid rgba(180,160,255,0.4); }
+
+.skills-refine-note { margin: 8px 10px; font-size: 11px; color: var(--accent, #5aa9ff); }

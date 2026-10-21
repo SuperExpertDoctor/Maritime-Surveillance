@@ -47,7 +47,7 @@ class _JobRuntime:
     """Non-serializable per-job internals (validators, completion signal)."""
 
     __slots__ = ("done", "result", "validators", "deadline", "internal_snapshot",
-                 "selection_payload", "snapshot_dto")
+                 "selection_payload", "snapshot_dto", "evidence_recorded")
 
     def __init__(self) -> None:
         self.done = threading.Event()
@@ -57,6 +57,7 @@ class _JobRuntime:
         self.internal_snapshot: Any | None = None
         self.selection_payload: dict | None = None
         self.snapshot_dto: dict | None = None
+        self.evidence_recorded: bool = False
 
 
 class AgentJob(AgentJobDTO):
@@ -86,6 +87,7 @@ class AgentBroker:
         episode_id_fn: Callable[[], str] = lambda: "",
         sim_time_fn: Callable[[], float] = lambda: 0.0,
         autonomy_mode: str = "full",
+        evidence_sink: Callable | None = None,
     ) -> None:
         # Reentrant: queue_human/claim_next/etc. call upsert_message and
         # _publish_state while already holding the lock.
@@ -108,6 +110,20 @@ class AgentBroker:
         # "本会话允许同类操作": one grant per kind+domain, recorded on
         # approve_session and cleared when the autonomy mode changes.
         self._session_grants: list[dict] = []
+        # Optional SkillRefinery hook: called once per resolved decision.
+        self.evidence_sink = evidence_sink
+
+    def _emit_decision(self, job, *, success: bool, plan=None,
+                       reason: str = "", error: str = "") -> None:
+        """One evidence record per resolved decision (dedup via runtime flag)."""
+        sink = self.evidence_sink
+        if sink is None or job is None or job.runtime.evidence_recorded:
+            return
+        job.runtime.evidence_recorded = True
+        try:
+            sink(job, success=success, plan=plan, reason=reason, error=error)
+        except Exception:
+            pass  # evidence must never break scheduling
 
     # ------------------------------------------------------------------
     # Messages / plans
@@ -415,6 +431,15 @@ class AgentBroker:
                             delivery_status="requeued",
                         )
             self._publish_state()
+            if failed or not (
+                isinstance(job.runtime.result, dict)
+                and job.runtime.result.get("plan_id")
+            ):
+                self._emit_decision(
+                    job, success=not failed,
+                    reason="" if not failed else "job_failed",
+                    error=error or "",
+                )
 
     # ------------------------------------------------------------------
     # Plans / approvals
@@ -489,6 +514,8 @@ class AgentBroker:
             expires_at_s=sim_now_s + expires_in_s,
         )
         self.plans[plan.plan_id] = plan
+        if auto:
+            self._emit_decision(job, success=True, plan=plan)
         self.hub.emit(WsAgentEvent(type="plan_event", payload={"plan": plan.model_dump()}))
         self.hub.record_milestone("agent_plan_submitted", {
             "plan_id": plan.plan_id, "run_id": job.run_id,
@@ -508,6 +535,10 @@ class AgentBroker:
                     "decided_by": "timeout",
                 })
                 self.plans[plan_id] = updated
+                self._emit_decision(
+                    next((j for j in self.jobs if j.run_id == updated.run_id), None),
+                    success=False, plan=updated, reason="expired",
+                )
                 self.hub.emit(WsAgentEvent(type="plan_event", payload={"plan": updated.model_dump()}))
 
     def decide_plan(self, plan_id: str, decision: str = "approve_once", comment: str = "") -> AgentPlanDTO:
@@ -551,6 +582,10 @@ class AgentBroker:
                 job.error = "plan_rejected"
                 job.runtime.result = None
             job.runtime.done.set()
+        self._emit_decision(
+            job, success=approved, plan=updated,
+            reason="" if approved else f"{decision}:{comment}"[:120],
+        )
         self.hub.emit(WsAgentEvent(type="plan_event", payload={"plan": updated.model_dump()}))
         self.hub.record_milestone("agent_plan_decided", {
             "plan_id": plan_id, "approved": approved, "comment": comment,

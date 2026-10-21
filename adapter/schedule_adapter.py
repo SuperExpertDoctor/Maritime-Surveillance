@@ -671,7 +671,7 @@ class MissionToolsPort(ToolsPort):
                 desc = f"{kind_cn} {row['task_id']}"
             assignments.append({
                 "uav_id": row.get("uav_id"), "task_id": row.get("task_id"),
-                "desc": desc,
+                "kind": row.get("kind"), "desc": desc,
             })
         return {"members": members, "domain": domain, "assignments": assignments}
 

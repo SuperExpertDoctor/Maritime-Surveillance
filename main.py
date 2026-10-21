@@ -203,11 +203,19 @@ def main(
                 event_type, data,
             ),
         )
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        from adapter.skill_refinery import SkillRefinery
+        skill_refinery = SkillRefinery(
+            evidence_dir=os.path.join(repo_root, "outputs", "skills_evidence"),
+            skills_dir=os.path.join(repo_root, "harness", "agent", "skills"),
+            refine_every=int(os.environ.get("SKILL_REFINE_EVERY", "5")),
+        )
         agent_broker = AgentBroker(
             agent_hub,
             episode_id_fn=lambda: engine.allocator.sm.episode_id,
             sim_time_fn=lambda: engine.allocator.sm.current_time,
             autonomy_mode=os.environ.get("PI_AUTONOMY_MODE", "full"),
+            evidence_sink=skill_refinery.record_decision,
         )
         engine.allocator.set_scheduler_port(HarnessSchedulerPort(
             agent_broker,
@@ -219,8 +227,9 @@ def main(
             agent_broker,
             MissionToolsPort(agent_broker, engine.allocator.mission_scheduler),
             worker_token=worker_token,
-            skills_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "harness", "agent", "skills"),
-            agent_md_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "schedule", "AGENT.md"),
+            skills_dir=os.path.join(repo_root, "harness", "agent", "skills"),
+            agent_md_path=os.path.join(repo_root, "src", "schedule", "AGENT.md"),
+            refinery=skill_refinery,
         )
         agent_state_fn = agent_broker.state_frame
 

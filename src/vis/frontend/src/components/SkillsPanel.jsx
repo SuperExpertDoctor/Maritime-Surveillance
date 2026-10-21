@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { BookMarked, Check, Pencil, RefreshCw, X } from "lucide-react";
+import { BookMarked, Check, Pencil, RefreshCw, Sparkles, X } from "lucide-react";
 
 // Skills 栏：接管地图区——左侧凝练出的 skill 选项卡，右侧 SKILL.md
 // Markdown 渲染，可人工编辑并保存回写 harness/agent/skills/<name>/SKILL.md。
@@ -14,6 +14,8 @@ export default function SkillsPanel({ readOnly }) {
   const [dirty, setDirty] = useState(false);
   const [savedTick, setSavedTick] = useState(0);
   const [error, setError] = useState("");
+  const [refining, setRefining] = useState(false);
+  const [refineNote, setRefineNote] = useState("");
 
   const loadList = useCallback(async () => {
     try {
@@ -45,6 +47,28 @@ export default function SkillsPanel({ readOnly }) {
     if (!selected && skills.length) loadSkill(skills[0].name);
   }, [skills, selected, loadSkill]);
 
+  const refine = async () => {
+    setRefining(true);
+    setRefineNote("");
+    setError("");
+    try {
+      const res = await fetch("/api/skills/refine", { method: "POST" });
+      const data = await res.json();
+      const written = data.written || [];
+      setRefineNote(
+        written.length
+          ? `已凝练 ${written.length} 个技能：${written.join("、")}`
+          : "本轮没有符合阈值的成功轨迹，技能未变化",
+      );
+      setSavedTick((v) => v + 1);
+      if (selected) loadSkill(selected);
+    } catch {
+      setError("凝练失败");
+    } finally {
+      setRefining(false);
+    }
+  };
+
   const save = async () => {
     try {
       const res = await fetch(`/api/skills/${encodeURIComponent(selected)}`, {
@@ -68,6 +92,15 @@ export default function SkillsPanel({ readOnly }) {
         <header>
           <BookMarked size={14} />
           <strong>凝练技能</strong>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={refine}
+            disabled={refining || readOnly}
+            title="立即凝练——对积累的决策证据运行 extractor"
+          >
+            <Sparkles size={13} />
+          </button>
           <button type="button" className="icon-btn" onClick={loadList} title="刷新"><RefreshCw size={13} /></button>
         </header>
         <ul>
@@ -85,6 +118,7 @@ export default function SkillsPanel({ readOnly }) {
           ))}
           {!skills.length ? <li className="skills-empty">尚未凝练出技能 —— 成功决策轨迹将由 extractor 生成</li> : null}
         </ul>
+        {refineNote ? <p className="skills-refine-note">{refineNote}</p> : null}
       </aside>
       <section className="skills-doc">
         <header>

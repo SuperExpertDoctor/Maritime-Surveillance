@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,7 @@ def build_agent_router(
     worker_token: str = "",
     skills_dir: str | os.PathLike = "harness/agent/skills",
     agent_md_path: str | os.PathLike | None = None,
+    refinery=None,
 ) -> APIRouter:
     """Create the adapter router; all state lives in ``broker``."""
     router = APIRouter()
@@ -327,6 +329,26 @@ def build_agent_router(
             target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return {"name": name, "saved": True}
+
+    @router.delete("/api/skills/{name}")
+    async def delete_skill(name: str):
+        if name == AGENT_DOC_NAME:
+            return _error("skill_protected", 400)
+        if not _SKILL_NAME.match(name):
+            return _error("skill_not_found", 404)
+        root = Path(skills_dir).resolve()
+        target = (root / name).resolve()
+        if root not in target.parents or not target.is_dir():
+            return _error("skill_not_found", 404)
+        shutil.rmtree(target)
+        return {"name": name, "deleted": True}
+
+    @router.post("/api/skills/refine")
+    async def refine_skills():
+        """Manual trigger: run the extractor over accumulated decision evidence."""
+        if refinery is None:
+            return _error("refinery_unavailable", 503)
+        return {"written": refinery.refine()}
 
     @router.get("/api/pi-agent/plans")
     @router.get("/api/plans")

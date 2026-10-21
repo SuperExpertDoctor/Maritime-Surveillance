@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, readdir, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createAgentSession, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { longcatConfig, redact } from "./config.ts";
@@ -104,6 +104,29 @@ function heartbeatRun(job: Job, signal?: AbortSignal): Promise<void> {
   return heartbeatTask;
 }
 
+const skillsRoot = resolve(import.meta.dirname, "skills");
+
+// Skills hot-reload: the adapter rewrites SKILL.md files as the refinery
+// distills new trajectories. Re-scan the skills root per claimed job; when
+// the file set or contents changed, drop the cached session so the next
+// makeSession rebuilds <available_skills> with the new entries.
+async function skillsSignature(root: string): Promise<string> {
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    const parts: string[] = [];
+    for (const entry of entries.filter((e) => e.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+      try {
+        const info = await stat(join(root, entry.name, "SKILL.md"));
+        parts.push(`${entry.name}:${info.mtimeMs}:${info.size}`);
+      } catch { /* skill without SKILL.md */ }
+    }
+    return parts.join("|");
+  } catch {
+    return "";
+  }
+}
+let skillsSig = await skillsSignature(skillsRoot);
+
 function jobPrompt(job: Job): string {
   if (job.kind === "legacy-plan/v1") {
     return `Episode ${job.episode_id}. 搜索区规划任务（legacy-mission-plan）。调用 get_mission_snapshot 获取规划输入，给出 {search_regions, notes} 并调用 submit_plan_regions 提交（decision_reason 必填，简短中文说明真实理由）。若不需要新区域，最后一行输出 决策原因：... 说明维持现状的真实原因。`;
@@ -127,6 +150,12 @@ while (running) {
     calls = 0;
     runFailure = undefined;
     heartbeatTask = Promise.resolve();
+    const sig = await skillsSignature(skillsRoot);
+    if (sig !== skillsSig) {
+      skillsSig = sig;
+      session?.dispose();
+      session = null;
+    }
     if (!session || sessionEpisode !== job.episode_id) {
       session?.dispose();
       session = await makeSession(job.episode_id);
