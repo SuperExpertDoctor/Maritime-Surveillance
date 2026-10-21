@@ -186,6 +186,9 @@ def create_app(
     engine=None,
     intent_service=None,
     replay_mode: bool = False,
+    agent_router=None,
+    agent_hub=None,
+    agent_state_fn=None,
 ) -> FastAPI:
     """创建 FastAPI 应用实例。
 
@@ -247,6 +250,10 @@ def create_app(
         if engine is not None
         else None
     )
+    app.state.agent_hub = agent_hub
+    app.state.agent_state_fn = agent_state_fn
+    if agent_router is not None:
+        app.include_router(agent_router)
 
     # --- 静态前端文件 ---
     if os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
@@ -298,6 +305,31 @@ def create_app(
         finally:
             app.state._live_clients.discard(ws)
             app.state._live_send_locks.pop(ws, None)
+
+    @app.websocket("/ws/agent")
+    async def websocket_agent(ws: WebSocket):
+        """PI agent 事件流：初始状态帧 + hub 增量事件。"""
+        hub = app.state.agent_hub
+        if hub is None:
+            await ws.close(code=1013, reason="agent channel unavailable")
+            return
+        await ws.accept()
+        queue = hub.subscribe()
+        try:
+            if callable(app.state.agent_state_fn):
+                await ws.send_text(json.dumps(
+                    app.state.agent_state_fn(), ensure_ascii=False,
+                ))
+            while True:
+                try:
+                    frame = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    frame = {"type": "ping"}
+                await ws.send_text(json.dumps(frame, ensure_ascii=False))
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            hub.unsubscribe(queue)
 
     @app.get("/api/runtime/logs")
     async def runtime_logs(after: int = Query(default=0, ge=0), episode_id: str | None = None):

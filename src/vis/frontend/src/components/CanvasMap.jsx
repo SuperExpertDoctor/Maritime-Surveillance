@@ -22,6 +22,57 @@ function loadMapAsset(source) {
   });
 }
 
+// assignment 视图叠加层：覆盖任务画互不重叠的子任务区域并标注负责 UAV；
+// 跟踪任务在目标位置画方形阴影（边长由传感器覆盖范围导出）并叠加 UAV ID。
+function drawAssignmentOverlay(ctx, { assignments, frame, cellSize, offsetX, offsetY }) {
+  const contacts = frame?.contacts || [];
+  const uavs = new Map((frame?.uavs || []).map((uav) => [uav.id, uav]));
+  ctx.save();
+  for (const item of assignments) {
+    const uav = uavs.get(item.uav_id);
+    const sensorCells = Number(uav?.sar_range_cells ?? uav?.sensor_range_cells ?? 0);
+    const isTrack = item.target_id || ["track", "reacquire"].includes(item.kind);
+    if (isTrack) {
+      const contact = contacts.find((c) => c.contact_id === item.target_id);
+      const center = item.center || contact?.estimated_position;
+      if (!Array.isArray(center)) continue;
+      const halfCells = Math.max(2, sensorCells || 2);
+      const half = halfCells * cellSize;
+      const cx = offsetX + (Number(center[0]) + 0.5) * cellSize;
+      const cy = offsetY + (Number(center[1]) + 0.5) * cellSize;
+      ctx.fillStyle = "rgba(148, 163, 184, 0.30)";
+      ctx.strokeStyle = "rgba(56, 189, 248, 0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(cx - half, cy - half, half * 2, half * 2);
+      ctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
+      ctx.font = `700 ${Math.max(10, cellSize * 0.55)}px sans-serif`;
+      ctx.fillStyle = "#0ea5e9";
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.lineWidth = 3;
+      ctx.strokeText(item.uav_id, cx - half + 4, cy - half + 14);
+      ctx.fillText(item.uav_id, cx - half + 4, cy - half + 14);
+    } else if (Array.isArray(item.bbox) && item.bbox.length === 4) {
+      const [x0, y0, x1, y1] = item.bbox.map(Number);
+      const rx = offsetX + x0 * cellSize;
+      const ry = offsetY + y0 * cellSize;
+      const rw = (x1 - x0) * cellSize;
+      const rh = (y1 - y0) * cellSize;
+      ctx.fillStyle = "rgba(45, 212, 191, 0.14)";
+      ctx.strokeStyle = "rgba(45, 212, 191, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.font = `700 ${Math.max(10, cellSize * 0.55)}px sans-serif`;
+      ctx.fillStyle = "#0f766e";
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.lineWidth = 3;
+      ctx.strokeText(item.uav_id, rx + 4, ry + 15);
+      ctx.fillText(item.uav_id, rx + 4, ry + 15);
+    }
+  }
+  ctx.restore();
+}
+
 const CanvasMap = forwardRef(function CanvasMap({
   frame,
   selectedUavId,
@@ -29,6 +80,8 @@ const CanvasMap = forwardRef(function CanvasMap({
   showGrid = false,
   showScenario = false,
   trailMode = "comet",
+  mapMode = "live",
+  assignments = [],
   selectionMode = false,
   onSelectionCommit,
   onSelectContact,
@@ -189,6 +242,11 @@ const CanvasMap = forwardRef(function CanvasMap({
         frameCount: phase,
         assets: mapAssets,
       });
+      if (mapMode === "assignment" && assignments.length) {
+        drawAssignmentOverlay(context, {
+          assignments, frame: displayFrame, cellSize, offsetX, offsetY,
+        });
+      }
       context.restore();
       phase += 1;
       const elapsed = performance.now() - frameReceivedRef.current;
@@ -201,7 +259,7 @@ const CanvasMap = forwardRef(function CanvasMap({
     return () => {
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
     };
-  }, [frame, hoverVersion, mapAssets, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, showScenario, sizeVersion, trailMode]);
+  }, [assignments, frame, hoverVersion, mapAssets, mapMode, selectedContactId, selectedScenarioVesselId, selectedUavId, showGrid, showScenario, sizeVersion, trailMode]);
 
   useImperativeHandle(ref, () => ({
     async recordReplay(frames, { fps = 20, onProgress } = {}) {

@@ -133,6 +133,12 @@ class TaskAllocator:
             ),
             strategy_memory_store=self.strategy_memory_store,
         )
+        # Every heavy decision (mission selection and the legacy region plan)
+        # goes through a SchedulerPort. The default resolves in-process via
+        # the shared gateway; main.py swaps in the harness port that posts
+        # AgentJobs to the PI worker.
+        self.scheduler_port = None
+        self.set_scheduler_port(None)
         self._mission_snapshot_counter = 0
         heuristic = config.control.heuristic
         self._mission_navigator = AStarNavigator(
@@ -151,6 +157,17 @@ class TaskAllocator:
         self._route_cache_version: int | None = None
         self._last_mission_snapshot: MissionSnapshot | None = None
         self.last_decision_timing: dict | None = None
+
+    def set_scheduler_port(self, port) -> None:
+        """Install the SchedulerPort for both heavy decision paths."""
+        if port is None:
+            from adapter.schedule_adapter import InProcessSchedulerPort
+            port = InProcessSchedulerPort(
+                scheduler=self.mission_scheduler,
+                llm_client=self.llm_client,
+            )
+        self.scheduler_port = port
+        self.mission_scheduler.selection_provider = port.provide_selection
 
     def build_mission_snapshot(
         self,
@@ -762,9 +779,10 @@ class TaskAllocator:
                     self.sm.last_information_delta,
                     time=current_time,
                 )
-            new_memory = self.reviewer.step(current_time, self.sm)
-            if new_memory:
-                self.llm_client.set_reviewer_memory(new_memory)
+            if not getattr(self.scheduler_port, "external", False):
+                new_memory = self.reviewer.step(current_time, self.sm)
+                if new_memory:
+                    self.llm_client.set_reviewer_memory(new_memory)
             decision = self.trigger_manager.check(current_time)
         snapshot = None
         wall_started = time.perf_counter()
@@ -840,8 +858,12 @@ class TaskAllocator:
             }, None
         decision_deadline = (
             snapshot_frozen_wall
-            + self.config.mission.information_update.planning_deadline_seconds
+            + max(
+                self.config.mission.information_update.planning_deadline_seconds,
+                getattr(self.scheduler_port, "deadline_budget_seconds", 0.0),
+            )
         )
+        self.scheduler_port.begin_decision(decision_deadline)
         batch = self.mission_scheduler.decide(
             snapshot,
             deadline_monotonic=decision_deadline,
@@ -1594,10 +1616,13 @@ class TaskAllocator:
                 time=current_time,
             )
 
-        # Reviewer update: periodically generate long-term memory
-        new_memory = self.reviewer.step(current_time, self.sm)
-        if new_memory:
-            self.llm_client.set_reviewer_memory(new_memory)
+        # Reviewer update: periodically generate long-term memory.
+        # In PI-harness mode the agent owns context (persistent session +
+        # get_mission_snapshot), so reviewer memory splicing is bypassed.
+        if not getattr(self.scheduler_port, "external", False):
+            new_memory = self.reviewer.step(current_time, self.sm)
+            if new_memory:
+                self.llm_client.set_reviewer_memory(new_memory)
 
         # Check triggers
         decision = self.trigger_manager.check(current_time)
@@ -1719,8 +1744,8 @@ class TaskAllocator:
                 len(candidate_result.candidate_regions),
             )
 
-        # Step 3-5: LLM decision (with validation retries built in)
-        llm_output = self.llm_client.decide(
+        # Step 3-5: scheduler-port decision (in-process gateway or PI worker)
+        llm_output = self.scheduler_port.decide_regions(
             self.sm,
             self.ivt,
             candidate_result,

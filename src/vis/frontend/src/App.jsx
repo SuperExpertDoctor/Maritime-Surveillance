@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Eye, EyeOff, Focus, Grid3X3, History, PanelBottom, PanelRight, Radio, Route, Wind, X } from "lucide-react";
 
+import ActivityBar from "./components/ActivityBar";
 import BottomDrawer from "./components/BottomDrawer";
 import CanvasMap from "./components/CanvasMap";
+import LeftPanel from "./components/LeftPanel";
 import MenuBar from "./components/MenuBar";
 import PlaybackBar from "./components/PlaybackBar";
-import RightSidebar from "./components/RightSidebar";
 import SettingsDialog from "./components/SettingsDialog";
+import useAgentSocket from "./hooks/useAgentSocket";
 import useReplay from "./hooks/useReplay";
 import useMp4Export from "./hooks/useMp4Export";
 import useWebSocket from "./hooks/useWebSocket";
@@ -17,7 +19,7 @@ export default function App() {
   const [mode, setMode] = useState("live");
   const [selectedUavId, setSelectedUavId] = useState(null);
   const [drawerVisible, setDrawerVisible] = useState(true);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activePanel, setActivePanel] = useState(null);
   const [showGrid, setShowGrid] = useState(true);
   const [showScenario, setShowScenario] = useState(false);
   const [trailMode, setTrailMode] = useState("comet");
@@ -38,6 +40,7 @@ export default function App() {
   const commandAbort = useRef(null);
   const eventContext = useRef(null);
   const live = useWebSocket(mode === "live");
+  const agentSocket = useAgentSocket(mode === "live");
   const runtime = useRuntimeLogs(mode === "live" ? live.frame?.episode_id : null, live.frame?.reset_generation);
   const replay = useReplay(mode === "replay");
   const mp4Export = useMp4Export(replay, mapExporterRef);
@@ -377,7 +380,7 @@ export default function App() {
         { id: "grid", label: "网格", checked: showGrid, onClick: () => setShowGrid((v) => !v) },
         { id: "scenario", label: "场景真值图层", checked: showScenario, onClick: () => setShowScenario((v) => !v) },
         { id: "drawer", label: "任务详情面板", checked: drawerVisible, onClick: () => setDrawerVisible((v) => !v) },
-        { id: "sidebar", label: "编队状态面板", checked: sidebarOpen, onClick: () => setSidebarOpen((v) => !v) },
+        { id: "sidebar", label: "编队状态面板", checked: activePanel === "data", onClick: () => setActivePanel((v) => v === "data" ? null : "data") },
         "sep",
         { id: "trail", label: `UAV 轨迹模式：${trailModeLabel}`, onClick: cycleTrailMode },
       ],
@@ -519,7 +522,7 @@ export default function App() {
           >
             <Focus size={17} />
           </button>
-          <button className="icon-btn mobile-only" onClick={() => setSidebarOpen((value) => !value)} title="编队状态" aria-label="切换编队状态面板">
+          <button className="icon-btn mobile-only" onClick={() => setActivePanel((value) => value === "data" ? null : "data")} title="编队状态" aria-label="切换编队状态面板">
             <PanelRight size={17} />
           </button>
         </div>
@@ -534,7 +537,7 @@ export default function App() {
         showScenario={showScenario || Boolean(vesselPlacement)}
         trailMode={trailMode}
         selectionMode={selectionMode}
-        onSelectionCommit={(bbox) => { setSelectedBBox(bbox); setSidebarOpen(true); }}
+        onSelectionCommit={(bbox) => { setSelectedBBox(bbox); setActivePanel("data"); }}
         onSelectContact={setSelectedContactId}
         selectedContactId={selectedContactId}
         editingAllowed={editingAllowed && !vesselCommandBusy}
@@ -548,26 +551,32 @@ export default function App() {
         }}
         selectedScenarioVesselId={selectedScenarioVesselId}
         onSelectScenarioVessel={setSelectedScenarioVesselId}
+        mapMode={activePanel === "assignment" ? "assignment" : "live"}
+        assignments={agentSocket.assignments}
       />
-      <RightSidebar
-        frame={frame}
-        selectedUavId={selectedUavId}
-        onSelectUav={setSelectedUavId}
-        open={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        lastLlmCycle={displayedLlmCycle}
-        readOnly={readOnly}
-        connectionStatus={mode === "live" ? live.status : replayConnectionStatus}
-        selection={selectedBBox}
-        onClearSelection={() => setSelectedBBox(null)}
-        selectedContactId={selectedContactId}
-        onSelectContact={setSelectedContactId}
-        editingAllowed={editingAllowed}
-        vesselPlacement={vesselPlacement}
-        onSelectVesselType={(vesselClass) => { setSelectionMode(false); setVesselPlacement(vesselClass); }}
-        onCancelVesselPlacement={() => setVesselPlacement(null)}
-        vesselCommandStatus={vesselCommandStatus}
-        vesselCommandBusy={vesselCommandBusy}
+      <ActivityBar activePanel={activePanel} onSelect={setActivePanel} />
+      <LeftPanel
+        panel={activePanel}
+        onClose={() => setActivePanel(null)}
+        fleet={{
+          frame,
+          selectedUavId,
+          onSelectUav: setSelectedUavId,
+          lastLlmCycle: displayedLlmCycle,
+          readOnly,
+          connectionStatus: mode === "live" ? live.status : replayConnectionStatus,
+          selection: selectedBBox,
+          onClearSelection: () => setSelectedBBox(null),
+          selectedContactId,
+          onSelectContact: setSelectedContactId,
+          editingAllowed,
+          vesselPlacement,
+          onSelectVesselType: (vesselClass) => { setSelectionMode(false); setVesselPlacement(vesselClass); },
+          onCancelVesselPlacement: () => setVesselPlacement(null),
+          vesselCommandStatus,
+          vesselCommandBusy,
+        }}
+        agent={agentSocket}
       />
       <BottomDrawer
         key={`${mode}|${frame?.episode_id}|${replay.selectedFile}`}

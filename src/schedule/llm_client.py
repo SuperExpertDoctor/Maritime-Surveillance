@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 from src.mission.llm_gateway import LLMConfigurationError, LLMGateway, ModelResult, parse_object
 from src.schedule.candidate_extractor import CandidateResult
@@ -118,13 +119,20 @@ class LLMClient:
                 errors.append(f"Region {index}: bbox must contain four integers")
         return tuple(errors)
 
-    def decide(
+    def prepare_decision(
         self,
         sm: StateManager,
         ivt: InfoValueTable,
         candidate_result: CandidateResult,
         required_search_regions: int = 0,
-    ) -> dict:
+    ) -> tuple[str, str, Callable[[dict], tuple[str, ...]]]:
+        """Prompt pair + plan validator for one legacy decision round.
+
+        Split out so the scheduler port can hand the identical prompt and
+        validator to an external agent while ``decide`` keeps calling the
+        gateway in-process. Returns (system_prompt, user_prompt,
+        validate_plan).
+        """
         system_prompt, user_prompt = self.prompt_builder.build(
             sm,
             ivt,
@@ -164,6 +172,18 @@ class LLMClient:
             )
             return tuple(result.errors)
 
+        return system_prompt, user_prompt, validate_plan
+
+    def decide(
+        self,
+        sm: StateManager,
+        ivt: InfoValueTable,
+        candidate_result: CandidateResult,
+        required_search_regions: int = 0,
+    ) -> dict:
+        system_prompt, user_prompt, validate_plan = self.prepare_decision(
+            sm, ivt, candidate_result, required_search_regions,
+        )
         result = self.gateway.request_json(
             role="decision_maker", snapshot_id=f"decision-{sm.current_time}",
             system_prompt=system_prompt, user_payload={"prompt": user_prompt},

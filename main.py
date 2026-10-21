@@ -17,6 +17,7 @@ import uvicorn
 from src.env.simulation import SimulationEngine
 from src.mission.strategy_memory import StrategyMemoryStore
 from src.schedule.config_loader import ConfigLoader
+from src.schedule.env_loader import EnvLoader
 from src.vis.backend.frame_logger import FrameLogger
 from src.vis.backend.frame_publisher import FramePublisher
 from src.vis.backend.runtime_journal import publish_algorithm_events
@@ -115,6 +116,10 @@ def _parser() -> argparse.ArgumentParser:
                         help="stop at a simulation boundary after this wall-clock budget")
     parser.add_argument("--run-report-dir", default=None,
                         help="new directory for final runtime evidence (never overwritten)")
+    parser.add_argument("--no-pi-agent", action="store_true",
+                        help="keep heavy decisions in-process; do not spawn the PI worker")
+    parser.add_argument("--pi-agent-timeout", type=float, default=240.0,
+                        help="seconds a heavy decision may wait on the PI worker")
     return parser
 
 
@@ -131,6 +136,8 @@ def main(
     memory_root: str | os.PathLike[str] = "outputs/strategy_memory",
     wall_seconds: float | None = None,
     run_report_dir: str | None = None,
+    pi_agent: bool = True,
+    pi_agent_timeout: float = 240.0,
 ) -> dict:
     run_started_label = datetime.now().strftime("%Y%m%d_%H%M%S")
     if wall_seconds is not None and (not math.isfinite(wall_seconds) or wall_seconds <= 0):
@@ -138,6 +145,8 @@ def main(
     report_dir = Path(run_report_dir) if run_report_dir is not None else None
     if report_dir is not None and report_dir.exists():
         raise FileExistsError(f"run report directory already exists: {report_dir}")
+    EnvLoader.load_dotenv(os.path.join(config_path, ".env"))
+    EnvLoader.load_dotenv(".env")
     config = ConfigLoader.load(config_path)
     memory_store = StrategyMemoryStore(memory_root)
     if config.common.clear_outputs_before_run:
@@ -162,11 +171,61 @@ def main(
         print("LongCat-2.0 connectivity probe passed")
     app = None
     logger = None
+    worker_process = None
+
+    agent_broker = None
+    agent_router = None
+    agent_hub = None
+    agent_state_fn = None
+    worker_token = ""
+    if (
+        pi_agent
+        and start_server
+        and os.environ.get("LONGCAT_API_KEY")
+        # Tests stub the engine; only a real allocator exposes the port seam.
+        and callable(getattr(engine.allocator, "set_scheduler_port", None))
+    ):
+        import secrets
+
+        from adapter import (
+            AgentBroker,
+            AgentEventHub,
+            HarnessSchedulerPort,
+            MissionToolsPort,
+            build_agent_router,
+        )
+
+        worker_token = secrets.token_urlsafe(24)
+        agent_hub = AgentEventHub(
+            record_sink=lambda event_type, data: engine.allocator.sm.add_event(
+                event_type, data,
+            ),
+        )
+        agent_broker = AgentBroker(
+            agent_hub,
+            episode_id_fn=lambda: engine.allocator.sm.episode_id,
+            sim_time_fn=lambda: engine.allocator.sm.current_time,
+            autonomy_mode=os.environ.get("PI_AUTONOMY_MODE", "full"),
+        )
+        engine.allocator.set_scheduler_port(HarnessSchedulerPort(
+            agent_broker,
+            engine.allocator.mission_scheduler,
+            llm_client=engine.allocator.llm_client,
+            timeout_seconds=pi_agent_timeout,
+        ))
+        agent_router = build_agent_router(
+            agent_broker,
+            MissionToolsPort(agent_broker, engine.allocator.mission_scheduler),
+            worker_token=worker_token,
+        )
+        agent_state_fn = agent_broker.state_frame
 
     if start_server:
         _check_port_available(port)
         app = create_app(
             config, engine.allocator.sm, engine=engine, config_dir=config_path,
+            agent_router=agent_router, agent_hub=agent_hub,
+            agent_state_fn=agent_state_fn,
         )
         app.state.total_steps = steps
         def run_server():
@@ -179,6 +238,19 @@ def main(
         if getattr(app.state, "event_loop", None) is None:
             raise RuntimeError(f"visualization backend did not start on port {port}")
         print(f"可视化服务已启动: http://localhost:{port}")
+        if agent_broker is not None:
+            from adapter.launcher import PiWorkerSupervisor
+
+            Path("outputs/pi").mkdir(parents=True, exist_ok=True)
+            worker_process = PiWorkerSupervisor(
+                port=port,
+                runtime_dir="outputs/pi",
+                worker_token=worker_token,
+                log_path="outputs/pi/worker.log",
+            )
+            worker_process.start()
+            pid = worker_process.process.pid if worker_process.process else None
+            print(f"PI agent worker 已启动 (pid={pid})")
     else:
         logger = FrameLogger()
     frame_publisher = FramePublisher(
@@ -278,6 +350,8 @@ def main(
             summary = engine.summary()
     finally:
         try:
+            if worker_process is not None:
+                worker_process.stop()
             if not frame_publisher.flush(timeout=120):
                 raise RuntimeError("timed out while flushing replay frames")
         finally:
@@ -379,4 +453,6 @@ if __name__ == "__main__":
         memory_root=args.memory_root,
         wall_seconds=args.wall_seconds,
         run_report_dir=args.run_report_dir,
+        pi_agent=not args.no_pi_agent,
+        pi_agent_timeout=args.pi_agent_timeout,
     )

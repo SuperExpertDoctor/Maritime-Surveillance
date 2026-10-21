@@ -1559,11 +1559,19 @@ class MissionScheduler:
             return None
         gateway_started = time.perf_counter()
         if self.selection_provider is not None:
+            # Providers are usually bound methods (e.g. port.provide_selection):
+            # their bookkeeping attributes live on the owning object.
+            provider_owner = getattr(self.selection_provider, "__self__", self.selection_provider)
             raw = self.selection_provider(snapshot, payload)
-            call_id = "selection-provider"
-            success = True
+            call_id = (
+                getattr(provider_owner, "last_call_id", None)
+                or "selection-provider"
+            )
+            success = raw is not None
             response = raw
-            failure_category = None
+            failure_category = getattr(
+                provider_owner, "last_failure_category", None,
+            )
         elif self.gateway is not None:
             result = self.gateway.request_json(
                 role="decision_maker",
