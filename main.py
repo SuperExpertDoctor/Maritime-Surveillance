@@ -145,8 +145,10 @@ def main(
     report_dir = Path(run_report_dir) if run_report_dir is not None else None
     if report_dir is not None and report_dir.exists():
         raise FileExistsError(f"run report directory already exists: {report_dir}")
-    EnvLoader.load_dotenv(os.path.join(config_path, ".env"))
-    EnvLoader.load_dotenv(".env")
+    # Operator-written .env files are authoritative (e.g. LONGCAT_API_KEY);
+    # a stale ambient secret must not shadow them for the PI worker.
+    EnvLoader.load_dotenv(os.path.join(config_path, ".env"), overwrite=True)
+    EnvLoader.load_dotenv(".env", overwrite=True)
     config = ConfigLoader.load(config_path)
     memory_store = StrategyMemoryStore(memory_root)
     if config.common.clear_outputs_before_run:

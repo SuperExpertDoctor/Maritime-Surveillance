@@ -368,6 +368,10 @@ class AgentBroker:
             for message in self.messages:
                 if message.get("run_id") == job.run_id and message.get("status") == "streaming":
                     message["status"] = "failed" if failed else "completed"
+                    if failed:
+                        message["error"] = error
+                        if not message["text"]:
+                            message["text"] = f"任务失败：{error}" if error else "任务失败"
             kind = "failed" if failed else "completed"
             self.hub.emit(WsAgentEvent(
                 type="agent_event",
@@ -525,6 +529,14 @@ class AgentBroker:
                 "plans": [p.model_dump() for p in self.plans.values()][-30:],
                 "jobs": [j.model_dump(exclude={"payload"}) for j in self.jobs][-_MAX_JOBS:],
                 "assignments": list(self._assignment_view),
+                # Recent tool/session/agent event payloads (unwrapped to the
+                # inner event objects the timeline renders) so a freshly
+                # connected client sees the same timeline as a live one.
+                "events": [
+                    f["event"] for f in self.hub.recent(120)
+                    if f.get("type") in ("tool_event", "session_event", "agent_event")
+                    and isinstance(f.get("event"), dict)
+                ],
             }
 
     def status_payload(self) -> dict:

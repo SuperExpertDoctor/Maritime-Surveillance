@@ -5,11 +5,14 @@ class EnvLoader:
     """Load key=value pairs from a .env file into os.environ."""
 
     @staticmethod
-    def load_dotenv(dotenv_path: str = "configs/.env") -> None:
+    def load_dotenv(dotenv_path: str = "configs/.env", overwrite: bool = False) -> None:
         """Load .env into os.environ.
 
         Lines that are blank or start with '#' are ignored.
-        Does NOT overwrite existing environment variables.
+        Does NOT overwrite existing environment variables unless
+        ``overwrite`` is set — main.py passes it so the operator-written
+        project .env wins over stale ambient secrets (e.g. an outdated
+        org-level LONGCAT_API_KEY injected into the process env).
         """
         if not os.path.isfile(dotenv_path):
             return
@@ -24,7 +27,7 @@ class EnvLoader:
                 key, _, value = line.partition("=")
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
+                if key and (overwrite or key not in os.environ):
                     os.environ[key] = value
 
         local_path = f"{dotenv_path}.local"
