@@ -605,6 +605,7 @@ export default function App() {
         } : undefined}
         visible={drawerVisible}
         onToggle={() => setDrawerVisible((value) => !value)}
+        agent={agentSocket}
       />
       <PlaybackBar
         visible={mode === "replay"}

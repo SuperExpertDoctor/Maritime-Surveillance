@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Clipboard, GripHorizontal, ListChecks, Map as MapIcon, Satellite, ScrollText, SlidersHorizontal, X } from "lucide-react";
+import { Clipboard, GitBranch, GripHorizontal, ListChecks, Map as MapIcon, Satellite, ScrollText, SlidersHorizontal, X } from "lucide-react";
 import VesselStatusTab from "./VesselStatusTab";
+import WorkflowPanel from "./WorkflowPanel";
 import { errorName, regionAnchor, regionDisplayName, regionNameById, roleName, translateTriggerReason } from "../renderer/regionName";
 
 const TABS = [
@@ -9,6 +10,7 @@ const TABS = [
   { label: "日志", icon: ScrollText },
   { label: "参数", icon: SlidersHorizontal },
   { label: "船舶状态", icon: Satellite },
+  { label: "工作流", icon: GitBranch },
 ];
 const TRIGGERS = {
   event: "事件被动触发",
@@ -59,7 +61,8 @@ const LOG_STATUSES = {
 };
 
 export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions = [], logs = [], logError = "", onSelectDecision,
-  editingAllowed = false, vesselCommandBusy = false, vesselCommandStatus, onSetVesselAis, onDeleteVessel, visible, onToggle }) {
+  editingAllowed = false, vesselCommandBusy = false, vesselCommandStatus, onSetVesselAis, onDeleteVessel, visible, onToggle,
+  agent = {} }) {
   const [activeTab, setActiveTab] = useState(0);
   const [height, setHeight] = useState(220);
   const [config, setConfig] = useState(null);
@@ -113,6 +116,9 @@ export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions
         {activeTab === 4 && <VesselStatusTab vessels={frame?.scenario_vessels || []} mode={mode}
           editingAllowed={editingAllowed} commandBusy={vesselCommandBusy}
           commandStatus={vesselCommandStatus} onSetAis={onSetVesselAis} onDelete={onDeleteVessel} />}
+        {activeTab === 5 && <WorkflowPanel
+          plans={agent.plans || []} assignments={agent.assignments || []}
+          decisions={decisions} logs={logs} frame={frame} mode={mode} />}
       </div>
     </section>
   );
