@@ -347,6 +347,7 @@ class TaskAllocator:
                 if row["minutes"] == coverage_config.primary_window_min
             )
             coverage_summary["rolling_sar_coverage_pct"] = primary_coverage["coverage_pct"]
+            coverage_summary["cumulative_pct"] = sar_snapshot["cumulative_pct"]
             coverage_summary["rolling_window_complete"] = primary_coverage["window_complete"]
             coverage_summary["primary_window_min"] = coverage_config.primary_window_min
             earliest_transit = {}

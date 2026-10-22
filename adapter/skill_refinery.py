@@ -28,9 +28,18 @@ DEFAULT_REFINE_EVERY = 5
 
 
 def _coverage_pct(job) -> float | None:
-    """Weighted seen-and-fresh fraction from the job's snapshot zones."""
+    """Cumulative (ever-scanned) coverage from the job's snapshot.
+
+    Prefers ``cumulative_pct`` — the same ever-scanned fraction the UI and
+    the extractor's MIN_COVERAGE_PCT threshold refer to. Falls back to the
+    zone-gap (fresh-window) computation for snapshots built before the
+    field existed.
+    """
     snapshot = getattr(getattr(job, "runtime", None), "internal_snapshot", None)
     summary = getattr(snapshot, "coverage_summary", None) or {}
+    cumulative = summary.get("cumulative_pct")
+    if cumulative is not None:
+        return round(float(cumulative), 2)
     zones = summary.get("zones") or ()
     fixed = sum(int(z.get("fixed_cells") or 0) for z in zones)
     if not fixed:
