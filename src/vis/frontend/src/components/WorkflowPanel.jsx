@@ -11,8 +11,8 @@ const TASKS = [
 const ST_LBL = { cov: "区域覆盖", trk: "目标跟踪", rtb: "返航基地" };
 const COLW = 150;
 const TOP = 46;
-const UGAP = 46;
-const TGAP = 80;
+const UGAP = 46;   // UAV 行距上限（容器矮时自动压缩）
+const UGAP_MIN = 26;
 const NODE_H = 22;
 
 const TRG_LABEL = {
@@ -160,8 +160,19 @@ export default function WorkflowPanel({ plans = [], decisions = [], logs = [], f
   const [offsets, setOffsets] = useState({});
   const [picked, setPicked] = useState(null);
   const [dragKey, setDragKey] = useState(null);
+  const [availH, setAvailH] = useState(0);
   const innerRef = useRef(null);
   const scrollRef = useRef(null);
+
+  // 观测可视高度：自适应压缩行距，让全部 UAV 与三个任务节点一屏看全
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return undefined;
+    const ro = new ResizeObserver(() => setAvailH(el.clientHeight));
+    ro.observe(el);
+    setAvailH(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
 
   const cols = useMemo(() => {
     const list = [];
@@ -173,7 +184,11 @@ export default function WorkflowPanel({ plans = [], decisions = [], logs = [], f
     return list;
   }, [snapshots, current]);
 
-  const rowH = Math.max(uavIds.length * UGAP, 3 * TGAP) + TOP + 30;
+  // 行距自适应：容器装得下就用宽松行距，装不下就压缩到能放下全部节点
+  const fitGap = availH > 0 ? (availH - TOP - NODE_H - 14) / Math.max(uavIds.length, 1) : UGAP;
+  const uGap = Math.max(UGAP_MIN, Math.min(UGAP, fitGap));
+  const span = uavIds.length * uGap;
+  const rowH = TOP + span + 30;
   const width = cols.length * COLW + 60;
 
   // 节点基础坐标（不随拖拽变化）；拖拽位移叠加在 offsets 上
@@ -183,16 +198,17 @@ export default function WorkflowPanel({ plans = [], decisions = [], logs = [], f
       const x = 30 + ci * COLW;
       if (c.type === "uav") {
         uavIds.forEach((u, k) => {
-          list.push({ key: `${c.r.id}|${u}`, uav: u, col: ci, x: x + 44, y: TOP + k * UGAP, kind: "uav", st: c.r.state[u] || "cov" });
+          list.push({ key: `${c.r.id}|${u}`, uav: u, col: ci, x: x + 44, y: TOP + k * uGap, kind: "uav", st: c.r.state[u] || "cov" });
         });
       } else {
+        // 三个任务节点摊到 UAV 列纵跨度的上/中/下三段中心
         TASKS.forEach(([cls], k) => {
-          list.push({ key: `${c.r.id}|t|${cls}`, uav: null, col: ci, x: x + 30, y: TOP + (uavIds.length * UGAP) / 2 - TGAP + k * TGAP - NODE_H / 2 + 12, kind: "task", st: cls });
+          list.push({ key: `${c.r.id}|t|${cls}`, uav: null, col: ci, x: x + 30, y: TOP + (span * (k + 0.5)) / 3 - NODE_H / 2, kind: "task", st: cls });
         });
       }
     });
     return list;
-  }, [cols, uavIds]);
+  }, [cols, uavIds, span]);
 
   const posOf = (n) => {
     const o = offsets[n.key] || { dx: 0, dy: 0 };

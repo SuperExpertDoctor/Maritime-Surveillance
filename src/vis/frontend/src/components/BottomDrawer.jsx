@@ -64,7 +64,8 @@ export default function BottomDrawer({ frame, llmCycle, mode = "live", decisions
   editingAllowed = false, vesselCommandBusy = false, vesselCommandStatus, onSetVesselAis, onDeleteVessel, visible, onToggle,
   agent = {} }) {
   const [activeTab, setActiveTab] = useState(0);
-  const [height, setHeight] = useState(220);
+  // 默认高度取视口 42%：工作流面板一屏需容纳全部 UAV 行与三个任务节点
+  const [height, setHeight] = useState(() => Math.max(220, Math.round(window.innerHeight * 0.42)));
   const [config, setConfig] = useState(null);
   const [configError, setConfigError] = useState("");
   const drag = useRef(null);
