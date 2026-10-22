@@ -9,6 +9,7 @@ import SkillsPanel from "./components/SkillsPanel";
 import MenuBar from "./components/MenuBar";
 import PlaybackBar from "./components/PlaybackBar";
 import SettingsDialog from "./components/SettingsDialog";
+import SkillSettingsDialog from "./components/SkillSettingsDialog";
 import useAgentSocket from "./hooks/useAgentSocket";
 import useReplay from "./hooks/useReplay";
 import useMp4Export from "./hooks/useMp4Export";
@@ -32,6 +33,7 @@ export default function App() {
   const [vesselCommandStatus, setVesselCommandStatus] = useState(null);
   const [lastLlmCycle, setLastLlmCycle] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [skillSettingsOpen, setSkillSettingsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [restartTimedOut, setRestartTimedOut] = useState(false);
@@ -404,6 +406,7 @@ export default function App() {
     {
       id: "settings", label: "设置(S)", items: [
         { id: "open-settings", label: "算法参数设置…", shortcut: "Ctrl+,", onClick: () => setSettingsOpen(true), disabled: readOnly },
+        { id: "open-skill-settings", label: "Skills 自演进…", onClick: () => setSkillSettingsOpen(true), disabled: readOnly },
       ],
     },
     {
@@ -631,6 +634,7 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         onRestarting={() => { setSettingsOpen(false); setRestarting(true); }}
       />
+      <SkillSettingsDialog open={skillSettingsOpen} onClose={() => setSkillSettingsOpen(false)} />
       {aboutOpen && (
         <div className="settings-overlay" role="presentation" onMouseDown={(e) => {
           if (e.target === e.currentTarget) setAboutOpen(false);

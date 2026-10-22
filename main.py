@@ -178,6 +178,7 @@ def main(
     agent_broker = None
     agent_router = None
     agent_hub = None
+    skill_refinery = None
     agent_state_fn = None
     worker_token = ""
     if (
@@ -241,6 +242,10 @@ def main(
             agent_state_fn=agent_state_fn,
         )
         app.state.total_steps = steps
+        if skill_refinery is not None:
+            # Runtime journal milestones (task_completed, uav_returned, …)
+            # drain into decision_outcome records for outcome backfill.
+            skill_refinery.attach_journal(app.state.runtime_journal)
         def run_server():
             uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 

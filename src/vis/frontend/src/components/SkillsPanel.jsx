@@ -113,6 +113,15 @@ export default function SkillsPanel({ readOnly }) {
               >
                 <strong>{skill.name}</strong>
                 <small>{skill.description || "（无描述）"}</small>
+                <span className="skills-badges">
+                  {skill.verified != null ? (
+                    <i className={`skills-badge${skill.stale ? " stale" : ""}`}>
+                      已验证 {skill.verified} 回合{skill.confidence != null ? ` · 置信 ${skill.confidence}` : ""}
+                    </i>
+                  ) : null}
+                  {skill.conflicted ? <i className="skills-badge warn" title="同局面存在备选策略，需人工裁决">⚠ 待裁决</i> : null}
+                  {skill.human_reviewed ? <i className="skills-badge ok" title="人工审定，自动凝练不覆盖正文">人工审定</i> : null}
+                </span>
               </button>
             </li>
           ))}

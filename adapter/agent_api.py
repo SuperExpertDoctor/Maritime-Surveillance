@@ -20,6 +20,7 @@ Operator-facing (frontend LeftSidebar):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -284,12 +285,46 @@ def build_agent_router(
         match = re.search(r'^description:\s*["\']?(.*?)["\']?\s*$', text, re.M)
         return match.group(1)[:200] if match else ""
 
+    def _skills_index() -> dict:
+        """The signature ledger written by the extractor (may not exist)."""
+        try:
+            data = json.loads((Path(skills_dir) / "index.json").read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("skills"), dict):
+                return data["skills"]
+        except Exception:
+            pass
+        return {}
+
+    def _index_entry_for(name: str) -> dict | None:
+        for entry in _skills_index().values():
+            if entry.get("name") == name:
+                return entry
+        return None
+
+    def _mark_human_reviewed(name: str) -> None:
+        """Record that a human edited this skill — extractor then preserves its body."""
+        index_path = Path(skills_dir) / "index.json"
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        changed = False
+        for entry in (index.get("skills") or {}).values():
+            if entry.get("name") == name:
+                entry["human_reviewed"] = True
+                entry["conflicted"] = False
+                entry["updated_at"] = time.time()
+                changed = True
+        if changed:
+            index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
     @router.get("/api/skills")
     async def list_skills():
         root = Path(skills_dir)
+        ledger = _skills_index()
+        by_name = {e.get("name"): e for e in ledger.values()}
         skills = []
         if _agent_md is not None and _agent_md.is_file():
-            text = _agent_md.read_text(encoding="utf-8", errors="replace")
             skills.append({
                 "name": AGENT_DOC_NAME,
                 "description": "任务分配风格指导（人工维护，注入每次调度决策）",
@@ -300,10 +335,16 @@ def build_agent_router(
                 doc = child / "SKILL.md"
                 if child.is_dir() and doc.is_file():
                     text = doc.read_text(encoding="utf-8", errors="replace")
+                    entry = by_name.get(child.name) or {}
                     skills.append({
                         "name": child.name,
                         "description": _skill_description(text),
                         "updated_at": doc.stat().st_mtime,
+                        "confidence": entry.get("confidence"),
+                        "verified": f"{entry.get('support', 0)}/{entry.get('occurrence', 0)}",
+                        "conflicted": bool(entry.get("conflicted")),
+                        "human_reviewed": bool(entry.get("human_reviewed")),
+                        "stale": bool(entry.get("stale")),
                     })
         return {"skills": skills}
 
@@ -328,6 +369,7 @@ def build_agent_router(
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        _mark_human_reviewed(name)
         return {"name": name, "saved": True}
 
     @router.delete("/api/skills/{name}")
@@ -349,6 +391,28 @@ def build_agent_router(
         if refinery is None:
             return _error("refinery_unavailable", 503)
         return {"written": refinery.refine()}
+
+    @router.get("/api/skills/settings")
+    async def get_skill_settings():
+        if refinery is None:
+            return _error("refinery_unavailable", 503)
+        return refinery.get_settings()
+
+    @router.post("/api/skills/settings")
+    async def set_skill_settings(request: Request):
+        if refinery is None:
+            return _error("refinery_unavailable", 503)
+        data = await _json(request)
+        if isinstance(data, JSONResponse):
+            return data
+        try:
+            return refinery.set_settings({
+                key: data[key] for key in
+                ("auto_refine", "refine_every", "min_coverage_pct")
+                if key in data
+            })
+        except (TypeError, ValueError):
+            return _error("invalid_skill_settings")
 
     @router.get("/api/pi-agent/plans")
     @router.get("/api/plans")

@@ -2971,6 +2971,29 @@ button {
   overflow: hidden; margin-top: 3px; color: var(--text-muted); font-size: 10px;
 }
 .skills-empty { padding: 14px 10px; color: var(--text-muted); font-size: 11px; }
+.skills-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.skills-badge {
+  font-style: normal; font-size: 9.5px; padding: 1px 6px; border-radius: 8px;
+  background: #2a3f4a; color: #8fd6e8; border: 1px solid #3a5a6a;
+}
+.skills-badge.warn { background: #4a3a2a; color: #f0c060; border-color: #6a5a3a; }
+.skills-badge.ok { background: #2a4a34; color: #8fe0a8; border-color: #3a6a4a; }
+.skills-badge.stale { background: #3a3a3a; color: #9a9a9a; border-color: #4a4a4a; }
+.skills-settings-dialog { width: 520px; }
+.skills-settings-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+.skills-setting-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+}
+.skills-setting-row > span { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.skills-setting-row strong { font-size: 12.5px; color: var(--text); }
+.skills-setting-row small { font-size: 10.5px; color: var(--text-muted); }
+.skills-setting-row input[type="number"] {
+  width: 64px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: var(--panel); color: var(--text); font-size: 12px;
+}
+.skills-setting-row em { font-style: normal; font-size: 11px; color: var(--text-muted); }
+.skills-setting-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--teal); flex-shrink: 0; }
 .skills-doc { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .skills-doc > header {
   display: flex; align-items: center; gap: 8px;
