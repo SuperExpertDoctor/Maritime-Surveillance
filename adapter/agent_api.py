@@ -348,6 +348,28 @@ def build_agent_router(
                     })
         return {"skills": skills}
 
+    @router.get("/api/skills/settings")
+    async def get_skill_settings():
+        if refinery is None:
+            return _error("refinery_unavailable", 503)
+        return refinery.get_settings()
+
+    @router.post("/api/skills/settings")
+    async def set_skill_settings(request: Request):
+        if refinery is None:
+            return _error("refinery_unavailable", 503)
+        data = await _json(request)
+        if isinstance(data, JSONResponse):
+            return data
+        try:
+            return refinery.set_settings({
+                key: data[key] for key in
+                ("auto_refine", "refine_every", "min_coverage_pct")
+                if key in data
+            })
+        except (TypeError, ValueError):
+            return _error("invalid_skill_settings")
+
     @router.get("/api/skills/{name}")
     async def get_skill(name: str):
         target = _skill_file(name)
@@ -391,28 +413,6 @@ def build_agent_router(
         if refinery is None:
             return _error("refinery_unavailable", 503)
         return {"written": refinery.refine()}
-
-    @router.get("/api/skills/settings")
-    async def get_skill_settings():
-        if refinery is None:
-            return _error("refinery_unavailable", 503)
-        return refinery.get_settings()
-
-    @router.post("/api/skills/settings")
-    async def set_skill_settings(request: Request):
-        if refinery is None:
-            return _error("refinery_unavailable", 503)
-        data = await _json(request)
-        if isinstance(data, JSONResponse):
-            return data
-        try:
-            return refinery.set_settings({
-                key: data[key] for key in
-                ("auto_refine", "refine_every", "min_coverage_pct")
-                if key in data
-            })
-        except (TypeError, ValueError):
-            return _error("invalid_skill_settings")
 
     @router.get("/api/pi-agent/plans")
     @router.get("/api/plans")
